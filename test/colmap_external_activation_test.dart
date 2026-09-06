@@ -92,12 +92,15 @@ class _SelfTest implements BackendSelfTest {
 }
 
 class _PipelineRunner implements ColmapProcessRunner {
+  _PipelineRunner({this.versionResult = 'COLMAP 3.13'});
+
+  final String? versionResult;
   final List<String> executables = [];
 
   @override
   Future<String?> version(String executable) async {
     executables.add(executable);
-    return 'COLMAP 3.13';
+    return versionResult;
   }
 
   @override
@@ -373,6 +376,161 @@ void main() {
     expect(result.diagnostics.backendVersion, 'COLMAP 3.13');
     expect(runner.executables, hasLength(9));
     expect(runner.executables, everyElement(canonical));
+  });
+
+  test('activates only a certified managed executable confined to its root', () async {
+    final temp = await Directory.systemTemp.createTemp('flcad-managed-');
+    addTearDown(() => temp.delete(recursive: true));
+    final root = await Directory(
+      '${temp.path}${Platform.pathSeparator}managed',
+    ).create();
+    final executable = await File(
+      '${root.path}${Platform.pathSeparator}colmap-3.13'
+      '${Platform.pathSeparator}$_executableName',
+    ).create(recursive: true);
+    final canonical = await executable.resolveSymbolicLinks();
+    final record = BackendInstallationRecord(
+      backendId: 'colmap',
+      version: 'COLMAP 3.13',
+      installedAt: DateTime.utc(2026),
+      source: Uri.parse('https://example.test/colmap'),
+      sha256: 'approved',
+      architecture: 'test',
+      status: BackendInstallationStatus.certified,
+      certification: BackendCertificationStatus.certified,
+      executablePath: canonical,
+    );
+    final runner = _PipelineRunner();
+    final backend = await ColmapBackendActivation(
+      processRunner: runner,
+      managedInstallationRoot: root,
+    ).activate(record);
+    expect(backend.executable, canonical);
+
+    await expectLater(
+      ColmapBackendActivation(processRunner: runner).activate(record),
+      throwsStateError,
+    );
+    final outside = await File(
+      '${temp.path}${Platform.pathSeparator}outside'
+      '${Platform.pathSeparator}$_executableName',
+    ).create(recursive: true);
+    final escaped = BackendInstallationRecord(
+      backendId: record.backendId,
+      version: record.version,
+      installedAt: record.installedAt,
+      source: record.source,
+      sha256: record.sha256,
+      architecture: record.architecture,
+      status: record.status,
+      certification: record.certification,
+      executablePath: outside.path,
+    );
+    await expectLater(
+      ColmapBackendActivation(
+        processRunner: runner,
+        managedInstallationRoot: root,
+      ).activate(escaped),
+      throwsStateError,
+    );
+  });
+
+  test('rejects invalid external states and missing version probes', () async {
+    final temp = await Directory.systemTemp.createTemp('flcad-activation-state-');
+    addTearDown(() => temp.delete(recursive: true));
+    final executable = await File(
+      '${temp.path}${Platform.pathSeparator}$_executableName',
+    ).create();
+    BackendInstallationRecord external({
+      BackendInstallationStatus status = BackendInstallationStatus.installed,
+      BackendCertificationStatus certification =
+          BackendCertificationStatus.notCertified,
+    }) => BackendInstallationRecord(
+      backendId: 'colmap',
+      version: 'COLMAP 3.13',
+      installedAt: DateTime.utc(2026),
+      source: Uri.file(executable.path),
+      sha256: '',
+      architecture: 'external',
+      status: status,
+      certification: certification,
+      executablePath: executable.path,
+      origin: BackendInstallationOrigin.external,
+    );
+
+    for (final record in [
+      external(status: BackendInstallationStatus.failed),
+      external(status: BackendInstallationStatus.certified),
+      external(certification: BackendCertificationStatus.certified),
+    ]) {
+      await expectLater(
+        ColmapBackendActivation(
+          processRunner: _PipelineRunner(),
+        ).activate(record, allowUncertifiedExternal: true),
+        throwsStateError,
+      );
+    }
+    for (final version in <String?>[null, '']) {
+      await expectLater(
+        ColmapBackendActivation(
+          processRunner: _PipelineRunner(versionResult: version),
+        ).activate(external(), allowUncertifiedExternal: true),
+        throwsStateError,
+      );
+    }
+  });
+
+  test('low-level COLMAP backend rejects implicit relative executables', () async {
+    final runner = _PipelineRunner();
+    await expectLater(
+      ColmapBackend(executable: 'colmap', processRunner: runner)
+          .detectCapabilities(),
+      throwsArgumentError,
+    );
+    expect(runner.executables, isEmpty);
+  });
+
+  test('external discovery rejects a canonical alias with a wrong name', () async {
+    if (Platform.isWindows) return;
+    final temp = await Directory.systemTemp.createTemp('flcad-external-link-');
+    addTearDown(() => temp.delete(recursive: true));
+    final target = await File(
+      '${temp.path}${Platform.pathSeparator}unexpected-binary',
+    ).create();
+    final alias = Link(
+      '${temp.path}${Platform.pathSeparator}$_executableName',
+    );
+    try {
+      await alias.create(target.path);
+    } on FileSystemException {
+      return;
+    }
+    final repository = _Repository()
+      ..memory = [
+        BackendInstallationRecord(
+          backendId: 'colmap',
+          version: 'COLMAP 3.13',
+          installedAt: DateTime.utc(2026),
+          source: Uri.file(alias.path),
+          sha256: '',
+          architecture: 'external',
+          status: BackendInstallationStatus.installed,
+          certification: BackendCertificationStatus.notCertified,
+          executablePath: alias.path,
+          origin: BackendInstallationOrigin.external,
+        ),
+      ];
+    final selfTest = _SelfTest();
+    final manager = _manager(
+      repository: repository,
+      downloader: _NeverDownloader(),
+      installer: _NeverInstaller(),
+      selfTest: selfTest,
+      root: Directory('${temp.path}${Platform.pathSeparator}managed'),
+    );
+    final discovered = await manager.discover();
+    expect(discovered.single.status, BackendInstallationStatus.notInstalled);
+    expect(selfTest.paths, isEmpty);
   });
 
   test('stale preferred backend falls back safely', () async {

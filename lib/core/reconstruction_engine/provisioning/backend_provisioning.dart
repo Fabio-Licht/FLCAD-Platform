@@ -290,6 +290,7 @@ class BackendProvisioningManager {
         throw StateError('External executable was not found');
       }
       final canonical = await executable.resolveSymbolicLinks();
+      _requireExpectedExecutable(record.backendId, canonical);
       _event('validationStarted', record.backendId, canonical);
       final capabilities = await selfTest.validate(record.backendId, canonical);
       final validated = BackendInstallationRecord(
