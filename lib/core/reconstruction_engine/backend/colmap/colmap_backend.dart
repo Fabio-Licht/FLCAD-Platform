@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import '../../engine/reconstruction_engine.dart';
 import '../../models/reconstruction_contract.dart';
 import '../reconstruction_backend_contract.dart';
 
@@ -46,7 +47,7 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
       executable,
       arguments,
       workingDirectory: workingDirectory.path,
-      runInShell: Platform.isWindows,
+      runInShell: false,
     );
     final stdout = StringBuffer();
     final stderr = StringBuffer();
@@ -82,7 +83,10 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
         workingDirectory: Directory.current,
       );
       final text = '${result.stdout}\n${result.stderr}';
-      final match = RegExp(r'(?i)colmap[^\r\n]*').firstMatch(text);
+      final match = RegExp(
+        r'colmap[^\r\n]*',
+        caseSensitive: false,
+      ).firstMatch(text);
       return match?.group(0)?.trim();
     } on ProcessException {
       return null;
@@ -98,13 +102,15 @@ class ColmapBackend implements ReconstructionBackend {
 
   final String executable;
   final ColmapProcessRunner _processRunner;
-  String? _detectedVersion;
 
   @override
   String get id => 'colmap';
 
   @override
   ReconstructionBackendCapabilities get capabilities =>
+      _capabilities('undetected');
+
+  ReconstructionBackendCapabilities _capabilities(String version) =>
       ReconstructionBackendCapabilities(
         supportsGpu: true,
         supportsCpu: true,
@@ -113,12 +119,12 @@ class ColmapBackend implements ReconstructionBackend {
         texturing: false,
         automaticCalibration: true,
         license: 'BSD-3-Clause',
-        version: _detectedVersion ?? 'undetected',
+        version: version,
       );
 
   Future<ReconstructionBackendCapabilities> detectCapabilities() async {
-    _detectedVersion = await _processRunner.version(executable);
-    return capabilities;
+    final detectedVersion = await _processRunner.version(executable);
+    return _capabilities(detectedVersion ?? 'undetected');
   }
 
   @override
@@ -136,7 +142,16 @@ class ColmapBackend implements ReconstructionBackend {
     await workspace.create(recursive: true);
     final database = File('${workspace.path}${Platform.pathSeparator}database.db');
     final sparse = Directory('${workspace.path}${Platform.pathSeparator}sparse');
+    final sparseModel = Directory(
+      '${sparse.path}${Platform.pathSeparator}0',
+    );
+    final sparseText = Directory(
+      '${workspace.path}${Platform.pathSeparator}sparse_text',
+    );
     final dense = Directory('${workspace.path}${Platform.pathSeparator}dense');
+    await sparse.create(recursive: true);
+    await sparseText.create(recursive: true);
+    await dense.create(recursive: true);
     final reports = <ReconstructionStageReport>[];
     final diagnostics = <String>[];
     final started = DateTime.now();
@@ -217,7 +232,7 @@ class ColmapBackend implements ReconstructionBackend {
         '--image_path',
         imagePath,
         '--input_path',
-        '${sparse.path}${Platform.pathSeparator}0',
+        sparseModel.path,
         '--output_path',
         dense.path,
         '--output_type',
@@ -227,7 +242,15 @@ class ColmapBackend implements ReconstructionBackend {
     );
     await execute(
       ReconstructionStage.sparseReconstruction,
-      ['model_converter', '--input_path', sparse.path, '--output_path', sparse.path, '--output_type', 'TXT],
+      [
+        'model_converter',
+        '--input_path',
+        sparseModel.path,
+        '--output_path',
+        sparseText.path,
+        '--output_type',
+        'TXT',
+      ],
       'COLMAP disponibilizou a reconstrução esparsa para o contrato interno.',
     );
     await execute(
@@ -278,7 +301,10 @@ class ColmapBackend implements ReconstructionBackend {
         'provenance': ProvenanceSource.photogrammetry.name,
       },
       sparseCloud: [
-        {'path': sparse.path, 'provenance': ProvenanceSource.photogrammetry.name},
+        {
+          'path': sparseText.path,
+          'provenance': ProvenanceSource.photogrammetry.name,
+        },
       ],
       denseCloud: [
         {'path': '${dense.path}${Platform.pathSeparator}fused.ply', 'provenance': ProvenanceSource.photogrammetry.name},

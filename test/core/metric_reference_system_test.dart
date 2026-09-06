@@ -1,5 +1,4 @@
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
-import 'package:flcad_mobile/core/geometric_kernel/precision/precision.dart';
 import 'package:flcad_mobile/core/metric_reference/metric_reference.dart';
 import 'package:flutter_test/flutter_test.dart';
 

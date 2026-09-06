@@ -23,22 +23,26 @@ This task must not modify M-005 functional implementation.
 - The repository already documents `tool/test_runner_diagnostics.ps1` as the
   per-file discovery and `--machine` protocol diagnostic.
 - The diagnostic now supports `-DedicatedM005`, normalizes test paths, rejects
-  empty discovery, and counts real Flutter `test` protocol events.
+  empty discovery, and counts real Flutter `testStart`/`testDone` protocol
+  events using `test.id` and `testID` respectively.
 - The current session cannot start `PowerShell.exe`, so literal `flutter
   analyze` and `flutter test` commands cannot be executed here.
 - The previous `LengthUnit` diagnostic was a real M-005 compile issue, not a
   runner-only issue. It was fixed with the official geometric-kernel import.
-- The dedicated VS Code runner now executes 8 M-005 tests with 8 passes and 0
-  failures.
+- The dedicated M-005 runner targets all three files that contain its unit,
+  system and reference-integration coverage. Its executed/pass/fail totals must
+  come from the Flutter machine protocol rather than a previously recorded
+  fixed count.
 - The full VS Code runner reports `743 passed, 2 failed`; the two failures are
   the known viewport/open-profile failures.
 
 ## Infrastructure change
 
 `tool/test_runner_diagnostics.ps1` now supports `-DedicatedM005`, validates the
-requested path, uses Windows PowerShell 5.1-compatible path handling, rejects
-empty discovery, and counts Flutter machine-protocol test events. It does not
-modify M-005 source or test implementation.
+three requested M-005 test files, uses Windows PowerShell 5.1-compatible path
+handling, rejects empty discovery and zero `testStart` events, and verifies
+matching `testDone` events plus a successful terminal `done` event. It does
+not modify M-005 source or test implementation.
 
 ## Reproduction checklist
 

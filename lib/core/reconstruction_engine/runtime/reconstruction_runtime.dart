@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:isolate';
 
+import '../backend/reconstruction_backend_contract.dart';
 import '../engine/reconstruction_engine.dart';
 import '../models/reconstruction_contract.dart';
 

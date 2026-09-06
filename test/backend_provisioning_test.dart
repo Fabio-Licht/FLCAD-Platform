@@ -5,7 +5,6 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _Repository implements BackendProvisioningRepository {
   _Repository(this.releases);
-  @override
   final List<ApprovedBackendRelease> releases;
   List<BackendInstallationRecord> records = [];
   @override
