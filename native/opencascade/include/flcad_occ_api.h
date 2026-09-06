@@ -20,7 +20,7 @@ FLCAD_OCC_EXPORT int flcad_occ_create_wire(const char* edge_tokens,char* token,s
 FLCAD_OCC_EXPORT int flcad_occ_create_face(const char* wire_token,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
 FLCAD_OCC_EXPORT int flcad_occ_create_shell(const char* face_tokens,double tolerance,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
 FLCAD_OCC_EXPORT int flcad_occ_create_solid(const char* shell_token,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
-FLCAD_OCC_EXPORT int flcad_occ_extrude(const char* source_token,const double* direction,int solid_output,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
+FLCAD_OCC_EXPORT int flcad_occ_extrude(const char* source_token,const double* direction,int solid_output,double draft_angle_degrees,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
 FLCAD_OCC_EXPORT int flcad_occ_create_plane(const double* origin,const double* normal,double lower,double upper,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
 FLCAD_OCC_EXPORT int flcad_occ_create_planar_face(const double* points,size_t point_count,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);
 FLCAD_OCC_EXPORT int flcad_occ_create_cylinder(const double* origin,const double* direction,double radius,double lower,double upper,char* token,size_t token_size,char* fingerprint,size_t fingerprint_size,char* error,size_t error_size);

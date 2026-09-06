@@ -24,6 +24,88 @@ int main() {
   CHECK(flcad_occ_shape_count() == 1);
   CHECK(flcad_occ_destroy_shape(token, error, sizeof(error)) == 1);
   CHECK(flcad_occ_shape_count() == 0);
+  const double square[12] = {0, 0, 0, 10, 0, 0, 10, 10, 0, 0, 10, 0};
+  char profile[256] = {}, drafted_extrude[256] = {};
+  CHECK(flcad_occ_create_planar_face(
+            square, 4, profile, sizeof(profile), fingerprint,
+            sizeof(fingerprint), error, sizeof(error)) == 1);
+  const double extrusion[3] = {0, 0, 20};
+  CHECK(flcad_occ_extrude(
+            profile, extrusion, 1, 5.0, drafted_extrude,
+            sizeof(drafted_extrude), fingerprint, sizeof(fingerprint), error,
+            sizeof(error)) == 1);
+  // UI smoke contract: an independently selected geometric edge must be
+  // matched back to the owning body and produce a real fillet.
+  char edge_start[256] = {}, edge_end[256] = {}, selected_edge[256] = {};
+  CHECK(flcad_occ_create_vertex(0, 0, 0, edge_start, sizeof(edge_start),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_vertex(10, 0, 0, edge_end, sizeof(edge_end),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_edge(edge_start, edge_end, selected_edge,
+                              sizeof(selected_edge), fingerprint,
+                              sizeof(fingerprint), error,
+                              sizeof(error)) == 1);
+  char filleted[256] = {}, operated_type[64] = {};
+  const double fillet_values[10] = {0, 1.0, 1.0, 1, 0, 1, 0, 1e-4, 0, 0};
+  CHECK(flcad_occ_surface_operation(
+            "FILLET", drafted_extrude, selected_edge, fillet_values, 10,
+            filleted, sizeof(filleted), fingerprint, sizeof(fingerprint),
+            operated_type, sizeof(operated_type), error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(filleted, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(selected_edge, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(edge_start, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(edge_end, error, sizeof(error)) == 1);
+
+  // Two independent planar supports plus one selected boundary Edge from
+  // each support must produce a real Blend face.
+  const double second_square[12] = {0, 15, 0, 10, 15, 0,
+                                    10, 25, 0, 0, 25, 0};
+  char second_face[256] = {}, blend_a0[256] = {}, blend_a1[256] = {},
+       blend_b0[256] = {}, blend_b1[256] = {}, blend_edge_a[256] = {},
+       blend_edge_b[256] = {}, blended[256] = {};
+  CHECK(flcad_occ_create_planar_face(
+            second_square, 4, second_face, sizeof(second_face), fingerprint,
+            sizeof(fingerprint), error, sizeof(error)) == 1);
+  CHECK(flcad_occ_create_vertex(0, 10, 0, blend_a0, sizeof(blend_a0),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_vertex(10, 10, 0, blend_a1, sizeof(blend_a1),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_vertex(0, 15, 0, blend_b0, sizeof(blend_b0),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_vertex(10, 15, 0, blend_b1, sizeof(blend_b1),
+                                fingerprint, sizeof(fingerprint), error,
+                                sizeof(error)) == 1);
+  CHECK(flcad_occ_create_edge(blend_a0, blend_a1, blend_edge_a,
+                              sizeof(blend_edge_a), fingerprint,
+                              sizeof(fingerprint), error,
+                              sizeof(error)) == 1);
+  CHECK(flcad_occ_create_edge(blend_b0, blend_b1, blend_edge_b,
+                              sizeof(blend_edge_b), fingerprint,
+                              sizeof(fingerprint), error,
+                              sizeof(error)) == 1);
+  const std::string blend_refs = std::string(second_face) + "," +
+                                 blend_edge_a + "," + blend_edge_b;
+  const double blend_values[8] = {0, 0, 1e-4, 1e-3, 0, 1, 0, 1};
+  CHECK(flcad_occ_surface_operation(
+            "BLEND", profile, blend_refs.c_str(), blend_values, 8, blended,
+            sizeof(blended), fingerprint, sizeof(fingerprint), operated_type,
+            sizeof(operated_type), error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blended, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_edge_a, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_edge_b, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_a0, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_a1, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_b0, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(blend_b1, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(second_face, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(drafted_extrude, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_destroy_shape(profile, error, sizeof(error)) == 1);
+  CHECK(flcad_occ_shape_count() == 0);
   const double center[3] = {0, 0, 0}, axis[3] = {0, 0, 1};
   CHECK(flcad_occ_create_torus(center, axis, 5, 1, token, sizeof(token),
                                 fingerprint, sizeof(fingerprint), error,
@@ -38,7 +120,7 @@ int main() {
   CHECK(std::strstr(quality, "meanCurvature") != nullptr);
   CHECK(std::strstr(quality, "averageNormal") != nullptr);
   CHECK(std::strstr(quality, "draft") != nullptr);
-  char operated[256] = {}, operated_fp[256] = {}, operated_type[64] = {};
+  char operated[256] = {}, operated_fp[256] = {};
   CHECK(flcad_occ_surface_operation("NURBS", token, "", nullptr, 0,
       operated, sizeof(operated), operated_fp, sizeof(operated_fp),
       operated_type, sizeof(operated_type), error, sizeof(error)) == 1);

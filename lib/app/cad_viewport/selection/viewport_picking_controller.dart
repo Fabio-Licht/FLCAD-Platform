@@ -196,6 +196,26 @@ class ViewportPickingController {
       final rawPoints = entity.geometry['points'];
       if (rawPoints is List) {
         final points = rawPoints.map(vector).whereType<Vector3>().toList();
+        if (entity.geometry['pickOnlyClosedProfile'] == true &&
+            points.length >= 3) {
+          final polygon = Path()
+            ..addPolygon(points.map(project).toList(), true);
+          if (polygon.contains(position)) {
+            consider(entity, -2, 0, points.first);
+          }
+        }
+        if (entity.kind == CadSceneEntityKind.sketch &&
+            entity.geometry['showEndpoints'] == true &&
+            points.isNotEmpty) {
+          for (final endpoint in {points.first, points.last}) {
+            consider(
+              entity,
+              -1,
+              (position - project(endpoint)).distance,
+              endpoint,
+            );
+          }
+        }
         for (var i = 1; i < points.length; i++) {
           final a = points[i - 1], b = points[i];
           final projection = segmentProjection(
@@ -210,6 +230,17 @@ class ViewportPickingController {
             a + (b - a) * projection.parameter,
           );
         }
+        continue;
+      }
+
+      final pointPosition = vector(entity.geometry['position']);
+      if (entity.kind == CadSceneEntityKind.point && pointPosition != null) {
+        consider(
+          entity,
+          priority,
+          (position - project(pointPosition)).distance,
+          pointPosition,
+        );
         continue;
       }
 

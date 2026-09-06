@@ -23,10 +23,14 @@ class OpenCascadeRuntimeRepository {
   Future<File> saveShapeMetadata(Directory project, ShapeHandle handle) async {
     await ensureStructure(project);
     final file = File(
-      '${project.path}${Platform.pathSeparator}NativeShapes${Platform.pathSeparator}${handle.persistentId}.json',
+      '${project.path}${Platform.pathSeparator}NativeShapes${Platform.pathSeparator}${_safeFileStem(handle.persistentId)}.json',
     );
     return file.writeAsString(jsonEncode(handle.toJson()), flush: true);
   }
+
+  String _safeFileStem(String value) => value
+      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+      .replaceAll(RegExp(r'[. ]+$'), '_');
 
   Future<File> saveDiagnostics(
     Directory project,

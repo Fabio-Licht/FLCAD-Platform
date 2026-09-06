@@ -26,6 +26,7 @@
 #include <BRepOffsetAPI_MakeOffsetShape.hxx>
 #include <BRepOffsetAPI_MakeThickSolid.hxx>
 #include <BRepOffsetAPI_MakePipe.hxx>
+#include <BRepOffsetAPI_DraftAngle.hxx>
 #include <BRepOffsetAPI_ThruSections.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <BRepTools.hxx>
@@ -291,6 +292,7 @@ int flcad_occ_create_solid(const char *id, char *t, size_t ts, char *f,
   }
 }
 int flcad_occ_extrude(const char *id, const double *d, int solid_output,
+                      double draft_angle_degrees,
                       char *t, size_t ts, char *f, size_t fs, char *e,
                       size_t es) {
   try {
@@ -305,11 +307,50 @@ int flcad_occ_extrude(const char *id, const double *d, int solid_output,
     } else if (!solid_output && source.ShapeType() == TopAbs_FACE) {
       source = BRepTools::OuterWire(TopoDS::Face(source));
     }
-    BRepPrimAPI_MakePrism prism(source, gp_Vec(d[0], d[1], d[2]), false, true);
+    const gp_Vec extrusion(d[0], d[1], d[2]);
+    if (extrusion.Magnitude() <= gp::Resolution())
+      return fail("Extrude direction must not be zero", e, es);
+    if (!std::isfinite(draft_angle_degrees) ||
+        std::abs(draft_angle_degrees) >= 89.0)
+      return fail("Extrude draft angle must be between -89 and 89 degrees", e,
+                  es);
+    BRepPrimAPI_MakePrism prism(source, extrusion, false, true);
     prism.Build();
     if (!prism.IsDone())
       return fail("Extrude builder did not complete", e, es);
-    return output(prism.Shape(), t, ts, f, fs, e, es);
+    TopoDS_Shape result = prism.Shape();
+    if (std::abs(draft_angle_degrees) > 1.0e-9) {
+      TopExp_Explorer vertices(source, TopAbs_VERTEX);
+      if (!vertices.More())
+        return fail("Draft angle requires a profile with vertices", e, es);
+      const gp_Pnt neutral_origin =
+          BRep_Tool::Pnt(TopoDS::Vertex(vertices.Current()));
+      const gp_Dir pull_direction(extrusion);
+      const gp_Pln neutral_plane(neutral_origin, pull_direction);
+      BRepOffsetAPI_DraftAngle drafted(result);
+      int lateral_faces = 0;
+      for (TopExp_Explorer edges(source, TopAbs_EDGE); edges.More();
+           edges.Next()) {
+        const TopTools_ListOfShape &generated = prism.Generated(edges.Current());
+        for (TopTools_ListOfShape::Iterator item(generated); item.More();
+             item.Next()) {
+          if (item.Value().ShapeType() != TopAbs_FACE)
+            continue;
+          drafted.Add(TopoDS::Face(item.Value()), pull_direction,
+                      draft_angle_degrees * 3.14159265358979323846 / 180.0,
+                      neutral_plane);
+          ++lateral_faces;
+        }
+      }
+      if (lateral_faces == 0)
+        return fail("Draft angle found no lateral extrusion faces", e, es);
+      drafted.Build();
+      if (!drafted.IsDone())
+        return fail("Draft angle could not be applied to the side faces", e,
+                    es);
+      result = drafted.Shape();
+    }
+    return output(result, t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
   }
@@ -1170,6 +1211,10 @@ int flcad_occ_surface_operation(const char *op, const char *source,
     } else if (operation == "FILLET") {
       std::vector<TopoDS_Shape> supports;
       std::vector<TopoDS_Edge> requestedEdges;
+      // The adapter sends the primary support through source_token and the
+      // remaining supports/selected edges through reference_tokens.
+      if (source && *source)
+        supports.push_back(get(source));
       for (const auto &id : ids) {
         const TopoDS_Shape candidate = get(id.c_str());
         if (candidate.ShapeType() == TopAbs_EDGE)

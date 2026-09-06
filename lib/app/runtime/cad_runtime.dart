@@ -105,7 +105,7 @@ class CadRuntime extends ChangeNotifier {
     final nativePath = path.join(
       directory.path,
       'NativeShapes',
-      '${shape.persistentId}.brep',
+      _nativeShapeFileName(shape.persistentId),
     );
     if (!await File(nativePath).exists()) return shape;
     try {
@@ -136,6 +136,7 @@ class CadRuntime extends ChangeNotifier {
     projection.clearTransient();
     geometrySelection.clear();
     operationalSelection.clear();
+    operationalResolver.clear();
     operationalEntities.clear();
     recognitionSession = sketchSession = surfaceSession = null;
     _state.clear();
@@ -205,6 +206,9 @@ class CadRuntime extends ChangeNotifier {
     _displayMeshes = null;
     _workspaceBounds = null;
     geometrySelection.clear();
+    operationalSelection.clear();
+    operationalResolver.clear();
+    operationalEntities.clear();
     recognitionSession = sketchSession = surfaceSession = null;
     _state.clear();
     projection.clearTransient();
@@ -750,7 +754,7 @@ class CadRuntime extends ChangeNotifier {
     final payload = path.join(
       directory.path,
       'NativeShapes',
-      '${handle.persistentId}.brep',
+      _nativeShapeFileName(handle.persistentId),
     );
     if (!await File(payload).exists()) return handle;
     try {
@@ -771,8 +775,17 @@ class CadRuntime extends ChangeNotifier {
     await folder.create(recursive: true);
     await kernel.persistShape(
       handle,
-      path.join(folder.path, '${handle.persistentId}.brep'),
+      path.join(folder.path, _nativeShapeFileName(handle.persistentId)),
     );
+  }
+
+  /// Persistent IDs are CAD identities, not filesystem names. In particular,
+  /// generated entities use ':' separators, which Windows rejects in paths.
+  String _nativeShapeFileName(String persistentId) {
+    final safe = persistentId
+        .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+        .replaceAll(RegExp(r'[. ]+$'), '_');
+    return '${safe.isEmpty ? 'shape' : safe}.brep';
   }
 
   String _nextWorkingCollectionId(CadDocument document) {

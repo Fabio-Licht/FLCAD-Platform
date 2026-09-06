@@ -110,6 +110,12 @@ enum ManualTransformMode { move, rotate, scale, align }
 
 enum TransformDisposition { original, workingCopy }
 
+class SketchDragHud {
+  const SketchDragHud(this.x, this.y, this.snap);
+  final double x, y;
+  final String snap;
+}
+
 class OperationalReverseEngineeringController extends ChangeNotifier {
   OperationalReverseEngineeringController({
     required ProfessionalRecognitionApi recognition,
@@ -182,6 +188,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.read<Map<String, dynamic>>('solid.extrude.preview');
   set professionalExtrudePreview(Map<String, dynamic>? value) =>
       runtime.write('solid.extrude.preview', value);
+  String? get selectedExtrudeSourceId =>
+      runtime.read<String>('solid.extrude.sourceId');
+  set selectedExtrudeSourceId(String? value) =>
+      runtime.write('solid.extrude.sourceId', value);
   Map<String, dynamic>? get professionalRevolvePreview =>
       runtime.read<Map<String, dynamic>>('solid.revolve.preview');
   set professionalRevolvePreview(Map<String, dynamic>? value) =>
@@ -347,6 +357,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   SketchVector? get lineCursor => runtime.read('sketch.line.cursor');
   EditorSnapType? get lineSnapType => runtime.read('sketch.line.snapType');
+  SketchDragHud? get sketchDragHud => runtime.read('sketch.drag.hud');
+  bool get sketchEntityDragActive =>
+      runtime.read<bool>('sketch.drag.active') ?? false;
   SketchInference? get activeSketchInference =>
       runtime.read<SketchInference>('sketch.inference');
   Offset? get sketchInferenceCursor =>
@@ -2646,7 +2659,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final settings = editorApi?.engine.snapping.settings;
     if (settings != null) {
       settings.tolerance = .5;
-      settings.gridSpacing = 1;
+      settings.gridSpacing = .1;
       settings.enabled
         ..clear()
         ..addAll(const {
@@ -2719,7 +2732,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final settings = editorApi?.engine.snapping.settings;
     if (settings == null) return;
     settings.tolerance = .5;
-    settings.gridSpacing = 1;
+    settings.gridSpacing = .1;
     settings.enabled
       ..clear()
       ..addAll(const {
@@ -2854,6 +2867,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       SketchVector(world.x, world.y, world.z),
     );
     final raw = SketchVector(local.x, local.y);
+    final settings = editorApi?.engine.snapping.settings;
+    if (settings != null) {
+      settings.gridSpacing = _adaptiveSketchGridSpacing(camera);
+    }
     final snap = editorApi?.snap(raw);
     final inference = _sketchInference.inferLine(
       cursor: raw,
@@ -2871,6 +2888,34 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.line.snapType', snap?.type);
     }
     return inference?.position ?? snap?.position ?? raw;
+  }
+
+  double _adaptiveSketchGridSpacing(CadCameraController camera) {
+    final worldPerPixel =
+        camera.projectionMode == CadProjectionMode.orthographic
+        ? camera.viewScale / math.max(camera.viewportHeight, 1)
+        : 2 *
+              (camera.target - camera.eye).length *
+              math.tan(camera.fieldOfViewRadians / 2) /
+              math.max(camera.viewportHeight, 1);
+    final target = math.max(worldPerPixel * 8, .001);
+    final exponent = math
+        .pow(10, (math.log(target) / math.ln10).floor())
+        .toDouble();
+    final normalized = target / exponent;
+    final step = normalized <= 1
+        ? 1.0
+        : normalized <= 2
+        ? 2.0
+        : normalized <= 5
+        ? 5.0
+        : 10.0;
+    return (step * exponent).clamp(.001, 1000.0);
+  }
+
+  Future<void> refreshSketchSceneAfterExit() async {
+    await _synchronizeSketchScene();
+    notifyListeners();
   }
 
   void previewSketchPointer(Offset position, CadCameraController camera) {
@@ -3231,9 +3276,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void _refreshSketchAlignmentGuides(
     SketchVector cursor,
-    CadCameraController camera,
-  ) {
-    if (!lineCommandActive || previewPoints.isEmpty || activeSketch == null) {
+    CadCameraController camera, {
+    bool dragging = false,
+  }) {
+    if ((!dragging && (!lineCommandActive || previewPoints.isEmpty)) ||
+        activeSketch == null) {
       runtime.hideTransient('sketch-alignment-guides');
       return;
     }
@@ -3636,6 +3683,221 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       busy = false;
       notifyListeners();
     }
+  }
+
+  void beginSketchEntityDrag(
+    CadViewportPick pick,
+    Offset position,
+    CadCameraController camera,
+  ) {
+    if (sketchCreationCommandActive || sketchEditingCommandActive) return;
+    final entityId = pick.entityId;
+    final entity = sketchApi?.entity(entityId);
+    if (entity is! SketchLine || activeSketch == null) return;
+    final anchor = _sketchPointAt(position, camera);
+    if (anchor == null) return;
+    final start = SketchVector.fromJson(entity.parameters['start']);
+    final end = SketchVector.fromJson(entity.parameters['end']);
+    final hit = activeSketch!.coordinates.globalToLocal(
+      SketchVector(pick.hit.point.x, pick.hit.point.y, pick.hit.point.z),
+    );
+    final endpointTolerance =
+        editorApi?.engine.snapping.settings.tolerance ?? .5;
+    double squaredDistance(SketchVector a, SketchVector b) {
+      final delta = a - b;
+      return delta.dot(delta);
+    }
+
+    final startDistance = squaredDistance(hit, start);
+    final endDistance = squaredDistance(hit, end);
+    final endpointLimit = endpointTolerance * endpointTolerance;
+    final endpoint = math.min(startDistance, endDistance) <= endpointLimit
+        ? (startDistance <= endDistance ? 'start' : 'end')
+        : null;
+    final originals = <String, Map<String, SketchVector>>{};
+    bool samePoint(SketchVector a, SketchVector b) =>
+        squaredDistance(a, b) <= 1e-8;
+    for (final candidate in sketchEntities.whereType<SketchLine>()) {
+      final candidateStart = SketchVector.fromJson(
+        candidate.parameters['start'],
+      );
+      final candidateEnd = SketchVector.fromJson(candidate.parameters['end']);
+      final touchesStart =
+          samePoint(candidateStart, start) || samePoint(candidateEnd, start);
+      final touchesEnd =
+          samePoint(candidateStart, end) || samePoint(candidateEnd, end);
+      if (candidate.id == entityId ||
+          (endpoint == 'start' && touchesStart) ||
+          (endpoint == 'end' && touchesEnd) ||
+          (endpoint == null && (touchesStart || touchesEnd))) {
+        originals[candidate.id] = {
+          'start': candidateStart,
+          'end': candidateEnd,
+        };
+      }
+    }
+    runtime.write('sketch.drag.active', true);
+    runtime.write('sketch.drag.entityId', entityId);
+    runtime.write('sketch.drag.anchor', anchor);
+    runtime.write('sketch.drag.start', start);
+    runtime.write('sketch.drag.end', end);
+    runtime.write('sketch.drag.endpoint', endpoint);
+    runtime.write('sketch.drag.originals', originals);
+    runtime.write(
+      'sketch.drag.hud',
+      SketchDragHud(anchor.x, anchor.y, lineSnapType?.name ?? 'Free'),
+    );
+    selectSketchEntity(entityId);
+  }
+
+  void updateSketchEntityDrag(Offset position, CadCameraController camera) {
+    if (!sketchEntityDragActive || activeSketch == null) return;
+    final point = _sketchPointAt(position, camera);
+    final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
+    final start = runtime.read<SketchVector>('sketch.drag.start');
+    final end = runtime.read<SketchVector>('sketch.drag.end');
+    final endpoint = runtime.read<String>('sketch.drag.endpoint');
+    final originals = runtime.read<Map<String, Map<String, SketchVector>>>(
+      'sketch.drag.originals',
+    );
+    if (point == null || anchor == null || start == null || end == null) return;
+    final delta = point - anchor;
+    final coordinates = activeSketch!.coordinates;
+    final segments = <List<List<double>>>[];
+    for (final entry in (originals ?? const {}).entries) {
+      var movedStart = entry.value['start']!;
+      var movedEnd = entry.value['end']!;
+      final movesStart = endpoint == null
+          ? _sameSketchPoint(movedStart, start) ||
+                _sameSketchPoint(movedStart, end)
+          : _sameSketchPoint(movedStart, endpoint == 'start' ? start : end);
+      final movesEnd = endpoint == null
+          ? _sameSketchPoint(movedEnd, start) || _sameSketchPoint(movedEnd, end)
+          : _sameSketchPoint(movedEnd, endpoint == 'start' ? start : end);
+      if (movesStart) movedStart += delta;
+      if (movesEnd) movedEnd += delta;
+      segments.add([
+        coordinates.localToGlobal(movedStart).toJson(),
+        coordinates.localToGlobal(movedEnd).toJson(),
+      ]);
+    }
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'sketch-drag-preview',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'segments': segments,
+          'displayColor': 'previewOrange',
+          'strokeWidth': SketchSceneAdapter.technicalStrokeWidth,
+          'dragPreview': true,
+        },
+      ),
+    );
+    final cursorWorld = coordinates.localToGlobal(point);
+    final inference = runtime.read<SketchInference>('sketch.inference');
+    final snapLabel = inference?.type.name ?? lineSnapType?.name ?? 'Livre';
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'sketch-drag-hud',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'points': const <List<double>>[],
+          'dimensionLabel':
+              'X ${point.x.toStringAsFixed(3)}   Y ${point.y.toStringAsFixed(3)}   ${snapLabel.toUpperCase()}',
+          'labelPosition': cursorWorld.toJson(),
+          'labelScreenOffset': const [0.0, -34.0],
+          'floatingHud': true,
+        },
+      ),
+    );
+    _refreshSketchAlignmentGuides(point, camera, dragging: true);
+    runtime.write(
+      'sketch.drag.hud',
+      SketchDragHud(
+        point.x,
+        point.y,
+        inference?.type.name ?? lineSnapType?.name ?? 'Free',
+      ),
+    );
+    notifyListeners();
+  }
+
+  Future<void> finishSketchEntityDrag(
+    Offset position,
+    CadCameraController camera,
+  ) async {
+    if (!sketchEntityDragActive) return;
+    final entityId = runtime.read<String>('sketch.drag.entityId');
+    final point = _sketchPointAt(position, camera);
+    final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
+    final start = runtime.read<SketchVector>('sketch.drag.start');
+    final end = runtime.read<SketchVector>('sketch.drag.end');
+    final endpoint = runtime.read<String>('sketch.drag.endpoint');
+    final originals = runtime.read<Map<String, Map<String, SketchVector>>>(
+      'sketch.drag.originals',
+    );
+    try {
+      if (entityId != null &&
+          point != null &&
+          anchor != null &&
+          start != null &&
+          end != null) {
+        final delta = point - anchor;
+        final api = sketchApi!;
+        api.engine.transaction('connected-sketch-drag', () {
+          for (final entry in (originals ?? const {}).entries) {
+            final originalStart = entry.value['start']!;
+            final originalEnd = entry.value['end']!;
+            final target = endpoint == 'start' ? start : end;
+            final movesStart = endpoint == null
+                ? _sameSketchPoint(originalStart, start) ||
+                      _sameSketchPoint(originalStart, end)
+                : _sameSketchPoint(originalStart, target);
+            final movesEnd = endpoint == null
+                ? _sameSketchPoint(originalEnd, start) ||
+                      _sameSketchPoint(originalEnd, end)
+                : _sameSketchPoint(originalEnd, target);
+            final movedStart = movesStart
+                ? originalStart + delta
+                : originalStart;
+            final movedEnd = movesEnd ? originalEnd + delta : originalEnd;
+            api.updateParameters(entry.key, {
+              'startX': movedStart.x,
+              'startY': movedStart.y,
+              'endX': movedEnd.x,
+              'endY': movedEnd.y,
+            });
+          }
+        });
+        await api.persist();
+        await _synchronizeSketchScene();
+        runtime.select({entityId});
+      }
+    } finally {
+      cancelSketchEntityDrag();
+    }
+  }
+
+  void cancelSketchEntityDrag() {
+    runtime.write('sketch.drag.active', false);
+    runtime.write('sketch.drag.entityId', null);
+    runtime.write('sketch.drag.anchor', null);
+    runtime.write('sketch.drag.start', null);
+    runtime.write('sketch.drag.end', null);
+    runtime.write('sketch.drag.endpoint', null);
+    runtime.write('sketch.drag.originals', null);
+    runtime.write('sketch.drag.hud', null);
+    runtime.hideTransient('sketch-drag-preview');
+    runtime.hideTransient('sketch-drag-hud');
+    runtime.hideTransient('sketch-alignment-guides');
+    notifyListeners();
+  }
+
+  bool _sameSketchPoint(SketchVector first, SketchVector second) {
+    final delta = first - second;
+    return delta.dot(delta) <= 1e-8;
   }
 
   Future<void> setSketchEntityVisibility(String id, bool visible) async {
@@ -4398,20 +4660,137 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   CadDocumentEntity? get selectedExtrudeSource {
     final document = runtime.document;
-    if (document == null || runtime.selection.length != 1) return null;
-    final entity = document.entities[runtime.selection.single];
-    if (entity == null) return null;
-    if (entity.kind == CadDocumentEntityKind.sketch &&
-        entity.data['sketch'] is Map) {
-      return entity;
+    if (document == null) return null;
+    final explicitId = selectedExtrudeSourceId;
+    if (explicitId != null) {
+      final explicit = document.entities[explicitId];
+      if (explicit != null &&
+          ((explicit.kind == CadDocumentEntityKind.sketch &&
+                  explicit.data['sketch'] is Map) ||
+              (explicit.kind == CadDocumentEntityKind.surface &&
+                  explicit.shape != null))) {
+        return explicit;
+      }
     }
-    if (entity.kind == CadDocumentEntityKind.surface && entity.shape != null) {
-      return entity;
+    if (runtime.selection.isEmpty) return null;
+    final sources = <String, CadDocumentEntity>{};
+    for (final selectedId in runtime.selection) {
+      final entity = document.entities[selectedId];
+      if (entity == null) continue;
+      if (entity.kind == CadDocumentEntityKind.sketch) {
+        if (entity.data['sketch'] is Map) {
+          sources[entity.id] = entity;
+          continue;
+        }
+        final parentId = entity.data['parentSketchId'] as String?;
+        final parent = parentId == null ? null : document.entities[parentId];
+        if (parent != null && parent.data['sketch'] is Map) {
+          sources[parent.id] = parent;
+        }
+        continue;
+      }
+      if (entity.kind == CadDocumentEntityKind.surface &&
+          entity.shape != null) {
+        sources[entity.id] = entity;
+      }
     }
-    return null;
+    return sources.length == 1 ? sources.values.single : null;
   }
 
   bool get canPreviewExtrude => selectedExtrudeSource != null;
+
+  List<CadDocumentEntity> get extrudeSources {
+    final document = runtime.document;
+    if (document == null) return const [];
+    final result = document.entities.values
+        .where(
+          (entity) =>
+              (entity.kind == CadDocumentEntityKind.sketch &&
+                  entity.data['sketch'] is Map) ||
+              (entity.kind == CadDocumentEntityKind.surface &&
+                  entity.shape != null),
+        )
+        .toList(growable: false);
+    result.sort((a, b) {
+      final an = (a.data['name'] as String? ?? a.id).toLowerCase();
+      final bn = (b.data['name'] as String? ?? b.id).toLowerCase();
+      return an.compareTo(bn);
+    });
+    return result;
+  }
+
+  void selectExtrudeSource(String id) {
+    final valid = extrudeSources.any((entity) => entity.id == id);
+    if (!valid) throw StateError('Extrude source is unavailable: $id');
+    selectedExtrudeSourceId = id;
+    notifyListeners();
+  }
+
+  bool selectExtrudeSourceFromViewport(String entityId) {
+    final document = runtime.document;
+    final entity = document?.entities[entityId];
+    if (entity == null) return false;
+    String? sourceId;
+    if (entity.kind == CadDocumentEntityKind.sketch) {
+      sourceId = entity.data['sketch'] is Map
+          ? entity.id
+          : entity.data['parentSketchId'] as String?;
+    } else if (entity.kind == CadDocumentEntityKind.surface &&
+        entity.shape != null) {
+      sourceId = entity.id;
+    }
+    if (sourceId == null ||
+        !extrudeSources.any((source) => source.id == sourceId)) {
+      return false;
+    }
+    selectedExtrudeSourceId = sourceId;
+    notifyListeners();
+    return true;
+  }
+
+  List<({String id, String label, List<double> vector})>
+  get extrudeDirectionOptions {
+    final result = <({String id, String label, List<double> vector})>[
+      (id: 'profileNormal', label: 'Normal ao perfil', vector: const [0, 0, 1]),
+      (id: 'worldX', label: 'Eixo global X', vector: const [1, 0, 0]),
+      (id: 'worldY', label: 'Eixo global Y', vector: const [0, 1, 0]),
+      (id: 'worldZ', label: 'Eixo global Z', vector: const [0, 0, 1]),
+    ];
+    final document = runtime.document;
+    if (document == null) return result;
+    for (final entity in document.entities.values) {
+      final construction = entity.data['constructionEntity'];
+      if (construction is! Map || construction['type'] != 'vector') continue;
+      final raw = construction['direction'];
+      if (raw is! List || raw.length < 3) continue;
+      result.add((
+        id: entity.id,
+        label: entity.data['name'] as String? ?? entity.id,
+        vector: raw.take(3).map((value) => (value as num).toDouble()).toList(),
+      ));
+    }
+    return result;
+  }
+
+  List<double> _extrudeDirectionVector(
+    CadDocumentEntity source,
+    String directionSourceId,
+  ) {
+    if (directionSourceId == 'profileNormal' &&
+        source.kind == CadDocumentEntityKind.sketch) {
+      final system = source.data['localCoordinateSystem'];
+      final raw = system is Map ? system['normal'] : null;
+      if (raw is List && raw.length >= 3) {
+        return raw.take(3).map((value) => (value as num).toDouble()).toList();
+      }
+    }
+    return extrudeDirectionOptions
+        .firstWhere(
+          (option) => option.id == directionSourceId,
+          orElse: () => extrudeDirectionOptions.first,
+        )
+        .vector;
+  }
 
   CadDocumentEntity? get selectedExtrudeFeature {
     final document = runtime.document;
@@ -4441,6 +4820,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       current.data['extrudeFeature'] as Map,
     );
     raw['displayMode'] = mode;
+    final sceneGeometry =
+        Map<String, dynamic>.from(
+          current.data['sceneGeometry'] as Map? ?? const {},
+        )..addAll({
+          'featureId': current.id,
+          'tool': 'extrude',
+          'handle': current.shape!.toJson(),
+          'displayMode': mode,
+          'shaded': mode != 'wireframe',
+        });
     await runtime.mutate(
       command: 'extrude.display.$mode',
       upsert: [
@@ -4449,30 +4838,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           kind: current.kind,
           shape: current.shape,
           mesh: current.mesh,
-          data: {...current.data, 'extrudeFeature': raw, 'displayMode': mode},
+          data: {
+            ...current.data,
+            'extrudeFeature': raw,
+            'displayMode': mode,
+            'sceneGeometry': sceneGeometry,
+            'sceneTransparent': mode == 'transparent',
+          },
         ),
       ],
-    );
-    runtime.scene.upsert(
-      CadSceneEntity(
-        id: current.id,
-        kind: current.kind == CadDocumentEntityKind.solid
-            ? CadSceneEntityKind.solid
-            : CadSceneEntityKind.surface,
-        transparent: mode == 'transparent',
-        geometry: {
-          'featureId': current.id,
-          'tool': 'extrude',
-          'handle': current.shape!.toJson(),
-          'displayMode': mode,
-        },
-      ),
     );
     notifyListeners();
   }
 
   Future<void> previewProfessionalExtrude({
     double distance = 10,
+    double draftAngleDegrees = 0,
+    String directionSourceId = 'profileNormal',
     ProfessionalExtrudeDirection direction =
         ProfessionalExtrudeDirection.normal,
     ProfessionalExtrudeOutput output = ProfessionalExtrudeOutput.solid,
@@ -4505,6 +4887,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sourceRevision: _loftSourceRevision(source),
         sourceShapeId: sourceHandle.persistentId,
         distance: distance,
+        draftAngleDegrees: draftAngleDegrees,
+        directionSourceId: directionSourceId,
+        directionVector: _extrudeDirectionVector(source, directionSourceId),
         direction: direction,
         output: output,
       );
@@ -4528,8 +4913,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         {
           'inputs': [sourceHandle],
           'distance': distance,
+          'draftAngleDegrees': draftAngleDegrees,
           'reverse': contract.reverse,
-          'direction': [0.0, 0.0, contract.reverse ? -distance : distance],
+          'direction': [
+            for (final component in contract.directionVector)
+              component * (contract.reverse ? -distance : distance),
+          ],
           'output': output.name,
         },
         persistentId: '$id:shape',
@@ -4583,6 +4972,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> updateProfessionalExtrudePreview({
     double? distance,
+    double? draftAngleDegrees,
+    String? directionSourceId,
     ProfessionalExtrudeDirection? direction,
     ProfessionalExtrudeOutput? output,
   }) async {
@@ -4597,6 +4988,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await previewProfessionalExtrude(
       featureId: current['id'] as String,
       distance: distance ?? contract.distance,
+      draftAngleDegrees: draftAngleDegrees ?? contract.draftAngleDegrees,
+      directionSourceId: directionSourceId ?? contract.directionSourceId,
       direction: direction ?? contract.direction,
       output: output ?? contract.output,
     );
@@ -4632,6 +5025,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'featureId': id,
           'tool': 'extrude',
           'handle': handle.toJson(),
+          'displayMode': 'shadedWithEdges',
+          'shaded': true,
           'parameters': value,
         },
       ),
@@ -4661,6 +5056,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       FeatureLifecycleState.closed,
       command: 'extrude.lifecycle.commit',
     );
+    runtime.select({id});
     professionalExtrudePreview = null;
     notifyListeners();
   }
@@ -4678,10 +5074,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final contract = ProfessionalExtrudeContract.fromJson(
       Map<String, dynamic>.from(raw['contract'] as Map),
     );
+    selectedExtrudeSourceId = contract.sourceEntityId;
     runtime.select({contract.sourceEntityId});
     await previewProfessionalExtrude(
       featureId: id,
       distance: contract.distance,
+      draftAngleDegrees: contract.draftAngleDegrees,
+      directionSourceId: contract.directionSourceId,
       direction: contract.direction,
       output: contract.output,
     );
@@ -5048,7 +5447,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .whereType<CadDocumentEntity>()
         .where(
           (entity) =>
-              entity.kind == CadDocumentEntityKind.edge && entity.shape != null,
+              entity.kind == CadDocumentEntityKind.edge &&
+              (entity.shape != null || entity.data['topology'] is Map),
         )
         .toList(growable: false);
   }
@@ -5077,7 +5477,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           (entity) =>
               (entity.kind == CadDocumentEntityKind.edge ||
                   entity.kind == CadDocumentEntityKind.boundary) &&
-              entity.shape != null,
+              (entity.shape != null || entity.data['topology'] is Map),
         )
         .toList(growable: false);
   }
@@ -5357,7 +5757,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ].map((id) => selectedById[id]).whereType<CadDocumentEntity>();
       final handles = <ShapeHandle>[];
       for (final entity in ordered) {
-        handles.add(await runtime.loadShape(entity.shape!));
+        handles.add(await _ensureSelectableShape(entity));
       }
       final id = ProfessionalSurfaceFilletNaming.nextId(
         runtime.document!.entities.keys,
@@ -5418,7 +5818,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final boundaryHandles = <ShapeHandle>[];
       final supportHandles = <String, ShapeHandle>{};
       for (final boundary in boundaries) {
-        boundaryHandles.add(await runtime.loadShape(boundary.shape!));
+        boundaryHandles.add(await _ensureSelectableShape(boundary));
         final supportId = boundary.data['parentSurfaceId'] as String?;
         final support = runtime.document?.entities[supportId];
         if (supportId != null && support?.shape != null) {
@@ -5516,7 +5916,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         surfaceHandles.add(await runtime.loadShape(surface.shape!));
       }
       for (final boundary in boundaries) {
-        boundaryHandles.add(await runtime.loadShape(boundary.shape!));
+        boundaryHandles.add(await _ensureSelectableShape(boundary));
       }
       BlendSurfaceReference referenceFor(int index) {
         final surface = surfaces[index];
@@ -5654,7 +6054,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (entity.kind == CadDocumentEntityKind.section) {
       return SweepInputKind.referenceCurve;
     }
-    if (entity.kind == CadDocumentEntityKind.edge && entity.shape != null) {
+    if (entity.kind == CadDocumentEntityKind.edge &&
+        (entity.shape != null || entity.data['topology'] is Map)) {
       return SweepInputKind.edge;
     }
     return null;
@@ -5676,7 +6077,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               sketchApi!.sketches.firstWhere((item) => item.id == source.id),
             ),
             CadDocumentEntityKind.section => _ensureSectionWire(source),
-            CadDocumentEntityKind.edge => runtime.loadShape(source.shape!),
+            CadDocumentEntityKind.edge => _ensureSelectableShape(source),
             _ => throw StateError('${source.id} is not a Sweep input.'),
           };
       final profileHandle = await resolve(sources.first);
@@ -5773,7 +6174,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (entity.kind == CadDocumentEntityKind.section) {
       return LoftSectionKind.referenceCurve;
     }
-    if (entity.kind == CadDocumentEntityKind.edge && entity.shape != null) {
+    if (entity.kind == CadDocumentEntityKind.edge &&
+        (entity.shape != null || entity.data['topology'] is Map)) {
       return LoftSectionKind.edge;
     }
     return null;
@@ -5799,7 +6201,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             sketchApi!.sketches.firstWhere((item) => item.id == source.id),
           ),
           CadDocumentEntityKind.section => await _ensureSectionWire(source),
-          CadDocumentEntityKind.edge => await runtime.loadShape(source.shape!),
+          CadDocumentEntityKind.edge => await _ensureSelectableShape(source),
           _ => throw StateError('${source.id} is not a Loft section.'),
         };
         handles.add(handle);
@@ -6169,6 +6571,68 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           : ProfessionalCurveType.composite,
       color: sketch.entityIds.length == 1 ? 'splineMagenta' : 'polylineBlue',
     );
+  }
+
+  /// Resolves both persisted CAD shapes and selectable Surface topology.
+  /// Surface edges are intentionally materialized only when a command uses
+  /// them, keeping display topology lightweight while giving the kernel a
+  /// real Edge token for Blend, Fill, Loft, Sweep and Fillet.
+  Future<ShapeHandle> _ensureSelectableShape(CadDocumentEntity entity) async {
+    if (entity.shape != null) return runtime.loadShape(entity.shape!);
+    final topology = entity.data['topology'];
+    final rawPoints = topology is Map ? topology['points'] : null;
+    if (entity.kind != CadDocumentEntityKind.edge ||
+        rawPoints is! List ||
+        rawPoints.length < 2) {
+      throw StateError('${entity.id} has no selectable kernel geometry.');
+    }
+    final points = rawPoints
+        .whereType<List>()
+        .map(SketchVector.fromJson)
+        .toList(growable: false);
+    if (points.length < 2) {
+      throw StateError('${entity.id} has no usable Edge geometry.');
+    }
+    final kernel = runtime.kernels.active;
+    final projectId = runtime.document?.projectId;
+    if (projectId == null) throw StateError('Open a project first.');
+    final transaction = KernelTransaction(
+      'selectable-edge-${DateTime.now().microsecondsSinceEpoch}',
+      projectId,
+      kernel.descriptor.id,
+      DateTime.now(),
+      TransactionStatus.active,
+      const [],
+    );
+    await kernel.begin(transaction);
+    try {
+      final start = await kernel.create(
+        'CREATE VERTEX',
+        {'x': points.first.x, 'y': points.first.y, 'z': points.first.z},
+        persistentId: '${entity.id}:selection:start',
+        expectedType: CADShapeType.vertex,
+        transaction: transaction,
+      );
+      final end = await kernel.create(
+        'CREATE VERTEX',
+        {'x': points.last.x, 'y': points.last.y, 'z': points.last.z},
+        persistentId: '${entity.id}:selection:end',
+        expectedType: CADShapeType.vertex,
+        transaction: transaction,
+      );
+      final edge = await kernel.create(
+        'CREATE EDGE',
+        {'start': start, 'end': end},
+        persistentId: '${entity.id}:selection:edge',
+        expectedType: CADShapeType.edge,
+        transaction: transaction,
+      );
+      await kernel.commit(transaction);
+      return edge;
+    } catch (_) {
+      await kernel.rollback(transaction);
+      rethrow;
+    }
   }
 
   List<SketchVector> _globalSketchPoints(Sketch sketch) {
@@ -8156,10 +8620,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
         }
         for (var index = 0; index < 4; index++) {
+          final current = lines[index];
+          final next = lines[(index + 1) % 4];
           rectangleConstraints.add(
             constraintApi!.builders.coincident.build([
-              lines[index].id,
-              lines[(index + 1) % 4].id,
+              '${current.id}:end',
+              '${next.id}:start',
             ]),
           );
         }
@@ -8814,6 +9280,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             visible: showEdges,
             geometry: {
               'points': edge.points,
+              'parentSurfaceId': surface.surfaceId,
+              'surfaceEdgeIndex': topology.edges.indexOf(edge) + 1,
               'displayColor': 'surfaceEdge',
               'strokeWidth': 1.0,
             },
@@ -8836,6 +9304,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             visible: showEdges,
             geometry: {
               'origin': vertex.position,
+              'parentSurfaceId': surface.surfaceId,
+              'surfaceVertexIndex': topology.vertices.indexOf(vertex) + 1,
               'displayColor': 'surfaceVertex',
             },
             data: {
@@ -8929,6 +9399,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'group': 'Sketches',
               'sceneKind': 'sketch',
               'sceneVisible': sketch.metadata['visible'] as bool? ?? true,
+              'sceneGeometry': _sketchProfilePickGeometry(sketch),
               'revision': sketch.version,
               'sourceSectionId': sketch.metadata['sourceSectionId'],
               'associationState':
@@ -9048,6 +9519,42 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           ? selectedConstraintIds
           : _selectionWithDimensions(),
     );
+  }
+
+  Map<String, dynamic> _sketchProfilePickGeometry(Sketch sketch) {
+    final remaining = <(SketchVector, SketchVector)>[];
+    for (final id in sketch.entityIds) {
+      final entity = sketchApi?.entity(id);
+      if (entity is SketchLine) {
+        remaining.add((
+          SketchVector.fromJson(entity.parameters['start']),
+          SketchVector.fromJson(entity.parameters['end']),
+        ));
+      }
+    }
+    if (remaining.length < 3) return const {'points': <List<double>>[]};
+    final ordered = <SketchVector>[remaining.first.$1, remaining.first.$2];
+    remaining.removeAt(0);
+    while (remaining.isNotEmpty) {
+      final tail = ordered.last;
+      final index = remaining.indexWhere(
+        (line) =>
+            _sameSketchPoint(line.$1, tail) || _sameSketchPoint(line.$2, tail),
+      );
+      if (index < 0) break;
+      final line = remaining.removeAt(index);
+      ordered.add(_sameSketchPoint(line.$1, tail) ? line.$2 : line.$1);
+    }
+    final closed =
+        remaining.isEmpty && _sameSketchPoint(ordered.first, ordered.last);
+    return {
+      'points': ordered
+          .map(sketch.coordinates.localToGlobal)
+          .map((point) => point.toJson())
+          .toList(growable: false),
+      'pickOnlyClosedProfile': closed,
+      'displayColor': 'sketchProfilePickTarget',
+    };
   }
 
   Future<void> refreshDependentProfessionalLofts() async {

@@ -20,7 +20,7 @@ class OperationalEntityResolver {
   OperationalEntityResolver(this.registry);
 
   final OperationalEntityRegistry registry;
-  final Map<String, Future<_MeshResolution?>> _meshResolutions = {};
+  final Map<String, _CachedMeshResolution> _meshResolutions = {};
   final Map<String, OperationalResolution> _presentations = {};
 
   OperationalResolution? presentation(String operationalEntityId) =>
@@ -29,13 +29,22 @@ class OperationalEntityResolver {
   void prepare(CadSceneGraph scene) {
     for (final entity in scene.entities) {
       if (entity.kind == CadSceneEntityKind.mesh) {
-        _meshResolutions.putIfAbsent(entity.id, () => _segment(entity));
+        _resolutionFor(entity);
       }
     }
   }
 
   void invalidate(String sceneEntityId) {
     _meshResolutions.remove(sceneEntityId);
+    _presentations.removeWhere(
+      (_, presentation) => presentation.entity.ownerId == sceneEntityId,
+    );
+    registry.replaceOwner(sceneEntityId, const []);
+  }
+
+  void clear() {
+    _meshResolutions.clear();
+    _presentations.clear();
   }
 
   Future<OperationalResolution?> resolve(
@@ -45,10 +54,7 @@ class OperationalEntityResolver {
     final source = scene.find(raw.entityId);
     if (source == null || !source.visible) return null;
     if (source.kind == CadSceneEntityKind.mesh) {
-      final resolution = await _meshResolutions.putIfAbsent(
-        source.id,
-        () => _segment(source),
-      );
+      final resolution = await _resolutionFor(source);
       final triangle = raw.subId - 1;
       if (resolution == null || triangle < 0) return null;
       final region = resolution.byTriangle[triangle];
@@ -58,32 +64,75 @@ class OperationalEntityResolver {
         triangleIndices: region.triangleIndices,
       );
     }
-    final type = switch (source.kind) {
-      CadSceneEntityKind.surface => OperationalEntityType.surface,
-      CadSceneEntityKind.curve => OperationalEntityType.curve,
-      CadSceneEntityKind.sketch => OperationalEntityType.sketchEntity,
-      CadSceneEntityKind.point => OperationalEntityType.topologicalVertex,
-      _ => OperationalEntityType.cadFace,
+    final selectedSource = _topologySource(raw, source, scene) ?? source;
+    final type = switch (raw.kind) {
+      NativePickKind.edge => OperationalEntityType.topologicalEdge,
+      NativePickKind.vertex => OperationalEntityType.topologicalVertex,
+      NativePickKind.face => OperationalEntityType.cadFace,
+      _ => switch (selectedSource.kind) {
+        CadSceneEntityKind.surface => OperationalEntityType.surface,
+        CadSceneEntityKind.curve => OperationalEntityType.curve,
+        CadSceneEntityKind.sketch => OperationalEntityType.sketchEntity,
+        CadSceneEntityKind.point => OperationalEntityType.topologicalVertex,
+        _ => OperationalEntityType.cadFace,
+      },
     };
     final entity = OperationalEntity(
-      id: 'operational:${source.id}',
+      id: 'operational:${selectedSource.id}',
       type: type,
-      ownerId: source.id,
+      ownerId: selectedSource.id,
       ownerDomain: type.name,
-      documentId: source.id,
+      documentId: selectedSource.id,
       revision: 1,
-      label: source.id,
+      label: selectedSource.id,
       capabilities: const {
         OperationalCapability.selectable,
         OperationalCapability.inspectable,
       },
-      properties: {'sceneEntityId': source.id, 'type': type.name},
+      properties: {'sceneEntityId': selectedSource.id, 'type': type.name},
     );
-    registry.replaceOwner(source.id, [entity]);
+    registry.replaceOwner(selectedSource.id, [entity]);
     return OperationalResolution(entity: entity, triangleIndices: const []);
   }
 
-  Future<_MeshResolution?> _segment(CadSceneEntity source) async {
+  Future<_MeshResolution?> _resolutionFor(CadSceneEntity source) {
+    final signature = _signature(source);
+    final cached = _meshResolutions[source.id];
+    if (cached != null && cached.signature == signature) return cached.value;
+    if (cached != null) invalidate(source.id);
+    final value = _segment(source, signature);
+    _meshResolutions[source.id] = _CachedMeshResolution(signature, value);
+    return value;
+  }
+
+  Object _signature(CadSceneEntity source) => Object.hash(
+    source.geometry['fingerprint'],
+    source.geometry['revision'],
+    identityHashCode(source.geometry['nodes']),
+    identityHashCode(source.geometry['triangles']),
+  );
+
+  CadSceneEntity? _topologySource(
+    NativeViewportPick raw,
+    CadSceneEntity owner,
+    CadSceneGraph scene,
+  ) {
+    final indexKey = switch (raw.kind) {
+      NativePickKind.edge => 'surfaceEdgeIndex',
+      NativePickKind.vertex => 'surfaceVertexIndex',
+      _ => null,
+    };
+    if (indexKey == null) return null;
+    return scene.entities.where((candidate) {
+      return candidate.geometry['parentSurfaceId'] == owner.id &&
+          candidate.geometry[indexKey] == raw.subId;
+    }).firstOrNull;
+  }
+
+  Future<_MeshResolution?> _segment(
+    CadSceneEntity source,
+    Object signature,
+  ) async {
     final rawNodes = source.geometry['nodes'];
     final rawTriangles = source.geometry['triangles'];
     if (rawNodes is! List || rawTriangles is! List) return null;
@@ -132,18 +181,31 @@ class OperationalEntityResolver {
         },
       );
       final resolved = _ResolvedRegion(entity, region.triangleIndices);
-      _presentations[entity.id] = OperationalResolution(
-        entity: entity,
-        triangleIndices: region.triangleIndices,
-      );
+      if (_isCurrent(source.id, signature)) {
+        _presentations[entity.id] = OperationalResolution(
+          entity: entity,
+          triangleIndices: region.triangleIndices,
+        );
+      }
       regions.add(resolved);
       for (final triangle in region.triangleIndices) {
         byTriangle[triangle] = resolved;
       }
     }
-    registry.replaceOwner(source.id, regions.map((region) => region.entity));
+    if (_isCurrent(source.id, signature)) {
+      registry.replaceOwner(source.id, regions.map((region) => region.entity));
+    }
     return _MeshResolution(byTriangle);
   }
+
+  bool _isCurrent(String sourceId, Object signature) =>
+      _meshResolutions[sourceId]?.signature == signature;
+}
+
+class _CachedMeshResolution {
+  const _CachedMeshResolution(this.signature, this.value);
+  final Object signature;
+  final Future<_MeshResolution?> value;
 }
 
 class _MeshResolution {

@@ -2,6 +2,11 @@ import 'dart:io';
 import 'package:flcad_mobile/app/bootstrap/engineering_bootstrap.dart';
 import 'package:flcad_mobile/core/cad_kernel/api/geometry_kernel_api.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
+import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
+import 'package:flcad_mobile/core/geometric_kernel/precision/precision.dart';
+import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph.dart';
+import 'package:flcad_mobile/core/metric_reference/metric_reference.dart'
+    as metric;
 import 'package:flcad_mobile/core/reference_geometry/analytics/reference_analytics.dart';
 import 'package:flcad_mobile/core/reference_geometry/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_geometry/commands/fel_reference_commands.dart';
@@ -306,4 +311,97 @@ void main() {
       );
     },
   );
+
+  group('M-005 Metric Reference System', () {
+    test(
+      'runs marker, bar, distance, object, solver and persistence flow',
+      () async {
+        final capturedAt = DateTime.utc(2026, 8, 22);
+        final marker = metric.fiducialMarker(
+          id: 'Marker001',
+          nominalSize: 20,
+          material: metric.FiducialMaterial.pvc,
+        );
+        final bar = metric.ScaleBar.calibrated(
+          id: 'ScaleBar001',
+          millimeters: 100,
+        );
+        final sphere = metric.CalibratedReferenceObject(
+          id: 'ReferenceSphere001',
+          shape: metric.CalibratedObjectShape.sphere,
+          nominalDimension: 40,
+          unit: LengthUnit.millimeter,
+        );
+        final knownDistance = metric.MetricReference(
+          id: 'KnownDistance001',
+          type: metric.MetricReferenceType.distance,
+          pointA: Vector3.zero,
+          pointB: const Vector3(25, 0, 0),
+          knownValue: 50,
+          unit: LengthUnit.millimeter,
+          createdAt: capturedAt,
+        );
+        final system = metric.MetricReferenceSystem();
+        system.addAll([
+          marker.toReference(
+            pointA: Vector3.zero,
+            pointB: const Vector3(10, 0, 0),
+            measuredSize: 10,
+            capturedAt: capturedAt,
+          ),
+          bar.toReference(
+            pointA: Vector3.zero,
+            pointB: const Vector3(50, 0, 0),
+            capturedAt: capturedAt,
+          ),
+          knownDistance,
+          sphere.toReference(
+            pointA: Vector3.zero,
+            pointB: const Vector3(20, 0, 0),
+            measuredType: metric.MetricReferenceType.diameter,
+            capturedAt: capturedAt,
+          ),
+        ]);
+        final solution = system.solve();
+        final graph = system.evidenceGraph();
+        final directory = await Directory.systemTemp.createTemp('m005-');
+        addTearDown(() => directory.delete(recursive: true));
+        final repository = metric.MetricReferenceRepository(
+          directory: directory,
+        );
+
+        await repository.save(
+          metric.MetricReferenceSnapshot(
+            projectId: 'm005-project',
+            references: system.references,
+            solution: solution,
+          ),
+        );
+        final reopened = await repository.load('m005-project');
+
+        expect(marker.hasValidChecksum, isTrue);
+        expect(system.references, hasLength(4));
+        expect(solution.evidence, hasLength(4));
+        expect(solution.maximumResidual, greaterThanOrEqualTo(0));
+        expect(graph.nodes, hasLength(8));
+        expect(
+          graph.nodes.where(
+            (node) => node.kind == EvidenceNodeKind.metricReference,
+          ),
+          hasLength(4),
+        );
+        expect(
+          reopened!.references.map((item) => item.id),
+          containsAll([
+            'Marker001',
+            'ScaleBar001',
+            'KnownDistance001',
+            'ReferenceSphere001',
+          ]),
+        );
+        expect(reopened.solution.evidence, hasLength(4));
+        expect(reopened.solution.confidence, solution.confidence);
+      },
+    );
+  });
 }
