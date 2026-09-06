@@ -22,17 +22,18 @@ class ColmapBackendActivation {
     if (record.backendId != 'colmap') {
       throw StateError('Only a COLMAP installation can activate this backend');
     }
-    if (record.status != BackendInstallationStatus.installed &&
-        record.status != BackendInstallationStatus.certified) {
-      throw StateError('COLMAP installation is not available');
-    }
     final executable = File(record.executablePath);
     if (!path.isAbsolute(executable.path) || !await executable.exists()) {
       throw StateError('COLMAP executable is missing or is not absolute');
     }
+    final expectedName = Platform.isWindows ? 'colmap.exe' : 'colmap';
+    if (path.basename(executable.path).toLowerCase() != expectedName) {
+      throw StateError('COLMAP executable must be named $expectedName');
+    }
     final canonical = await executable.resolveSymbolicLinks();
     if (record.origin == BackendInstallationOrigin.external) {
-      if (!allowUncertifiedExternal ||
+      if (record.status != BackendInstallationStatus.installed ||
+          !allowUncertifiedExternal ||
           record.certification != BackendCertificationStatus.notCertified) {
         throw StateError(
           'External COLMAP requires explicit experimental activation',
