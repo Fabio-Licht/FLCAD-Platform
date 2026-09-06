@@ -59,21 +59,42 @@ if ($files.Count -eq 0) {
 foreach ($file in $files) {
   $relative = $file.FullName.Substring($root.Length).TrimStart('\', '/')
   $timer = [Diagnostics.Stopwatch]::StartNew()
-  $stdout = New-TemporaryFile
-  $stderr = New-TemporaryFile
+  $stdout = $null
+  $stderr = $null
+  $process = $null
   try {
+    $stdout = New-TemporaryFile
+    $stderr = New-TemporaryFile
     $process = Start-Process $flutter `
       -ArgumentList @("test", "--no-pub", "--machine", $relative) `
       -PassThru -NoNewWindow `
       -RedirectStandardOutput $stdout.FullName `
       -RedirectStandardError $stderr.FullName
+    # Cache the native process handle before waiting. Windows PowerShell 5.1
+    # may otherwise return a Process wrapper whose ExitCode remains null.
+    $null = $process.Handle
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-      $process.Kill($true)
+      try {
+        & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+      } catch {
+        if (-not $process.HasExited) {
+          $process.Kill()
+        }
+      }
       throw "TIMEOUT after ${TimeoutSeconds}s: $relative"
     }
+    # Read the cached handle after both the timed and stream-flushing waits.
+    # ExitCode and the Flutter terminal event are verified independently.
     $process.WaitForExit()
     $process.Refresh()
-    $exitCode = $process.ExitCode
+    $exitCode = $null
+    try {
+      if ($process.HasExited) {
+        $exitCode = $process.ExitCode
+      }
+    } catch {
+      $exitCode = $null
+    }
     $lines = @(Get-Content $stdout.FullName | Where-Object { $_.Trim() })
     $first = $lines | Select-Object -First 1
     $last = $lines | Select-Object -Last 1
@@ -114,6 +135,9 @@ foreach ($file in $files) {
       throw "INCOMPLETE TEST EVENTS: $relative; started=$($testIds.Count), completed=$($completedIds.Count)"
     }
     $done = $doneEvents | Select-Object -Last 1
+    if ($null -eq $exitCode) {
+      throw "EXIT CODE UNAVAILABLE: $relative; Flutter protocol completed but the process result could not be verified"
+    }
     if ($doneEvents.Count -eq 0 -or $done.success -ne $true -or $exitCode -ne 0) {
       $errorText = ""
       if (Test-Path -LiteralPath $stderr.FullName) {
@@ -130,7 +154,38 @@ foreach ($file in $files) {
     $totalFailed += $failed
     $totalSkipped += $skipped
   } finally {
-    Remove-Item $stdout.FullName, $stderr.FullName -Force
+    if ($null -ne $process) {
+      try {
+        if (-not $process.HasExited) {
+          & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+        }
+      } catch {
+        try {
+          if (-not $process.HasExited) {
+            $process.Kill()
+          }
+        } catch {
+          # Preserve the original runner failure while still attempting cleanup.
+        }
+      } finally {
+        try {
+          $process.Dispose()
+        } catch {
+          # Process resources are best-effort cleanup after test completion.
+        }
+      }
+    }
+    foreach ($temporaryFile in @($stdout, $stderr)) {
+      if ($null -ne $temporaryFile -and
+          (Test-Path -LiteralPath $temporaryFile.FullName)) {
+        try {
+          Remove-Item -LiteralPath $temporaryFile.FullName -Force
+        } catch {
+          # Do not replace the actual test result with a temporary-file error.
+        }
+      }
+    }
+    $timer.Stop()
   }
 }
 
