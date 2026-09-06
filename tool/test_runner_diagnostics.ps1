@@ -115,7 +115,13 @@ foreach ($file in $files) {
     }
     $done = $doneEvents | Select-Object -Last 1
     if ($doneEvents.Count -eq 0 -or $done.success -ne $true -or $exitCode -ne 0) {
-      $errorText = (Get-Content $stderr.FullName -Raw).Trim()
+      $errorText = ""
+      if (Test-Path -LiteralPath $stderr.FullName) {
+        $rawErrorText = Get-Content -LiteralPath $stderr.FullName -Raw
+        if ($null -ne $rawErrorText) {
+          $errorText = $rawErrorText.Trim()
+        }
+      }
       throw "FAILED ($exitCode): $relative; done-success=$($done.success); stderr=$errorText"
     }
     $totalFiles++
