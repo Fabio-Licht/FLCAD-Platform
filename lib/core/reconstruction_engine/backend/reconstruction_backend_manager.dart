@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/reconstruction_contract.dart';
-import 'colmap/colmap_backend.dart';
 import 'foundation_reconstruction_backend.dart';
 import 'reconstruction_backend_contract.dart';
 
@@ -10,7 +9,6 @@ class ReconstructionBackendManager {
   ReconstructionBackendManager({
     Iterable<ReconstructionBackend> backends = const [
       FoundationReconstructionBackend(),
-      ColmapBackend(),
     ],
     this.fallbackId = 'foundation',
   }) : _backends = {for (final backend in backends) backend.id: backend};
@@ -100,6 +98,10 @@ class ReconstructionBackendManager {
     if (!await file.exists()) return;
     final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
     final preferredId = json['preferredId'] as String?;
-    if (preferredId != null) setPreferred(preferredId);
+    // A persisted optional backend may have been removed or may no longer be
+    // available on this machine. Selection must remain safely usable.
+    _preferredId = preferredId != null && _backends.containsKey(preferredId)
+        ? preferredId
+        : null;
   }
 }

@@ -1,5 +1,6 @@
 export 'backend/foundation_reconstruction_backend.dart';
 export 'backend/colmap/colmap_backend.dart';
+export 'backend/colmap/colmap_backend_activation.dart';
 export 'backend/reconstruction_backend_contract.dart';
 export 'backend/reconstruction_backend_manager.dart';
 export 'data/reconstruction_repository.dart';

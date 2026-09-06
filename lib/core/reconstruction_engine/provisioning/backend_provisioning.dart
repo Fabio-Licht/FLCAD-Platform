@@ -1,11 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as path;
+
 import '../backend/reconstruction_backend_contract.dart';
 
 const defaultBackendInstallationRoot = r'C:\ProgramData\FLSCAN\Backends';
 
 enum BackendCertificationStatus { certified, notCertified, unsupported }
+
+enum BackendInstallationOrigin { managed, external }
 
 enum BackendInstallationStatus {
   notInstalled,
@@ -56,6 +60,7 @@ class BackendInstallationRecord {
     required this.status,
     required this.certification,
     required this.executablePath,
+    this.origin = BackendInstallationOrigin.managed,
     this.lastError,
   });
 
@@ -68,6 +73,7 @@ class BackendInstallationRecord {
   final BackendInstallationStatus status;
   final BackendCertificationStatus certification;
   final String executablePath;
+  final BackendInstallationOrigin origin;
   final String? lastError;
 
   Map<String, dynamic> toJson() => {
@@ -80,6 +86,7 @@ class BackendInstallationRecord {
     'status': status.name,
     'certification': certification.name,
     'executablePath': executablePath,
+    'origin': origin.name,
     'lastError': lastError,
   };
 
@@ -98,6 +105,9 @@ class BackendInstallationRecord {
           json['certification'] as String,
         ),
         executablePath: json['executablePath'] as String,
+        origin: BackendInstallationOrigin.values.byName(
+          json['origin'] as String? ?? BackendInstallationOrigin.managed.name,
+        ),
         lastError: json['lastError'] as String?,
       );
 }
@@ -237,6 +247,9 @@ class BackendProvisioningManager {
   Future<BackendInstallationRecord> _validateRecord(
     BackendInstallationRecord record,
   ) async {
+    if (record.origin == BackendInstallationOrigin.external) {
+      return _validateExternalRecord(record);
+    }
     if (record.status != BackendInstallationStatus.certified) {
       return record;
     }
@@ -262,8 +275,140 @@ class BackendProvisioningManager {
       status: BackendInstallationStatus.notInstalled,
       certification: BackendCertificationStatus.notCertified,
       executablePath: record.executablePath,
+      origin: record.origin,
       lastError: 'Installed executable was not found',
     );
+  }
+
+  Future<BackendInstallationRecord> _validateExternalRecord(
+    BackendInstallationRecord record,
+  ) async {
+    try {
+      final executable = File(record.executablePath);
+      _requireExpectedExecutable(record.backendId, executable.path);
+      if (!path.isAbsolute(executable.path) || !await executable.exists()) {
+        throw StateError('External executable was not found');
+      }
+      final canonical = await executable.resolveSymbolicLinks();
+      _event('validationStarted', record.backendId, canonical);
+      final capabilities = await selfTest.validate(record.backendId, canonical);
+      final validated = BackendInstallationRecord(
+        backendId: record.backendId,
+        version: capabilities.version,
+        installedAt: record.installedAt,
+        source: Uri.file(canonical),
+        sha256: '',
+        architecture: record.architecture,
+        status: BackendInstallationStatus.installed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: canonical,
+        origin: BackendInstallationOrigin.external,
+      );
+      _event('externalValidated', record.backendId, capabilities.version);
+      return validated;
+    } catch (error) {
+      _event('failed', record.backendId, error.toString());
+      return BackendInstallationRecord(
+        backendId: record.backendId,
+        version: record.version,
+        installedAt: record.installedAt,
+        source: record.source,
+        sha256: '',
+        architecture: record.architecture,
+        status: BackendInstallationStatus.notInstalled,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: record.executablePath,
+        origin: BackendInstallationOrigin.external,
+        lastError: 'External self test failed: $error',
+      );
+    }
+  }
+
+  Future<BackendInstallationRecord> registerExisting(
+    String backendId, {
+    required String executablePath,
+    required bool authorized,
+  }) async {
+    if (!authorized) {
+      throw StateError('External backend registration requires authorization');
+    }
+    _validatePathComponent(backendId, field: 'backendId');
+    if (!path.isAbsolute(executablePath)) {
+      throw ArgumentError.value(
+        executablePath,
+        'executablePath',
+        'must be absolute',
+      );
+    }
+    _requireExpectedExecutable(backendId, executablePath);
+    final executable = File(executablePath);
+    if (!await executable.exists()) {
+      throw ArgumentError.value(
+        executablePath,
+        'executablePath',
+        'must identify an existing file',
+      );
+    }
+    final canonical = await executable.resolveSymbolicLinks();
+    _event('externalRegistrationStarted', backendId, canonical);
+    late final ReconstructionBackendCapabilities capabilities;
+    try {
+      capabilities = await selfTest.validate(backendId, canonical);
+    } catch (error) {
+      final failed = BackendInstallationRecord(
+        backendId: backendId,
+        version: 'undetected',
+        installedAt: DateTime.now().toUtc(),
+        source: Uri.file(canonical),
+        sha256: '',
+        architecture: 'external',
+        status: BackendInstallationStatus.failed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: canonical,
+        origin: BackendInstallationOrigin.external,
+        lastError: 'External self test failed: $error',
+      );
+      await _replaceAndSave(failed);
+      _event('failed', backendId, failed.lastError);
+      return failed;
+    }
+    final record = BackendInstallationRecord(
+      backendId: backendId,
+      version: capabilities.version,
+      installedAt: DateTime.now().toUtc(),
+      source: Uri.file(canonical),
+      sha256: '',
+      architecture: 'external',
+      status: BackendInstallationStatus.installed,
+      certification: BackendCertificationStatus.notCertified,
+      executablePath: canonical,
+      origin: BackendInstallationOrigin.external,
+    );
+    await _replaceAndSave(record);
+    _event('externalRegistered', backendId, capabilities.version);
+    return record;
+  }
+
+  Future<void> _replaceAndSave(BackendInstallationRecord record) async {
+    _installations = [
+      ..._installations.where((item) => item.backendId != record.backendId),
+      record,
+    ];
+    await repository.saveInstallations(_installations);
+  }
+
+  static void _requireExpectedExecutable(String backendId, String value) {
+    if (backendId != 'colmap') {
+      throw ArgumentError.value(backendId, 'backendId', 'is not supported');
+    }
+    final expected = Platform.isWindows ? 'colmap.exe' : 'colmap';
+    if (path.basename(value).toLowerCase() != expected) {
+      throw ArgumentError.value(
+        value,
+        'executablePath',
+        'must end with $expected',
+      );
+    }
   }
 
   ApprovedBackendRelease release(String backendId, {String? version}) {

@@ -98,10 +98,12 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
 class ColmapBackend implements ReconstructionBackend {
   const ColmapBackend({
     this.executable = 'colmap',
+    this.detectedVersion = 'undetected',
     ColmapProcessRunner? processRunner,
   }) : _processRunner = processRunner ?? const IoColmapProcessRunner();
 
   final String executable;
+  final String detectedVersion;
   final ColmapProcessRunner _processRunner;
 
   @override
@@ -109,7 +111,7 @@ class ColmapBackend implements ReconstructionBackend {
 
   @override
   ReconstructionBackendCapabilities get capabilities =>
-      _capabilities('undetected');
+      _capabilities(detectedVersion);
 
   ReconstructionBackendCapabilities _capabilities(String version) =>
       ReconstructionBackendCapabilities(
