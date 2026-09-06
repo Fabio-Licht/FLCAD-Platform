@@ -2,8 +2,12 @@
 
 ## Status
 
-Resolved for the VS Code test runner. M-005 source now has zero static
-diagnostics after restoring its official `LengthUnit` import.
+Resolved and validated locally and in the Windows Flutter CI. M-005 source has
+zero static diagnostics after restoring its official `LengthUnit` import.
+
+The OpenCascade native smoke test has also passed manually. Native compilation
+and CTest are not yet automated by the repository CI and therefore remain a
+manual release/merge gate.
 
 ## Scope
 
@@ -18,23 +22,33 @@ This task must not modify M-005 functional implementation.
 
 ## Current evidence
 
-- Targeted runner calls return `0/0` for the M-005 test files.
-- The full workspace runner discovers and executes the existing suite.
 - The repository already documents `tool/test_runner_diagnostics.ps1` as the
   per-file discovery and `--machine` protocol diagnostic.
 - The diagnostic now supports `-DedicatedM005`, normalizes test paths, rejects
   empty discovery, and counts real Flutter `testStart`/`testDone` protocol
   events using `test.id` and `testID` respectively.
-- The current session cannot start `PowerShell.exe`, so literal `flutter
-  analyze` and `flutter test` commands cannot be executed here.
 - The previous `LengthUnit` diagnostic was a real M-005 compile issue, not a
   runner-only issue. It was fixed with the official geometric-kernel import.
 - The dedicated M-005 runner targets all three files that contain its unit,
   system and reference-integration coverage. Its executed/pass/fail totals must
   come from the Flutter machine protocol rather than a previously recorded
   fixed count.
-- The full VS Code runner reports `743 passed, 2 failed`; the two failures are
-  the known viewport/open-profile failures.
+- `flutter analyze` completes with no issues in the validated local Windows
+  environment.
+- The complete local Flutter suite passed. The recorded baseline before the
+  later hardening tests was `892/892`; no updated aggregate is claimed here
+  without a newly captured machine-protocol total.
+- The Windows `Flutter quality` GitHub Actions workflow completes successfully,
+  including static analysis and the Flutter test suite.
+- The OpenCascade native smoke test was compiled and executed manually with
+  CTest on Windows: `1/1` test passed.
+- Native OpenCascade compilation and CTest are not currently part of the
+  automated CI workflow.
+
+Historical context: before the discovery and functional corrections, the full
+VS Code runner reported `743 passed, 2 failed`. Those viewport/open-profile
+failures were subsequently corrected; this figure is retained only as the
+pre-stabilization baseline and is not the current status.
 
 ## Infrastructure change
 
@@ -55,6 +69,8 @@ Run from the repository root in a working PowerShell environment:
 5. `flutter test --machine`
 6. `powershell -ExecutionPolicy Bypass -File tool/test_runner_diagnostics.ps1`
 7. `powershell -ExecutionPolicy Bypass -File tool/test_runner_diagnostics.ps1 -DedicatedM005`
+8. Configure and build `native/opencascade` on Windows, then run `ctest -C
+   Release --output-on-failure` from its build directory (manual native gate).
 
 The dedicated suite is valid only when the machine protocol reports test start
 and completion events with a non-zero test count.
@@ -64,4 +80,7 @@ and completion events with a non-zero test count.
 - M-005 dedicated tests are discovered and executed, not merely analyzed.
 - The full suite is executed after the dedicated suite.
 - Results include explicit executed, passed, and failed counts.
+- The Windows Flutter CI completes successfully.
+- The manual native OpenCascade CTest gate reports `1/1` passed until equivalent
+  native CI automation is available.
 - No M-005 functional source is changed as part of this task.

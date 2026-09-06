@@ -5,6 +5,18 @@ import '../backend/reconstruction_backend_contract.dart';
 import '../engine/reconstruction_engine.dart';
 import '../models/reconstruction_contract.dart';
 
+typedef ReconstructionIsolateSpawner = Future<Isolate> Function(
+  Future<void> Function(Map<String, dynamic>) entry,
+  Map<String, dynamic> message,
+  SendPort errorPort,
+);
+
+Future<Isolate> _spawnReconstructionIsolate(
+  Future<void> Function(Map<String, dynamic>) entry,
+  Map<String, dynamic> message,
+  SendPort errorPort,
+) => Isolate.spawn(entry, message, onError: errorPort);
+
 class ReconstructionCancellationToken implements ReconstructionCancellation {
   bool _cancelled = false;
   final Set<void Function()> _listeners = {};
@@ -29,6 +41,11 @@ class ReconstructionCancellationToken implements ReconstructionCancellation {
 }
 
 class ReconstructionRuntime {
+  ReconstructionRuntime({
+    ReconstructionIsolateSpawner spawnIsolate = _spawnReconstructionIsolate,
+  }) : _spawnIsolate = spawnIsolate;
+
+  final ReconstructionIsolateSpawner _spawnIsolate;
   _RuntimeOperation? _active;
 
   Stream<ReconstructionStageReport> get progress => _progress.stream;
@@ -45,6 +62,11 @@ class ReconstructionRuntime {
     }
     final operation = _RuntimeOperation();
     _active = operation;
+    final operationResult = operation.completer.future;
+    // Cancellation can happen while Isolate.spawn is still pending. Observe
+    // the internal future immediately so that its error is not reported as
+    // unhandled before start() reaches the final await below.
+    operationResult.ignore();
     void cancelFromToken() => operation.cancel();
     cancellation?._addListener(cancelFromToken);
 
@@ -79,11 +101,17 @@ class ReconstructionRuntime {
       }
     });
     try {
-      operation.isolate = await Isolate.spawn(_entry, {
-        'reply': operation.replies.sendPort,
-        'request': request.toJson(),
-      }, onError: operation.errors.sendPort);
-      return await operation.completer.future;
+      operation.attachIsolate(
+        await _spawnIsolate(
+          _entry,
+          {
+            'reply': operation.replies.sendPort,
+            'request': request.toJson(),
+          },
+          operation.errors.sendPort,
+        ),
+      );
+      return await operationResult;
     } finally {
       cancellation?._removeListener(cancelFromToken);
       await operation.close();
@@ -145,6 +173,14 @@ class _RuntimeOperation {
   Isolate? isolate;
   SendPort? control;
   bool _closed = false;
+
+  void attachIsolate(Isolate spawnedIsolate) {
+    if (_closed) {
+      spawnedIsolate.kill(priority: Isolate.immediate);
+      return;
+    }
+    isolate = spawnedIsolate;
+  }
 
   void cancel() {
     control?.send('cancel');

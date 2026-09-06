@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph.dart';
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
@@ -215,6 +216,52 @@ void main() {
       ),
     );
     expect(restarted.requestId, 'reconstruction-restart');
+  });
+
+  test('stop during isolate spawn does not leave an orphan isolate', () async {
+    final allowSpawnToReturn = Completer<void>();
+    final isolateStarted = Completer<void>();
+    final isolateExited = Completer<void>();
+    final exitPort = ReceivePort();
+    final exitSubscription = exitPort.listen((_) {
+      if (!isolateExited.isCompleted) isolateExited.complete();
+    });
+    addTearDown(exitSubscription.cancel);
+    addTearDown(exitPort.close);
+
+    final runtime = ReconstructionRuntime(
+      spawnIsolate: (entry, message, errorPort) async {
+        final isolate = await Isolate.spawn(
+          (_) => ReceivePort(),
+          null,
+          onError: errorPort,
+        );
+        isolate.addOnExitListener(exitPort.sendPort);
+        isolateStarted.complete();
+        await allowSpawnToReturn.future;
+        return isolate;
+      },
+    );
+    addTearDown(runtime.dispose);
+
+    final startFuture = runtime.start(
+      ReconstructionRequest(
+        id: 'reconstruction-stop-during-spawn',
+        projectId: 'project-1',
+        evidenceGraph: graph(),
+      ),
+    );
+    final cancellationResult = startFuture.then<Object?>(
+      (_) => fail('The stopped reconstruction completed successfully.'),
+      onError: (Object error, StackTrace _) => error,
+    );
+
+    await isolateStarted.future;
+    await runtime.stop();
+    allowSpawnToReturn.complete();
+
+    expect(await cancellationResult, isA<ReconstructionCancelled>());
+    await isolateExited.future.timeout(const Duration(seconds: 5));
   });
 
   group('M-007 Reconstruction Backend Contract', () {
