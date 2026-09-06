@@ -242,7 +242,15 @@ class BackendProvisioningManager {
     }
     if (record.executablePath.isNotEmpty &&
         await File(record.executablePath).exists()) {
-      return record;
+      try {
+        final rootPath = await _canonicalInstallationRoot();
+        final executablePath = await File(
+          record.executablePath,
+        ).resolveSymbolicLinks();
+        if (_isWithin(rootPath, executablePath)) return record;
+      } on FileSystemException {
+        // Treat an unresolvable or escaped path as an invalid installation.
+      }
     }
     return BackendInstallationRecord(
       backendId: record.backendId,
@@ -259,18 +267,30 @@ class BackendProvisioningManager {
   }
 
   ApprovedBackendRelease release(String backendId, {String? version}) {
+    _validatePathComponent(backendId, field: 'backendId');
+    if (version != null) _parseVersion(version);
     final matches = repository.approvedReleases.where(
       (item) =>
           item.backendId == backendId &&
           (version == null || item.version == version),
-    );
+    ).map(_validateRelease);
     if (matches.isEmpty) {
       throw StateError('No approved release for backend $backendId');
     }
     return matches.reduce(
       (first, second) =>
-          first.version.compareTo(second.version) >= 0 ? first : second,
+          _compareVersions(first.version, second.version) >= 0 ? first : second,
     );
+  }
+
+  ApprovedBackendRelease _validateRelease(ApprovedBackendRelease value) {
+    _validatePathComponent(value.backendId, field: 'backendId');
+    _parseVersion(value.version);
+    _validateRelativePath(
+      value.executableRelativePath,
+      field: 'executableRelativePath',
+    );
+    return value;
   }
 
   Future<BackendInstallationRecord> install(
@@ -282,6 +302,8 @@ class BackendProvisioningManager {
       throw StateError('Backend installation requires explicit authorization');
     }
     final approved = release(backendId, version: version);
+    await installationRoot.create(recursive: true);
+    final canonicalRoot = await _canonicalInstallationRoot();
     final target = Directory(
       '${installationRoot.path}${Platform.pathSeparator}${approved.backendId}${Platform.pathSeparator}${approved.version}',
     );
@@ -304,9 +326,13 @@ class BackendProvisioningManager {
     if (!await executable.exists()) {
       return _failed(approved, 'Installed executable was not found');
     }
+    final canonicalExecutable = await executable.resolveSymbolicLinks();
+    if (!_isWithin(canonicalRoot, canonicalExecutable)) {
+      return _failed(approved, 'Installed executable escapes installation root');
+    }
     _event('validationStarted', backendId);
     try {
-      await selfTest.validate(backendId, executable.path);
+      await selfTest.validate(backendId, canonicalExecutable);
     } catch (error) {
       return _failed(approved, 'Self test failed: $error');
     }
@@ -319,7 +345,7 @@ class BackendProvisioningManager {
       architecture: approved.architecture,
       status: BackendInstallationStatus.certified,
       certification: BackendCertificationStatus.certified,
-      executablePath: executable.path,
+      executablePath: canonicalExecutable,
     );
     _installations = [
       ..._installations.where((item) => item.backendId != backendId),
@@ -382,5 +408,116 @@ class BackendProvisioningManager {
     await repository.saveInstallations(_installations);
     _event('failed', release.backendId, error);
     return record;
+  }
+
+  Future<String> _canonicalInstallationRoot() =>
+      installationRoot.resolveSymbolicLinks();
+
+  static bool _isWithin(String root, String candidate) {
+    final normalizedRoot = root.endsWith(Platform.pathSeparator)
+        ? root
+        : '$root${Platform.pathSeparator}';
+    final caseSensitive = !Platform.isWindows;
+    final comparedRoot = caseSensitive
+        ? normalizedRoot
+        : normalizedRoot.toLowerCase();
+    final comparedCandidate = caseSensitive
+        ? candidate
+        : candidate.toLowerCase();
+    return comparedCandidate.startsWith(comparedRoot);
+  }
+
+  static void _validatePathComponent(String value, {required String field}) {
+    if (!RegExp(r'^[A-Za-z0-9][A-Za-z0-9._-]*$').hasMatch(value) ||
+        value == '.' ||
+        value == '..') {
+      throw ArgumentError.value(value, field, 'must be a safe path component');
+    }
+  }
+
+  static void _validateRelativePath(String value, {required String field}) {
+    if (value.isEmpty ||
+        value.startsWith('/') ||
+        value.startsWith(r'\') ||
+        RegExp(r'^[A-Za-z]:').hasMatch(value)) {
+      throw ArgumentError.value(value, field, 'must be a relative path');
+    }
+    final segments = value.split(RegExp(r'[/\\]'));
+    if (segments.any(
+      (segment) =>
+          segment.isEmpty ||
+          segment == '.' ||
+          segment == '..' ||
+          !RegExp(r'^[A-Za-z0-9][A-Za-z0-9._ -]*$').hasMatch(segment) ||
+          segment.endsWith('.') ||
+          segment.endsWith(' '),
+    )) {
+      throw ArgumentError.value(
+        value,
+        field,
+        'contains an unsafe path segment',
+      );
+    }
+  }
+
+  static ({List<int> core, List<String>? prerelease}) _parseVersion(
+    String value,
+  ) {
+    final match = RegExp(
+      r'^(0|[1-9]\d*)(?:\.(0|[1-9]\d*))*'
+      r'(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$',
+    ).firstMatch(value);
+    if (match == null) {
+      throw ArgumentError.value(value, 'version', 'must be a numeric version');
+    }
+    final prereleaseSeparator = value.indexOf('-');
+    final core = prereleaseSeparator < 0
+        ? value
+        : value.substring(0, prereleaseSeparator);
+    final prerelease = prereleaseSeparator < 0
+        ? null
+        : value.substring(prereleaseSeparator + 1).split('.');
+    return (
+      core: core.split('.').map(int.parse).toList(),
+      prerelease: prerelease,
+    );
+  }
+
+  static int _compareVersions(String left, String right) {
+    final leftParts = _parseVersion(left);
+    final rightParts = _parseVersion(right);
+    final leftCore = leftParts.core;
+    final rightCore = rightParts.core;
+    final length = leftCore.length > rightCore.length
+        ? leftCore.length
+        : rightCore.length;
+    for (var index = 0; index < length; index++) {
+      final l = index < leftCore.length ? leftCore[index] : 0;
+      final r = index < rightCore.length ? rightCore[index] : 0;
+      if (l != r) return l.compareTo(r);
+    }
+    final leftPre = leftParts.prerelease;
+    final rightPre = rightParts.prerelease;
+    if (leftPre == null || rightPre == null) {
+      if (leftPre == rightPre) return 0;
+      return leftPre == null ? 1 : -1;
+    }
+    final preLength = leftPre.length < rightPre.length
+        ? leftPre.length
+        : rightPre.length;
+    for (var index = 0; index < preLength; index++) {
+      final l = leftPre[index];
+      final r = rightPre[index];
+      if (l == r) continue;
+      final lNumber = int.tryParse(l);
+      final rNumber = int.tryParse(r);
+      if (lNumber != null && rNumber != null) {
+        return lNumber.compareTo(rNumber);
+      }
+      if (lNumber != null) return -1;
+      if (rNumber != null) return 1;
+      return l.compareTo(r);
+    }
+    return leftPre.length.compareTo(rightPre.length);
   }
 }

@@ -101,4 +101,55 @@ void main() {
       expect(result?.entity.type, OperationalEntityType.topologicalVertex);
     },
   );
+
+  test('mesh cache does not cross projects that reuse a scene id', () async {
+    final registry = OperationalEntityRegistry();
+    final resolver = OperationalEntityResolver(registry);
+    final firstScene = _meshScene('mesh-v1');
+    final first = await resolver.resolve(_meshPick, firstScene);
+
+    expect(first, isNotNull);
+    expect(resolver.presentation(first!.entity.id), isNotNull);
+
+    resolver.clear();
+    registry.clear();
+    final second = await resolver.resolve(_meshPick, _meshScene('mesh-v2'));
+
+    expect(second, isNotNull);
+    expect(second!.entity.id, isNot(first.entity.id));
+    expect(resolver.presentation(first.entity.id), isNull);
+  });
+
+  test('mesh cache invalidates a revised entity with the same id', () async {
+    final registry = OperationalEntityRegistry();
+    final resolver = OperationalEntityResolver(registry);
+    final first = await resolver.resolve(_meshPick, _meshScene('mesh-v1'));
+    final second = await resolver.resolve(_meshPick, _meshScene('mesh-v2'));
+
+    expect(first, isNotNull);
+    expect(second, isNotNull);
+    expect(second!.entity.id, isNot(first!.entity.id));
+    expect(resolver.presentation(first.entity.id), isNull);
+    expect(registry.find(first.entity.id), isNull);
+  });
 }
+
+const _meshPick = NativeViewportPick(
+  entityId: 'Mesh001',
+  kind: NativePickKind.face,
+  subId: 1,
+  point: <double>[0, 0, 0],
+);
+
+CadSceneGraph _meshScene(String fingerprint) => CadSceneGraph()
+  ..upsert(
+    CadSceneEntity(
+      id: 'Mesh001',
+      kind: CadSceneEntityKind.mesh,
+      geometry: <String, dynamic>{
+        'fingerprint': fingerprint,
+        'nodes': const <double>[0, 0, 0, 1, 0, 0, 0, 1, 0],
+        'triangles': const <int>[0, 1, 2],
+      },
+    ),
+  );

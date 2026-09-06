@@ -91,7 +91,12 @@ void main() {
       );
 
       expect(result.diagnostics.backendId, 'test-backend');
-      expect(result.diagnostics.completedStages, hasLength(8));
+      expect(result.diagnostics.completedStages, isEmpty);
+      expect(result.output.meshCandidate, isNull);
+      expect(
+        result.output.stageReports.every((report) => !report.accepted),
+        isTrue,
+      );
       expect(result.diagnostics.explanations, isNotEmpty);
       expect(result.output.evidenceGraph.nodes, hasLength(1));
     },

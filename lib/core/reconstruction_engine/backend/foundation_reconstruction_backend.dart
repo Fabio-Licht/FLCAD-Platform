@@ -35,9 +35,7 @@ class FoundationReconstructionBackend implements ReconstructionBackend {
     );
     final completed = output.stageReports
         .where(
-          (report) =>
-              report.status == ReconstructionStageStatus.completed ||
-              report.status == ReconstructionStageStatus.skipped,
+          (report) => report.status == ReconstructionStageStatus.completed,
         )
         .map((report) => report.stage)
         .toList();
@@ -54,6 +52,8 @@ class FoundationReconstructionBackend implements ReconstructionBackend {
         completedStages: completed,
         limitations: const [
           'Foundation adapter does not execute a reconstruction algorithm.',
+          'Stage confidence describes capture coverage, not reconstructed '
+              'geometry.',
           'Dense reconstruction and texturing are unavailable.',
         ],
         explanations: {

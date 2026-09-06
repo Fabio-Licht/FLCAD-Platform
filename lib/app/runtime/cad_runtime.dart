@@ -136,6 +136,7 @@ class CadRuntime extends ChangeNotifier {
     projection.clearTransient();
     geometrySelection.clear();
     operationalSelection.clear();
+    operationalResolver.clear();
     operationalEntities.clear();
     recognitionSession = sketchSession = surfaceSession = null;
     _state.clear();
@@ -205,6 +206,9 @@ class CadRuntime extends ChangeNotifier {
     _displayMeshes = null;
     _workspaceBounds = null;
     geometrySelection.clear();
+    operationalSelection.clear();
+    operationalResolver.clear();
+    operationalEntities.clear();
     recognitionSession = sketchSession = surfaceSession = null;
     _state.clear();
     projection.clearTransient();

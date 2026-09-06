@@ -7,35 +7,53 @@ import '../models/reconstruction_contract.dart';
 
 class ReconstructionCancellationToken implements ReconstructionCancellation {
   bool _cancelled = false;
+  final Set<void Function()> _listeners = {};
+
   @override
   bool get isCancelled => _cancelled;
-  void cancel() => _cancelled = true;
+
+  void cancel() {
+    if (_cancelled) return;
+    _cancelled = true;
+    for (final listener in List<void Function()>.of(_listeners)) {
+      listener();
+    }
+  }
+
+  void _addListener(void Function() listener) {
+    _listeners.add(listener);
+    if (_cancelled) listener();
+  }
+
+  void _removeListener(void Function() listener) => _listeners.remove(listener);
 }
 
 class ReconstructionRuntime {
-  Isolate? _isolate;
-  SendPort? _control;
+  _RuntimeOperation? _active;
 
   Stream<ReconstructionStageReport> get progress => _progress.stream;
   final StreamController<ReconstructionStageReport> _progress =
-      StreamController<ReconstructionStageReport>.broadcast();
+      StreamController<ReconstructionStageReport>.broadcast(sync: true);
 
   Future<ReconstructionOutput> start(
     ReconstructionRequest request, {
     ReconstructionCancellationToken? cancellation,
   }) async {
     await stop();
-    final replies = ReceivePort();
-    final errors = ReceivePort();
-    final completer = Completer<ReconstructionOutput>();
-    late final StreamSubscription replySubscription;
-    late final StreamSubscription errorSubscription;
-    replySubscription = replies.listen((message) {
+    if (cancellation?.isCancelled ?? false) {
+      throw const ReconstructionCancelled();
+    }
+    final operation = _RuntimeOperation();
+    _active = operation;
+    void cancelFromToken() => operation.cancel();
+    cancellation?._addListener(cancelFromToken);
+
+    operation.replySubscription = operation.replies.listen((message) {
       if (message is SendPort) {
-        _control = message;
+        operation.control = message;
         return;
       }
-      if (message is! Map) return;
+      if (message is! Map || operation.completer.isCompleted) return;
       final data = message.cast<String, dynamic>();
       if (data['kind'] == 'stage') {
         _progress.add(
@@ -43,46 +61,44 @@ class ReconstructionRuntime {
             (data['data'] as Map).cast<String, dynamic>(),
           ),
         );
-      } else if (data['kind'] == 'result' && !completer.isCompleted) {
-        completer.complete(
+      } else if (data['kind'] == 'result') {
+        operation.completer.complete(
           ReconstructionOutput.fromJson(
             (data['data'] as Map).cast<String, dynamic>(),
           ),
         );
-      } else if (data['kind'] == 'error' && !completer.isCompleted) {
-        completer.completeError(StateError(data['message'] as String));
+      } else if (data['kind'] == 'error') {
+        operation.completer.completeError(
+          StateError(data['message'] as String),
+        );
       }
     });
-    errorSubscription = errors.listen((message) {
-      if (!completer.isCompleted) completer.completeError(message);
+    operation.errorSubscription = operation.errors.listen((message) {
+      if (!operation.completer.isCompleted) {
+        operation.completer.completeError(message);
+      }
     });
-    _isolate = await Isolate.spawn(_entry, {
-      'reply': replies.sendPort,
-      'request': request.toJson(),
-    }, onError: errors.sendPort);
     try {
-      final output = await completer.future;
-      if (cancellation?.isCancelled ?? false) {
-        throw const ReconstructionCancelled();
-      }
-      return output;
+      operation.isolate = await Isolate.spawn(_entry, {
+        'reply': operation.replies.sendPort,
+        'request': request.toJson(),
+      }, onError: operation.errors.sendPort);
+      return await operation.completer.future;
     } finally {
-      await replySubscription.cancel();
-      await errorSubscription.cancel();
-      replies.close();
-      errors.close();
-      _isolate?.kill(priority: Isolate.immediate);
-      _isolate = null;
-      _control = null;
+      cancellation?._removeListener(cancelFromToken);
+      await operation.close();
+      if (identical(_active, operation)) _active = null;
     }
   }
 
-  void cancel() => _control?.send('cancel');
+  void cancel() => _active?.cancel();
 
   Future<void> stop() async {
-    _isolate?.kill(priority: Isolate.immediate);
-    _isolate = null;
-    _control = null;
+    final operation = _active;
+    if (operation == null) return;
+    _active = null;
+    operation.cancel();
+    await operation.close();
   }
 
   Future<void> dispose() async {
@@ -116,5 +132,37 @@ class ReconstructionRuntime {
     } finally {
       control.close();
     }
+  }
+}
+
+class _RuntimeOperation {
+  final ReceivePort replies = ReceivePort();
+  final ReceivePort errors = ReceivePort();
+  final Completer<ReconstructionOutput> completer =
+      Completer<ReconstructionOutput>();
+  StreamSubscription<dynamic>? replySubscription;
+  StreamSubscription<dynamic>? errorSubscription;
+  Isolate? isolate;
+  SendPort? control;
+  bool _closed = false;
+
+  void cancel() {
+    control?.send('cancel');
+    if (!completer.isCompleted) {
+      completer.completeError(const ReconstructionCancelled());
+    }
+    isolate?.kill(priority: Isolate.immediate);
+  }
+
+  Future<void> close() async {
+    if (_closed) return;
+    _closed = true;
+    isolate?.kill(priority: Isolate.immediate);
+    await replySubscription?.cancel();
+    await errorSubscription?.cancel();
+    replies.close();
+    errors.close();
+    isolate = null;
+    control = null;
   }
 }

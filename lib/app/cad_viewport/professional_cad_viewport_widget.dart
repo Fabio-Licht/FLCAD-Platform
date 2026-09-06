@@ -95,6 +95,8 @@ class _ProfessionalCadViewportWidgetState
       widget.onSketchSupportPick != null ||
       widget.onSketchEntityDragStart != null;
   bool _draggingSketchEntity = false;
+  CadViewportPick? _pendingSketchDragPick;
+  Offset? _sketchDragStartPosition;
   Offset? _lastSketchDragPosition;
   String? hoveredEntityId;
   late NavigationEngine navigation;
@@ -298,6 +300,9 @@ class _ProfessionalCadViewportWidgetState
             child: GestureDetector(
               onScaleStart: (event) {
                 previousScale = 1;
+                _pendingSketchDragPick = null;
+                _sketchDragStartPosition = null;
+                _lastSketchDragPosition = null;
                 if (widget.onSketchEntityDragStart != null) {
                   final hit = picking.pick(
                     position: event.localFocalPoint,
@@ -307,12 +312,8 @@ class _ProfessionalCadViewportWidgetState
                   if (hit != null &&
                       widget.scene.find(hit.entityId)?.kind ==
                           CadSceneEntityKind.sketch) {
-                    _draggingSketchEntity = true;
-                    _lastSketchDragPosition = event.localFocalPoint;
-                    widget.onSketchEntityDragStart!(
-                      hit,
-                      event.localFocalPoint,
-                    );
+                    _pendingSketchDragPick = hit;
+                    _sketchDragStartPosition = event.localFocalPoint;
                   }
                 }
               },
@@ -376,19 +377,34 @@ class _ProfessionalCadViewportWidgetState
                   ? null
                   : (_) => widget.onSketchSecondaryTap!(),
               onScaleUpdate: (event) {
-                if (_draggingSketchEntity && event.pointerCount == 1) {
+                if (event.pointerCount > 1) {
+                  _pendingSketchDragPick = null;
+                  _sketchDragStartPosition = null;
+                  if (event.scale != previousScale) {
+                    navigation.scale(previousScale / event.scale);
+                    previousScale = event.scale;
+                  }
+                  return;
+                }
+                final pendingPick = _pendingSketchDragPick;
+                final dragStart = _sketchDragStartPosition;
+                if (!_draggingSketchEntity &&
+                    pendingPick != null &&
+                    dragStart != null &&
+                    (event.localFocalPoint - dragStart).distanceSquared > 1) {
+                  _draggingSketchEntity = true;
+                  _pendingSketchDragPick = null;
+                  widget.onSketchEntityDragStart!(pendingPick, dragStart);
+                }
+                if (_draggingSketchEntity) {
                   _lastSketchDragPosition = event.localFocalPoint;
                   widget.onSketchEntityDragUpdate?.call(event.localFocalPoint);
-                }
-                if (!_sketchToolActive &&
-                    event.pointerCount > 1 &&
-                    event.scale != previousScale) {
-                  navigation.scale(previousScale / event.scale);
-                  previousScale = event.scale;
                 }
               },
               onScaleEnd: (_) {
                 previousScale = 1;
+                _pendingSketchDragPick = null;
+                _sketchDragStartPosition = null;
                 if (_draggingSketchEntity) {
                   _draggingSketchEntity = false;
                   final position = _lastSketchDragPosition;

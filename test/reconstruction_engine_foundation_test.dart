@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph.dart';
@@ -38,9 +39,62 @@ void main() {
         ReconstructionStage.featureDetection,
       );
       expect(output.stageReports.last.stage, ReconstructionStage.optimization);
-      expect(output.stageReports.every((report) => report.accepted), isTrue);
+      expect(
+        output.stageReports.every(
+          (report) =>
+              report.status == ReconstructionStageStatus.pending &&
+              !report.accepted,
+        ),
+        isTrue,
+      );
       expect(output.evidenceGraph, same(graph()));
       expect(output.meshCandidate, isNull);
+    },
+  );
+
+  test('confidence counts captures rather than auxiliary graph nodes', () async {
+    final output = await const ReconstructionEngine().run(
+      ReconstructionRequest(
+        id: 'capture-confidence',
+        projectId: 'project-1',
+        evidenceGraph: graph(),
+      ),
+    );
+
+    expect(output.confidenceMap.single.confidence, .1);
+    expect(output.confidenceMap.single.evidenceIds, ['capture:1']);
+  });
+
+  test(
+    'auxiliary nodes alone do not create reconstruction confidence',
+    () async {
+      final output = await const ReconstructionEngine().run(
+        ReconstructionRequest(
+          id: 'auxiliary-only',
+          projectId: 'project-1',
+          evidenceGraph: EvidenceGraph(
+            nodes: [
+              EvidenceNode(
+                id: 'analysis:1',
+                kind: EvidenceNodeKind.analysis,
+                payload: {'confidence': 1.0},
+              ),
+              EvidenceNode(
+                id: 'metric-reference:1',
+                kind: EvidenceNodeKind.metricReference,
+                payload: {'confidence': 1.0},
+              ),
+            ],
+          ),
+        ),
+      );
+
+      expect(output.confidenceMap, isEmpty);
+      expect(
+        output.stageReports.every((report) => report.confidence == 0),
+        isTrue,
+      );
+      expect(output.stageReports.every((report) => !report.accepted), isTrue);
     },
   );
 
@@ -63,8 +117,9 @@ void main() {
       expect(output.stageReports[1].status, ReconstructionStageStatus.skipped);
       expect(
         output.stageReports[2].status,
-        ReconstructionStageStatus.completed,
+        ReconstructionStageStatus.pending,
       );
+      expect(output.stageReports.every((report) => !report.accepted), isTrue);
     },
   );
 
@@ -115,6 +170,53 @@ void main() {
     },
   );
 
+  test('runtime observes an external cancellation token while running', () async {
+    final runtime = ReconstructionRuntime();
+    final cancellation = ReconstructionCancellationToken();
+    addTearDown(runtime.dispose);
+    final subscription = runtime.progress.listen((_) => cancellation.cancel());
+    addTearDown(subscription.cancel);
+
+    final future = runtime.start(
+      ReconstructionRequest(
+        id: 'reconstruction-external-cancel',
+        projectId: 'project-1',
+        evidenceGraph: graph(),
+      ),
+      cancellation: cancellation,
+    );
+
+    await expectLater(future, throwsA(isA<ReconstructionCancelled>()));
+  });
+
+  test('stop completes the active future and runtime can restart', () async {
+    final runtime = ReconstructionRuntime();
+    addTearDown(runtime.dispose);
+    late final StreamSubscription<ReconstructionStageReport> subscription;
+    subscription = runtime.progress.listen((_) {
+      subscription.cancel();
+      runtime.stop();
+    });
+
+    final interrupted = runtime.start(
+      ReconstructionRequest(
+        id: 'reconstruction-stop',
+        projectId: 'project-1',
+        evidenceGraph: graph(),
+      ),
+    );
+    await expectLater(interrupted, throwsA(isA<ReconstructionCancelled>()));
+
+    final restarted = await runtime.start(
+      ReconstructionRequest(
+        id: 'reconstruction-restart',
+        projectId: 'project-1',
+        evidenceGraph: graph(),
+      ),
+    );
+    expect(restarted.requestId, 'reconstruction-restart');
+  });
+
   group('M-007 Reconstruction Backend Contract', () {
     test('reports capabilities without binding the engine to a backend', () {
       final manager = ReconstructionBackendManager();
@@ -153,7 +255,12 @@ void main() {
         );
 
         expect(result.diagnostics.backendId, 'foundation');
-        expect(result.diagnostics.completedStages, hasLength(8));
+        expect(result.diagnostics.completedStages, isEmpty);
+        expect(result.output.meshCandidate, isNull);
+        expect(
+          result.output.stageReports.every((report) => !report.accepted),
+          isTrue,
+        );
         expect(result.diagnostics.explanations, isNotEmpty);
         expect(result.output.evidenceGraph.nodes, hasLength(2));
       },

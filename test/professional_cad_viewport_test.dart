@@ -962,6 +962,97 @@ void main() {
     },
   );
 
+  testWidgets('Sketch entity click does not open an empty drag transaction', (
+    tester,
+  ) async {
+    final scene = CadSceneGraph()
+      ..upsert(
+        const CadSceneEntity(
+          id: 'line-1',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'points': [
+              [-1.0, 0.0, 0.0],
+              [1.0, 0.0, 0.0],
+            ],
+          },
+        ),
+      );
+    final camera = CadCameraController(
+      eye: const Vector3(0, 0, 5),
+      target: Vector3.zero,
+      up: const Vector3(0, 1, 0),
+    );
+    var starts = 0;
+    var updates = 0;
+    var ends = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 800,
+          height: 600,
+          child: ProfessionalCadViewportWidget(
+            scene: scene,
+            camera: camera,
+            onSketchEntityDragStart: (_, _) => starts += 1,
+            onSketchEntityDragUpdate: (_) => updates += 1,
+            onSketchEntityDragEnd: (_) => ends += 1,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tapAt(const Offset(400, 300));
+    await tester.pump();
+
+    expect(starts, 0);
+    expect(updates, 0);
+    expect(ends, 0);
+  });
+
+  testWidgets('Sketch mode keeps two-pointer pinch zoom available', (
+    tester,
+  ) async {
+    final scene = CadSceneGraph();
+    final camera = CadCameraController(
+      eye: const Vector3(0, 0, 5),
+      target: Vector3.zero,
+      up: const Vector3(0, 1, 0),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SizedBox(
+          width: 800,
+          height: 600,
+          child: ProfessionalCadViewportWidget(
+            scene: scene,
+            camera: camera,
+            enablePicking: false,
+            onSketchTap: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    final scaleBeforePinch = camera.viewScale;
+    final first = await tester.startGesture(
+      const Offset(360, 300),
+      pointer: 51,
+    );
+    final second = await tester.startGesture(
+      const Offset(440, 300),
+      pointer: 52,
+    );
+    await first.moveTo(const Offset(320, 300));
+    await second.moveTo(const Offset(480, 300));
+    await tester.pump();
+    await first.up();
+    await second.up();
+
+    expect(camera.viewScale, isNot(scaleBeforePinch));
+  });
+
   testWidgets('double click on a graphical dimension opens its editor route', (
     tester,
   ) async {

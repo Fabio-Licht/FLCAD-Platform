@@ -74,6 +74,20 @@ ApprovedBackendRelease release(String version) => ApprovedBackendRelease(
   executableRelativePath: 'colmap.exe',
 );
 
+BackendProvisioningManager managerFor(
+  List<ApprovedBackendRelease> releases,
+  Directory root,
+  File source,
+) => BackendProvisioningManager(
+  repository: _Repository(releases),
+  downloader: _Downloader(source),
+  installer: _Installer(),
+  checksumVerifier: _Checksum(),
+  signatureVerifier: _Signature(),
+  selfTest: _SelfTest(),
+  installationRoot: root,
+);
+
 void main() {
   test('requires authorization before provisioning', () async {
     final source = await File(
@@ -149,5 +163,123 @@ void main() {
     expect(failed.certification, BackendCertificationStatus.certified);
     await manager.discover();
     expect(manager.installations, hasLength(1));
+  });
+
+  test('selects versions numerically instead of lexically', () async {
+    final source = await File(
+      '${Directory.systemTemp.path}/backend-version.archive',
+    ).create();
+    final root = await Directory.systemTemp.createTemp('flscan-backends-');
+    addTearDown(() async {
+      await source.delete();
+      await root.delete(recursive: true);
+    });
+    final manager = managerFor(
+      [release('3.9'), release('3.10'), release('3.10-beta.1')],
+      root,
+      source,
+    );
+
+    expect(manager.release('colmap').version, '3.10');
+  });
+
+  test('rejects unsafe backend identifiers and versions', () async {
+    final source = await File(
+      '${Directory.systemTemp.path}/backend-invalid.archive',
+    ).create();
+    final root = await Directory.systemTemp.createTemp('flscan-backends-');
+    addTearDown(() async {
+      await source.delete();
+      await root.delete(recursive: true);
+    });
+    final manager = managerFor([release('3.13')], root, source);
+
+    expect(() => manager.release('../colmap'), throwsArgumentError);
+    expect(
+      () => manager.release('colmap', version: '../3.13'),
+      throwsArgumentError,
+    );
+  });
+
+  test('rejects absolute and traversing executable paths', () async {
+    final source = await File(
+      '${Directory.systemTemp.path}/backend-path.archive',
+    ).create();
+    final root = await Directory.systemTemp.createTemp('flscan-backends-');
+    addTearDown(() async {
+      await source.delete();
+      await root.delete(recursive: true);
+    });
+    ApprovedBackendRelease unsafe(String path) => ApprovedBackendRelease(
+      backendId: 'colmap',
+      version: '3.13',
+      downloadUri: Uri.parse('https://repository.flscan.test/colmap/3.13'),
+      sha256: 'approved',
+      signature: 'signed',
+      architecture: 'windows-x64',
+      executableRelativePath: path,
+    );
+
+    for (final path in [
+      '../colmap.exe',
+      r'bin\..\colmap.exe',
+      '/tmp/colmap.exe',
+      r'C:\tools\colmap.exe',
+      r'\\server\share\colmap.exe',
+      r'bin\colmap.exe:payload',
+    ]) {
+      final manager = managerFor([unsafe(path)], root, source);
+      expect(
+        () => manager.release('colmap'),
+        throwsArgumentError,
+        reason: path,
+      );
+    }
+  });
+
+  test('does not trust a recorded executable outside installation root', () async {
+    final source = await File(
+      '${Directory.systemTemp.path}/backend-discovery.archive',
+    ).create();
+    final external = await File(
+      '${Directory.systemTemp.path}/external-colmap.exe',
+    ).create();
+    final root = await Directory.systemTemp.createTemp('flscan-backends-');
+    final repository = _Repository([release('3.13')])
+      ..records = [
+        BackendInstallationRecord(
+          backendId: 'colmap',
+          version: '3.13',
+          installedAt: DateTime.utc(2026),
+          source: Uri.parse('https://repository.flscan.test/colmap/3.13'),
+          sha256: 'approved',
+          architecture: 'windows-x64',
+          status: BackendInstallationStatus.certified,
+          certification: BackendCertificationStatus.certified,
+          executablePath: external.path,
+        ),
+      ];
+    final manager = BackendProvisioningManager(
+      repository: repository,
+      downloader: _Downloader(source),
+      installer: _Installer(),
+      checksumVerifier: _Checksum(),
+      signatureVerifier: _Signature(),
+      selfTest: _SelfTest(),
+      installationRoot: root,
+    );
+    addTearDown(() async {
+      await source.delete();
+      await external.delete();
+      await root.delete(recursive: true);
+    });
+
+    final discovered = await manager.discover();
+
+    expect(discovered.single.status, BackendInstallationStatus.notInstalled);
+    expect(
+      discovered.single.certification,
+      BackendCertificationStatus.notCertified,
+    );
   });
 }
