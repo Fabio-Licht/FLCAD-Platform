@@ -1,0 +1,68 @@
+name: Flutter quality
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flutter-quality-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  flutter-quality:
+    name: Analyze and test (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter 3.44.9
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.9'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain
+        shell: pwsh
+        run: |
+          flutter --version
+          dart --version
+
+      - name: Resolve dependencies
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          flutter pub get *>&1 | Tee-Object -FilePath artifacts/pub-get.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Analyze
+        shell: pwsh
+        run: |
+          flutter analyze *>&1 | Tee-Object -FilePath artifacts/analyze.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run Flutter test suite
+        shell: pwsh
+        run: |
+          flutter test --reporter expanded *>&1 | Tee-Object -FilePath artifacts/flutter-test.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-quality-logs-${{ github.run_attempt }}
+          path: artifacts/*.log
+          if-no-files-found: warn
+          retention-days: 14
