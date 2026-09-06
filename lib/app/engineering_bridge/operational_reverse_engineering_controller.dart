@@ -8620,10 +8620,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
         }
         for (var index = 0; index < 4; index++) {
+          final current = lines[index];
+          final next = lines[(index + 1) % 4];
           rectangleConstraints.add(
             constraintApi!.builders.coincident.build([
-              lines[index].id,
-              lines[(index + 1) % 4].id,
+              '${current.id}:end',
+              '${next.id}:start',
             ]),
           );
         }

@@ -61,10 +61,32 @@ class ReconstructionBackendManager {
     String? manualId,
     void Function(ReconstructionStageReport report)? onStage,
     ReconstructionCancellation? cancellation,
-  }) => select(
-    mode: mode,
-    manualId: manualId,
-  ).reconstruct(request, onStage: onStage, cancellation: cancellation);
+  }) async {
+    final backend = select(mode: mode, manualId: manualId);
+    final result = await backend.reconstruct(
+      request,
+      onStage: onStage,
+      cancellation: cancellation,
+    );
+    final diagnostics = result.diagnostics;
+    if (diagnostics.backendId == backend.id &&
+        diagnostics.backendVersion == backend.capabilities.version) {
+      return result;
+    }
+    return ReconstructionBackendResult(
+      output: result.output,
+      diagnostics: ReconstructionBackendDiagnostics(
+        backendId: backend.id,
+        backendVersion: backend.capabilities.version,
+        durationMs: diagnostics.durationMs,
+        memoryBytes: diagnostics.memoryBytes,
+        confidence: diagnostics.confidence,
+        completedStages: diagnostics.completedStages,
+        limitations: diagnostics.limitations,
+        explanations: diagnostics.explanations,
+      ),
+    );
+  }
 
   Future<void> saveSelection(File file) async {
     await file.parent.create(recursive: true);

@@ -296,45 +296,26 @@ class _ProfessionalCadViewportWidgetState
               }
             },
             child: GestureDetector(
-              onPanStart: widget.onSketchEntityDragStart == null
-                  ? null
-                  : (event) {
-                      final hit = picking.pick(
-                        position: event.localPosition,
-                        camera: widget.camera,
-                        scene: widget.scene,
-                      );
-                      if (hit != null &&
-                          widget.scene.find(hit.entityId)?.kind ==
-                              CadSceneEntityKind.sketch) {
-                        _draggingSketchEntity = true;
-                        _lastSketchDragPosition = event.localPosition;
-                        widget.onSketchEntityDragStart!(
-                          hit,
-                          event.localPosition,
-                        );
-                      }
-                    },
-              onPanUpdate: widget.onSketchEntityDragUpdate == null
-                  ? null
-                  : (event) {
-                      if (_draggingSketchEntity) {
-                        _lastSketchDragPosition = event.localPosition;
-                        widget.onSketchEntityDragUpdate!(event.localPosition);
-                      }
-                    },
-              onPanEnd: widget.onSketchEntityDragEnd == null
-                  ? null
-                  : (event) {
-                      if (_draggingSketchEntity) {
-                        _draggingSketchEntity = false;
-                        final position = _lastSketchDragPosition;
-                        _lastSketchDragPosition = null;
-                        if (position != null) {
-                          widget.onSketchEntityDragEnd!(position);
-                        }
-                      }
-                    },
+              onScaleStart: (event) {
+                previousScale = 1;
+                if (widget.onSketchEntityDragStart != null) {
+                  final hit = picking.pick(
+                    position: event.localFocalPoint,
+                    camera: widget.camera,
+                    scene: widget.scene,
+                  );
+                  if (hit != null &&
+                      widget.scene.find(hit.entityId)?.kind ==
+                          CadSceneEntityKind.sketch) {
+                    _draggingSketchEntity = true;
+                    _lastSketchDragPosition = event.localFocalPoint;
+                    widget.onSketchEntityDragStart!(
+                      hit,
+                      event.localFocalPoint,
+                    );
+                  }
+                }
+              },
               onDoubleTapDown: widget.onSketchEntityDoublePick == null
                   ? null
                   : (event) {
@@ -394,10 +375,11 @@ class _ProfessionalCadViewportWidgetState
               onSecondaryTapUp: widget.onSketchSecondaryTap == null
                   ? null
                   : (_) => widget.onSketchSecondaryTap!(),
-              onScaleStart: (event) {
-                previousScale = 1;
-              },
               onScaleUpdate: (event) {
+                if (_draggingSketchEntity && event.pointerCount == 1) {
+                  _lastSketchDragPosition = event.localFocalPoint;
+                  widget.onSketchEntityDragUpdate?.call(event.localFocalPoint);
+                }
                 if (!_sketchToolActive &&
                     event.pointerCount > 1 &&
                     event.scale != previousScale) {
@@ -407,6 +389,14 @@ class _ProfessionalCadViewportWidgetState
               },
               onScaleEnd: (_) {
                 previousScale = 1;
+                if (_draggingSketchEntity) {
+                  _draggingSketchEntity = false;
+                  final position = _lastSketchDragPosition;
+                  _lastSketchDragPosition = null;
+                  if (position != null) {
+                    widget.onSketchEntityDragEnd?.call(position);
+                  }
+                }
               },
               child: ColoredBox(
                 color: widget.paintBackground
