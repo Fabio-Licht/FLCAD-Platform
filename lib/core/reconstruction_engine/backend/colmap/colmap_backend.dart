@@ -166,41 +166,66 @@ class ColmapBackend implements ReconstructionBackend {
       String explanation,
       Future<void> Function() validateArtifacts,
     ) async {
-      final result = await _processRunner.run(
-        executable,
-        arguments,
-        workingDirectory: workspace,
-        cancellation: cancellation,
-      );
-      String? artifactFailure;
-      if (result.succeeded) {
-        try {
-          await validateArtifacts();
-        } on StateError catch (error) {
-          artifactFailure = error.message.toString();
-        }
+      final stageStarted = DateTime.now();
+
+      void emitFailure(String detail, int durationMs) {
+        final report = ReconstructionStageReport(
+          stage: stage,
+          status: ReconstructionStageStatus.failed,
+          confidence: 0,
+          quality: 0,
+          durationMs: durationMs,
+          residuals: const {},
+          dependencies: const [],
+          accepted: false,
+          explanation: '$explanation Falha: $detail',
+        );
+        reports.add(report);
+        onStage?.call(report);
       }
-      final accepted = result.succeeded && artifactFailure == null;
+
+      late final ColmapCommandResult result;
+      try {
+        result = await _processRunner.run(
+          executable,
+          arguments,
+          workingDirectory: workspace,
+          cancellation: cancellation,
+        );
+      } on ReconstructionCancelled {
+        rethrow;
+      } catch (error, stackTrace) {
+        emitFailure(
+          error.toString(),
+          DateTime.now().difference(stageStarted).inMilliseconds,
+        );
+        Error.throwWithStackTrace(error, stackTrace);
+      }
+      if (!result.succeeded) {
+        emitFailure(result.stderr.trim(), result.durationMs);
+        throw StateError(reports.last.explanation);
+      }
+      try {
+        await validateArtifacts();
+      } on ReconstructionCancelled {
+        rethrow;
+      } catch (error, stackTrace) {
+        emitFailure(error.toString(), result.durationMs);
+        Error.throwWithStackTrace(error, stackTrace);
+      }
       final report = ReconstructionStageReport(
         stage: stage,
-        status: accepted
-            ? ReconstructionStageStatus.completed
-            : ReconstructionStageStatus.failed,
-        confidence: accepted ? 1 : 0,
-        quality: accepted ? 1 : 0,
+        status: ReconstructionStageStatus.completed,
+        confidence: 1,
+        quality: 1,
         durationMs: result.durationMs,
         residuals: const {},
         dependencies: const [],
-        accepted: accepted,
-        explanation: accepted
-            ? explanation
-            : '$explanation Falha: ${artifactFailure ?? result.stderr.trim()}',
+        accepted: true,
+        explanation: explanation,
       );
       reports.add(report);
       onStage?.call(report);
-      if (!accepted) {
-        throw StateError(report.explanation);
-      }
     }
 
     await execute(
@@ -217,6 +242,7 @@ class ColmapBackend implements ReconstructionBackend {
       'COLMAP detectou características das imagens fornecidas pelo Evidence Graph.',
       () => _requireNonEmptyFile(database, 'database.db'),
     );
+    final featureDatabaseFingerprint = await _fingerprint(database);
     await execute(
       ReconstructionStage.featureMatching,
       [
@@ -225,7 +251,15 @@ class ColmapBackend implements ReconstructionBackend {
         database.path,
       ],
       'COLMAP calculou correspondências entre as observações disponíveis.',
-      () => _requireNonEmptyFile(database, 'database.db'),
+      () async {
+        await _requireNonEmptyFile(database, 'database.db');
+        final matchedDatabaseFingerprint = await _fingerprint(database);
+        if (matchedDatabaseFingerprint == featureDatabaseFingerprint) {
+          throw StateError(
+            'COLMAP did not modify database.db while matching features.',
+          );
+        }
+      },
     );
     await execute(
       ReconstructionStage.cameraCalibration,
@@ -256,7 +290,16 @@ class ColmapBackend implements ReconstructionBackend {
         'COLMAP',
       ],
       'COLMAP produziu poses calibradas para as imagens observadas.',
-      () => _requireNonEmptyDirectory(dense, 'dense workspace'),
+      () async {
+        await _requireModelInEitherFormat(
+          Directory('${dense.path}${Platform.pathSeparator}sparse'),
+          'undistorted sparse model',
+        );
+        await _requireSupportedNonEmptyImage(
+          Directory('${dense.path}${Platform.pathSeparator}images'),
+          'undistorted image output',
+        );
+      },
     );
     await execute(
       ReconstructionStage.sparseReconstruction,
@@ -410,7 +453,21 @@ Future<void> _validateImageDirectory(Directory directory) async {
 
 String _safeRunPrefix(String requestId) {
   final safe = requestId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
-  return safe.isEmpty ? 'run' : safe;
+  final bounded = safe.length > 48 ? safe.substring(0, 48) : safe;
+  return bounded.isEmpty ? 'run' : bounded;
+}
+
+Future<({int length, int hash})> _fingerprint(File file) async {
+  var length = 0;
+  var hash = 0x811c9dc5;
+  await for (final chunk in file.openRead()) {
+    length += chunk.length;
+    for (final byte in chunk) {
+      hash ^= byte;
+      hash = (hash * 0x01000193) & 0x7fffffff;
+    }
+  }
+  return (length: length, hash: hash);
 }
 
 Future<void> _requireNonEmptyFile(File file, String label) async {
@@ -435,6 +492,23 @@ Future<void> _requireNonEmptyDirectory(
   throw StateError('COLMAP did not produce a non-empty $label artifact.');
 }
 
+Future<void> _requireSupportedNonEmptyImage(
+  Directory directory,
+  String label,
+) async {
+  if (await directory.exists()) {
+    await for (final entity in directory.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File || await entity.length() == 0) continue;
+      final name = entity.uri.pathSegments.last.toLowerCase();
+      if (_supportedImageExtensions.any(name.endsWith)) return;
+    }
+  }
+  throw StateError('COLMAP did not produce a non-empty $label artifact.');
+}
+
 Future<void> _requireCompleteModel(
   Directory directory,
   List<String> names,
@@ -451,21 +525,40 @@ Future<void> _requireCompleteModel(
   }
 }
 
+Future<void> _requireModelInEitherFormat(
+  Directory directory,
+  String label,
+) async {
+  for (final names in const [
+    ['cameras.bin', 'images.bin', 'points3D.bin'],
+    ['cameras.txt', 'images.txt', 'points3D.txt'],
+  ]) {
+    try {
+      await _requireCompleteModel(directory, names, label);
+      return;
+    } on StateError {
+      // Try the other supported COLMAP representation.
+    }
+  }
+  throw StateError('COLMAP did not produce a complete non-empty $label.');
+}
+
 Future<Directory> _discoverSparseModel(Directory sparseRoot) async {
   if (!await sparseRoot.exists()) {
     throw StateError('COLMAP did not produce a sparse model directory.');
   }
-  await for (final entity in sparseRoot.list(followLinks: false)) {
-    if (entity is! Directory) continue;
-    final binary = ['cameras.bin', 'images.bin', 'points3D.bin'];
-    final text = ['cameras.txt', 'images.txt', 'points3D.txt'];
-    for (final files in [binary, text]) {
-      try {
-        await _requireCompleteModel(entity, files, 'sparse model');
-        return entity;
-      } on StateError {
-        // Keep looking: COLMAP may produce more than one candidate model.
-      }
+  final candidates = await sparseRoot
+      .list(followLinks: false)
+      .where((entity) => entity is Directory)
+      .cast<Directory>()
+      .toList();
+  candidates.sort((left, right) => left.path.compareTo(right.path));
+  for (final candidate in candidates) {
+    try {
+      await _requireModelInEitherFormat(candidate, 'sparse model');
+      return candidate;
+    } on StateError {
+      // Keep looking: COLMAP may produce more than one candidate model.
     }
   }
   throw StateError('COLMAP did not produce a complete non-empty sparse model.');

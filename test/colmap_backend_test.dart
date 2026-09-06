@@ -5,10 +5,17 @@ import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.da
 import 'package:flutter_test/flutter_test.dart';
 
 class _FakeColmapRunner implements ColmapProcessRunner {
-  _FakeColmapRunner({this.omitArtifactFor, this.emptyArtifactFor});
+  _FakeColmapRunner({
+    this.omitArtifactFor,
+    this.emptyArtifactFor,
+    this.throwFor,
+    this.cancelFor,
+  });
 
   final String? omitArtifactFor;
   final String? emptyArtifactFor;
+  final String? throwFor;
+  final String? cancelFor;
   final List<({String command, List<String> arguments, String workspace})>
   calls = [];
 
@@ -26,6 +33,12 @@ class _FakeColmapRunner implements ColmapProcessRunner {
       workspace: workingDirectory.path,
     ));
     await Future<void>.delayed(const Duration(milliseconds: 2));
+    if (command == throwFor) {
+      throw StateError('runner failed for $command');
+    }
+    if (command == cancelFor) {
+      throw const ReconstructionCancelled();
+    }
     if (command != omitArtifactFor) {
       await _createArtifact(command, arguments, workingDirectory);
     }
@@ -51,22 +64,47 @@ class _FakeColmapRunner implements ColmapProcessRunner {
     String valueAfter(String option) => arguments[arguments.indexOf(option) + 1];
     switch (command) {
       case 'feature_extractor':
-      case 'exhaustive_matcher':
         await write(valueAfter('--database_path'));
         break;
+      case 'exhaustive_matcher':
+        final database = File(valueAfter('--database_path'));
+        if (command == emptyArtifactFor) {
+          await database.writeAsBytes(const []);
+        } else {
+          await database.writeAsBytes([2], mode: FileMode.append);
+        }
+        break;
       case 'mapper':
-        final model = Directory(
-          '${valueAfter('--output_path')}${Platform.pathSeparator}7',
+        final mapperOutput = valueAfter('--output_path');
+        await write(
+          '$mapperOutput${Platform.pathSeparator}0'
+          '${Platform.pathSeparator}cameras.bin',
         );
         for (final name in ['cameras.bin', 'images.bin', 'points3D.bin']) {
-          await write('${model.path}${Platform.pathSeparator}$name');
+          await write(
+            '$mapperOutput${Platform.pathSeparator}8'
+            '${Platform.pathSeparator}$name',
+          );
+        }
+        for (final name in ['cameras.bin', 'images.bin', 'points3D.bin']) {
+          await write(
+            '$mapperOutput${Platform.pathSeparator}7'
+            '${Platform.pathSeparator}$name',
+          );
         }
         break;
       case 'image_undistorter':
+        final undistortedOutput = valueAfter('--output_path');
         await write(
-          '${valueAfter('--output_path')}${Platform.pathSeparator}images'
-          '${Platform.pathSeparator}undistorted.bin',
+          '$undistortedOutput${Platform.pathSeparator}images'
+          '${Platform.pathSeparator}undistorted.jpg',
         );
+        for (final name in ['cameras.bin', 'images.bin', 'points3D.bin']) {
+          await write(
+            '$undistortedOutput${Platform.pathSeparator}sparse'
+            '${Platform.pathSeparator}$name',
+          );
+        }
         break;
       case 'model_converter':
         for (final name in ['cameras.txt', 'images.txt', 'points3D.txt']) {
@@ -186,42 +224,73 @@ void main() {
     );
   });
 
-  test('reports failure before throwing when exit zero has no artifact', () async {
-    final fixture = await _fixture('flcad-colmap-missing-');
+  for (final command in [
+    'feature_extractor',
+    'exhaustive_matcher',
+    'mapper',
+    'image_undistorter',
+    'model_converter',
+    'patch_match_stereo',
+    'stereo_fusion',
+    'poisson_mesher',
+  ]) {
+    for (final empty in [false, true]) {
+      test(
+        'reports $command ${empty ? 'empty' : 'missing'} artifact before throwing',
+        () async {
+          final fixture = await _fixture('flcad-colmap-artifact-');
+          addTearDown(() => fixture.root.delete(recursive: true));
+          final reports = <ReconstructionStageReport>[];
+          final backend = ColmapBackend(
+            processRunner: _FakeColmapRunner(
+              omitArtifactFor: empty ? null : command,
+              emptyArtifactFor: empty ? command : null,
+            ),
+          );
+
+          await expectLater(
+            backend.reconstruct(
+              _request('invalid-$command', fixture.root, fixture.images),
+              onStage: reports.add,
+            ),
+            throwsA(anything),
+          );
+          expect(reports.last.status, ReconstructionStageStatus.failed);
+          expect(reports.last.accepted, isFalse);
+        },
+      );
+    }
+  }
+
+  test('reports runner exceptions and preserves cancellation semantics', () async {
+    final fixture = await _fixture('flcad-colmap-runner-error-');
     addTearDown(() => fixture.root.delete(recursive: true));
     final reports = <ReconstructionStageReport>[];
     final backend = ColmapBackend(
-      processRunner: _FakeColmapRunner(omitArtifactFor: 'feature_extractor'),
+      processRunner: _FakeColmapRunner(throwFor: 'feature_extractor'),
     );
 
     await expectLater(
       backend.reconstruct(
-        _request('missing-artifact', fixture.root, fixture.images),
+        _request('runner-error', fixture.root, fixture.images),
         onStage: reports.add,
       ),
       throwsStateError,
     );
     expect(reports.single.status, ReconstructionStageStatus.failed);
-    expect(reports.single.accepted, isFalse);
-    expect(reports.single.explanation, contains('non-empty database.db'));
-  });
 
-  test('rejects an empty artifact after a successful command', () async {
-    final fixture = await _fixture('flcad-colmap-empty-');
-    addTearDown(() => fixture.root.delete(recursive: true));
-    final reports = <ReconstructionStageReport>[];
-    final backend = ColmapBackend(
-      processRunner: _FakeColmapRunner(emptyArtifactFor: 'feature_extractor'),
+    reports.clear();
+    final cancelledBackend = ColmapBackend(
+      processRunner: _FakeColmapRunner(cancelFor: 'feature_extractor'),
     );
-
     await expectLater(
-      backend.reconstruct(
-        _request('empty-artifact', fixture.root, fixture.images),
+      cancelledBackend.reconstruct(
+        _request('cancelled', fixture.root, fixture.images),
         onStage: reports.add,
       ),
-      throwsStateError,
+      throwsA(isA<ReconstructionCancelled>()),
     );
-    expect(reports.single.status, ReconstructionStageStatus.failed);
+    expect(reports, isEmpty);
   });
 
   test('passes paths as literal arguments and counts captures only', () async {
@@ -243,5 +312,25 @@ void main() {
       result.output.meshCandidate!['path'] as String,
       startsWith(fixture.root.path),
     );
+  });
+
+  test('bounds and sanitizes the retained workspace prefix', () async {
+    final fixture = await _fixture('flcad-colmap-prefix-');
+    addTearDown(() => fixture.root.delete(recursive: true));
+    final runner = _FakeColmapRunner();
+    final requestId = '${'unsafe/&'.padRight(80, 'x')}?';
+    await ColmapBackend(processRunner: runner).reconstruct(
+      _request(requestId, fixture.root, fixture.images),
+    );
+
+    final name = Directory(runner.calls.first.workspace).uri.pathSegments
+        .where((segment) => segment.isNotEmpty)
+        .last;
+    final expectedPrefix = requestId
+        .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')
+        .substring(0, 48);
+    expect(name, startsWith('$expectedPrefix-'));
+    expect(name, isNot(contains('&')));
+    expect(name, isNot(contains('/')));
   });
 }

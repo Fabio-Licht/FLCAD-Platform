@@ -10,6 +10,8 @@
   processo externo.
 - Cada comando só é aceito depois que seus artefatos mínimos existem e não
   estão vazios.
+- O matching precisa alterar efetivamente o banco criado pela extração; o
+  undistorter precisa produzir modelo esparso completo e imagem não vazia.
 - O modelo esparso válido é descoberto pelo conteúdo, sem presumir o nome `0`.
 - Diagnósticos contam somente nós `EvidenceNodeKind.capture`.
 - Caminhos continuam absolutos e são enviados como argumentos literais, sem
