@@ -31,6 +31,9 @@ class ColmapBackendActivation {
       throw StateError('COLMAP executable must be named $expectedName');
     }
     final canonical = await executable.resolveSymbolicLinks();
+    if (path.basename(canonical).toLowerCase() != expectedName) {
+      throw StateError('Canonical COLMAP executable must be named $expectedName');
+    }
     if (record.origin == BackendInstallationOrigin.external) {
       if (record.status != BackendInstallationStatus.installed ||
           !allowUncertifiedExternal ||

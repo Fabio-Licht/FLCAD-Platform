@@ -350,6 +350,7 @@ class BackendProvisioningManager {
       );
     }
     final canonical = await executable.resolveSymbolicLinks();
+    _requireExpectedExecutable(backendId, canonical);
     _event('externalRegistrationStarted', backendId, canonical);
     late final ReconstructionBackendCapabilities capabilities;
     try {
