@@ -169,6 +169,7 @@ BackendProvisioningManager _manager({
   required BackendArchiveInstaller installer,
   required BackendSelfTest selfTest,
   required Directory root,
+  BackendCanonicalPathResolver? canonicalPathResolver,
 }) => BackendProvisioningManager(
   repository: repository,
   downloader: downloader,
@@ -177,6 +178,7 @@ BackendProvisioningManager _manager({
   signatureVerifier: _Verifier(),
   selfTest: selfTest,
   installationRoot: root,
+  canonicalPathResolver: canonicalPathResolver,
 );
 
 String get _executableName => Platform.isWindows ? 'colmap.exe' : 'colmap';
@@ -491,32 +493,25 @@ void main() {
   });
 
   test('external discovery rejects a canonical alias with a wrong name', () async {
-    if (Platform.isWindows) return;
-    final temp = await Directory.systemTemp.createTemp('flcad-external-link-');
+    final temp = await Directory.systemTemp.createTemp('flcad-external-alias-');
     addTearDown(() => temp.delete(recursive: true));
-    final target = await File(
-      '${temp.path}${Platform.pathSeparator}unexpected-binary',
-    ).create();
-    final alias = Link(
+    final executable = await File(
       '${temp.path}${Platform.pathSeparator}$_executableName',
-    );
-    try {
-      await alias.create(target.path);
-    } on FileSystemException {
-      return;
-    }
+    ).create();
+    final unexpectedCanonical =
+        '${temp.path}${Platform.pathSeparator}unexpected-binary.bin';
     final repository = _Repository()
       ..memory = [
         BackendInstallationRecord(
           backendId: 'colmap',
           version: 'COLMAP 3.13',
           installedAt: DateTime.utc(2026),
-          source: Uri.file(alias.path),
+          source: Uri.file(executable.path),
           sha256: '',
           architecture: 'external',
           status: BackendInstallationStatus.installed,
           certification: BackendCertificationStatus.notCertified,
-          executablePath: alias.path,
+          executablePath: executable.path,
           origin: BackendInstallationOrigin.external,
         ),
       ];
@@ -527,6 +522,10 @@ void main() {
       installer: _NeverInstaller(),
       selfTest: selfTest,
       root: Directory('${temp.path}${Platform.pathSeparator}managed'),
+      canonicalPathResolver: (value) async {
+        expect(value, executable.path);
+        return unexpectedCanonical;
+      },
     );
     final discovered = await manager.discover();
     expect(discovered.single.status, BackendInstallationStatus.notInstalled);

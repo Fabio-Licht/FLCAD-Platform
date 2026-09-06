@@ -16,6 +16,9 @@
 - A versão detectada aparece nas capacidades e nos diagnósticos do backend.
 - Uma preferência persistida por backend indisponível retorna com segurança ao
   backend `foundation`.
+- `ColmapBackend` é uma API de baixo nível e exige um caminho absoluto
+  explícito. O fluxo oficial autorizado é `ColmapBackendActivation`; construir
+  o backend diretamente não comprova canonicalização nem autorização.
 
 ## Limites e segurança
 

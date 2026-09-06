@@ -187,6 +187,8 @@ abstract interface class BackendSelfTest {
   );
 }
 
+typedef BackendCanonicalPathResolver = Future<String> Function(String value);
+
 class BackendProvisioningEvent {
   const BackendProvisioningEvent({
     required this.type,
@@ -217,9 +219,12 @@ class BackendProvisioningManager {
     required this.signatureVerifier,
     required this.selfTest,
     Directory? installationRoot,
+    BackendCanonicalPathResolver? canonicalPathResolver,
     void Function(BackendProvisioningEvent event)? onEvent,
   }) : installationRoot =
            installationRoot ?? Directory(defaultBackendInstallationRoot),
+       _canonicalPathResolver =
+           canonicalPathResolver ?? _resolveCanonicalPath,
        _onEvent = onEvent;
 
   final BackendProvisioningRepository repository;
@@ -228,6 +233,7 @@ class BackendProvisioningManager {
   final BackendChecksumVerifier checksumVerifier;
   final BackendSignatureVerifier signatureVerifier;
   final BackendSelfTest selfTest;
+  final BackendCanonicalPathResolver _canonicalPathResolver;
   final Directory installationRoot;
   final void Function(BackendProvisioningEvent event)? _onEvent;
   List<BackendInstallationRecord> _installations = [];
@@ -257,9 +263,9 @@ class BackendProvisioningManager {
         await File(record.executablePath).exists()) {
       try {
         final rootPath = await _canonicalInstallationRoot();
-        final executablePath = await File(
+        final executablePath = await _canonicalPathResolver(
           record.executablePath,
-        ).resolveSymbolicLinks();
+        );
         if (_isWithin(rootPath, executablePath)) return record;
       } on FileSystemException {
         // Treat an unresolvable or escaped path as an invalid installation.
@@ -289,7 +295,7 @@ class BackendProvisioningManager {
       if (!path.isAbsolute(executable.path) || !await executable.exists()) {
         throw StateError('External executable was not found');
       }
-      final canonical = await executable.resolveSymbolicLinks();
+      final canonical = await _canonicalPathResolver(executable.path);
       _requireExpectedExecutable(record.backendId, canonical);
       _event('validationStarted', record.backendId, canonical);
       final capabilities = await selfTest.validate(record.backendId, canonical);
@@ -350,7 +356,7 @@ class BackendProvisioningManager {
         'must identify an existing file',
       );
     }
-    final canonical = await executable.resolveSymbolicLinks();
+    final canonical = await _canonicalPathResolver(executable.path);
     _requireExpectedExecutable(backendId, canonical);
     _event('externalRegistrationStarted', backendId, canonical);
     late final ReconstructionBackendCapabilities capabilities;
@@ -473,7 +479,7 @@ class BackendProvisioningManager {
     if (!await executable.exists()) {
       return _failed(approved, 'Installed executable was not found');
     }
-    final canonicalExecutable = await executable.resolveSymbolicLinks();
+    final canonicalExecutable = await _canonicalPathResolver(executable.path);
     if (!_isWithin(canonicalRoot, canonicalExecutable)) {
       return _failed(approved, 'Installed executable escapes installation root');
     }
@@ -558,7 +564,10 @@ class BackendProvisioningManager {
   }
 
   Future<String> _canonicalInstallationRoot() =>
-      installationRoot.resolveSymbolicLinks();
+      _canonicalPathResolver(installationRoot.path);
+
+  static Future<String> _resolveCanonicalPath(String value) =>
+      File(value).resolveSymbolicLinks();
 
   static bool _isWithin(String root, String candidate) {
     final normalizedRoot = root.endsWith(Platform.pathSeparator)
