@@ -37,6 +37,39 @@ void main() {
     }
   });
 
+  test('draft angle persists and validates the executable range', () {
+    final drafted = _contract(draftAngleDegrees: 7.5);
+    expect(
+      ProfessionalExtrudeContract.fromJson(drafted.toJson()).draftAngleDegrees,
+      7.5,
+    );
+    expect(adapter.health(drafted).ready, isTrue);
+    expect(
+      () => adapter.solve(_contract(draftAngleDegrees: 89)),
+      throwsArgumentError,
+    );
+    expect(
+      () => adapter.solve(_contract(draftAngleDegrees: double.nan)),
+      throwsArgumentError,
+    );
+  });
+
+  test('selected extrusion axis persists as a real direction vector', () {
+    final value = ProfessionalExtrudeContract(
+      sourceEntityId: 'Source001',
+      sourceKind: ProfessionalExtrudeSourceKind.sketch,
+      sourceRevision: 1,
+      sourceShapeId: 'profile-shape',
+      distance: 10,
+      directionSourceId: 'worldX',
+      directionVector: const [1, 0, 0],
+    );
+    final restored = ProfessionalExtrudeContract.fromJson(value.toJson());
+    expect(restored.directionSourceId, 'worldX');
+    expect(restored.directionVector, [1, 0, 0]);
+    expect(adapter.health(restored).ready, isTrue);
+  });
+
   test('future extents are prepared but cannot execute in G-143', () {
     for (final extent in ProfessionalExtrudeExtent.values.skip(1)) {
       expect(
@@ -62,12 +95,14 @@ ProfessionalExtrudeContract _contract({
   ProfessionalExtrudeExtent extent = ProfessionalExtrudeExtent.distance,
   ProfessionalExtrudeOutput output = ProfessionalExtrudeOutput.solid,
   double distance = 10,
+  double draftAngleDegrees = 0,
 }) => ProfessionalExtrudeContract(
   sourceEntityId: 'Source001',
   sourceKind: kind,
   sourceRevision: 1,
   sourceShapeId: 'profile-shape',
   distance: distance,
+  draftAngleDegrees: draftAngleDegrees,
   direction: direction,
   extent: extent,
   output: output,

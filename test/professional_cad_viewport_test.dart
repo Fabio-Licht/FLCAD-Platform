@@ -841,7 +841,7 @@ void main() {
   });
 
   testWidgets(
-    'active Sketch tool receives click independently of picking and blocks navigation',
+    'active Sketch tool receives clicks while preserving pan and wheel zoom',
     (tester) async {
       final scene = CadSceneGraph();
       final camera = CadCameraController(
@@ -870,6 +870,7 @@ void main() {
 
       final eyeBefore = camera.eye;
       final targetBefore = camera.target;
+      final presentationBefore = camera.presentationTranslation;
       await tester.tapAt(const Offset(400, 300));
       await tester.pump();
 
@@ -892,8 +893,21 @@ void main() {
       await tester.sendEventToBinding(mouse.up());
       await tester.pump();
 
+      expect(
+        camera.presentationTranslation.distanceTo(presentationBefore),
+        greaterThan(1e-6),
+      );
       expect(camera.eye.distanceTo(eyeBefore), lessThan(1e-12));
       expect(camera.target.distanceTo(targetBefore), lessThan(1e-12));
+      final scaleBeforeZoom = camera.viewScale;
+      await tester.sendEventToBinding(
+        const PointerScrollEvent(
+          position: Offset(400, 300),
+          scrollDelta: Offset(0, -120),
+        ),
+      );
+      await tester.pump();
+      expect(camera.viewScale, isNot(scaleBeforeZoom));
     },
   );
 

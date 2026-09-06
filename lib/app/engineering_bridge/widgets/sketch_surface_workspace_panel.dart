@@ -18,10 +18,12 @@ class SketchSurfaceWorkspacePanel extends StatefulWidget {
   const SketchSurfaceWorkspacePanel({
     super.key,
     required this.controller,
+    this.initialSurfaceTool,
     this.onOpenSketch,
     this.onFinishSketch,
   });
   final OperationalReverseEngineeringController controller;
+  final ProfessionalSurfaceTool? initialSurfaceTool;
   final Future<void> Function()? onOpenSketch;
   final Future<void> Function()? onFinishSketch;
 
@@ -68,6 +70,13 @@ class _SketchSurfaceWorkspacePanelState
   bool sewCompensate = false;
 
   OperationalReverseEngineeringController get controller => widget.controller;
+  bool get _dedicatedSurfaceCommand => widget.initialSurfaceTool != null;
+
+  @override
+  void initState() {
+    super.initState();
+    guidedSurfaceTool = widget.initialSurfaceTool;
+  }
 
   void _openGuidedSurfaceCommand(ProfessionalSurfaceTool tool) {
     setState(() {
@@ -110,6 +119,8 @@ class _SketchSurfaceWorkspacePanelState
     ProfessionalSurfaceTool.offset => 'Select one Surface to offset.',
     ProfessionalSurfaceTool.fill =>
       'Select every Edge of the outer loop and any inner loops. There is no four-edge limit.',
+    ProfessionalSurfaceTool.patch =>
+      'Select the boundary Curves or Edges that define the Patch.',
     ProfessionalSurfaceTool.fillet =>
       'Select support Surface(s), then Edge, Loop, Face or Tangent Chain.',
     ProfessionalSurfaceTool.sew =>
@@ -158,7 +169,8 @@ class _SketchSurfaceWorkspacePanelState
           selectionMode: sewSelectionMode,
         );
       case _:
-        return;
+        final tool = guidedSurfaceTool;
+        if (tool != null) await controller.previewProfessionalSurface(tool);
     }
   }
 
@@ -223,7 +235,9 @@ class _SketchSurfaceWorkspacePanelState
     } else if (controller.surfaceOffsetPreviewActive) {
       controller.cancelSurfaceOffset();
     }
-    if (mounted) setState(() => guidedSurfaceTool = null);
+    if (mounted && !_dedicatedSurfaceCommand) {
+      setState(() => guidedSurfaceTool = null);
+    }
   }
 
   void _toggleSnap(EditorSnapType type, bool enabled) {
@@ -247,379 +261,398 @@ class _SketchSurfaceWorkspacePanelState
             controller.error!,
             style: TextStyle(color: Theme.of(context).colorScheme.error),
           ),
-        if (controller.stage == SketchSurfaceStage.idle) ...[
-          const Text(
-            'Create a Sketch on a world plane or on selected planar geometry.',
-          ),
-          const SizedBox(height: 8),
-          FilledButton.icon(
-            onPressed: controller.busy
-                ? null
-                : (widget.onOpenSketch ?? controller.openSketch),
-            icon: const Icon(Icons.edit_note),
-            label: const Text('New Sketch'),
-          ),
-          const SizedBox(height: 6),
-          OutlinedButton.icon(
-            onPressed: controller.busy
-                ? null
-                : controller.createRecognizedPlane,
-            icon: const Icon(Icons.layers_outlined),
-            label: const Text('Create recognized plane'),
-          ),
-        ],
-        if (controller.stage == SketchSurfaceStage.referenceReady) ...[
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              OutlinedButton.icon(
-                onPressed: controller.busy ? null : controller.createAxis,
-                icon: const Icon(Icons.straighten),
-                label: const Text('Create Axis'),
-              ),
-              OutlinedButton.icon(
-                onPressed: controller.busy ? null : controller.createPoint,
-                icon: const Icon(Icons.adjust),
-                label: const Text('Create Point'),
-              ),
-              OutlinedButton.icon(
-                onPressed: controller.busy
-                    ? null
-                    : controller.createCoordinateSystem,
-                icon: const Icon(Icons.threed_rotation),
-                label: const Text('Create Coordinate System'),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          FilledButton.icon(
-            onPressed: controller.busy
-                ? null
-                : (widget.onOpenSketch ?? controller.openSketch),
-            icon: const Icon(Icons.edit_note),
-            label: const Text('New Sketch'),
-          ),
-        ],
-        if (controller.stage == SketchSurfaceStage.sketchActive) ...[
-          _ProfessionalSketchToolbar(
-            controller: controller,
-            onSnapManager: () =>
-                setState(() => showSnapManager = !showSnapManager),
-          ),
-          if (showSnapManager)
-            _SnapManager(
-              controller: controller,
-              mesh: snapMesh,
-              section: snapSection,
-              sketch: snapSketch,
-              references: snapReferences,
-              grid: snapGrid,
-              onMesh: (value) => setState(() => snapMesh = value),
-              onSection: (value) => setState(() => snapSection = value),
-              onSketch: (value) => setState(() => snapSketch = value),
-              onReferences: (value) => setState(() => snapReferences = value),
-              onGrid: (value) {
-                setState(() => snapGrid = value);
-                _toggleSnap(EditorSnapType.grid, value);
-              },
-              onCoreSnap: _toggleSnap,
-            ),
-          _SketchHeadsUpDisplay(controller: controller),
-          _ConstraintStateBanner(controller: controller),
-          SwitchListTile.adaptive(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            title: const Text('Constraint glyphs'),
-            subtitle: const Text(
-              'Tangent · Parallel · Coincident · Equal · H/V',
-            ),
-            value: showConstraintGlyphs,
-            onChanged: (value) => setState(() => showConstraintGlyphs = value),
-          ),
-          if (showConstraintGlyphs)
-            _ConstraintGlyphSummary(controller: controller),
-          const SizedBox(height: 8),
-          OutlinedButton.icon(
-            onPressed: controller.sketchEntities.length < 4 || controller.busy
-                ? null
-                : controller.constrainRectangle,
-            icon: const Icon(Icons.square_foot),
-            label: Text(
-              'Apply rectangle constraints (${controller.constraints.length})',
-            ),
-          ),
-          Text(
-            '${controller.selectedSketchEntityIds.length} Sketch entities selected',
-          ),
-          Wrap(
-            spacing: 4,
-            children: [
-              for (final type in const [
-                SketchConstraintType.coincident,
-                SketchConstraintType.parallel,
-                SketchConstraintType.perpendicular,
-                SketchConstraintType.tangent,
-                SketchConstraintType.horizontal,
-                SketchConstraintType.vertical,
-                SketchConstraintType.equal,
-                SketchConstraintType.radius,
-                SketchConstraintType.diameter,
-                SketchConstraintType.distance,
-                SketchConstraintType.angle,
-              ])
-                ActionChip(
-                  label: Text(type.name),
-                  onPressed: controller.selectedSketchEntityIds.isEmpty
-                      ? null
-                      : () => controller.applyConstraint(
-                          type,
-                          value: switch (type) {
-                            SketchConstraintType.radius ||
-                            SketchConstraintType.diameter ||
-                            SketchConstraintType.distance => 10,
-                            SketchConstraintType.angle => 1.5707963267948966,
-                            _ => null,
-                          },
-                        ),
-                ),
-            ],
-          ),
-          FilledButton.icon(
-            onPressed: controller.sketchEntities.isEmpty || controller.busy
-                ? null
-                : (widget.onFinishSketch ?? controller.finishSketch),
-            icon: const Icon(Icons.done),
-            label: const Text('Finish Sketch'),
-          ),
-        ],
-        if (controller.stage == SketchSurfaceStage.sketchFinished) ...[
-          FilledButton.icon(
-            onPressed: controller.busy || !controller.sketchReadyForSurface
-                ? null
-                : controller.previewPlanarSurface,
-            icon: const Icon(Icons.visibility_outlined),
-            label: const Text('Preview Surface'),
-          ),
-          if (!controller.sketchReadyForSurface)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                controller.sketchSurfaceBlockReason,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Theme.of(context).colorScheme.error,
-                ),
-              ),
-            ),
-        ],
-        if (controller.stage == SketchSurfaceStage.surfacePreview) ...[
-          const ListTile(
-            dense: true,
-            leading: Icon(Icons.layers_outlined, color: Colors.lightBlueAccent),
-            title: Text('Dynamic Surface Preview'),
-            subtitle: Text(
-              'Temporary translucent film. Editing the Sketch updates it immediately.',
-            ),
-          ),
-        ],
-        if (controller.stage == SketchSurfaceStage.surfaceGenerated)
-          const ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.check_circle),
-            title: Text('CAD Surface generated'),
-            subtitle: Text('Registered, persisted and visible in the scene.'),
-          ),
-        ...[
-          const Divider(),
-          const ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.waves_outlined),
-            title: Text('Surface Continuity'),
-            subtitle: Text('Build → measure → approve'),
-          ),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              OutlinedButton(
-                onPressed:
-                    controller.busy || !controller.canInspectSurfaceContinuity
-                    ? null
-                    : controller.inspectSelectedG0,
-                child: const Text('Inspect G0'),
-              ),
-              OutlinedButton(
-                onPressed:
-                    controller.busy ||
-                        !controller.canInspectSurfaceContinuity ||
-                        controller.continuityPreview != null
-                    ? null
-                    : controller.previewSelectedG1,
-                child: const Text('Preview G1'),
-              ),
-            ],
-          ),
-          if (!controller.canInspectSurfaceContinuity)
+        if (!_dedicatedSurfaceCommand) ...[
+          if (controller.stage == SketchSurfaceStage.idle) ...[
             const Text(
-              'Select exactly two Surfaces to inspect G0 or preview G1.',
-              style: TextStyle(fontSize: 11),
+              'Create a Sketch on a world plane or on selected planar geometry.',
             ),
-          if (controller.continuityPreview != null)
-            Row(
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: controller.busy
+                  ? null
+                  : (widget.onOpenSketch ?? controller.openSketch),
+              icon: const Icon(Icons.edit_note),
+              label: const Text('New Sketch'),
+            ),
+            const SizedBox(height: 6),
+            OutlinedButton.icon(
+              onPressed: controller.busy
+                  ? null
+                  : controller.createRecognizedPlane,
+              icon: const Icon(Icons.layers_outlined),
+              label: const Text('Create recognized plane'),
+            ),
+          ],
+          if (controller.stage == SketchSurfaceStage.referenceReady) ...[
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
               children: [
-                Expanded(
-                  child: FilledButton(
-                    onPressed: controller.busy
-                        ? null
-                        : controller.confirmSelectedG1,
-                    child: const Text('Confirm G1'),
-                  ),
+                OutlinedButton.icon(
+                  onPressed: controller.busy ? null : controller.createAxis,
+                  icon: const Icon(Icons.straighten),
+                  label: const Text('Create Axis'),
                 ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: controller.busy
-                        ? null
-                        : controller.cancelSelectedG1,
-                    child: const Text('Cancel'),
-                  ),
+                OutlinedButton.icon(
+                  onPressed: controller.busy ? null : controller.createPoint,
+                  icon: const Icon(Icons.adjust),
+                  label: const Text('Create Point'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: controller.busy
+                      ? null
+                      : controller.createCoordinateSystem,
+                  icon: const Icon(Icons.threed_rotation),
+                  label: const Text('Create Coordinate System'),
                 ),
               ],
             ),
-          if (controller.selectedSurfaceForQuality != null) ...[
             const SizedBox(height: 8),
-            const Text(
-              'Independent analysis',
-              style: TextStyle(fontWeight: FontWeight.w600),
+            FilledButton.icon(
+              onPressed: controller.busy
+                  ? null
+                  : (widget.onOpenSketch ?? controller.openSketch),
+              icon: const Icon(Icons.edit_note),
+              label: const Text('New Sketch'),
             ),
-            for (final kind in ProfessionalAnalysisKind.values)
-              Builder(
-                builder: (context) {
-                  final setting = controller.selectedSurfaceAnalysisSettings
-                      .where((item) => item.kind == kind)
-                      .firstOrNull;
-                  final enabled = setting?.enabled ?? false;
-                  final intensity = setting?.intensity ?? 0.7;
-                  return Column(
-                    children: [
-                      CheckboxListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(switch (kind) {
-                          ProfessionalAnalysisKind.zebra => 'Zebra',
-                          ProfessionalAnalysisKind.reflection => 'Reflection',
-                          ProfessionalAnalysisKind.curvature => 'Curvature',
-                        }),
-                        value: enabled,
-                        onChanged: controller.busy
-                            ? null
-                            : (value) => controller.setSurfaceQualityAnalysis(
-                                kind,
-                                enabled: value ?? false,
-                                intensity: intensity,
-                              ),
-                      ),
-                      if (enabled)
-                        Slider(
-                          value: intensity,
-                          min: 0,
-                          max: 1,
-                          divisions: 20,
-                          label: intensity.toStringAsFixed(2),
-                          onChanged: controller.busy
-                              ? null
-                              : (value) => controller.setSurfaceQualityAnalysis(
-                                  kind,
-                                  enabled: true,
-                                  intensity: value,
-                                ),
-                        ),
-                    ],
-                  );
+          ],
+          if (controller.stage == SketchSurfaceStage.sketchActive) ...[
+            _ProfessionalSketchToolbar(
+              controller: controller,
+              onSnapManager: () =>
+                  setState(() => showSnapManager = !showSnapManager),
+            ),
+            if (showSnapManager)
+              _SnapManager(
+                controller: controller,
+                mesh: snapMesh,
+                section: snapSection,
+                sketch: snapSketch,
+                references: snapReferences,
+                grid: snapGrid,
+                onMesh: (value) => setState(() => snapMesh = value),
+                onSection: (value) => setState(() => snapSection = value),
+                onSketch: (value) => setState(() => snapSketch = value),
+                onReferences: (value) => setState(() => snapReferences = value),
+                onGrid: (value) {
+                  setState(() => snapGrid = value);
+                  _toggleSnap(EditorSnapType.grid, value);
                 },
+                onCoreSnap: _toggleSnap,
               ),
-          ] else ...[
+            _SketchHeadsUpDisplay(controller: controller),
+            _ConstraintStateBanner(controller: controller),
+            SwitchListTile.adaptive(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Constraint glyphs'),
+              subtitle: const Text(
+                'Tangent · Parallel · Coincident · Equal · H/V',
+              ),
+              value: showConstraintGlyphs,
+              onChanged: (value) =>
+                  setState(() => showConstraintGlyphs = value),
+            ),
+            if (showConstraintGlyphs)
+              _ConstraintGlyphSummary(controller: controller),
             const SizedBox(height: 8),
-            const Text(
-              'Independent analysis',
-              style: TextStyle(fontWeight: FontWeight.w600),
+            OutlinedButton.icon(
+              onPressed: controller.sketchEntities.length < 4 || controller.busy
+                  ? null
+                  : controller.constrainRectangle,
+              icon: const Icon(Icons.square_foot),
+              label: Text(
+                'Apply rectangle constraints (${controller.constraints.length})',
+              ),
+            ),
+            Text(
+              '${controller.selectedSketchEntityIds.length} Sketch entities selected',
+            ),
+            Wrap(
+              spacing: 4,
+              children: [
+                for (final type in const [
+                  SketchConstraintType.coincident,
+                  SketchConstraintType.parallel,
+                  SketchConstraintType.perpendicular,
+                  SketchConstraintType.tangent,
+                  SketchConstraintType.horizontal,
+                  SketchConstraintType.vertical,
+                  SketchConstraintType.equal,
+                  SketchConstraintType.radius,
+                  SketchConstraintType.diameter,
+                  SketchConstraintType.distance,
+                  SketchConstraintType.angle,
+                ])
+                  ActionChip(
+                    label: Text(type.name),
+                    onPressed: controller.selectedSketchEntityIds.isEmpty
+                        ? null
+                        : () => controller.applyConstraint(
+                            type,
+                            value: switch (type) {
+                              SketchConstraintType.radius ||
+                              SketchConstraintType.diameter ||
+                              SketchConstraintType.distance => 10,
+                              SketchConstraintType.angle => 1.5707963267948966,
+                              _ => null,
+                            },
+                          ),
+                  ),
+              ],
+            ),
+            FilledButton.icon(
+              onPressed: controller.sketchEntities.isEmpty || controller.busy
+                  ? null
+                  : (widget.onFinishSketch ?? controller.finishSketch),
+              icon: const Icon(Icons.done),
+              label: const Text('Finish Sketch'),
+            ),
+          ],
+          if (controller.stage == SketchSurfaceStage.sketchFinished) ...[
+            FilledButton.icon(
+              onPressed: controller.busy || !controller.sketchReadyForSurface
+                  ? null
+                  : controller.previewPlanarSurface,
+              icon: const Icon(Icons.visibility_outlined),
+              label: const Text('Preview Surface'),
+            ),
+            if (!controller.sketchReadyForSurface)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  controller.sketchSurfaceBlockReason,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                ),
+              ),
+          ],
+          if (controller.stage == SketchSurfaceStage.surfacePreview) ...[
+            const ListTile(
+              dense: true,
+              leading: Icon(
+                Icons.layers_outlined,
+                color: Colors.lightBlueAccent,
+              ),
+              title: Text('Dynamic Surface Preview'),
+              subtitle: Text(
+                'Temporary translucent film. Editing the Sketch updates it immediately.',
+              ),
+            ),
+          ],
+          if (controller.stage == SketchSurfaceStage.surfaceGenerated)
+            const ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.check_circle),
+              title: Text('CAD Surface generated'),
+              subtitle: Text('Registered, persisted and visible in the scene.'),
+            ),
+          ...[
+            const Divider(),
+            const ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.waves_outlined),
+              title: Text('Surface Continuity'),
+              subtitle: Text('Build → measure → approve'),
             ),
             Wrap(
               spacing: 6,
               runSpacing: 6,
-              children: const [
-                OutlinedButton(onPressed: null, child: Text('Zebra')),
-                OutlinedButton(onPressed: null, child: Text('Reflection')),
-                OutlinedButton(onPressed: null, child: Text('Curvature')),
+              children: [
+                OutlinedButton(
+                  onPressed:
+                      controller.busy || !controller.canInspectSurfaceContinuity
+                      ? null
+                      : controller.inspectSelectedG0,
+                  child: const Text('Inspect G0'),
+                ),
+                OutlinedButton(
+                  onPressed:
+                      controller.busy ||
+                          !controller.canInspectSurfaceContinuity ||
+                          controller.continuityPreview != null
+                      ? null
+                      : controller.previewSelectedG1,
+                  child: const Text('Preview G1'),
+                ),
               ],
             ),
-            const Text(
-              'Select one Surface to enable the quality analyses.',
-              style: TextStyle(fontSize: 11),
-            ),
+            if (!controller.canInspectSurfaceContinuity)
+              const Text(
+                'Select exactly two Surfaces to inspect G0 or preview G1.',
+                style: TextStyle(fontSize: 11),
+              ),
+            if (controller.continuityPreview != null)
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton(
+                      onPressed: controller.busy
+                          ? null
+                          : controller.confirmSelectedG1,
+                      child: const Text('Confirm G1'),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: controller.busy
+                          ? null
+                          : controller.cancelSelectedG1,
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                ],
+              ),
+            if (controller.selectedSurfaceForQuality != null) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'Independent analysis',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              for (final kind in ProfessionalAnalysisKind.values)
+                Builder(
+                  builder: (context) {
+                    final setting = controller.selectedSurfaceAnalysisSettings
+                        .where((item) => item.kind == kind)
+                        .firstOrNull;
+                    final enabled = setting?.enabled ?? false;
+                    final intensity = setting?.intensity ?? 0.7;
+                    return Column(
+                      children: [
+                        CheckboxListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(switch (kind) {
+                            ProfessionalAnalysisKind.zebra => 'Zebra',
+                            ProfessionalAnalysisKind.reflection => 'Reflection',
+                            ProfessionalAnalysisKind.curvature => 'Curvature',
+                          }),
+                          value: enabled,
+                          onChanged: controller.busy
+                              ? null
+                              : (value) => controller.setSurfaceQualityAnalysis(
+                                  kind,
+                                  enabled: value ?? false,
+                                  intensity: intensity,
+                                ),
+                        ),
+                        if (enabled)
+                          Slider(
+                            value: intensity,
+                            min: 0,
+                            max: 1,
+                            divisions: 20,
+                            label: intensity.toStringAsFixed(2),
+                            onChanged: controller.busy
+                                ? null
+                                : (value) =>
+                                      controller.setSurfaceQualityAnalysis(
+                                        kind,
+                                        enabled: true,
+                                        intensity: value,
+                                      ),
+                          ),
+                      ],
+                    );
+                  },
+                ),
+            ] else ...[
+              const SizedBox(height: 8),
+              const Text(
+                'Independent analysis',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: const [
+                  OutlinedButton(onPressed: null, child: Text('Zebra')),
+                  OutlinedButton(onPressed: null, child: Text('Reflection')),
+                  OutlinedButton(onPressed: null, child: Text('Curvature')),
+                ],
+              ),
+              const Text(
+                'Select one Surface to enable the quality analyses.',
+                style: TextStyle(fontSize: 11),
+              ),
+            ],
           ],
         ],
         ...[
           const Divider(),
-          const ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(Icons.auto_awesome_motion),
-            title: Text('Professional Surface'),
-            subtitle: Text('Loft · Sweep · Blend · Offset'),
-          ),
-          Text(
-            '${controller.geometrySelection.shapeHandles.length} kernel shape(s) · ${controller.activeSketch == null ? 0 : 1} active Sketch',
-          ),
-          const Text('Create', style: TextStyle(fontWeight: FontWeight.w600)),
-          Wrap(
-            spacing: 6,
-            runSpacing: 6,
-            children: [
-              for (final tool in const [
-                ProfessionalSurfaceTool.loft,
-                ProfessionalSurfaceTool.sweep,
-                ProfessionalSurfaceTool.fill,
-                ProfessionalSurfaceTool.patch,
-                ProfessionalSurfaceTool.blend,
-                ProfessionalSurfaceTool.fillet,
-                ProfessionalSurfaceTool.sew,
-              ])
-                OutlinedButton.icon(
-                  icon: Icon(switch (tool) {
-                    ProfessionalSurfaceTool.loft => Icons.view_in_ar,
-                    ProfessionalSurfaceTool.sweep => Icons.route,
-                    ProfessionalSurfaceTool.fill => Icons.format_color_fill,
-                    ProfessionalSurfaceTool.patch => Icons.grid_4x4,
-                    ProfessionalSurfaceTool.blend => Icons.rounded_corner,
-                    ProfessionalSurfaceTool.fillet => Icons.blur_circular,
-                    ProfessionalSurfaceTool.sew => Icons.hub_outlined,
-                    _ => Icons.layers,
-                  }),
-                  onPressed: controller.busy
-                      ? null
-                      : () {
-                          if (tool == ProfessionalSurfaceTool.loft ||
-                              tool == ProfessionalSurfaceTool.sweep ||
-                              tool == ProfessionalSurfaceTool.blend ||
-                              tool == ProfessionalSurfaceTool.fill ||
-                              tool == ProfessionalSurfaceTool.fillet ||
-                              tool == ProfessionalSurfaceTool.sew) {
-                            _openGuidedSurfaceCommand(tool);
-                            return;
-                          }
-                          controller.previewProfessionalSurface(tool);
-                        },
-                  label: Text(
-                    tool.name[0].toUpperCase() + tool.name.substring(1),
+          if (!_dedicatedSurfaceCommand) ...[
+            const ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.auto_awesome_motion),
+              title: Text('Professional Surface'),
+              subtitle: Text('Loft · Sweep · Blend · Offset'),
+            ),
+            Text(
+              '${controller.geometrySelection.shapeHandles.length} kernel shape(s) · ${controller.activeSketch == null ? 0 : 1} active Sketch',
+            ),
+            const Text('Create', style: TextStyle(fontWeight: FontWeight.w600)),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final tool in const [
+                  ProfessionalSurfaceTool.loft,
+                  ProfessionalSurfaceTool.sweep,
+                  ProfessionalSurfaceTool.fill,
+                  ProfessionalSurfaceTool.patch,
+                  ProfessionalSurfaceTool.blend,
+                  ProfessionalSurfaceTool.fillet,
+                  ProfessionalSurfaceTool.sew,
+                ])
+                  OutlinedButton.icon(
+                    icon: Icon(switch (tool) {
+                      ProfessionalSurfaceTool.loft => Icons.view_in_ar,
+                      ProfessionalSurfaceTool.sweep => Icons.route,
+                      ProfessionalSurfaceTool.fill => Icons.format_color_fill,
+                      ProfessionalSurfaceTool.patch => Icons.grid_4x4,
+                      ProfessionalSurfaceTool.blend => Icons.rounded_corner,
+                      ProfessionalSurfaceTool.fillet => Icons.blur_circular,
+                      ProfessionalSurfaceTool.sew => Icons.hub_outlined,
+                      _ => Icons.layers,
+                    }),
+                    onPressed: controller.busy
+                        ? null
+                        : () {
+                            if (tool == ProfessionalSurfaceTool.loft ||
+                                tool == ProfessionalSurfaceTool.sweep ||
+                                tool == ProfessionalSurfaceTool.blend ||
+                                tool == ProfessionalSurfaceTool.fill ||
+                                tool == ProfessionalSurfaceTool.fillet ||
+                                tool == ProfessionalSurfaceTool.sew) {
+                              _openGuidedSurfaceCommand(tool);
+                              return;
+                            }
+                            controller.previewProfessionalSurface(tool);
+                          },
+                    label: Text(
+                      tool.name[0].toUpperCase() + tool.name.substring(1),
+                    ),
                   ),
-                ),
-            ],
-          ),
+              ],
+            ),
+          ] else
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.auto_awesome_motion),
+              title: Text(
+                '${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name[0].toUpperCase()}${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name.substring(1)} Surface',
+              ),
+              subtitle: const Text('Dedicated command editor'),
+            ),
           const SizedBox(height: 8),
-          if (controller.selectedSewBody != null) ...[
+          if (guidedSurfaceTool == ProfessionalSurfaceTool.sew &&
+              controller.selectedSewBody != null) ...[
             Row(
               children: [
                 Expanded(
@@ -656,35 +689,40 @@ class _SketchSurfaceWorkspacePanelState
             ),
             const SizedBox(height: 8),
           ],
-          const Text(
-            'Surface Operations',
-            style: TextStyle(fontWeight: FontWeight.w600),
-          ),
-          TextFormField(
-            initialValue: categoryBValue.toStringAsFixed(2),
-            decoration: const InputDecoration(
-              isDense: true,
-              labelText: 'Offset distance',
-              suffixText: 'mm',
+          if (!_dedicatedSurfaceCommand ||
+              guidedSurfaceTool == ProfessionalSurfaceTool.offset) ...[
+            const Text(
+              'Surface Operations',
+              style: TextStyle(fontWeight: FontWeight.w600),
             ),
-            keyboardType: const TextInputType.numberWithOptions(
-              decimal: true,
-              signed: true,
+            TextFormField(
+              initialValue: categoryBValue.toStringAsFixed(2),
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: 'Offset distance',
+                suffixText: 'mm',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                decimal: true,
+                signed: true,
+              ),
+              onChanged: (value) {
+                final parsed = double.tryParse(value.replaceAll(',', '.'));
+                if (parsed != null) setState(() => categoryBValue = parsed);
+              },
             ),
-            onChanged: (value) {
-              final parsed = double.tryParse(value.replaceAll(',', '.'));
-              if (parsed != null) setState(() => categoryBValue = parsed);
-            },
-          ),
+          ],
           const SizedBox(height: 6),
-          OutlinedButton.icon(
-            onPressed: controller.busy
-                ? null
-                : () =>
-                      _openGuidedSurfaceCommand(ProfessionalSurfaceTool.offset),
-            icon: const Icon(Icons.layers_outlined),
-            label: const Text('Offset'),
-          ),
+          if (!_dedicatedSurfaceCommand)
+            OutlinedButton.icon(
+              onPressed: controller.busy
+                  ? null
+                  : () => _openGuidedSurfaceCommand(
+                      ProfessionalSurfaceTool.offset,
+                    ),
+              icon: const Icon(Icons.layers_outlined),
+              label: const Text('Offset'),
+            ),
           if (guidedSurfaceTool != null &&
               controller.professionalSurfacePreview == null &&
               !controller.surfaceOffsetPreviewActive)
@@ -999,7 +1037,7 @@ class _SketchSurfaceWorkspacePanelState
                         ? null
                         : () async {
                             await controller.confirmSurfaceOffset();
-                            if (mounted) {
+                            if (mounted && !_dedicatedSurfaceCommand) {
                               setState(() => guidedSurfaceTool = null);
                             }
                           },
@@ -1018,7 +1056,8 @@ class _SketchSurfaceWorkspacePanelState
             controller.professionalSurfaceSelectionGuidance,
             style: const TextStyle(fontSize: 11),
           ),
-          if (controller.selectedProfessionalSurface != null) ...[
+          if (!_dedicatedSurfaceCommand &&
+              controller.selectedProfessionalSurface != null) ...[
             const SizedBox(height: 10),
             const Text('Edit', style: TextStyle(fontWeight: FontWeight.w600)),
             Wrap(
@@ -1511,7 +1550,7 @@ class _SketchSurfaceWorkspacePanelState
                       ? null
                       : () async {
                           await controller.confirmProfessionalSurface();
-                          if (mounted) {
+                          if (mounted && !_dedicatedSurfaceCommand) {
                             setState(() => guidedSurfaceTool = null);
                           }
                         },

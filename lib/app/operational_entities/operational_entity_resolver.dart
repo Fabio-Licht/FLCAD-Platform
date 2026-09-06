@@ -58,29 +58,52 @@ class OperationalEntityResolver {
         triangleIndices: region.triangleIndices,
       );
     }
-    final type = switch (source.kind) {
-      CadSceneEntityKind.surface => OperationalEntityType.surface,
-      CadSceneEntityKind.curve => OperationalEntityType.curve,
-      CadSceneEntityKind.sketch => OperationalEntityType.sketchEntity,
-      CadSceneEntityKind.point => OperationalEntityType.topologicalVertex,
-      _ => OperationalEntityType.cadFace,
+    final selectedSource = _topologySource(raw, source, scene) ?? source;
+    final type = switch (raw.kind) {
+      NativePickKind.edge => OperationalEntityType.topologicalEdge,
+      NativePickKind.vertex => OperationalEntityType.topologicalVertex,
+      NativePickKind.face => OperationalEntityType.cadFace,
+      _ => switch (selectedSource.kind) {
+        CadSceneEntityKind.surface => OperationalEntityType.surface,
+        CadSceneEntityKind.curve => OperationalEntityType.curve,
+        CadSceneEntityKind.sketch => OperationalEntityType.sketchEntity,
+        CadSceneEntityKind.point => OperationalEntityType.topologicalVertex,
+        _ => OperationalEntityType.cadFace,
+      },
     };
     final entity = OperationalEntity(
-      id: 'operational:${source.id}',
+      id: 'operational:${selectedSource.id}',
       type: type,
-      ownerId: source.id,
+      ownerId: selectedSource.id,
       ownerDomain: type.name,
-      documentId: source.id,
+      documentId: selectedSource.id,
       revision: 1,
-      label: source.id,
+      label: selectedSource.id,
       capabilities: const {
         OperationalCapability.selectable,
         OperationalCapability.inspectable,
       },
-      properties: {'sceneEntityId': source.id, 'type': type.name},
+      properties: {'sceneEntityId': selectedSource.id, 'type': type.name},
     );
-    registry.replaceOwner(source.id, [entity]);
+    registry.replaceOwner(selectedSource.id, [entity]);
     return OperationalResolution(entity: entity, triangleIndices: const []);
+  }
+
+  CadSceneEntity? _topologySource(
+    NativeViewportPick raw,
+    CadSceneEntity owner,
+    CadSceneGraph scene,
+  ) {
+    final indexKey = switch (raw.kind) {
+      NativePickKind.edge => 'surfaceEdgeIndex',
+      NativePickKind.vertex => 'surfaceVertexIndex',
+      _ => null,
+    };
+    if (indexKey == null) return null;
+    return scene.entities.where((candidate) {
+      return candidate.geometry['parentSurfaceId'] == owner.id &&
+          candidate.geometry[indexKey] == raw.subId;
+    }).firstOrNull;
   }
 
   Future<_MeshResolution?> _segment(CadSceneEntity source) async {

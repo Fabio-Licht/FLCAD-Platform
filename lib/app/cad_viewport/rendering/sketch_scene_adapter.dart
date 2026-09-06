@@ -21,6 +21,7 @@ class SketchSceneAdapter {
           .map((point) => point.toJson())
           .toList(),
       'entityType': entity.type.name,
+      'showEndpoints': entity is SketchLine || entity is SketchArc,
       'displayColor': preview
           ? 'previewOrange'
           : entity is SketchSpline

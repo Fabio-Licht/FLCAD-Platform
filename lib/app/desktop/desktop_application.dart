@@ -37,11 +37,17 @@ import '../engineering_bridge/selection/geometry_selection_manager.dart';
 import '../engineering_bridge/widgets/recognition_workspace_panel.dart';
 import '../engineering_bridge/widgets/reverse_engineering_studio_panel.dart';
 import '../engineering_bridge/widgets/sketch_surface_workspace_panel.dart';
+import '../entities/entity_point_service.dart';
+import '../entities/entity_plane_service.dart';
+import '../entities/entity_vector_service.dart';
+import '../entities/entity_curve_service.dart';
+import '../entities/entity_primitive_surface_service.dart';
 import '../modeling/modeling.dart';
 import '../modeling/entity_edit_contract.dart';
 import '../navigation/cad_camera_navigation_adapter.dart';
 import '../navigation/navigation_engine.dart';
 import '../operational_entities/operational_entity.dart';
+import '../runtime/cad_runtime.dart';
 import 'desktop_asset_manager.dart';
 import 'desktop_cad_controller.dart';
 import 'desktop_settings.dart';
@@ -877,6 +883,9 @@ class OfficialEngineeringWorkspace extends StatefulWidget {
 class _OfficialEngineeringWorkspaceState
     extends State<OfficialEngineeringWorkspace> {
   String module = 'AI Engineering';
+  ProfessionalSurfaceTool? toolbarSurfaceTool;
+  int toolbarEntityConstructor = 0;
+  PrimitiveSurfaceType? toolbarPrimitiveType;
   final Set<String> openToolWindows = <String>{};
   final modelingViewport = ModelingViewportController();
   CadSceneGraph get scene => widget.cad.runtime.scene;
@@ -906,6 +915,7 @@ class _OfficialEngineeringWorkspaceState
     'AI Engineering',
     'Recognition',
     'Reference',
+    'Entidades',
     'Sketch',
     'Curves',
     'Surfaces',
@@ -2271,6 +2281,42 @@ class _OfficialEngineeringWorkspaceState
     operational.cancelSketchCommand();
     await operational.finishSketch();
     camera.exitSketch();
+    await operational.refreshSketchSceneAfterExit();
+    final sketch = operational.activeSketch;
+    if (sketch != null) {
+      final points = <Vector3>[];
+      for (final id in sketch.entityIds) {
+        final geometry = widget.cad.runtime.scene.find(id)?.geometry['points'];
+        if (geometry is! List) continue;
+        for (final raw in geometry.whereType<List>()) {
+          if (raw.length >= 3) {
+            points.add(
+              Vector3(
+                (raw[0] as num).toDouble(),
+                (raw[1] as num).toDouble(),
+                (raw[2] as num).toDouble(),
+              ),
+            );
+          }
+        }
+      }
+      if (points.isNotEmpty) {
+        var minimum = points.first, maximum = points.first;
+        for (final point in points.skip(1)) {
+          minimum = Vector3(
+            math.min(minimum.x, point.x),
+            math.min(minimum.y, point.y),
+            math.min(minimum.z, point.z),
+          );
+          maximum = Vector3(
+            math.max(maximum.x, point.x),
+            math.max(maximum.y, point.y),
+            math.max(maximum.z, point.z),
+          );
+        }
+        camera.fit(minimum, maximum);
+      }
+    }
   }
 
   void _focusSketchHealthIssue(SketchHealthIssue issue) {
@@ -3352,6 +3398,13 @@ class _OfficialEngineeringWorkspaceState
     final entities =
         widget.cad.runtime.document?.entities.values.toList() ?? [];
     final groups = <String, List<CadDocumentEntity>>{
+      'Entidades': entities
+          .where(
+            (entity) =>
+                entity.data['constructionEntity'] is Map &&
+                entity.data['deleted'] != true,
+          )
+          .toList(),
       'Meshes': entities
           .where(
             (entity) =>
@@ -3363,6 +3416,7 @@ class _OfficialEngineeringWorkspaceState
           .where(
             (entity) =>
                 entity.kind == CadDocumentEntityKind.reference &&
+                entity.data['constructionEntity'] is! Map &&
                 entity.data['deleted'] != true,
           )
           .toList(),
@@ -3378,6 +3432,7 @@ class _OfficialEngineeringWorkspaceState
           .where(
             (entity) =>
                 entity.kind == CadDocumentEntityKind.curve &&
+                entity.data['constructionEntity'] is! Map &&
                 entity.data['deleted'] != true,
           )
           .toList(),
@@ -3974,6 +4029,18 @@ class _OfficialEngineeringWorkspaceState
       description: 'Project construction references.',
       capabilities: ['Point', 'Axis', 'Plane', 'Coordinate System'],
     ),
+    'Entidades' => _EntitiesHubPanel(
+      key: ValueKey(
+        'entity-tool-$toolbarEntityConstructor-${toolbarPrimitiveType?.name ?? 'default'}',
+      ),
+      runtime: widget.cad.runtime,
+      onStatus: widget.cad.setStatus,
+      initialConstructor: toolbarEntityConstructor,
+      initialPrimitiveType: toolbarPrimitiveType,
+      pickedSourceId: operational.activePick?.entityId,
+      pickedPoint: operational.activePick?.hit.point,
+      pickedTriangleIndex: operational.activePick?.hit.triangleIndex,
+    ),
     'Sketch'
         when operational.activeSketch != null &&
             operational.stage != SketchSurfaceStage.idle &&
@@ -3995,7 +4062,9 @@ class _OfficialEngineeringWorkspaceState
       capabilities: ['Splines', 'Projected', 'Extracted', 'Intersection'],
     ),
     'Surfaces' => SketchSurfaceWorkspacePanel(
+      key: ValueKey('surface-tool-${toolbarSurfaceTool?.name ?? 'home'}'),
       controller: operational,
+      initialSurfaceTool: toolbarSurfaceTool,
       onOpenSketch: () async => _beginDirectSketchSupportSelection(),
       onFinishSketch: _finishSketch,
     ),
@@ -4004,6 +4073,149 @@ class _OfficialEngineeringWorkspaceState
     'Transform' => _transformTools(),
     _ => null,
   };
+
+  Widget _surfaceToolbarMenu() => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 3),
+    child: PopupMenuButton<ProfessionalSurfaceTool>(
+      tooltip: 'Surface commands',
+      position: PopupMenuPosition.under,
+      onSelected: (tool) async {
+        setState(() {
+          toolbarSurfaceTool = tool;
+          module = 'Surfaces';
+          openToolWindows.add('Surfaces');
+        });
+        try {
+          await widget.commands.dispatch('workspace.surfaces');
+        } catch (_) {
+          widget.cad.setStatus('${tool.name} Surface aberto.');
+        }
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(enabled: false, child: Text('Create Surface')),
+        for (final tool in const [
+          ProfessionalSurfaceTool.loft,
+          ProfessionalSurfaceTool.sweep,
+          ProfessionalSurfaceTool.fill,
+          ProfessionalSurfaceTool.patch,
+          ProfessionalSurfaceTool.blend,
+          ProfessionalSurfaceTool.fillet,
+          ProfessionalSurfaceTool.sew,
+        ])
+          PopupMenuItem(
+            value: tool,
+            child: ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(switch (tool) {
+                ProfessionalSurfaceTool.loft => Icons.view_in_ar,
+                ProfessionalSurfaceTool.sweep => Icons.route,
+                ProfessionalSurfaceTool.fill => Icons.format_color_fill,
+                ProfessionalSurfaceTool.patch => Icons.grid_4x4,
+                ProfessionalSurfaceTool.blend => Icons.rounded_corner,
+                ProfessionalSurfaceTool.fillet => Icons.blur_circular,
+                ProfessionalSurfaceTool.sew => Icons.hub_outlined,
+                _ => Icons.layers,
+              }),
+              title: Text(tool.name[0].toUpperCase() + tool.name.substring(1)),
+            ),
+          ),
+        const PopupMenuDivider(),
+        const PopupMenuItem(
+          value: ProfessionalSurfaceTool.offset,
+          child: ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(Icons.layers_outlined),
+            title: Text('Offset'),
+          ),
+        ),
+      ],
+      child: Chip(
+        avatar: module == 'Surfaces'
+            ? const Icon(Icons.check, size: 16)
+            : const Icon(Icons.layers_outlined, size: 16),
+        label: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Surfaces'),
+            SizedBox(width: 4),
+            Icon(Icons.arrow_drop_down),
+          ],
+        ),
+        backgroundColor: module == 'Surfaces'
+            ? Theme.of(context).colorScheme.secondaryContainer
+            : null,
+      ),
+    ),
+  );
+
+  Future<void> _openEntityTool(
+    int constructor, {
+    PrimitiveSurfaceType? primitive,
+  }) async {
+    setState(() {
+      toolbarEntityConstructor = constructor;
+      toolbarPrimitiveType = primitive;
+      module = 'Entidades';
+      openToolWindows.add('Entidades');
+    });
+    try {
+      await widget.commands.dispatch('workspace.entidades');
+    } catch (_) {
+      widget.cad.setStatus('Geometria de Referência aberta.');
+    }
+  }
+
+  Widget _entityToolbarMenu() => Padding(
+    padding: const EdgeInsets.symmetric(horizontal: 3),
+    child: PopupMenuButton<Object>(
+      tooltip: 'Geometria de Referência',
+      position: PopupMenuPosition.under,
+      onSelected: (value) {
+        if (value is int) _openEntityTool(value);
+        if (value is PrimitiveSurfaceType) {
+          _openEntityTool(4, primitive: value);
+        }
+      },
+      itemBuilder: (context) => const [
+        PopupMenuItem(enabled: false, child: Text('Geometria de Referência')),
+        PopupMenuItem(value: 0, child: Text('📍  Ponto')),
+        PopupMenuItem(value: 1, child: Text('▱  Plano')),
+        PopupMenuItem(value: 2, child: Text('↗  Vetor')),
+        PopupMenuItem(value: 3, child: Text('⌁  Curva')),
+        PopupMenuDivider(),
+        PopupMenuItem(enabled: false, child: Text('Superfícies primitivas')),
+        PopupMenuItem(value: PrimitiveSurfaceType.plane, child: Text('Plano')),
+        PopupMenuItem(
+          value: PrimitiveSurfaceType.cylinder,
+          child: Text('Cilindro'),
+        ),
+        PopupMenuItem(value: PrimitiveSurfaceType.cone, child: Text('Cone')),
+        PopupMenuItem(
+          value: PrimitiveSurfaceType.sphere,
+          child: Text('Esfera'),
+        ),
+        PopupMenuItem(value: PrimitiveSurfaceType.torus, child: Text('Toro')),
+      ],
+      child: Chip(
+        avatar: module == 'Entidades'
+            ? const Icon(Icons.check, size: 16)
+            : const Icon(Icons.architecture_outlined, size: 16),
+        label: const Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Geometria'),
+            SizedBox(width: 4),
+            Icon(Icons.arrow_drop_down),
+          ],
+        ),
+        backgroundColor: module == 'Entidades'
+            ? Theme.of(context).colorScheme.secondaryContainer
+            : null,
+      ),
+    ),
+  );
 
   @override
   Widget build(BuildContext context) => CallbackShortcuts(
@@ -4086,54 +4298,69 @@ class _OfficialEngineeringWorkspaceState
                 padding: const EdgeInsets.symmetric(horizontal: 12),
                 children: [
                   for (final item in modules)
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 3),
-                      child: ChoiceChip(
-                        avatar: item == 'AI Engineering'
-                            ? const Icon(Icons.psychology_outlined, size: 16)
-                            : item == 'Reverse Engineering'
-                            ? const Icon(Icons.account_tree_outlined, size: 16)
-                            : null,
-                        label: Text(
-                          item,
-                          style: TextStyle(
-                            fontWeight: item == 'AI Engineering'
-                                ? FontWeight.w600
-                                : FontWeight.w500,
+                    if (item == 'Surfaces')
+                      _surfaceToolbarMenu()
+                    else if (item == 'Entidades')
+                      _entityToolbarMenu()
+                    else
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 3),
+                        child: ChoiceChip(
+                          avatar: item == 'AI Engineering'
+                              ? const Icon(Icons.psychology_outlined, size: 16)
+                              : item == 'Reverse Engineering'
+                              ? const Icon(
+                                  Icons.account_tree_outlined,
+                                  size: 16,
+                                )
+                              : null,
+                          label: Text(
+                            item,
+                            style: TextStyle(
+                              fontWeight: item == 'AI Engineering'
+                                  ? FontWeight.w600
+                                  : FontWeight.w500,
+                            ),
                           ),
-                        ),
-                        selected: module == item,
-                        onSelected: (_) async {
-                          if (item == 'Sketch') {
-                            if (operational.stage ==
-                                SketchSurfaceStage.sketchActive) {
-                              if (mounted) {
-                                setState(() {
-                                  module = 'Sketch';
-                                  choosingSketchSupport = false;
-                                  openToolWindows.add('Sketch');
-                                });
+                          selected: module == item,
+                          onSelected: (_) async {
+                            if (item == 'Sketch') {
+                              if (operational.stage ==
+                                  SketchSurfaceStage.sketchActive) {
+                                if (mounted) {
+                                  setState(() {
+                                    module = 'Sketch';
+                                    choosingSketchSupport = false;
+                                    openToolWindows.add('Sketch');
+                                  });
+                                }
+                              } else {
+                                _beginDirectSketchSupportSelection();
                               }
-                            } else {
-                              _beginDirectSketchSupportSelection();
                             }
-                          }
-                          await widget.commands.dispatch(
-                            'workspace.${item.toLowerCase().replaceAll(' ', '_')}',
-                          );
-                          if (item != 'Sketch' && mounted) {
+                            if (item != 'Sketch' && mounted) {
+                              setState(() {
+                                module = item;
+                                openToolWindows.add(item);
+                              });
+                            }
+                            try {
+                              await widget.commands.dispatch(
+                                'workspace.${item.toLowerCase().replaceAll(' ', '_')}',
+                              );
+                            } catch (error) {
+                              // A workspace panel is a local UI surface and must
+                              // still open when no coordinator command is
+                              // registered for that module yet.
+                              widget.cad.setStatus('$item aberto.');
+                            }
                             if (item == 'Reverse Engineering') {
                               await operational
                                   .persistReverseEngineeringStudioState();
                             }
-                            setState(() {
-                              module = item;
-                              openToolWindows.add(item);
-                            });
-                          }
-                        },
+                          },
+                        ),
                       ),
-                    ),
                 ],
               ),
             ),
@@ -4291,6 +4518,50 @@ class _OfficialEngineeringWorkspaceState
                                               camera,
                                             )
                                       : null,
+                                  onSketchEntityDragStart:
+                                      module == 'Sketch' &&
+                                          operational.stage ==
+                                              SketchSurfaceStage.sketchActive &&
+                                          !operational
+                                              .sketchCreationCommandActive &&
+                                          !operational
+                                              .sketchEditingCommandActive
+                                      ? (pick, position) {
+                                          operational.beginSketchEntityDrag(
+                                            pick,
+                                            position,
+                                            camera,
+                                          );
+                                        }
+                                      : null,
+                                  onSketchEntityDragUpdate: module == 'Sketch'
+                                      ? (position) =>
+                                            operational.updateSketchEntityDrag(
+                                              position,
+                                              camera,
+                                            )
+                                      : null,
+                                  onSketchEntityDragEnd: module == 'Sketch'
+                                      ? (position) async {
+                                          try {
+                                            await operational
+                                                .finishSketchEntityDrag(
+                                                  position,
+                                                  camera,
+                                                );
+                                            widget.cad.setStatus(
+                                              'Sketch line moved · Undo is available.',
+                                            );
+                                          } catch (error) {
+                                            widget.cad.setStatus(
+                                              error.toString().replaceFirst(
+                                                'Bad state: ',
+                                                '',
+                                              ),
+                                            );
+                                          }
+                                        }
+                                      : null,
                                   onPick: widget.cad.document == null
                                       ? null
                                       : (pick) async {
@@ -4309,6 +4580,15 @@ class _OfficialEngineeringWorkspaceState
                                               .runtime
                                               .document
                                               ?.entities[pick.entityId];
+                                          if (module == 'Solids' &&
+                                              operational
+                                                  .selectExtrudeSourceFromViewport(
+                                                    pick.entityId,
+                                                  )) {
+                                            widget.cad.setStatus(
+                                              'Perfil do Extrude selecionado na área de trabalho.',
+                                            );
+                                          }
                                           if (picked?.mesh != null) {
                                             await operational.recognizePick(
                                               pick: pick,
@@ -5257,6 +5537,1349 @@ class _SketchEntryWorkspace extends StatelessWidget {
   );
 }
 
+class _EntitiesHubPanel extends StatefulWidget {
+  const _EntitiesHubPanel({
+    super.key,
+    required this.runtime,
+    required this.onStatus,
+    this.initialConstructor = 0,
+    this.initialPrimitiveType,
+    this.pickedSourceId,
+    this.pickedPoint,
+    this.pickedTriangleIndex,
+  });
+
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final int initialConstructor;
+  final PrimitiveSurfaceType? initialPrimitiveType;
+  final String? pickedSourceId;
+  final Vector3? pickedPoint;
+  final int? pickedTriangleIndex;
+
+  @override
+  State<_EntitiesHubPanel> createState() => _EntitiesHubPanelState();
+}
+
+class _EntitiesHubPanelState extends State<_EntitiesHubPanel> {
+  late int constructor;
+
+  @override
+  void initState() {
+    super.initState();
+    constructor = widget.initialConstructor;
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(
+              value: 0,
+              icon: Icon(Icons.add_location_alt_outlined),
+              label: Text('Pontos'),
+            ),
+            ButtonSegment(
+              value: 1,
+              icon: Icon(Icons.layers_outlined),
+              label: Text('Planos'),
+            ),
+            ButtonSegment(
+              value: 2,
+              icon: Icon(Icons.arrow_outward),
+              label: Text('Vetores'),
+            ),
+            ButtonSegment(
+              value: 3,
+              icon: Icon(Icons.gesture),
+              label: Text('Curvas'),
+            ),
+            ButtonSegment(
+              value: 4,
+              icon: Icon(Icons.blur_on_outlined),
+              label: Text('Superfícies'),
+            ),
+          ],
+          selected: {constructor},
+          onSelectionChanged: (value) =>
+              setState(() => constructor = value.first),
+        ),
+      ),
+      const SizedBox(height: 12),
+      Expanded(
+        child: constructor == 1
+            ? _EntityPlanePanel(
+                runtime: widget.runtime,
+                onStatus: widget.onStatus,
+                pickedSourceId: widget.pickedSourceId,
+                pickedPoint: widget.pickedPoint,
+                pickedTriangleIndex: widget.pickedTriangleIndex,
+              )
+            : constructor == 2
+            ? _EntityVectorPanel(
+                runtime: widget.runtime,
+                onStatus: widget.onStatus,
+                pickedSourceId: widget.pickedSourceId,
+                pickedPoint: widget.pickedPoint,
+                pickedTriangleIndex: widget.pickedTriangleIndex,
+              )
+            : constructor == 3
+            ? _EntityCurvePanel(
+                runtime: widget.runtime,
+                onStatus: widget.onStatus,
+                pickedSourceId: widget.pickedSourceId,
+                pickedPoint: widget.pickedPoint,
+              )
+            : constructor == 4
+            ? _EntityPrimitiveSurfacePanel(
+                runtime: widget.runtime,
+                onStatus: widget.onStatus,
+                initialType: widget.initialPrimitiveType,
+              )
+            : _EntitiesWorkspacePanel(
+                runtime: widget.runtime,
+                onStatus: widget.onStatus,
+                pickedSourceId: widget.pickedSourceId,
+                pickedPoint: widget.pickedPoint,
+              ),
+      ),
+    ],
+  );
+}
+
+class _EntityPrimitiveSurfacePanel extends StatefulWidget {
+  const _EntityPrimitiveSurfacePanel({
+    required this.runtime,
+    required this.onStatus,
+    this.initialType,
+  });
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final PrimitiveSurfaceType? initialType;
+  @override
+  State<_EntityPrimitiveSurfacePanel> createState() =>
+      _EntityPrimitiveSurfacePanelState();
+}
+
+class _EntityPrimitiveSurfacePanelState
+    extends State<_EntityPrimitiveSurfacePanel> {
+  late PrimitiveSurfaceType type;
+  final ox = TextEditingController(text: '0'),
+      oy = TextEditingController(text: '0'),
+      oz = TextEditingController(text: '0');
+  final dx = TextEditingController(text: '0'),
+      dy = TextEditingController(text: '0'),
+      dz = TextEditingController(text: '1');
+  final radius = TextEditingController(text: '10');
+  final majorRadius = TextEditingController(text: '20'),
+      minorRadius = TextEditingController(text: '5');
+  final height = TextEditingController(text: '20'),
+      angle = TextEditingController(text: '30');
+  final planeSize = TextEditingController(text: '100');
+  final latitudeStart = TextEditingController(text: '-90'),
+      latitudeEnd = TextEditingController(text: '90');
+  bool busy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    type = widget.initialType ?? PrimitiveSurfaceType.plane;
+  }
+
+  double _number(TextEditingController controller, String label) {
+    final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+    if (value == null || !value.isFinite) {
+      throw FormatException('$label deve ser um número válido.');
+    }
+    return value;
+  }
+
+  Future<void> _create() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      await EntityPrimitiveSurfaceService(widget.runtime).create(
+        type: type,
+        origin: Vector3(
+          _number(ox, 'Origem X'),
+          _number(oy, 'Origem Y'),
+          _number(oz, 'Origem Z'),
+        ),
+        direction: Vector3(
+          _number(dx, 'Direção X'),
+          _number(dy, 'Direção Y'),
+          _number(dz, 'Direção Z'),
+        ),
+        radius: _number(radius, 'Raio'),
+        majorRadius: _number(majorRadius, 'Raio maior'),
+        minorRadius: _number(minorRadius, 'Raio menor'),
+        height: _number(height, 'Altura'),
+        semiAngleDegrees: _number(angle, 'Semiângulo'),
+        planeSize: _number(planeSize, 'Tamanho'),
+        sphereLatitudeStartDegrees: _number(latitudeStart, 'Latitude inicial'),
+        sphereLatitudeEndDegrees: _number(latitudeEnd, 'Latitude final'),
+      );
+      widget.onStatus(
+        'Superfície ${type.name} criada diretamente pelo kernel, sem malha de origem.',
+      );
+    } catch (error) {
+      widget.onStatus(
+        error
+            .toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('FormatException: ', ''),
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final c in [
+      ox,
+      oy,
+      oz,
+      dx,
+      dy,
+      dz,
+      radius,
+      majorRadius,
+      minorRadius,
+      height,
+      angle,
+      planeSize,
+      latitudeStart,
+      latitudeEnd,
+    ]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => SingleChildScrollView(
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'Entidades · Superfícies primitivas',
+          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+        ),
+        const SizedBox(height: 5),
+        const Text(
+          'Criação analítica manual pelo kernel CAD. Nenhuma malha ou reconhecimento é necessário.',
+          style: TextStyle(fontSize: 10),
+        ),
+        const SizedBox(height: 10),
+        DropdownButtonFormField<PrimitiveSurfaceType>(
+          initialValue: type,
+          decoration: const InputDecoration(
+            labelText: 'Primitiva',
+            border: OutlineInputBorder(),
+            isDense: true,
+          ),
+          items: const [
+            DropdownMenuItem(
+              value: PrimitiveSurfaceType.plane,
+              child: Text('Plano'),
+            ),
+            DropdownMenuItem(
+              value: PrimitiveSurfaceType.cylinder,
+              child: Text('Cilindro'),
+            ),
+            DropdownMenuItem(
+              value: PrimitiveSurfaceType.cone,
+              child: Text('Cone'),
+            ),
+            DropdownMenuItem(
+              value: PrimitiveSurfaceType.sphere,
+              child: Text('Esfera'),
+            ),
+            DropdownMenuItem(
+              value: PrimitiveSurfaceType.torus,
+              child: Text('Toro'),
+            ),
+          ],
+          onChanged: busy ? null : (value) => setState(() => type = value!),
+        ),
+        const SizedBox(height: 9),
+        _vectorFields('Origem / centro / ápice', [
+          ('X', ox),
+          ('Y', oy),
+          ('Z', oz),
+        ]),
+        if (type != PrimitiveSurfaceType.sphere) ...[
+          const SizedBox(height: 7),
+          _vectorFields(
+            type == PrimitiveSurfaceType.plane ? 'Normal' : 'Direção do eixo',
+            [('DX', dx), ('DY', dy), ('DZ', dz)],
+          ),
+        ],
+        const SizedBox(height: 8),
+        if (type == PrimitiveSurfaceType.plane)
+          _field(planeSize, 'Tamanho do plano'),
+        if ({
+          PrimitiveSurfaceType.cylinder,
+          PrimitiveSurfaceType.sphere,
+        }.contains(type))
+          _field(radius, 'Raio'),
+        if ({
+          PrimitiveSurfaceType.cylinder,
+          PrimitiveSurfaceType.cone,
+        }.contains(type)) ...[
+          const SizedBox(height: 7),
+          _field(height, 'Altura'),
+        ],
+        if (type == PrimitiveSurfaceType.cone) ...[
+          const SizedBox(height: 7),
+          _field(angle, 'Semiângulo (graus)'),
+        ],
+        if (type == PrimitiveSurfaceType.sphere) ...[
+          const SizedBox(height: 7),
+          Row(
+            children: [
+              Expanded(child: _field(latitudeStart, 'Latitude inicial')),
+              const SizedBox(width: 5),
+              Expanded(child: _field(latitudeEnd, 'Latitude final')),
+            ],
+          ),
+        ],
+        if (type == PrimitiveSurfaceType.torus) ...[
+          Row(
+            children: [
+              Expanded(child: _field(majorRadius, 'Raio maior')),
+              const SizedBox(width: 5),
+              Expanded(child: _field(minorRadius, 'Raio menor')),
+            ],
+          ),
+        ],
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          onPressed: busy ? null : _create,
+          icon: busy
+              ? const SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.blur_on_outlined, size: 18),
+          label: const Text('Criar superfície'),
+        ),
+        const SizedBox(height: 7),
+        const Text(
+          'O resultado é uma face B-Rep persistente, validada e tessellada apenas para exibição.',
+          style: TextStyle(fontSize: 10),
+        ),
+      ],
+    ),
+  );
+
+  Widget _field(TextEditingController controller, String label) => TextField(
+    controller: controller,
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+    keyboardType: const TextInputType.numberWithOptions(
+      decimal: true,
+      signed: true,
+    ),
+  );
+
+  Widget _vectorFields(
+    String label,
+    List<(String, TextEditingController)> fields,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: const TextStyle(fontSize: 10)),
+      const SizedBox(height: 4),
+      Row(
+        children: [
+          for (final item in fields) ...[
+            Expanded(child: _field(item.$2, item.$1)),
+            if (item != fields.last) const SizedBox(width: 5),
+          ],
+        ],
+      ),
+    ],
+  );
+}
+
+class _EntityCurvePanel extends StatefulWidget {
+  const _EntityCurvePanel({
+    required this.runtime,
+    required this.onStatus,
+    this.pickedSourceId,
+    this.pickedPoint,
+  });
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final String? pickedSourceId;
+  final Vector3? pickedPoint;
+  @override
+  State<_EntityCurvePanel> createState() => _EntityCurvePanelState();
+}
+
+class _EntityCurvePanelState extends State<_EntityCurvePanel> {
+  ConstructionCurveMethod method = ConstructionCurveMethod.extractEdge;
+  final u = TextEditingController(text: '0.5');
+  final v = TextEditingController(text: '0.5');
+  final samples = TextEditingController(text: '65');
+  bool locateByPick = true;
+  bool busy = false;
+  List<String> get sourceIds =>
+      widget.runtime.geometrySelection.selectedIds.toList(growable: false);
+
+  double _number(TextEditingController controller, String label) {
+    final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+    if (value == null || !value.isFinite) {
+      throw FormatException('$label deve ser um número válido.');
+    }
+    return value;
+  }
+
+  Future<void> _create() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      final ids = await EntityCurveService(widget.runtime).create(
+        method: method,
+        sourceEntityIds: sourceIds,
+        u: _number(u, 'Parâmetro U'),
+        v: _number(v, 'Parâmetro V'),
+        samples: int.tryParse(samples.text.trim()) ?? 0,
+        pickedPoint:
+            widget.pickedSourceId != null &&
+                sourceIds.contains(widget.pickedSourceId)
+            ? widget.pickedPoint
+            : null,
+        locateByPickedPoint: locateByPick,
+      );
+      widget.onStatus(
+        ids.length == 1
+            ? 'Curva extraída e registrada no projeto.'
+            : '${ids.length} curvas extraídas em uma única operação.',
+      );
+    } catch (error) {
+      widget.onStatus(
+        error
+            .toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('FormatException: ', ''),
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    u.dispose();
+    v.dispose();
+    samples.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = {
+      ConstructionCurveMethod.extractEdge: 'Extrair aresta/curva selecionada',
+      ConstructionCurveMethod.allBoundaries: 'Todas as bordas e loops',
+      ConstructionCurveMethod.externalBoundary: 'Somente borda externa',
+      ConstructionCurveMethod.isoU: 'Isoparamétrica U',
+      ConstructionCurveMethod.isoV: 'Isoparamétrica V',
+      ConstructionCurveMethod.isoBoth: 'Isoparamétricas U + V',
+      ConstructionCurveMethod.surfacePlaneIntersection:
+          'Interseção superfície × plano',
+      ConstructionCurveMethod.meshSection: 'Seção de malha por plano',
+    };
+    final usesU = {
+      ConstructionCurveMethod.isoU,
+      ConstructionCurveMethod.isoBoth,
+    }.contains(method);
+    final usesV = {
+      ConstructionCurveMethod.isoV,
+      ConstructionCurveMethod.isoBoth,
+    }.contains(method);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Entidades · Curvas',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'Extração associativa de bordas, parâmetros UV e interseções.',
+            style: TextStyle(fontSize: 10),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<ConstructionCurveMethod>(
+            initialValue: method,
+            decoration: const InputDecoration(
+              labelText: 'Método',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final item in ConstructionCurveMethod.values)
+                DropdownMenuItem(value: item, child: Text(labels[item]!)),
+            ],
+            onChanged: busy ? null : (value) => setState(() => method = value!),
+          ),
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.all(9),
+            decoration: BoxDecoration(
+              border: Border.all(color: Theme.of(context).dividerColor),
+              borderRadius: BorderRadius.circular(5),
+            ),
+            child: Text(
+              sourceIds.isEmpty
+                  ? 'Selecione face, superfície, topologia, malha, aresta ou plano. Use Ctrl para múltiplas.'
+                  : '${sourceIds.length} referência(s): ${sourceIds.join(', ')}',
+              style: const TextStyle(fontSize: 10),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (usesU) ...[
+            const SizedBox(height: 8),
+            _field(u, 'Posição U normalizada (0–1)'),
+          ],
+          if (usesV) ...[
+            const SizedBox(height: 8),
+            _field(v, 'Posição V normalizada (0–1)'),
+          ],
+          if (usesU || usesV) ...[
+            const SizedBox(height: 8),
+            _field(samples, 'Amostras (2–2001)'),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                'Usar o ponto clicado para localizar U/V',
+                style: TextStyle(fontSize: 11),
+              ),
+              value: locateByPick,
+              onChanged: busy
+                  ? null
+                  : (value) => setState(() => locateByPick = value!),
+            ),
+          ],
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: busy ? null : _create,
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.gesture, size: 18),
+            label: const Text('Extrair curva'),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'U/V usa o domínio paramétrico real publicado pela superfície. Interseção e seção usam a triangulação persistida como fallback.',
+            style: TextStyle(fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(TextEditingController controller, String label) => TextField(
+    controller: controller,
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+    keyboardType: const TextInputType.numberWithOptions(
+      decimal: true,
+      signed: true,
+    ),
+  );
+}
+
+class _EntityVectorPanel extends StatefulWidget {
+  const _EntityVectorPanel({
+    required this.runtime,
+    required this.onStatus,
+    this.pickedSourceId,
+    this.pickedPoint,
+    this.pickedTriangleIndex,
+  });
+
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final String? pickedSourceId;
+  final Vector3? pickedPoint;
+  final int? pickedTriangleIndex;
+
+  @override
+  State<_EntityVectorPanel> createState() => _EntityVectorPanelState();
+}
+
+class _EntityVectorPanelState extends State<_EntityVectorPanel> {
+  ConstructionVectorMethod method = ConstructionVectorMethod.xAxis;
+  final ox = TextEditingController(text: '0');
+  final oy = TextEditingController(text: '0');
+  final oz = TextEditingController(text: '0');
+  final vx = TextEditingController(text: '1');
+  final vy = TextEditingController(text: '0');
+  final vz = TextEditingController(text: '0');
+  final length = TextEditingController(text: '40');
+  bool reversed = false;
+  bool busy = false;
+
+  List<String> get sourceIds =>
+      widget.runtime.geometrySelection.selectedIds.toList(growable: false);
+
+  double _number(TextEditingController controller, String label) {
+    final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+    if (value == null || !value.isFinite) {
+      throw FormatException('$label deve ser um número válido.');
+    }
+    return value;
+  }
+
+  Vector3? get _pickedNormal {
+    final id = widget.pickedSourceId;
+    if (id == null || !sourceIds.contains(id)) return null;
+    final geometry = widget.runtime.scene.find(id)?.geometry;
+    if (geometry == null) return null;
+    Vector3? vector(Object? raw) {
+      if (raw is! List || raw.length < 3) return null;
+      final x = raw[0], y = raw[1], z = raw[2];
+      return x is num && y is num && z is num
+          ? Vector3(x.toDouble(), y.toDouble(), z.toDouble())
+          : null;
+    }
+
+    final explicit = vector(geometry['normal']);
+    if (explicit != null) return explicit.normalized;
+    final nodes = geometry['nodes'], triangles = geometry['triangles'];
+    final triangle = widget.pickedTriangleIndex;
+    if (nodes is! List ||
+        triangles is! List ||
+        triangle == null ||
+        triangle < 0 ||
+        triangle * 3 + 2 >= triangles.length) {
+      return null;
+    }
+    Vector3 node(int index) => Vector3(
+      (nodes[index * 3] as num).toDouble(),
+      (nodes[index * 3 + 1] as num).toDouble(),
+      (nodes[index * 3 + 2] as num).toDouble(),
+    );
+    final a = node((triangles[triangle * 3] as num).toInt());
+    final b = node((triangles[triangle * 3 + 1] as num).toInt());
+    final c = node((triangles[triangle * 3 + 2] as num).toInt());
+    return (b - a).cross(c - a).normalized;
+  }
+
+  Future<void> _create() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      await EntityVectorService(widget.runtime).create(
+        method: method,
+        sourceEntityIds: sourceIds,
+        origin: Vector3(
+          _number(ox, 'Origem X'),
+          _number(oy, 'Origem Y'),
+          _number(oz, 'Origem Z'),
+        ),
+        components: Vector3(
+          _number(vx, 'Componente X'),
+          _number(vy, 'Componente Y'),
+          _number(vz, 'Componente Z'),
+        ),
+        pickedPoint:
+            widget.pickedSourceId != null &&
+                sourceIds.contains(widget.pickedSourceId)
+            ? widget.pickedPoint
+            : null,
+        pickedNormal: _pickedNormal,
+        visualLength: _number(length, 'Comprimento visual'),
+        reverse: reversed,
+      );
+      widget.onStatus('Vetor criado, associado e registrado no projeto.');
+    } catch (error) {
+      widget.onStatus(
+        error
+            .toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('FormatException: ', ''),
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in [ox, oy, oz, vx, vy, vz, length]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = {
+      ConstructionVectorMethod.xAxis: 'Eixo principal X',
+      ConstructionVectorMethod.yAxis: 'Eixo principal Y',
+      ConstructionVectorMethod.zAxis: 'Eixo principal Z',
+      ConstructionVectorMethod.components: 'Origem + componentes XYZ',
+      ConstructionVectorMethod.twoPoints: 'Entre dois pontos',
+      ConstructionVectorMethod.directionBetweenEntities: 'Entre duas entidades',
+      ConstructionVectorMethod.fromLineOrCurve: 'Extrair de linha/curva',
+      ConstructionVectorMethod.tangentToCurve: 'Tangente à curva',
+      ConstructionVectorMethod.planeNormal: 'Normal a plano',
+      ConstructionVectorMethod.surfaceNormal: 'Normal a superfície/malha',
+      ConstructionVectorMethod.planeIntersection: 'Interseção de dois planos',
+      ConstructionVectorMethod.crossProduct: 'Produto vetorial',
+      ConstructionVectorMethod.bisector: 'Bissetor de direções',
+      ConstructionVectorMethod.projectedOnPlane: 'Projetado sobre plano',
+      ConstructionVectorMethod.reverse: 'Inverter vetor existente',
+      ConstructionVectorMethod.bestFitDirection: 'Best-fit de direção',
+    };
+    final manual = method == ConstructionVectorMethod.components;
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Entidades · Vetores',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'Direções construtivas, derivadas e extraídas de CAD ou scan.',
+            style: TextStyle(fontSize: 10),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<ConstructionVectorMethod>(
+            initialValue: method,
+            decoration: const InputDecoration(
+              labelText: 'Método',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final item in ConstructionVectorMethod.values)
+                DropdownMenuItem(value: item, child: Text(labels[item]!)),
+            ],
+            onChanged: busy ? null : (value) => setState(() => method = value!),
+          ),
+          const SizedBox(height: 10),
+          if (manual) ...[
+            _vectorFields('Origem', [('X', ox), ('Y', oy), ('Z', oz)]),
+            const SizedBox(height: 7),
+            _vectorFields('Componentes', [('VX', vx), ('VY', vy), ('VZ', vz)]),
+          ] else
+            Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                border: Border.all(color: Theme.of(context).dividerColor),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                sourceIds.isEmpty
+                    ? 'Selecione referências no viewport (Ctrl para múltiplas).'
+                    : '${sourceIds.length} referência(s): ${sourceIds.join(', ')}',
+                style: const TextStyle(fontSize: 10),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          const SizedBox(height: 8),
+          _field(length, 'Comprimento visual'),
+          CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            title: const Text(
+              'Inverter direção',
+              style: TextStyle(fontSize: 11),
+            ),
+            value: reversed,
+            onChanged: busy
+                ? null
+                : (value) => setState(() => reversed = value!),
+          ),
+          FilledButton.icon(
+            onPressed: busy ? null : _create,
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.arrow_outward, size: 18),
+            label: const Text('Criar vetor'),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Tangente e normal local usam o ponto clicado. Best-fit registra RMS e desvio máximo.',
+            style: TextStyle(fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(TextEditingController controller, String label) => TextField(
+    controller: controller,
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+    keyboardType: const TextInputType.numberWithOptions(
+      decimal: true,
+      signed: true,
+    ),
+  );
+
+  Widget _vectorFields(
+    String label,
+    List<(String, TextEditingController)> fields,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: const TextStyle(fontSize: 10)),
+      const SizedBox(height: 4),
+      Row(
+        children: [
+          for (final item in fields) ...[
+            Expanded(child: _field(item.$2, item.$1)),
+            if (item != fields.last) const SizedBox(width: 5),
+          ],
+        ],
+      ),
+    ],
+  );
+}
+
+class _EntityPlanePanel extends StatefulWidget {
+  const _EntityPlanePanel({
+    required this.runtime,
+    required this.onStatus,
+    this.pickedSourceId,
+    this.pickedPoint,
+    this.pickedTriangleIndex,
+  });
+
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final String? pickedSourceId;
+  final Vector3? pickedPoint;
+  final int? pickedTriangleIndex;
+
+  @override
+  State<_EntityPlanePanel> createState() => _EntityPlanePanelState();
+}
+
+class _EntityPlanePanelState extends State<_EntityPlanePanel> {
+  ConstructionPlaneMethod method = ConstructionPlaneMethod.xy;
+  final ox = TextEditingController(text: '0');
+  final oy = TextEditingController(text: '0');
+  final oz = TextEditingController(text: '0');
+  final nx = TextEditingController(text: '0');
+  final ny = TextEditingController(text: '0');
+  final nz = TextEditingController(text: '1');
+  final distance = TextEditingController(text: '10');
+  final angle = TextEditingController(text: '45');
+  final tolerance = TextEditingController(text: '0.05');
+  final size = TextEditingController(text: '60');
+  bool busy = false;
+
+  List<String> get sourceIds =>
+      widget.runtime.geometrySelection.selectedIds.toList(growable: false);
+
+  double _number(TextEditingController controller, String label) {
+    final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+    if (value == null || !value.isFinite) {
+      throw FormatException('$label deve ser um número válido.');
+    }
+    return value;
+  }
+
+  Vector3? get _pickedNormal {
+    final id = widget.pickedSourceId;
+    if (id == null || !sourceIds.contains(id)) return null;
+    final geometry = widget.runtime.scene.find(id)?.geometry;
+    if (geometry == null) return null;
+    Vector3? vector(Object? raw) {
+      if (raw is! List || raw.length < 3) return null;
+      final x = raw[0], y = raw[1], z = raw[2];
+      return x is num && y is num && z is num
+          ? Vector3(x.toDouble(), y.toDouble(), z.toDouble())
+          : null;
+    }
+
+    final explicit = vector(geometry['normal']);
+    if (explicit != null) return explicit.normalized;
+    final nodes = geometry['nodes'], triangles = geometry['triangles'];
+    final triangleIndex = widget.pickedTriangleIndex;
+    if (nodes is List &&
+        triangles is List &&
+        triangleIndex != null &&
+        triangleIndex >= 0 &&
+        triangleIndex * 3 + 2 < triangles.length) {
+      Vector3 node(int index) => Vector3(
+        (nodes[index * 3] as num).toDouble(),
+        (nodes[index * 3 + 1] as num).toDouble(),
+        (nodes[index * 3 + 2] as num).toDouble(),
+      );
+      final a = node((triangles[triangleIndex * 3] as num).toInt());
+      final b = node((triangles[triangleIndex * 3 + 1] as num).toInt());
+      final c = node((triangles[triangleIndex * 3 + 2] as num).toInt());
+      return (b - a).cross(c - a).normalized;
+    }
+    return null;
+  }
+
+  Future<void> _create() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      await EntityPlaneService(widget.runtime).create(
+        method: method,
+        sourceEntityIds: sourceIds,
+        origin: Vector3(
+          _number(ox, 'Origem X'),
+          _number(oy, 'Origem Y'),
+          _number(oz, 'Origem Z'),
+        ),
+        normal: Vector3(
+          _number(nx, 'Normal X'),
+          _number(ny, 'Normal Y'),
+          _number(nz, 'Normal Z'),
+        ),
+        pickedPoint:
+            widget.pickedSourceId != null &&
+                sourceIds.contains(widget.pickedSourceId)
+            ? widget.pickedPoint
+            : null,
+        pickedNormal: _pickedNormal,
+        distance: _number(distance, 'Distância'),
+        angleDegrees: _number(angle, 'Ângulo'),
+        planarTolerance: _number(tolerance, 'Tolerância'),
+        visualSize: _number(size, 'Tamanho visual'),
+      );
+      widget.onStatus('Plano criado, associado e registrado no projeto.');
+    } catch (error) {
+      widget.onStatus(
+        error
+            .toString()
+            .replaceFirst('Bad state: ', '')
+            .replaceFirst('FormatException: ', ''),
+      );
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    for (final controller in [
+      ox,
+      oy,
+      oz,
+      nx,
+      ny,
+      nz,
+      distance,
+      angle,
+      tolerance,
+      size,
+    ]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = {
+      ConstructionPlaneMethod.xy: 'Plano principal XY',
+      ConstructionPlaneMethod.yz: 'Plano principal YZ',
+      ConstructionPlaneMethod.zx: 'Plano principal ZX',
+      ConstructionPlaneMethod.originNormal: 'Origem + normal',
+      ConstructionPlaneMethod.threePoints: 'Por três pontos',
+      ConstructionPlaneMethod.offset: 'Offset de plano',
+      ConstructionPlaneMethod.parallelThroughPoint: 'Paralelo por ponto',
+      ConstructionPlaneMethod.midPlane: 'Plano médio / bissetor',
+      ConstructionPlaneMethod.perpendicular: 'Perpendicular a plano',
+      ConstructionPlaneMethod.angle: 'Angular em torno de eixo',
+      ConstructionPlaneMethod.normalToCurve: 'Normal a curva no ponto',
+      ConstructionPlaneMethod.tangentToSurface: 'Tangente à superfície',
+      ConstructionPlaneMethod.lineAndPoint: 'Linha e ponto',
+      ConstructionPlaneMethod.twoLines: 'Por duas linhas',
+      ConstructionPlaneMethod.bestFit: 'Best-fit em scan/geometria',
+      ConstructionPlaneMethod.extractPlanar: 'Extrair face/região plana',
+    };
+    final manual = method == ConstructionPlaneMethod.originNormal;
+    final showDistance = method == ConstructionPlaneMethod.offset;
+    final showAngle = method == ConstructionPlaneMethod.angle;
+    final showTolerance = {
+      ConstructionPlaneMethod.bestFit,
+      ConstructionPlaneMethod.extractPlanar,
+    }.contains(method);
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text(
+            'Entidades · Planos',
+            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 5),
+          const Text(
+            'Planos construtivos, derivados e extraídos de CAD ou scan.',
+            style: TextStyle(fontSize: 10),
+          ),
+          const SizedBox(height: 10),
+          DropdownButtonFormField<ConstructionPlaneMethod>(
+            initialValue: method,
+            decoration: const InputDecoration(
+              labelText: 'Método',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final item in ConstructionPlaneMethod.values)
+                DropdownMenuItem(value: item, child: Text(labels[item]!)),
+            ],
+            onChanged: busy ? null : (value) => setState(() => method = value!),
+          ),
+          const SizedBox(height: 10),
+          if (manual) ...[
+            _vectorFields('Origem', [('X', ox), ('Y', oy), ('Z', oz)]),
+            const SizedBox(height: 7),
+            _vectorFields('Normal', [('NX', nx), ('NY', ny), ('NZ', nz)]),
+          ] else ...[
+            Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                border: Border.all(color: Theme.of(context).dividerColor),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Text(
+                sourceIds.isEmpty
+                    ? 'Selecione as referências no viewport (Ctrl para múltiplas).'
+                    : '${sourceIds.length} referência(s): ${sourceIds.join(', ')}',
+                style: const TextStyle(fontSize: 10),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ],
+          if (showDistance) ...[
+            const SizedBox(height: 8),
+            _field(distance, 'Distância de offset'),
+          ],
+          if (showAngle) ...[
+            const SizedBox(height: 8),
+            _field(angle, 'Ângulo (graus)'),
+          ],
+          if (showTolerance) ...[
+            const SizedBox(height: 8),
+            _field(tolerance, 'Tolerância de planaridade'),
+          ],
+          const SizedBox(height: 8),
+          _field(size, 'Tamanho visual do plano'),
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: busy ? null : _create,
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.layers_outlined, size: 18),
+            label: const Text('Criar plano'),
+          ),
+          const SizedBox(height: 7),
+          const Text(
+            'Para tangência, clique diretamente na face ou malha. Best-fit usa todas as amostras das entidades selecionadas.',
+            style: TextStyle(fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _field(TextEditingController controller, String label) => TextField(
+    controller: controller,
+    decoration: InputDecoration(
+      labelText: label,
+      border: const OutlineInputBorder(),
+      isDense: true,
+    ),
+    keyboardType: const TextInputType.numberWithOptions(
+      decimal: true,
+      signed: true,
+    ),
+  );
+
+  Widget _vectorFields(
+    String label,
+    List<(String, TextEditingController)> fields,
+  ) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      Text(label, style: const TextStyle(fontSize: 10)),
+      const SizedBox(height: 4),
+      Row(
+        children: [
+          for (final item in fields) ...[
+            Expanded(child: _field(item.$2, item.$1)),
+            if (item != fields.last) const SizedBox(width: 5),
+          ],
+        ],
+      ),
+    ],
+  );
+}
+
+class _EntitiesWorkspacePanel extends StatefulWidget {
+  const _EntitiesWorkspacePanel({
+    required this.runtime,
+    required this.onStatus,
+    this.pickedSourceId,
+    this.pickedPoint,
+  });
+
+  final CadRuntime runtime;
+  final ValueChanged<String> onStatus;
+  final String? pickedSourceId;
+  final Vector3? pickedPoint;
+
+  @override
+  State<_EntitiesWorkspacePanel> createState() =>
+      _EntitiesWorkspacePanelState();
+}
+
+class _EntitiesWorkspacePanelState extends State<_EntitiesWorkspacePanel> {
+  ConstructionPointMethod method = ConstructionPointMethod.coordinates;
+  final x = TextEditingController(text: '0');
+  final y = TextEditingController(text: '0');
+  final z = TextEditingController(text: '0');
+  final parameter = TextEditingController(text: '0.5');
+  final count = TextEditingController(text: '3');
+  bool busy = false;
+
+  String? get sourceId {
+    final selected = widget.runtime.geometrySelection.selectedIds;
+    return selected.isEmpty ? null : selected.first;
+  }
+
+  bool get needsSource => method != ConstructionPointMethod.coordinates;
+
+  double _number(TextEditingController controller, String label) {
+    final value = double.tryParse(controller.text.trim().replaceAll(',', '.'));
+    if (value == null || !value.isFinite) {
+      throw FormatException('$label deve ser um número válido.');
+    }
+    return value;
+  }
+
+  Future<void> _create() async {
+    if (busy) return;
+    setState(() => busy = true);
+    try {
+      final ids = await EntityPointService(widget.runtime).create(
+        method: method,
+        sourceEntityId: needsSource ? sourceId : null,
+        coordinates: Vector3(_number(x, 'X'), _number(y, 'Y'), _number(z, 'Z')),
+        pickedPoint:
+            method == ConstructionPointMethod.onEntity &&
+                widget.pickedSourceId == sourceId
+            ? widget.pickedPoint
+            : null,
+        parameter: _number(parameter, 'Parâmetro'),
+        divisionCount: int.tryParse(count.text.trim()) ?? 0,
+      );
+      widget.onStatus(
+        ids.length == 1
+            ? 'Ponto criado e registrado no projeto.'
+            : '${ids.length} pontos equidistantes criados em uma única operação.',
+      );
+    } catch (error) {
+      widget.onStatus(error.toString().replaceFirst('Bad state: ', ''));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    x.dispose();
+    y.dispose();
+    z.dispose();
+    parameter.dispose();
+    count.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    const labels = {
+      ConstructionPointMethod.coordinates: 'Coordenadas',
+      ConstructionPointMethod.startPoint: 'Endpoint inicial',
+      ConstructionPointMethod.endPoint: 'Endpoint final',
+      ConstructionPointMethod.midpoint: 'Midpoint',
+      ConstructionPointMethod.equidistant: 'Equidistantes',
+      ConstructionPointMethod.onEntity: 'Sobre entidade',
+    };
+    final source = sourceId == null
+        ? null
+        : widget.runtime.document?.entities[sourceId!];
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.category_outlined, size: 19),
+              SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Entidades · Pontos',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Construa pontos associativos a partir de qualquer geometria selecionável.',
+            style: TextStyle(
+              fontSize: 11,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+          const Divider(height: 20),
+          DropdownButtonFormField<ConstructionPointMethod>(
+            initialValue: method,
+            decoration: const InputDecoration(
+              labelText: 'Método',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+            items: [
+              for (final item in ConstructionPointMethod.values)
+                DropdownMenuItem(value: item, child: Text(labels[item]!)),
+            ],
+            onChanged: busy ? null : (value) => setState(() => method = value!),
+          ),
+          const SizedBox(height: 10),
+          if (method == ConstructionPointMethod.coordinates)
+            Row(
+              children: [
+                for (final field in [('X', x), ('Y', y), ('Z', z)]) ...[
+                  Expanded(
+                    child: TextField(
+                      controller: field.$2,
+                      decoration: InputDecoration(
+                        labelText: field.$1,
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                        signed: true,
+                      ),
+                    ),
+                  ),
+                  if (field.$1 != 'Z') const SizedBox(width: 5),
+                ],
+              ],
+            )
+          else
+            Container(
+              padding: const EdgeInsets.all(9),
+              decoration: BoxDecoration(
+                border: Border.all(color: Theme.of(context).dividerColor),
+                borderRadius: BorderRadius.circular(5),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    source == null ? Icons.ads_click : Icons.check_circle,
+                    size: 17,
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      source == null
+                          ? 'Selecione a entidade de origem'
+                          : '${source.data['name'] ?? source.id} · ${source.kind.name}',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (method == ConstructionPointMethod.onEntity) ...[
+            const SizedBox(height: 10),
+            TextField(
+              controller: parameter,
+              decoration: const InputDecoration(
+                labelText: 'Parâmetro (0–1), se não houver clique 3D',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+          if (method == ConstructionPointMethod.equidistant) ...[
+            const SizedBox(height: 10),
+            TextField(
+              controller: count,
+              decoration: const InputDecoration(
+                labelText: 'Quantidade de pontos (2–1000)',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+              keyboardType: TextInputType.number,
+            ),
+          ],
+          const SizedBox(height: 12),
+          FilledButton.icon(
+            onPressed: busy || (needsSource && source == null) ? null : _create,
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.add_location_alt_outlined, size: 18),
+            label: Text(
+              method == ConstructionPointMethod.equidistant
+                  ? 'Criar pontos'
+                  : 'Criar ponto',
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Próximas entidades: planos e vetores. O contrato do comando já aceita novos construtores.',
+            style: TextStyle(fontSize: 10),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _WorkspaceEnvironmentPlaceholder extends StatelessWidget {
   const _WorkspaceEnvironmentPlaceholder({
     required this.icon,
@@ -5408,6 +7031,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hud = controller.lineHud;
+    final dragHud = controller.sketchDragHud;
     final health = controller.sketchHealth;
     final dimensionEntity = controller.selectedSketchEntityIds.length == 1
         ? controller.sketchApi?.entity(
@@ -6168,6 +7792,24 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
             ],
           ),
         ],
+        if (dragHud != null) ...[
+          const Divider(height: 18),
+          Wrap(
+            spacing: 10,
+            runSpacing: 4,
+            children: [
+              Text('MOVE X ${dragHud.x.toStringAsFixed(3)}'),
+              Text('Y ${dragHud.y.toStringAsFixed(3)}'),
+              Text(
+                'SNAP ${dragHud.snap.toUpperCase()}',
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ],
         const SizedBox(height: 8),
         DecoratedBox(
           decoration: BoxDecoration(
@@ -6715,6 +8357,8 @@ class _ProfessionalExtrudePanel extends StatefulWidget {
 
 class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
   double distance = 10;
+  double draftAngleDegrees = 0;
+  String directionSourceId = 'profileNormal';
   ProfessionalExtrudeDirection direction = ProfessionalExtrudeDirection.normal;
   ProfessionalExtrudeOutput output = ProfessionalExtrudeOutput.solid;
   bool extrudeCommandActive = false;
@@ -6828,25 +8472,8 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
             if (selectedFeature != null) ...[
               const SizedBox(height: 8),
               const Text(
-                'Display mode',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              Wrap(
-                spacing: 5,
-                children: [
-                  for (final mode in const [
-                    'shaded',
-                    'wireframe',
-                    'shadedWithEdges',
-                    'transparent',
-                  ])
-                    OutlinedButton(
-                      onPressed: widget.controller.busy
-                          ? null
-                          : () => widget.controller.setExtrudeDisplayMode(mode),
-                      child: Text(mode),
-                    ),
-                ],
+                'Use Shaded, Wireframe, Arestas ou Transparência na barra global da área de trabalho.',
+                style: TextStyle(fontSize: 10),
               ),
             ],
             const SizedBox(height: 8),
@@ -6869,14 +8496,133 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                         'Extrude active',
                         style: TextStyle(fontWeight: FontWeight.w700),
                       ),
+                      const SizedBox(height: 14),
+                      DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'extrude-source-${widget.controller.selectedExtrudeSource?.id ?? 'none'}',
+                        ),
+                        initialValue:
+                            widget.controller.selectedExtrudeSource?.id,
+                        decoration: const InputDecoration(
+                          labelText: 'Perfil (Sketch ou superfície)',
+                          helperText:
+                              'Escolha aqui ou clique em uma linha do perfil.',
+                          helperMaxLines: 2,
+                        ),
+                        isExpanded: true,
+                        items: widget.controller.extrudeSources
+                            .map(
+                              (entity) => DropdownMenuItem(
+                                value: entity.id,
+                                child: Text(
+                                  '${entity.data['name'] ?? entity.id} · ${entity.kind.name}',
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: widget.controller.busy
+                            ? null
+                            : (value) {
+                                if (value != null) {
+                                  widget.controller.selectExtrudeSource(value);
+                                }
+                              },
+                      ),
+                      const SizedBox(height: 16),
                       Text(
                         widget.controller.selectedExtrudeSource == null
                             ? 'Select one Sketch or Surface.'
                             : 'Source: ${widget.controller.selectedExtrudeSource!.id}',
                       ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        initialValue: distance.toString(),
+                        decoration: const InputDecoration(
+                          labelText: 'Distância',
+                          suffixText: 'mm',
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        onChanged: (value) {
+                          final parsed = double.tryParse(
+                            value.replaceAll(',', '.'),
+                          );
+                          if (parsed != null && parsed > 0) distance = parsed;
+                        },
+                      ),
+                      const SizedBox(height: 14),
+                      TextFormField(
+                        initialValue: draftAngleDegrees.toString(),
+                        decoration: const InputDecoration(
+                          labelText: 'Ângulo de saída (Draft)',
+                          suffixText: '°',
+                          helperText:
+                              'Positivo abre; negativo fecha as paredes laterais.',
+                          helperMaxLines: 2,
+                        ),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                          signed: true,
+                        ),
+                        onChanged: (value) {
+                          final parsed = double.tryParse(
+                            value.replaceAll(',', '.'),
+                          );
+                          if (parsed != null && parsed.abs() < 89) {
+                            draftAngleDegrees = parsed;
+                          }
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        initialValue: directionSourceId,
+                        decoration: const InputDecoration(
+                          labelText: 'Eixo ou vetor de extrusão',
+                          helperText:
+                              'Normal do perfil, eixo global ou vetor criado em Entidades.',
+                          helperMaxLines: 2,
+                        ),
+                        isExpanded: true,
+                        items: widget.controller.extrudeDirectionOptions
+                            .map(
+                              (option) => DropdownMenuItem(
+                                value: option.id,
+                                child: Text(option.label),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value != null) directionSourceId = value;
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<ProfessionalExtrudeDirection>(
+                        initialValue: direction,
+                        decoration: const InputDecoration(labelText: 'Direção'),
+                        items: ProfessionalExtrudeDirection.values
+                            .map(
+                              (item) => DropdownMenuItem(
+                                value: item,
+                                child: Text(
+                                  item == ProfessionalExtrudeDirection.normal
+                                      ? 'Normal'
+                                      : 'Reverse',
+                                ),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value != null) direction = value;
+                        },
+                      ),
+                      const SizedBox(height: 14),
                       DropdownButtonFormField<ProfessionalExtrudeOutput>(
                         initialValue: output,
-                        decoration: const InputDecoration(labelText: 'Result'),
+                        decoration: const InputDecoration(
+                          labelText: 'Resultado',
+                        ),
                         items: const [
                           DropdownMenuItem(
                             value: ProfessionalExtrudeOutput.solid,
@@ -6891,7 +8637,7 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                           if (value != null) setState(() => output = value);
                         },
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 18),
                       Row(
                         children: [
                           Expanded(
@@ -6903,6 +8649,8 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                                   : () => widget.controller
                                         .previewProfessionalExtrude(
                                           distance: distance,
+                                          draftAngleDegrees: draftAngleDegrees,
+                                          directionSourceId: directionSourceId,
                                           direction: direction,
                                           output: output,
                                         ),
@@ -6950,10 +8698,11 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
             '${preview['id']} · Preview',
             style: const TextStyle(fontWeight: FontWeight.w600),
           ),
+          const SizedBox(height: 14),
           TextFormField(
             initialValue: contract.distance.toString(),
             decoration: const InputDecoration(
-              labelText: 'Distance',
+              labelText: 'Distância',
               suffixText: 'mm',
             ),
             keyboardType: const TextInputType.numberWithOptions(decimal: true),
@@ -6966,9 +8715,58 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
               }
             },
           ),
+          const SizedBox(height: 14),
+          TextFormField(
+            key: ValueKey('extrude-draft-${contract.draftAngleDegrees}'),
+            initialValue: contract.draftAngleDegrees.toString(),
+            decoration: const InputDecoration(
+              labelText: 'Ângulo de saída (Draft)',
+              suffixText: '°',
+              helperText: 'Positivo abre; negativo fecha as paredes laterais.',
+              helperMaxLines: 2,
+            ),
+            keyboardType: const TextInputType.numberWithOptions(
+              decimal: true,
+              signed: true,
+            ),
+            onFieldSubmitted: (value) {
+              final parsed = double.tryParse(value.replaceAll(',', '.'));
+              if (parsed != null && parsed.abs() < 89) {
+                widget.controller.updateProfessionalExtrudePreview(
+                  draftAngleDegrees: parsed,
+                );
+              }
+            },
+          ),
+          const SizedBox(height: 16),
+          DropdownButtonFormField<String>(
+            initialValue: contract.directionSourceId,
+            decoration: const InputDecoration(
+              labelText: 'Eixo ou vetor de extrusão',
+            ),
+            isExpanded: true,
+            items: widget.controller.extrudeDirectionOptions
+                .map(
+                  (option) => DropdownMenuItem(
+                    value: option.id,
+                    child: Text(option.label),
+                  ),
+                )
+                .toList(),
+            onChanged: widget.controller.busy
+                ? null
+                : (value) {
+                    if (value != null) {
+                      widget.controller.updateProfessionalExtrudePreview(
+                        directionSourceId: value,
+                      );
+                    }
+                  },
+          ),
+          const SizedBox(height: 16),
           DropdownButtonFormField<ProfessionalExtrudeDirection>(
             initialValue: contract.direction,
-            decoration: const InputDecoration(labelText: 'Direction'),
+            decoration: const InputDecoration(labelText: 'Direção'),
             items: ProfessionalExtrudeDirection.values
                 .map(
                   (item) => DropdownMenuItem(
@@ -6991,9 +8789,10 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                     }
                   },
           ),
+          const SizedBox(height: 14),
           DropdownButtonFormField<ProfessionalExtrudeOutput>(
             initialValue: contract.output,
-            decoration: const InputDecoration(labelText: 'Result'),
+            decoration: const InputDecoration(labelText: 'Resultado'),
             items: const [
               DropdownMenuItem(
                 value: ProfessionalExtrudeOutput.solid,

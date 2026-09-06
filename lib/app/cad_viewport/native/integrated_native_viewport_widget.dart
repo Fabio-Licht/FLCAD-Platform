@@ -9,6 +9,8 @@ import '../camera/camera_pan_audit.dart';
 import '../professional_cad_viewport_widget.dart';
 import '../scene/cad_scene_graph.dart';
 import '../selection/viewport_picking_controller.dart';
+import '../../engineering_bridge/contracts/bridge_selection.dart';
+import '../../../core/geometric_kernel/geometry/vectors.dart';
 import '../../operational_entities/operational_entity.dart';
 import '../../operational_entities/operational_entity_resolver.dart';
 import 'native_viewport_bridge.dart';
@@ -25,6 +27,9 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.onSketchTap,
     this.onSketchSecondaryTap,
     this.onSketchHover,
+    this.onSketchEntityDragStart,
+    this.onSketchEntityDragUpdate,
+    this.onSketchEntityDragEnd,
     this.showSketchGrid = false,
     this.operationalEntities,
     this.operationalResolver,
@@ -40,6 +45,10 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchTap;
   final VoidCallback? onSketchSecondaryTap;
   final ValueChanged<Offset>? onSketchHover;
+  final void Function(CadViewportPick pick, Offset position)?
+  onSketchEntityDragStart;
+  final ValueChanged<Offset>? onSketchEntityDragUpdate;
+  final ValueChanged<Offset>? onSketchEntityDragEnd;
   final bool showSketchGrid;
   final OperationalEntityRegistry? operationalEntities;
   final OperationalEntityResolver? operationalResolver;
@@ -67,8 +76,22 @@ class _IntegratedCadViewportWidgetState
   OperationalResolution? _operationalHover;
   bool _hoverRequestActive = false;
   bool _nativeNavigating = false;
+  CadRenderStyle _renderStyle = CadRenderStyle.shaded;
   Offset? _pendingHover;
   Offset? _lastHoverPosition;
+
+  void _setRenderStyle(CadRenderStyle style) {
+    setState(() {
+      _renderStyle = style;
+      // The native pipeline currently provides the optimized opaque shaded
+      // pass. The canvas pipeline owns the other global CAD display modes.
+      // Switching here makes the toolbar authoritative instead of leaving a
+      // native texture covering the requested presentation.
+      backend = style == CadRenderStyle.shaded && Platform.isWindows
+          ? ViewportBackend.nativeGpu
+          : ViewportBackend.flutterCanvas;
+    });
+  }
 
   Future<void> _updateNativeHover(Offset position) async {
     _lastHoverPosition = position;
@@ -239,7 +262,10 @@ class _IntegratedCadViewportWidgetState
       final useNative =
           backend == ViewportBackend.nativeGpu && native.available;
       return MouseRegion(
-        cursor: widget.onSketchTap != null || widget.onSketchSupportPick != null
+        cursor:
+            widget.onSketchTap != null ||
+                widget.onSketchSupportPick != null ||
+                widget.onSketchEntityDragStart != null
             ? SystemMouseCursors.precise
             : useNative
             ? _nativeCursor
@@ -263,11 +289,27 @@ class _IntegratedCadViewportWidgetState
         child: GestureDetector(
           behavior: HitTestBehavior.translucent,
           onTapUp: useNative && _operationalHover != null
-              ? (_) => operationalSelection.select(
-                  _operationalHover!.entity.id,
-                  additive: HardwareKeyboard.instance.isShiftPressed,
-                  toggle: HardwareKeyboard.instance.isControlPressed,
-                )
+              ? (_) {
+                  final resolved = _operationalHover!;
+                  operationalSelection.select(
+                    resolved.entity.id,
+                    additive: HardwareKeyboard.instance.isShiftPressed,
+                    toggle: HardwareKeyboard.instance.isControlPressed,
+                  );
+                  final point = _nativeHover?.point;
+                  if (point != null && point.length >= 3) {
+                    widget.onPick?.call(
+                      CadViewportPick(
+                        entityId: resolved.entity.ownerId,
+                        hit: MeshHit(
+                          triangleIndex: -1,
+                          point: Vector3(point[0], point[1], point[2]),
+                          distance: 0,
+                        ),
+                      ),
+                    );
+                  }
+                }
               : null,
           child: Stack(
             children: [
@@ -290,11 +332,20 @@ class _IntegratedCadViewportWidgetState
                   onSketchTap: widget.onSketchTap,
                   onSketchSecondaryTap: widget.onSketchSecondaryTap,
                   onSketchHover: widget.onSketchHover,
+                  onSketchEntityDragStart: widget.onSketchEntityDragStart,
+                  onSketchEntityDragUpdate: widget.onSketchEntityDragUpdate,
+                  onSketchEntityDragEnd: widget.onSketchEntityDragEnd,
                   showSketchGrid: widget.showSketchGrid,
+                  renderStyle: _renderStyle,
+                  onRenderStyleChanged: _setRenderStyle,
+                  showRenderControls: false,
                   renderMeshes: !useNative,
                   paintBackground: !useNative,
-                  enablePicking:
-                      !useNative || widget.onSketchSupportPick != null,
+                  // Picking remains on in the transparent Flutter interaction
+                  // layer even when meshes are rendered by the native GPU.
+                  // Sketch profiles and construction geometry do not exist in
+                  // the native triangle-only pick buffer.
+                  enablePicking: true,
                   onNavigationChanged: useNative
                       ? (navigating) {
                           _nativeNavigating = navigating;
@@ -316,7 +367,34 @@ class _IntegratedCadViewportWidgetState
               ),
               Positioned(
                 top: 10,
-                left: 290,
+                left: 10,
+                child: SegmentedButton<CadRenderStyle>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(
+                      value: CadRenderStyle.shaded,
+                      label: Text('Shaded'),
+                    ),
+                    ButtonSegment(
+                      value: CadRenderStyle.wireframe,
+                      label: Text('Wireframe'),
+                    ),
+                    ButtonSegment(
+                      value: CadRenderStyle.hiddenLine,
+                      label: Text('Arestas'),
+                    ),
+                    ButtonSegment(
+                      value: CadRenderStyle.transparent,
+                      label: Text('Transparência'),
+                    ),
+                  ],
+                  selected: {_renderStyle},
+                  onSelectionChanged: (value) => _setRenderStyle(value.first),
+                ),
+              ),
+              Positioned(
+                top: 10,
+                right: 10,
                 child: SegmentedButton<ViewportBackend>(
                   showSelectedIcon: false,
                   segments: const [
@@ -332,7 +410,12 @@ class _IntegratedCadViewportWidgetState
                   selected: {backend},
                   onSelectionChanged: (selection) {
                     final next = selection.first;
-                    setState(() => backend = next);
+                    setState(() {
+                      backend = next;
+                      if (next == ViewportBackend.nativeGpu) {
+                        _renderStyle = CadRenderStyle.shaded;
+                      }
+                    });
                     if (next == ViewportBackend.nativeGpu) _ensureNative(size);
                   },
                 ),

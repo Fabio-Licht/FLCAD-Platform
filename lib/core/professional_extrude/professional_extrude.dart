@@ -21,6 +21,9 @@ class ProfessionalExtrudeContract {
     required this.sourceRevision,
     required this.sourceShapeId,
     required this.distance,
+    this.draftAngleDegrees = 0,
+    this.directionSourceId = 'profileNormal',
+    this.directionVector = const [0, 0, 1],
     this.direction = ProfessionalExtrudeDirection.normal,
     this.output = ProfessionalExtrudeOutput.solid,
     this.extent = ProfessionalExtrudeExtent.distance,
@@ -29,6 +32,9 @@ class ProfessionalExtrudeContract {
   final ProfessionalExtrudeSourceKind sourceKind;
   final int sourceRevision;
   final double distance;
+  final double draftAngleDegrees;
+  final String directionSourceId;
+  final List<double> directionVector;
   final ProfessionalExtrudeDirection direction;
   final ProfessionalExtrudeOutput output;
   final ProfessionalExtrudeExtent extent;
@@ -39,6 +45,9 @@ class ProfessionalExtrudeContract {
     'sourceRevision': sourceRevision,
     'sourceShapeId': sourceShapeId,
     'distance': distance,
+    'draftAngleDegrees': draftAngleDegrees,
+    'directionSourceId': directionSourceId,
+    'directionVector': directionVector,
     'direction': direction.name,
     'output': output.name,
     'extent': extent.name,
@@ -56,6 +65,13 @@ class ProfessionalExtrudeContract {
         sourceRevision: (json['sourceRevision'] as num).toInt(),
         sourceShapeId: json['sourceShapeId'] as String,
         distance: (json['distance'] as num).toDouble(),
+        draftAngleDegrees: (json['draftAngleDegrees'] as num?)?.toDouble() ?? 0,
+        directionSourceId:
+            json['directionSourceId'] as String? ?? 'profileNormal',
+        directionVector: (json['directionVector'] as List? ?? const [0, 0, 1])
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(growable: false),
         direction: ProfessionalExtrudeDirection.values.byName(
           json['direction'] as String? ?? 'normal',
         ),
@@ -98,6 +114,19 @@ class ProfessionalExtrudeConstraintAdapter {
     }
     if (!value.distance.isFinite || value.distance <= 0) {
       throw ArgumentError('Extrude distance must be greater than zero.');
+    }
+    if (!value.draftAngleDegrees.isFinite ||
+        value.draftAngleDegrees.abs() >= 89) {
+      throw ArgumentError(
+        'Extrude draft angle must be finite and greater than -89° and less than 89°.',
+      );
+    }
+    if (value.directionVector.length != 3 ||
+        value.directionVector.any((component) => !component.isFinite) ||
+        value.directionVector.every((component) => component.abs() <= 1e-12)) {
+      throw ArgumentError(
+        'Extrude direction vector must be finite and non-zero.',
+      );
     }
     if (value.extent != ProfessionalExtrudeExtent.distance) {
       throw UnsupportedError(

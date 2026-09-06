@@ -31,12 +31,18 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.onSketchTap,
     this.onSketchSecondaryTap,
     this.onSketchHover,
+    this.onSketchEntityDragStart,
+    this.onSketchEntityDragUpdate,
+    this.onSketchEntityDragEnd,
     this.showSketchGrid = false,
     this.renderMeshes = true,
     this.paintBackground = true,
     this.enablePicking = true,
     this.onNavigationChanged,
     this.showNavigationDebug = false,
+    this.renderStyle,
+    this.onRenderStyleChanged,
+    this.showRenderControls = true,
   });
 
   final CadSceneGraph scene;
@@ -48,12 +54,19 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchTap;
   final VoidCallback? onSketchSecondaryTap;
   final ValueChanged<Offset>? onSketchHover;
+  final void Function(CadViewportPick pick, Offset position)?
+  onSketchEntityDragStart;
+  final ValueChanged<Offset>? onSketchEntityDragUpdate;
+  final ValueChanged<Offset>? onSketchEntityDragEnd;
   final bool showSketchGrid;
   final bool renderMeshes;
   final bool paintBackground;
   final bool enablePicking;
   final ValueChanged<bool>? onNavigationChanged;
   final bool showNavigationDebug;
+  final CadRenderStyle? renderStyle;
+  final ValueChanged<CadRenderStyle>? onRenderStyleChanged;
+  final bool showRenderControls;
 
   @override
   State<ProfessionalCadViewportWidget> createState() =>
@@ -62,13 +75,27 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
 
 class _ProfessionalCadViewportWidgetState
     extends State<ProfessionalCadViewportWidget> {
-  CadRenderStyle style = CadRenderStyle.shaded;
+  CadRenderStyle _localStyle = CadRenderStyle.shaded;
+  CadRenderStyle get style => widget.renderStyle ?? _localStyle;
+
+  void _setRenderStyle(CadRenderStyle value) {
+    if (widget.onRenderStyleChanged != null) {
+      widget.onRenderStyleChanged!(value);
+    } else {
+      setState(() => _localStyle = value);
+    }
+  }
+
   double previousScale = 1;
   final picking = ViewportPickingController();
   final Map<String, _MeshRenderCache> meshRenderCaches = {};
 
   bool get _sketchToolActive =>
-      widget.onSketchTap != null || widget.onSketchSupportPick != null;
+      widget.onSketchTap != null ||
+      widget.onSketchSupportPick != null ||
+      widget.onSketchEntityDragStart != null;
+  bool _draggingSketchEntity = false;
+  Offset? _lastSketchDragPosition;
   String? hoveredEntityId;
   late NavigationEngine navigation;
   Vector3? _rotationCenterMarker;
@@ -116,7 +143,7 @@ class _ProfessionalCadViewportWidgetState
   }
 
   void _startMouseNavigation(PointerDownEvent event) {
-    if (_sketchToolActive) return;
+    if (_sketchToolActive && (event.buttons & kMiddleMouseButton) == 0) return;
     navigation.pointerDown(
       x: event.localPosition.dx,
       y: event.localPosition.dy,
@@ -125,7 +152,7 @@ class _ProfessionalCadViewportWidgetState
   }
 
   void _updateMouseNavigation(PointerMoveEvent event) {
-    if (_sketchToolActive) return;
+    if (_sketchToolActive && !_isMouseNavigating) return;
     navigation.pointerMove(
       x: event.localPosition.dx,
       y: event.localPosition.dy,
@@ -134,7 +161,7 @@ class _ProfessionalCadViewportWidgetState
   }
 
   void _endMouseNavigation(PointerUpEvent event) {
-    if (_sketchToolActive) return;
+    if (_sketchToolActive && !_isMouseNavigating) return;
     navigation.pointerUp(
       x: event.localPosition.dx,
       y: event.localPosition.dy,
@@ -261,14 +288,53 @@ class _ProfessionalCadViewportWidgetState
             onPointerMove: _updateMouseNavigation,
             onPointerUp: _endMouseNavigation,
             onPointerCancel: (_) {
-              if (!_sketchToolActive) navigation.pointerCancel();
+              navigation.pointerCancel();
             },
             onPointerSignal: (event) {
-              if (!_sketchToolActive && event is PointerScrollEvent) {
+              if (event is PointerScrollEvent) {
                 _zoomFromWheel(event);
               }
             },
             child: GestureDetector(
+              onPanStart: widget.onSketchEntityDragStart == null
+                  ? null
+                  : (event) {
+                      final hit = picking.pick(
+                        position: event.localPosition,
+                        camera: widget.camera,
+                        scene: widget.scene,
+                      );
+                      if (hit != null &&
+                          widget.scene.find(hit.entityId)?.kind ==
+                              CadSceneEntityKind.sketch) {
+                        _draggingSketchEntity = true;
+                        _lastSketchDragPosition = event.localPosition;
+                        widget.onSketchEntityDragStart!(
+                          hit,
+                          event.localPosition,
+                        );
+                      }
+                    },
+              onPanUpdate: widget.onSketchEntityDragUpdate == null
+                  ? null
+                  : (event) {
+                      if (_draggingSketchEntity) {
+                        _lastSketchDragPosition = event.localPosition;
+                        widget.onSketchEntityDragUpdate!(event.localPosition);
+                      }
+                    },
+              onPanEnd: widget.onSketchEntityDragEnd == null
+                  ? null
+                  : (event) {
+                      if (_draggingSketchEntity) {
+                        _draggingSketchEntity = false;
+                        final position = _lastSketchDragPosition;
+                        _lastSketchDragPosition = null;
+                        if (position != null) {
+                          widget.onSketchEntityDragEnd!(position);
+                        }
+                      }
+                    },
               onDoubleTapDown: widget.onSketchEntityDoublePick == null
                   ? null
                   : (event) {
@@ -372,34 +438,35 @@ class _ProfessionalCadViewportWidgetState
                         ),
                       ),
                     ),
-                    Positioned(
-                      top: 10,
-                      left: 10,
-                      child: SegmentedButton<CadRenderStyle>(
-                        showSelectedIcon: false,
-                        segments: const [
-                          ButtonSegment(
-                            value: CadRenderStyle.shaded,
-                            label: Text('Shaded'),
-                          ),
-                          ButtonSegment(
-                            value: CadRenderStyle.wireframe,
-                            label: Text('Wire'),
-                          ),
-                          ButtonSegment(
-                            value: CadRenderStyle.hiddenLine,
-                            label: Text('Hidden line'),
-                          ),
-                          ButtonSegment(
-                            value: CadRenderStyle.transparent,
-                            label: Text('X-Ray'),
-                          ),
-                        ],
-                        selected: {style},
-                        onSelectionChanged: (value) =>
-                            setState(() => style = value.first),
+                    if (widget.showRenderControls)
+                      Positioned(
+                        top: 10,
+                        left: 10,
+                        child: SegmentedButton<CadRenderStyle>(
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(
+                              value: CadRenderStyle.shaded,
+                              label: Text('Shaded'),
+                            ),
+                            ButtonSegment(
+                              value: CadRenderStyle.wireframe,
+                              label: Text('Wire'),
+                            ),
+                            ButtonSegment(
+                              value: CadRenderStyle.hiddenLine,
+                              label: Text('Hidden line'),
+                            ),
+                            ButtonSegment(
+                              value: CadRenderStyle.transparent,
+                              label: Text('X-Ray'),
+                            ),
+                          ],
+                          selected: {style},
+                          onSelectionChanged: (value) =>
+                              _setRenderStyle(value.first),
+                        ),
                       ),
-                    ),
                     if (widget.showNavigationDebug)
                       Positioned(
                         left: 10,
@@ -988,11 +1055,25 @@ class _CadScenePainter extends CustomPainter {
       if (renderMeshes &&
           entity.geometry['nodes'] is List &&
           entity.geometry['triangles'] is List) {
-        if (style == CadRenderStyle.shaded ||
-            style == CadRenderStyle.transparent) {
-          _paintMeshBatched(canvas, entity, size);
+        final entityMode = entity.geometry['displayMode'] as String?;
+        if (style == CadRenderStyle.wireframe) {
+          _paintMeshFeatureEdges(canvas, entity, size, alpha: .96);
+        } else if (style == CadRenderStyle.transparent) {
+          _paintMeshBatched(canvas, entity, size, alphaOverride: .24);
+          _paintMeshFeatureEdges(canvas, entity, size, alpha: .72);
+        } else if (style == CadRenderStyle.hiddenLine) {
+          _paintMeshBatched(canvas, entity, size, alphaOverride: 1);
+          _paintMeshFeatureEdges(canvas, entity, size, alpha: .92);
+        } else if (style == CadRenderStyle.shaded) {
+          _paintMeshBatched(canvas, entity, size, alphaOverride: 1);
+        } else if (entityMode == 'shadedWithEdges') {
+          _paintMeshBatched(canvas, entity, size, alphaOverride: 1);
+          _paintMeshFeatureEdges(canvas, entity, size, alpha: .92);
+        } else if (entityMode == 'transparent') {
+          _paintMeshBatched(canvas, entity, size, alphaOverride: .24);
+          _paintMeshFeatureEdges(canvas, entity, size, alpha: .42);
         } else {
-          _projectMesh(entity, size, projected);
+          _paintMeshBatched(canvas, entity, size);
         }
       } else {
         _paintReference(canvas, size, entity);
@@ -1152,14 +1233,21 @@ class _CadScenePainter extends CustomPainter {
     );
   }
 
-  void _paintMeshBatched(Canvas canvas, CadSceneEntity entity, Size size) {
+  void _paintMeshBatched(
+    Canvas canvas,
+    CadSceneEntity entity,
+    Size size, {
+    double? alphaOverride,
+  }) {
     // Shaded is deliberately opaque: partial alpha made dense STL meshes look
     // hollow because Flutter's 2D canvas has no per-triangle depth buffer.
-    final alpha = style == CadRenderStyle.transparent
-        ? .22
-        : entity.transparent || entity.kind == CadSceneEntityKind.preview
-        ? .34
-        : 1.0;
+    final alpha =
+        alphaOverride ??
+        (style == CadRenderStyle.transparent
+            ? .22
+            : entity.transparent || entity.kind == CadSceneEntityKind.preview
+            ? .34
+            : 1.0);
     var cache = meshRenderCaches[entity.id];
     if (cache == null ||
         !identical(cache.nodesSource, entity.geometry['nodes']) ||
@@ -1180,8 +1268,8 @@ class _CadScenePainter extends CustomPainter {
       (_, _, _, 'destructiveRed') => Colors.redAccent,
       (_, _, _, 'surfacePreviewBlue') => const Color(0xff38bdf8),
       (_, _, CadSceneEntityKind.preview, _) => const Color(0xffff9f43),
-      (_, _, CadSceneEntityKind.surface, _) => const Color(0xff53a8a6),
-      (_, _, CadSceneEntityKind.solid, _) => const Color(0xff8296a3),
+      (_, _, CadSceneEntityKind.surface, _) => const Color(0xffe2e7ee),
+      (_, _, CadSceneEntityKind.solid, _) => const Color(0xffd8e0e9),
       _ => const Color(0xff7899ad),
     };
     final foreground = foregroundColor.toARGB32();
@@ -1293,10 +1381,9 @@ class _CadScenePainter extends CustomPainter {
           final key = math.max(0.0, normal.dot(keyLight));
           final fill = math.max(0.0, normal.dot(fillLight));
           final facing = math.max(0.0, normal.dot(towardEye));
-          final t = (.13 + .59 * key + .18 * fill + .07 * facing).clamp(
-            .10,
-            .97,
-          );
+          final t = entity.kind == CadSceneEntityKind.surface
+              ? (.62 + .24 * key + .08 * fill + .06 * facing).clamp(.58, 1.0)
+              : (.16 + .56 * key + .18 * fill + .07 * facing).clamp(.14, .97);
           final triangleIndex = ((chunkVertexOffsets[chunk] ?? 0) + i) ~/ 3;
           final reconstructionStatus =
               reconstructionStatuses['$triangleIndex'] as String?;
@@ -1383,6 +1470,148 @@ class _CadScenePainter extends CustomPainter {
     }
   }
 
+  // Retained for diagnostic tessellation display; production Wireframe uses
+  // welded feature edges.
+  // ignore: unused_element
+  void _paintMeshWireframe(
+    Canvas canvas,
+    CadSceneEntity entity,
+    Size size, {
+    double alpha = .9,
+  }) {
+    final nodes = (entity.geometry['nodes'] as List).cast<num>();
+    final triangles = (entity.geometry['triangles'] as List).cast<num>();
+    if (nodes.length < 3 || triangles.length < 3) return;
+    Offset projectIndex(int index) {
+      final projected = camera.viewProjectionMatrix.transformPoint(
+        Vector3(
+          nodes[index * 3].toDouble(),
+          nodes[index * 3 + 1].toDouble(),
+          nodes[index * 3 + 2].toDouble(),
+        ),
+      );
+      return Offset(
+        (projected.x + 1) * size.width / 2,
+        (1 - projected.y) * size.height / 2,
+      );
+    }
+
+    final paint = Paint()
+      ..color =
+          (entity.selected ? const Color(0xffffb02e) : const Color(0xff83d8e8))
+              .withValues(alpha: alpha)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = entity.selected ? 1.25 : .72
+      ..isAntiAlias = true;
+    final path = Path();
+    for (var offset = 0; offset + 2 < triangles.length; offset += 3) {
+      final a = projectIndex(triangles[offset].toInt());
+      final b = projectIndex(triangles[offset + 1].toInt());
+      final c = projectIndex(triangles[offset + 2].toInt());
+      path
+        ..moveTo(a.dx, a.dy)
+        ..lineTo(b.dx, b.dy)
+        ..lineTo(c.dx, c.dy)
+        ..close();
+    }
+    canvas.drawPath(path, paint);
+  }
+
+  void _paintMeshFeatureEdges(
+    Canvas canvas,
+    CadSceneEntity entity,
+    Size size, {
+    double alpha = .9,
+  }) {
+    final nodes = (entity.geometry['nodes'] as List).cast<num>();
+    final triangles = (entity.geometry['triangles'] as List).cast<num>();
+    if (nodes.length < 3 || triangles.length < 3) return;
+    Vector3 vertex(int index) => Vector3(
+      nodes[index * 3].toDouble(),
+      nodes[index * 3 + 1].toDouble(),
+      nodes[index * 3 + 2].toDouble(),
+    );
+    Offset project(int index) {
+      final point = camera.viewProjectionMatrix.transformPoint(vertex(index));
+      return Offset(
+        (point.x + 1) * size.width / 2,
+        (1 - point.y) * size.height / 2,
+      );
+    }
+
+    String vertexKey(int index) {
+      final value = vertex(index);
+      // OCC tessellation may duplicate the same geometric vertex for each
+      // face. Position-based welding reconstructs CAD adjacency and prevents
+      // coplanar triangle diagonals from becoming visible edges.
+      String component(double coordinate) =>
+          (coordinate * 1000000).round().toString();
+      return '${component(value.x)},${component(value.y)},${component(value.z)}';
+    }
+
+    final edges = <String, ({int a, int b, List<Vector3> normals})>{};
+    void addEdge(int first, int second, Vector3 normal) {
+      final firstKey = vertexKey(first);
+      final secondKey = vertexKey(second);
+      final ordered = firstKey.compareTo(secondKey) <= 0;
+      final a = ordered ? first : second;
+      final b = ordered ? second : first;
+      final key = ordered ? '$firstKey|$secondKey' : '$secondKey|$firstKey';
+      final current = edges[key];
+      if (current == null) {
+        edges[key] = (a: a, b: b, normals: [normal]);
+      } else {
+        current.normals.add(normal);
+      }
+    }
+
+    for (var offset = 0; offset + 2 < triangles.length; offset += 3) {
+      final a = triangles[offset].toInt();
+      final b = triangles[offset + 1].toInt();
+      final c = triangles[offset + 2].toInt();
+      final normal = (vertex(b) - vertex(a)).cross(vertex(c) - vertex(a));
+      if (normal.length <= 1e-12) continue;
+      final unit = normal.normalized;
+      addEdge(a, b, unit);
+      addEdge(b, c, unit);
+      addEdge(c, a, unit);
+    }
+
+    const creaseCosine = .906307787; // 25 degrees.
+    final path = Path();
+    for (final edge in edges.values) {
+      final boundary = edge.normals.length == 1;
+      final crease =
+          edge.normals.length > 1 &&
+          edge.normals.first.dot(edge.normals[1]).abs() < creaseCosine;
+      if (!boundary && !crease) continue;
+      final a = project(edge.a);
+      final b = project(edge.b);
+      if (![a.dx, a.dy, b.dx, b.dy].every((value) => value.isFinite)) {
+        continue;
+      }
+      path
+        ..moveTo(a.dx, a.dy)
+        ..lineTo(b.dx, b.dy);
+    }
+    canvas.drawPath(
+      path,
+      Paint()
+        ..color =
+            (entity.selected
+                    ? const Color(0xffffb02e)
+                    : const Color(0xff15212b))
+                .withValues(alpha: alpha)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = entity.selected ? 1.7 : 1.15
+        ..strokeJoin = StrokeJoin.round
+        ..strokeCap = StrokeCap.round
+        ..isAntiAlias = true,
+    );
+  }
+
+  // Retained for the diagnostic triangle-depth renderer.
+  // ignore: unused_element
   void _projectMesh(
     CadSceneEntity entity,
     Size size,
@@ -1438,6 +1667,7 @@ class _CadScenePainter extends CustomPainter {
   }
 
   void _paintReference(Canvas canvas, Size size, CadSceneEntity entity) {
+    if (entity.geometry['pickOnlyClosedProfile'] == true) return;
     Vector3 vector(Object? value) {
       final values = value as List;
       return Vector3(
@@ -1478,7 +1708,12 @@ class _CadScenePainter extends CustomPainter {
     // World references are permanent workspace context. Their visibility must
     // never depend on which authoring command/tool window is active.
     final persistentWorldSupport = isWorld && isPlanarSupport;
-    final visibleSupport = selectableSupport || persistentWorldSupport;
+    final constructionEntity =
+        entity.geometry['displayColor'] == 'constructionPoint' ||
+        entity.geometry['displayColor'] == 'constructionPlane' ||
+        entity.geometry['displayColor'] == 'constructionVector';
+    final visibleSupport =
+        selectableSupport || persistentWorldSupport || constructionEntity;
     final passiveFactor = orbitActive
         ? .28
         : navigationActive
@@ -1579,7 +1814,10 @@ class _CadScenePainter extends CustomPainter {
           'x' => Colors.red,
           'y' => Colors.green,
           'z' => Colors.blue,
-          _ => colors.secondary,
+          _ =>
+            entity.geometry['displayColor'] == 'constructionVector'
+                ? const Color(0xfff0c85a)
+                : colors.secondary,
         };
         final start = isWorld ? origin : origin - direction * (length / 2);
         final end = isWorld
@@ -1591,12 +1829,16 @@ class _CadScenePainter extends CustomPainter {
           highlighted
               ? colors.tertiary
               : axisColor.withValues(
-                  alpha: isWorld ? .62 : .46 * passiveFactor,
+                  alpha: isWorld || constructionEntity
+                      ? .88
+                      : .46 * passiveFactor,
                 ),
           width: highlighted
               ? 1.55
               : isWorld
               ? .82
+              : constructionEntity
+              ? 1.65
               : .68,
         );
         if (isWorld) {
@@ -1648,7 +1890,10 @@ class _CadScenePainter extends CustomPainter {
           'xy' => Colors.blue,
           'xz' => Colors.green,
           'yz' => Colors.red,
-          _ => colors.secondary,
+          _ =>
+            entity.geometry['displayColor'] == 'constructionPlane'
+                ? const Color(0xff68c7ef)
+                : colors.secondary,
         };
         final corners = [
           origin - x * extent - y * extent,
@@ -1794,29 +2039,81 @@ class _CadScenePainter extends CustomPainter {
               ..strokeCap = StrokeCap.round
               ..isAntiAlias = true,
           );
+          if (entity.kind == CadSceneEntityKind.sketch &&
+              entity.geometry['showEndpoints'] == true) {
+            final endpointPaint = Paint()
+              ..color = highlighted
+                  ? const Color(0xff38d6ff)
+                  : const Color(0xff62d98b)
+              ..style = PaintingStyle.fill
+              ..isAntiAlias = true;
+            final outlinePaint = Paint()
+              ..color = colors.surface
+              ..style = PaintingStyle.stroke
+              ..strokeWidth = 1.2
+              ..isAntiAlias = true;
+            for (final endpoint in {points.first, points.last}) {
+              canvas.drawCircle(
+                endpoint,
+                highlighted ? 4.8 : 4.0,
+                endpointPaint,
+              );
+              canvas.drawCircle(
+                endpoint,
+                highlighted ? 4.8 : 4.0,
+                outlinePaint,
+              );
+            }
+          }
         }
         final dimensionLabel = entity.geometry['dimensionLabel'] as String?;
         final labelPosition = entity.geometry['labelPosition'];
         if (dimensionLabel != null && labelPosition is List) {
-          final position = project(vector(labelPosition));
+          final rawOffset = entity.geometry['labelScreenOffset'];
+          final screenOffset = rawOffset is List && rawOffset.length >= 2
+              ? Offset(
+                  (rawOffset[0] as num).toDouble(),
+                  (rawOffset[1] as num).toDouble(),
+                )
+              : Offset.zero;
+          final position = project(vector(labelPosition)) + screenOffset;
+          final floatingHud = entity.geometry['floatingHud'] == true;
           final text = TextPainter(
             text: TextSpan(
               text: dimensionLabel,
               style: TextStyle(
-                color: entity.selected
+                color: floatingHud
+                    ? const Color(0xffdff7ff)
+                    : entity.selected
                     ? const Color(0xffffb02e)
                     : const Color(0xff65c7ff),
-                fontSize: 11,
+                fontSize: floatingHud ? 10.5 : 11,
                 fontWeight: FontWeight.w600,
-                backgroundColor: colors.surface.withValues(alpha: .82),
               ),
             ),
             textDirection: TextDirection.ltr,
           )..layout();
-          text.paint(
-            canvas,
-            position - Offset(text.width / 2, text.height / 2),
-          );
+          final textOrigin = position - Offset(text.width / 2, text.height / 2);
+          if (floatingHud) {
+            final box = RRect.fromRectAndRadius(
+              Rect.fromLTWH(
+                textOrigin.dx - 7,
+                textOrigin.dy - 4,
+                text.width + 14,
+                text.height + 8,
+              ),
+              const Radius.circular(5),
+            );
+            canvas.drawRRect(box, Paint()..color = const Color(0xe61a252d));
+            canvas.drawRRect(
+              box,
+              Paint()
+                ..style = PaintingStyle.stroke
+                ..strokeWidth = 1
+                ..color = const Color(0xaa65c7ff),
+            );
+          }
+          text.paint(canvas, textOrigin);
         }
       case CadSceneEntityKind.mesh:
       case CadSceneEntityKind.surface:

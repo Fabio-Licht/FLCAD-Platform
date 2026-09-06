@@ -18,7 +18,10 @@ class CadBuilderRepository {
   Future<void> save(CadEntity entity) async {
     await initialize();
     final target = File(
-      path.join(_shapes.path, '${entity.handle.persistentId}.json'),
+      path.join(
+        _shapes.path,
+        '${entity.handle.persistentId.replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_').replaceAll(RegExp(r'[. ]+$'), '_')}.json',
+      ),
     );
     final temporary = File('${target.path}.tmp');
     await temporary.writeAsString(jsonEncode(entity.toJson()), flush: true);

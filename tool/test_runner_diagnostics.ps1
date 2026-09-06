@@ -1,6 +1,7 @@
 param(
   [string]$TestPath = "test",
-  [int]$TimeoutSeconds = 30
+  [int]$TimeoutSeconds = 30,
+  [switch]$DedicatedM005
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,13 +13,29 @@ $flutter = if ($env:FLUTTER_ROOT) {
 
 Write-Host "TEST RUNNER"
 Write-Host "Loading package..."
-$files = Get-ChildItem $TestPath -Recurse -Filter "*_test.dart" | Sort-Object FullName
+$root = (Get-Location).Path
+if ($DedicatedM005) {
+  $TestPath = "test/reference_geometry_test.dart"
+}
+$target = Join-Path $root $TestPath
+if (-not (Test-Path $target)) {
+  throw "Test path not found: $TestPath"
+}
+$files = if ((Get-Item $target).PSIsContainer) {
+  Get-ChildItem $target -File -Recurse -Filter "*_test.dart"
+} else {
+  @(Get-Item $target)
+}
+$files = $files | Sort-Object FullName
 Write-Host "Import completed"
 Write-Host "Bootstrap ready"
 Write-Host "Tests discovered: $($files.Count)"
+if ($files.Count -eq 0) {
+  throw "No test files discovered under: $TestPath"
+}
 
 foreach ($file in $files) {
-  $relative = Resolve-Path -Relative $file.FullName
+  $relative = $file.FullName.Substring($root.Length).TrimStart('\', '/')
   $timer = [Diagnostics.Stopwatch]::StartNew()
   $stdout = New-TemporaryFile
   $stderr = New-TemporaryFile
@@ -35,13 +52,23 @@ foreach ($file in $files) {
     $process.WaitForExit()
     $process.Refresh()
     $exitCode = $process.ExitCode
-    $events = Get-Content $stdout.FullName
+    $events = @(Get-Content $stdout.FullName | Where-Object { $_.Trim() })
     $first = $events | Select-Object -First 1
     $last = $events | Select-Object -Last 1
+    $testIds = @(
+      $events |
+        ForEach-Object { try { $_ | ConvertFrom-Json } catch { $null } } |
+        Where-Object { $_.type -eq "test" -and $_.testID } |
+        Select-Object -ExpandProperty testID -Unique
+    )
     Write-Host "Running first test: $relative"
     Write-Host "  first-event-ms=$($timer.ElapsedMilliseconds)"
     Write-Host "  first=$first"
     Write-Host "  last=$last"
+    Write-Host "  tests-executed=$($testIds.Count)"
+    if ($testIds.Count -eq 0) {
+      throw "NO TEST EVENTS: $relative"
+    }
     if ($last -notmatch '"type":"done"' -or $last -notmatch '"success":true') {
       throw "FAILED ($exitCode): $relative; last event: $last"
     }
