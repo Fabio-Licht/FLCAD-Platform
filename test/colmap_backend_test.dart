@@ -134,6 +134,13 @@ class _FakeColmapRunner implements ColmapProcessRunner {
   Future<String?> version(String executable) async => 'COLMAP 3.13';
 }
 
+class _CancelledToken implements ReconstructionCancellation {
+  const _CancelledToken();
+
+  @override
+  bool get isCancelled => true;
+}
+
 Future<({Directory root, Directory images})> _fixture(String prefix) async {
   final root = await Directory.systemTemp.createTemp(prefix);
   final images = Directory(
@@ -303,6 +310,25 @@ void main() {
       throwsA(isA<ReconstructionCancelled>()),
     );
     expect(reports, isEmpty);
+  });
+
+  test('pre-cancelled reconstruction never invokes the process runner', () async {
+    final fixture = await _fixture('flcad-colmap-pre-cancelled-');
+    addTearDown(() => fixture.root.delete(recursive: true));
+    final runner = _FakeColmapRunner();
+    final backend = ColmapBackend(
+      executable: _fakeColmapExecutable,
+      processRunner: runner,
+    );
+
+    await expectLater(
+      backend.reconstruct(
+        _request('pre-cancelled', fixture.root, fixture.images),
+        cancellation: const _CancelledToken(),
+      ),
+      throwsA(isA<ReconstructionCancelled>()),
+    );
+    expect(runner.calls, isEmpty);
   });
 
   test('passes paths as literal arguments and counts captures only', () async {

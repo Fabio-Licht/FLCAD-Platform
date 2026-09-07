@@ -12,6 +12,7 @@ class _Backend implements ReconstructionBackend {
   final Object? failure;
   ReconstructionCancellation? cancellation;
   int calls = 0;
+  void Function(ReconstructionStageReport report)? capturedOnStage;
 
   @override
   String get id => 'colmap';
@@ -36,6 +37,7 @@ class _Backend implements ReconstructionBackend {
     ReconstructionCancellation? cancellation,
   }) async {
     calls++;
+    capturedOnStage = onStage;
     this.cancellation = cancellation;
     if (block != null) await block!.future;
     if (cancellation?.isCancelled ?? false) {
@@ -84,6 +86,40 @@ class _Backend implements ReconstructionBackend {
         limitations: const ['Technical completion only.'],
         explanations: const {},
       ),
+    );
+  }
+}
+
+class _RecoveringBackend extends _Backend {
+  int remainingFailures = 1;
+
+  @override
+  Future<ReconstructionBackendResult> reconstruct(
+    ReconstructionRequest request, {
+    void Function(ReconstructionStageReport report)? onStage,
+    ReconstructionCancellation? cancellation,
+  }) async {
+    if (remainingFailures > 0) {
+      remainingFailures--;
+      calls++;
+      final failed = ReconstructionStageReport(
+        stage: ReconstructionStage.featureDetection,
+        status: ReconstructionStageStatus.failed,
+        confidence: 0,
+        quality: 0,
+        durationMs: 1,
+        residuals: const {},
+        dependencies: const [],
+        accepted: false,
+        explanation: 'temporary failure',
+      );
+      onStage?.call(failed);
+      throw StateError('temporary failure');
+    }
+    return super.reconstruct(
+      request,
+      onStage: onStage,
+      cancellation: cancellation,
     );
   }
 }
@@ -150,6 +186,46 @@ void main() {
     expect(allowed, isTrue);
     expect(manager.get('colmap'), same(backend));
     expect(controller.state, ColmapOperationalState.ready);
+  });
+
+  test('successful reconfiguration atomically replaces COLMAP', () async {
+    final previous = _Backend();
+    final replacement = _Backend();
+    final manager = ReconstructionBackendManager(backends: [previous]);
+    final controller = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) async =>
+          replacement,
+    );
+
+    await controller.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+
+    expect(manager.get('colmap'), same(replacement));
+    expect(controller.state, ColmapOperationalState.ready);
+  });
+
+  test('failed reconfiguration preserves working backend and ready state', () async {
+    final previous = _Backend();
+    final manager = ReconstructionBackendManager(backends: [previous]);
+    final controller = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) async =>
+          throw StateError('replacement probe failed'),
+    );
+
+    await controller.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+
+    expect(manager.get('colmap'), same(previous));
+    expect(controller.state, ColmapOperationalState.ready);
+    expect(controller.error, isA<StateError>());
   });
 
   test('consent is mandatory and activation failure changes no manager', () async {
@@ -226,6 +302,156 @@ void main() {
     await controller.start(_request);
     expect(failure.calls, 2);
     expect(controller.reports.last.status, ReconstructionStageStatus.failed);
+  });
+
+  test('retry can recover after a transient backend failure', () async {
+    final backend = _RecoveringBackend();
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(backends: [backend]),
+    );
+
+    await controller.start(_request);
+    expect(controller.state, ColmapOperationalState.failed);
+
+    await controller.start(_request);
+    expect(controller.state, ColmapOperationalState.succeeded);
+    expect(backend.calls, 2);
+    expect(controller.error, isNull);
+  });
+
+  test('start without a registered COLMAP backend fails before running', () async {
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(),
+    );
+
+    await expectLater(controller.start(_request), throwsStateError);
+    expect(controller.state, ColmapOperationalState.idle);
+  });
+
+  test('configure is rejected while running', () async {
+    final block = Completer<void>();
+    final backend = _Backend(block: block);
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(backends: [backend]),
+    );
+    final running = controller.start(_request);
+
+    await expectLater(
+      controller.configureExternal(
+        _record(),
+        consent: true,
+        allowExperimental: true,
+      ),
+      throwsStateError,
+    );
+    controller.cancel();
+    block.complete();
+    await running;
+  });
+
+  test('start and reconfigure are rejected while activation is pending', () async {
+    final activation = Completer<ReconstructionBackend>();
+    final manager = ReconstructionBackendManager();
+    final controller = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) =>
+          activation.future,
+    );
+    final configuring = controller.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+
+    expect(controller.state, ColmapOperationalState.activating);
+    await expectLater(controller.start(_request), throwsStateError);
+    await expectLater(
+      controller.configureExternal(
+        _record(),
+        consent: true,
+        allowExperimental: true,
+      ),
+      throwsStateError,
+    );
+    activation.complete(_Backend());
+    await configuring;
+    expect(controller.state, ColmapOperationalState.ready);
+  });
+
+  test('retry can recover after cancellation', () async {
+    final block = Completer<void>();
+    final backend = _Backend(block: block);
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(backends: [backend]),
+    );
+    final running = controller.start(_request);
+    controller.cancel();
+    block.complete();
+    await running;
+    expect(controller.state, ColmapOperationalState.cancelled);
+
+    await controller.start(_request);
+    expect(controller.state, ColmapOperationalState.succeeded);
+    expect(backend.calls, 2);
+  });
+
+  test('late stage callback after success is ignored', () async {
+    final backend = _Backend();
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(backends: [backend]),
+    );
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    await controller.start(_request);
+    final reports = controller.reports;
+    final beforeLateCallback = notifications;
+
+    backend.capturedOnStage!(_report(ReconstructionStage.optimization));
+
+    expect(controller.reports, same(reports));
+    expect(notifications, beforeLateCallback);
+  });
+
+  test('late stage callback after failure is ignored', () async {
+    final backend = _Backend(failure: StateError('mesh failed'));
+    final controller = ColmapOperationalController(
+      backendManager: ReconstructionBackendManager(backends: [backend]),
+    );
+    var notifications = 0;
+    controller.addListener(() => notifications++);
+    await controller.start(_request);
+    final reports = controller.reports;
+    final beforeLateCallback = notifications;
+
+    backend.capturedOnStage!(_report(ReconstructionStage.optimization));
+
+    expect(controller.reports, same(reports));
+    expect(notifications, beforeLateCallback);
+    expect(controller.state, ColmapOperationalState.failed);
+  });
+
+  test('dispose during activation ignores late completion', () async {
+    final activation = Completer<ReconstructionBackend>();
+    final manager = ReconstructionBackendManager();
+    final controller = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) =>
+          activation.future,
+    );
+    final configuring = controller.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+
+    controller.dispose();
+    activation.complete(
+      ColmapBackend(executable: _record().executablePath!),
+    );
+    await configuring;
+
+    expect(controller.state, ColmapOperationalState.disposed);
+    expect(manager.contains('colmap'), isFalse);
   });
 
   test('late completion after dispose is ignored without notification', () async {

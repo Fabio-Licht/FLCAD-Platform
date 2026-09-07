@@ -8,6 +8,11 @@ somente depois de uma ativação válida e executa exclusivamente a seleção ma
 `colmap`. O controlador expõe estados, relatórios imutáveis, resultado, erro,
 cancelamento e repetição de uma tentativa.
 
+Uma reconfiguração valida integralmente o novo executável antes de substituir
+atomicamente um backend já funcional. Se a nova ativação falhar, o backend
+anterior permanece registrado e pronto, enquanto o erro continua disponível
+para diagnóstico.
+
 O runner de processos continua usando argumentos literais e `runInShell: false`.
 Ao cancelar, tenta encerrar apenas o PID iniciado, espera brevemente sua saída e
 finaliza as assinaturas de stdout/stderr. Isso é *best effort*: não há garantia de

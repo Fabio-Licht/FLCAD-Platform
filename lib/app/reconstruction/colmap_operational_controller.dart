@@ -36,7 +36,7 @@ class _OperationalCancellationToken
   void cancel() => _cancelled = true;
 }
 
-typedef ColmapActivationCallback = Future<ColmapBackend> Function(
+typedef ColmapActivationCallback = Future<ReconstructionBackend> Function(
   BackendInstallationRecord record, {
   required bool allowUncertifiedExternal,
 });
@@ -89,6 +89,7 @@ class ColmapOperationalController extends ChangeNotifier {
     if (!consent || !allowExperimental) {
       throw StateError('Explicit consent and experimental use are required');
     }
+    final hadBackend = _backendManager.contains('colmap');
     final generation = ++_generation;
     _clearOperation();
     _setState(ColmapOperationalState.activating);
@@ -98,13 +99,21 @@ class ColmapOperationalController extends ChangeNotifier {
         allowUncertifiedExternal: true,
       );
       if (!_isCurrent(generation)) return;
-      _backendManager.register(backend);
+      if (hadBackend) {
+        _backendManager.replace(backend);
+      } else {
+        _backendManager.register(backend);
+      }
       _setState(ColmapOperationalState.ready);
     } catch (failure, stackTrace) {
       if (!_isCurrent(generation)) return;
       _error = failure;
       _errorStackTrace = stackTrace;
-      _setState(ColmapOperationalState.failed);
+      _setState(
+        hadBackend
+            ? ColmapOperationalState.ready
+            : ColmapOperationalState.failed,
+      );
     }
   }
 
@@ -121,6 +130,7 @@ class ColmapOperationalController extends ChangeNotifier {
     final cancellation = _cancellationFactory();
     _cancellation = cancellation;
     _setState(ColmapOperationalState.running);
+    var acceptStageUpdates = true;
     try {
       final result = await _backendManager.reconstruct(
         request,
@@ -128,26 +138,30 @@ class ColmapOperationalController extends ChangeNotifier {
         manualId: 'colmap',
         cancellation: cancellation,
         onStage: (report) {
-          if (!_isCurrent(generation)) return;
+          if (!acceptStageUpdates || !_isCurrent(generation)) return;
           _reports = List.unmodifiable([..._reports, report]);
           _notify();
         },
       );
+      acceptStageUpdates = false;
       if (!_isCurrent(generation)) return;
       _result = result;
       _reports = List.unmodifiable(result.output.stageReports);
       _setState(ColmapOperationalState.succeeded);
     } on ReconstructionCancelled catch (failure, stackTrace) {
+      acceptStageUpdates = false;
       if (!_isCurrent(generation)) return;
       _error = failure;
       _errorStackTrace = stackTrace;
       _setState(ColmapOperationalState.cancelled);
     } catch (failure, stackTrace) {
+      acceptStageUpdates = false;
       if (!_isCurrent(generation)) return;
       _error = failure;
       _errorStackTrace = stackTrace;
       _setState(ColmapOperationalState.failed);
     } finally {
+      acceptStageUpdates = false;
       if (_isCurrent(generation)) _cancellation = null;
     }
   }
