@@ -258,6 +258,7 @@ class _Harness {
   static Future<_Harness> create({
     Completer<ReconstructionBackend>? activation,
     _Cancellation? cancellation,
+    ColmapExecutablePicker? selectExecutable,
     ColmapPhotoDirectoryPicker? selectPhotoDirectory,
     ColmapWorkspaceRootProvider? workspaceRootProvider,
     ColmapInputValidator? inputValidator,
@@ -278,7 +279,7 @@ class _Harness {
     final lab = ColmapExperimentalLabController(
       operationalController: operational,
       provisioningManager: provisioning,
-      selectExecutable: () async => executable,
+      selectExecutable: selectExecutable ?? () async => executable,
       selectPhotoDirectory:
           selectPhotoDirectory ?? () async => r'C:\capture jobs\photo set',
       workspaceRootProvider:
@@ -386,7 +387,10 @@ void main() {
 
     expect(find.text('Estado: pronto'), findsOneWidget);
     expect(find.text('Versão: 3.13-test'), findsOneWidget);
-    expect(find.text('Caminho ativo: ${harness.executable}'), findsOneWidget);
+    expect(
+      find.text('Executável ativo: ${harness.executable}'),
+      findsOneWidget,
+    );
     expect(harness.provisioning.commitCalls, 1);
     expect(
       harness.provisioning.committed.single,
@@ -406,7 +410,10 @@ void main() {
 
     expect(harness.lab.activeInstallation, isNull);
     expect(harness.backendManager.contains('colmap'), isFalse);
-    expect(find.textContaining('self test rejected'), findsOneWidget);
+    expect(
+      find.textContaining('configuração do COLMAP foi rejeitada'),
+      findsOneWidget,
+    );
   });
 
   test(
@@ -441,7 +448,7 @@ void main() {
 
       expect(harness.lab.activeInstallation, same(previousRecord));
       expect(harness.backendManager.get('colmap'), same(previousBackend));
-      expect(harness.lab.presentationError, isA<StateError>());
+      expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
     },
   );
 
@@ -502,12 +509,12 @@ void main() {
     );
     addTearDown(emptyLab.dispose);
     await emptyLab.choosePhotoDirectory();
-    await emptyLab.startReconstruction();
+    await emptyLab.startReconstruction(consent: true);
     await _pumpLab(tester, emptyLab);
 
     expect(harness.backend.calls, 0);
     expect(
-      find.textContaining('não contém fotografias compatíveis'),
+      find.textContaining('não contém fotografias válidas'),
       findsOneWidget,
     );
   });
@@ -518,7 +525,7 @@ void main() {
     await harness.activate();
     await harness.lab.choosePhotoDirectory();
 
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
 
     final capture = harness.backend.request!.evidenceGraph.nodes.firstWhere(
       (node) => node.kind.name == 'capture',
@@ -536,6 +543,9 @@ void main() {
     await harness.lab.choosePhotoDirectory();
     harness.backend.block = Completer<void>();
     await _pumpLab(tester, harness.lab);
+
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
 
     await tester.tap(find.byKey(const Key('start-reconstruction')));
     await tester.tap(find.byKey(const Key('start-reconstruction')));
@@ -555,6 +565,8 @@ void main() {
     await harness.lab.choosePhotoDirectory();
     harness.backend.block = Completer<void>();
     await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
     await tester.tap(find.byKey(const Key('start-reconstruction')));
     await tester.pump();
 
@@ -595,6 +607,8 @@ void main() {
     await harness.lab.choosePhotoDirectory();
     harness.backend.block = Completer<void>();
     await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
     await tester.tap(find.byKey(const Key('start-reconstruction')));
     await tester.pump();
     await tester.tap(find.byKey(const Key('cancel-reconstruction')));
@@ -620,7 +634,7 @@ void main() {
     addTearDown(harness.dispose);
     await harness.activate();
     await harness.lab.choosePhotoDirectory();
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
     await _pumpLab(tester, harness.lab);
 
     expect(find.byKey(const Key('mesh-candidate-result')), findsOneWidget);
@@ -633,8 +647,10 @@ void main() {
     await harness.activate();
     await harness.lab.choosePhotoDirectory();
     harness.backend.failure = StateError('temporary reconstruction failure');
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
     await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
 
     expect(find.text('Estado: falhou'), findsOneWidget);
     expect(
@@ -658,7 +674,7 @@ void main() {
     addTearDown(harness.dispose);
     await harness.activate();
     await harness.lab.choosePhotoDirectory();
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
     await _pumpLab(tester, harness.lab);
 
     expect(find.textContaining('99%'), findsNothing);
@@ -698,6 +714,8 @@ void main() {
       await harness.lab.choosePhotoDirectory();
       harness.backend.block = Completer<void>();
       await _pumpLab(tester, harness.lab);
+      await tester.tap(find.byKey(const Key('colmap-consent')));
+      await tester.pump();
       await tester.tap(find.byKey(const Key('start-reconstruction')));
       await tester.pump();
 
@@ -737,7 +755,7 @@ void main() {
       await harness.activate();
 
       await harness.lab.choosePhotoDirectory();
-      await harness.lab.startReconstruction();
+      await harness.lab.startReconstruction(consent: true);
 
       final canonicalPhotos = await photos.resolveSymbolicLinks();
       final canonicalWorkspace = await Directory(
@@ -772,7 +790,7 @@ void main() {
         r'C:\capture jobs\fresh photo set\new 02.jpg',
       ],
     );
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
 
     expect(validator.photoCalls, 2);
     expect(validator.validatedPhotoPaths.last, r'C:\capture jobs\photo set');
@@ -964,7 +982,7 @@ void main() {
     await harness.lab.choosePhotoDirectory();
 
     expect(harness.lab.photoDirectory, isNull);
-    expect(harness.lab.presentationError, isA<StateError>());
+    expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
   });
 
   test('workspace provider failure prevents reconstruction start', () async {
@@ -976,9 +994,234 @@ void main() {
     await harness.activate();
     await harness.lab.choosePhotoDirectory();
 
-    await harness.lab.startReconstruction();
+    await harness.lab.startReconstruction(consent: true);
 
     expect(harness.backend.calls, 0);
-    expect(harness.lab.presentationError, isA<StateError>());
+    expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
+  });
+
+  test('start rejects false consent independently of the UI', () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    await harness.lab.startReconstruction(consent: false);
+
+    expect(harness.backend.calls, 0);
+    expect(harness.lab.presentationFailure?.code, 'consent');
+  });
+
+  testWidgets('unchecking consent blocks a new start', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    await _pumpLab(tester, harness.lab);
+    final consent = find.byKey(const Key('colmap-consent'));
+
+    await tester.tap(consent);
+    await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNotNull,
+    );
+    await tester.tap(consent);
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('unchecking consent does not cancel running work', (
+    tester,
+  ) async {
+    final cancellation = _Cancellation();
+    final harness = await _Harness.create(cancellation: cancellation);
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.block = Completer<void>();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    expect(cancellation.calls, 0);
+    expect(harness.operational.state, ColmapOperationalState.running);
+    harness.backend.block!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('new executable is pending and blocks Start', (tester) async {
+    var selection = Platform.isWindows
+        ? r'C:\Program Files\COLMAP\colmap.exe'
+        : '/opt/colmap/colmap';
+    final harness = await _Harness.create(
+      selectExecutable: () async => selection,
+    );
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    selection = Platform.isWindows
+        ? r'C:\Tools\COLMAP Next\colmap.exe'
+        : '/opt/colmap-next/colmap';
+    await harness.lab.chooseExecutable();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    expect(harness.lab.hasPendingConfiguration, isTrue);
+    expect(
+      find.byKey(const Key('pending-colmap-configuration')),
+      findsOneWidget,
+    );
+    expect(find.textContaining(harness.executable), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+  });
+
+  test(
+    'failed pending activation preserves the identified active path',
+    () async {
+      var selection = Platform.isWindows
+          ? r'C:\Program Files\COLMAP\colmap.exe'
+          : '/opt/colmap/colmap';
+      final harness = await _Harness.create(
+        selectExecutable: () async => selection,
+      );
+      addTearDown(harness.dispose);
+      await harness.activate();
+      final active = harness.lab.activeExecutablePath;
+      selection = Platform.isWindows
+          ? r'C:\Rejected\colmap.exe'
+          : '/rejected/colmap';
+      await harness.lab.chooseExecutable();
+      harness.provisioning.failure = StateError('secret arguments --token');
+
+      await harness.lab.validateAndActivate(consent: true);
+
+      expect(harness.lab.activeExecutablePath, active);
+      expect(harness.lab.selectedExecutablePath, selection);
+      expect(harness.lab.hasPendingConfiguration, isTrue);
+      expect(harness.lab.canStart(consent: true), isFalse);
+    },
+  );
+
+  test('cancelled executable picker is not an error', () async {
+    final harness = await _Harness.create(selectExecutable: () async => null);
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    expect(harness.lab.presentationFailure, isNull);
+  });
+
+  test('executable picker exception is safely captured', () async {
+    final harness = await _Harness.create(
+      selectExecutable: () async => throw StateError('secret.exe --password'),
+    );
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    expect(harness.lab.presentationFailure?.code, 'executable-picker');
+    expect(
+      harness.lab.presentationFailure?.controlledTechnicalDetail,
+      isNot(contains('password')),
+    );
+  });
+
+  testWidgets('raw errors and stage explanations never appear', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.failure = StateError(
+      'Process.start colmap.exe --database_path C:\\private stderr stack trace',
+    );
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.textContaining('database_path'), findsNothing);
+    expect(find.textContaining('stack trace'), findsNothing);
+    expect(find.textContaining('StateError'), findsNothing);
+
+    harness.backend.failure = null;
+    await harness.lab.startReconstruction(consent: true);
+    await tester.pump();
+    expect(find.textContaining('Candidato técnico produzido.'), findsNothing);
+    expect(find.textContaining('Status: concluída'), findsOneWidget);
+  });
+
+  test('controlled technical detail is sanitized and limited', () {
+    final failure = ColmapLabFailure.from(
+      StateError('${List.filled(700, 'x').join()}\n\r\u0001secret'),
+      operation: 'start',
+    );
+    expect(failure.controlledTechnicalDetail!.length, lessThanOrEqualTo(512));
+    expect(failure.controlledTechnicalDetail, isNot(contains('\n')));
+    expect(failure.controlledTechnicalDetail, isNot(contains('\u0001')));
+  });
+
+  testWidgets('controller replacement resets consent', (tester) async {
+    final first = await _Harness.create();
+    final second = await _Harness.create();
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    await _pumpLab(tester, first.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(const Key('colmap-consent')))
+          .value,
+      isTrue,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ColmapExperimentalLab(controller: second.lab)),
+      ),
+    );
+
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(const Key('colmap-consent')))
+          .value,
+      isFalse,
+    );
+  });
+
+  testWidgets('narrow viewport and high text scale do not overflow', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    tester.view.physicalSize = const Size(320, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MediaQuery(
+        data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+        child: MaterialApp(
+          home: Scaffold(body: ColmapExperimentalLab(controller: harness.lab)),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(tester.takeException(), isNull);
   });
 }

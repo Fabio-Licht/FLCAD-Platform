@@ -17,11 +17,58 @@ typedef ColmapPhotoDirectoryPicker = Future<String?> Function();
 typedef ColmapWorkspaceRootProvider = Future<String> Function();
 typedef ColmapRequestIdFactory = String Function();
 
+@immutable
+class ColmapLabFailure {
+  const ColmapLabFailure({
+    required this.code,
+    required this.userMessage,
+    this.controlledTechnicalDetail,
+  });
+
+  final String code;
+  final String userMessage;
+  final String? controlledTechnicalDetail;
+
+  static ColmapLabFailure from(Object error, {required String operation}) {
+    final detail = _sanitizeTechnicalDetail(error.runtimeType.toString());
+    final message = switch (operation) {
+      'executable-picker' => 'Não foi possível selecionar o executável.',
+      'photo-picker' => 'Não foi possível selecionar a pasta de fotografias.',
+      'photo-validation' =>
+        'A pasta selecionada não contém fotografias válidas para reconstrução.',
+      'workspace' =>
+        'Não foi possível preparar a área privada de reconstrução.',
+      'activation' => 'A nova configuração do COLMAP foi rejeitada.',
+      'start' => 'Não foi possível iniciar a reconstrução experimental.',
+      'consent' => 'O consentimento experimental atual é obrigatório.',
+      'pending-configuration' =>
+        'Valide e ative o executável selecionado antes de iniciar.',
+      _ => 'A operação do laboratório COLMAP não pôde ser concluída.',
+    };
+    return ColmapLabFailure(
+      code: operation,
+      userMessage: message,
+      controlledTechnicalDetail: detail.isEmpty ? null : detail,
+    );
+  }
+
+  static String _sanitizeTechnicalDetail(String value) {
+    final withoutControls = value.replaceAll(
+      RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'),
+      '',
+    );
+    final singleLine = withoutControls.replaceAll(RegExp(r'[\r\n]+'), ' ');
+    final compact = singleLine.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return compact.length <= 512 ? compact : compact.substring(0, 512);
+  }
+}
+
 /// Presentation facade for the isolated COLMAP laboratory.
 ///
 /// Operational state remains owned exclusively by [ColmapOperationalController].
-/// This class only coordinates injected selections, provisioning and request
-/// construction.
+/// Injected controllers are borrowed: this facade removes its listener but never
+/// disposes or cancels them. The future desktop owner must cancel/close them when
+/// the application scope ends. Leaving this presentation does not cancel work.
 class ColmapExperimentalLabController extends ChangeNotifier {
   ColmapExperimentalLabController({
     required ColmapOperationalController operationalController,
@@ -54,41 +101,71 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   String? _selectedExecutablePath;
   ValidatedColmapPhotoDirectory? _photoDirectory;
   BackendInstallationRecord? _activeInstallation;
-  Object? _presentationError;
+  ColmapLabFailure? _presentationFailure;
   bool _provisioning = false;
   bool _disposed = false;
 
   ColmapOperationalController get operational => _operationalController;
   String? get selectedExecutablePath => _selectedExecutablePath;
+  String? get activeExecutablePath => _activeInstallation?.executablePath;
   ValidatedColmapPhotoDirectory? get photoDirectory => _photoDirectory;
   BackendInstallationRecord? get activeInstallation => _activeInstallation;
-  Object? get presentationError => _presentationError;
+  ColmapLabFailure? get presentationFailure {
+    if (_presentationFailure != null) return _presentationFailure;
+    if (_operationalController.state == ColmapOperationalState.cancelled) {
+      return null;
+    }
+    final error = _operationalController.error;
+    return error == null
+        ? null
+        : ColmapLabFailure.from(error, operation: 'start');
+  }
+
+  @Deprecated('Use presentationFailure; raw exceptions are never UI content.')
+  Object? get presentationError => _presentationFailure;
   bool get isProvisioning => _provisioning;
+  bool get hasPendingConfiguration {
+    final selected = _selectedExecutablePath;
+    return selected != null && selected != activeExecutablePath;
+  }
+
+  bool canStart({required bool consent}) =>
+      !_disposed &&
+      consent &&
+      !_provisioning &&
+      !hasPendingConfiguration &&
+      _activeInstallation != null &&
+      (_photoDirectory?.imageCount ?? 0) > 0 &&
+      _operationalController.state != ColmapOperationalState.activating &&
+      _operationalController.state != ColmapOperationalState.running &&
+      _operationalController.state != ColmapOperationalState.cancelling;
 
   Future<void> chooseExecutable() async {
-    final selected = await _selectExecutable();
-    if (_disposed || selected == null) return;
-    _selectedExecutablePath = selected;
-    _presentationError = null;
-    notifyListeners();
+    try {
+      final selected = await _selectExecutable();
+      if (_disposed || selected == null) return;
+      _selectedExecutablePath = selected;
+      _presentationFailure = null;
+      notifyListeners();
+    } catch (error) {
+      _setFailure(error, operation: 'executable-picker');
+    }
   }
 
   Future<void> validateAndActivate({required bool consent}) async {
     if (_disposed || _provisioning) return;
     if (!consent) {
-      _setPresentationError(
-        StateError('O consentimento experimental é obrigatório.'),
-      );
+      _setFailure(StateError('consent required'), operation: 'consent');
       return;
     }
     final executablePath = _selectedExecutablePath;
     if (executablePath == null || executablePath.isEmpty) {
-      _setPresentationError(StateError('Selecione colmap.exe primeiro.'));
+      _setFailure(StateError('executable missing'), operation: 'activation');
       return;
     }
 
     _provisioning = true;
-    _presentationError = null;
+    _presentationFailure = null;
     notifyListeners();
     try {
       final result = await _operationalController.configureExternalSelection(
@@ -98,14 +175,19 @@ class ColmapExperimentalLabController extends ChangeNotifier {
         allowExperimental: true,
       );
       if (_disposed) return;
-      if (_operationalController.error != null) {
-        _presentationError = _operationalController.error;
-      } else if (result != null &&
+      if (result != null &&
           _operationalController.state == ColmapOperationalState.ready) {
         _activeInstallation = result.installation;
+        _selectedExecutablePath = result.installation.executablePath;
+      } else {
+        _setFailure(
+          _operationalController.error ?? StateError('activation rejected'),
+          operation: 'activation',
+          notify: false,
+        );
       }
     } catch (error) {
-      if (!_disposed) _presentationError = error;
+      _setFailure(error, operation: 'activation', notify: false);
     } finally {
       if (!_disposed) {
         _provisioning = false;
@@ -115,36 +197,51 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   }
 
   Future<void> choosePhotoDirectory() async {
+    String? selected;
     try {
-      final selected = await _selectPhotoDirectory();
-      if (_disposed || selected == null) return;
+      selected = await _selectPhotoDirectory();
+    } catch (error) {
+      _setFailure(error, operation: 'photo-picker');
+      return;
+    }
+    if (_disposed || selected == null) return;
+    try {
       final validated = await _inputValidator.validatePhotoDirectory(selected);
       if (_disposed) return;
       _photoDirectory = validated;
-      _presentationError = null;
+      _presentationFailure = null;
       notifyListeners();
     } catch (error) {
-      if (!_disposed) _setPresentationError(error);
+      _setFailure(error, operation: 'photo-validation');
     }
   }
 
-  Future<void> startReconstruction() async {
+  Future<void> startReconstruction({required bool consent}) async {
     if (_disposed ||
         _operationalController.state == ColmapOperationalState.running ||
         _operationalController.state == ColmapOperationalState.cancelling ||
         _operationalController.state == ColmapOperationalState.activating) {
       return;
     }
-    final selectedSnapshot = _photoDirectory;
-    if (selectedSnapshot == null ||
-        selectedSnapshot.canonicalImagePaths.isEmpty) {
-      _setPresentationError(
-        StateError('A pasta não contém fotografias compatíveis.'),
+    if (!consent) {
+      _setFailure(StateError('consent required'), operation: 'consent');
+      return;
+    }
+    if (hasPendingConfiguration) {
+      _setFailure(
+        StateError('pending executable'),
+        operation: 'pending-configuration',
       );
       return;
     }
+    final selectedSnapshot = _photoDirectory;
+    if (selectedSnapshot == null ||
+        selectedSnapshot.canonicalImagePaths.isEmpty) {
+      _setFailure(StateError('empty photo set'), operation: 'photo-validation');
+      return;
+    }
     if (_activeInstallation == null) {
-      _setPresentationError(StateError('Valide e ative o COLMAP primeiro.'));
+      _setFailure(StateError('COLMAP not active'), operation: 'activation');
       return;
     }
 
@@ -154,12 +251,18 @@ class ColmapExperimentalLabController extends ChangeNotifier {
       );
       if (_disposed) return;
       _photoDirectory = selection;
-      final managedRoot = await _workspaceRootProvider();
+      String managedRoot;
+      try {
+        managedRoot = await _workspaceRootProvider();
+      } catch (error) {
+        _setFailure(error, operation: 'workspace');
+        return;
+      }
       final workspaceRoot = await _inputValidator.prepareWorkspaceRoot(
         managedRoot,
       );
       if (_disposed) return;
-      _presentationError = null;
+      _presentationFailure = null;
       notifyListeners();
       final requestId = _requestIdFactory();
       var graph = const EvidenceGraph();
@@ -191,7 +294,7 @@ class ColmapExperimentalLabController extends ChangeNotifier {
         ),
       );
     } catch (error) {
-      if (!_disposed) _setPresentationError(error);
+      if (!_disposed) _setFailure(error, operation: 'start');
     }
   }
 
@@ -200,10 +303,14 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     _operationalController.cancel();
   }
 
-  void _setPresentationError(Object error) {
+  void _setFailure(
+    Object error, {
+    required String operation,
+    bool notify = true,
+  }) {
     if (_disposed) return;
-    _presentationError = error;
-    notifyListeners();
+    _presentationFailure = ColmapLabFailure.from(error, operation: operation);
+    if (notify) notifyListeners();
   }
 
   void _forwardOperationalChange() {
