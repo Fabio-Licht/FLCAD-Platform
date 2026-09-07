@@ -1,6 +1,6 @@
 # Arquitetura de Produtos FLCAD
 
-Status: Canônico  
+Status: Canônico
 Data: 07/09/2026
 
 ## Propósito
