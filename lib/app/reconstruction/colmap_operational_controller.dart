@@ -1,6 +1,5 @@
 import 'package:flutter/foundation.dart';
 
-import '../../core/reconstruction_engine/backend/colmap/colmap_backend.dart';
 import '../../core/reconstruction_engine/backend/colmap/colmap_backend_activation.dart';
 import '../../core/reconstruction_engine/backend/reconstruction_backend_contract.dart';
 import '../../core/reconstruction_engine/backend/reconstruction_backend_manager.dart';
@@ -36,10 +35,11 @@ class _OperationalCancellationToken
   void cancel() => _cancelled = true;
 }
 
-typedef ColmapActivationCallback = Future<ReconstructionBackend> Function(
-  BackendInstallationRecord record, {
-  required bool allowUncertifiedExternal,
-});
+typedef ColmapActivationCallback =
+    Future<ReconstructionBackend> Function(
+      BackendInstallationRecord record, {
+      required bool allowUncertifiedExternal,
+    });
 
 typedef OperationalCancellationFactory =
     OperationalReconstructionCancellation Function();
@@ -93,10 +93,7 @@ class ColmapOperationalController extends ChangeNotifier {
     _clearOperation();
     _setState(ColmapOperationalState.activating);
     try {
-      final backend = await _activate(
-        record,
-        allowUncertifiedExternal: true,
-      );
+      final backend = await _activate(record, allowUncertifiedExternal: true);
       if (!_isCurrent(generation)) return;
       if (backend.id != 'colmap') {
         throw StateError('Activation returned a non-COLMAP backend');
