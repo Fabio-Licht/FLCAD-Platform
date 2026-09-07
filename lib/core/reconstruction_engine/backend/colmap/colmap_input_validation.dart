@@ -58,12 +58,19 @@ class IoColmapInputValidator implements ColmapInputValidator {
     final images = <String>[];
     final identities = <String>{};
     await for (final entity in directory.list(followLinks: false)) {
-      if (entity is! File && entity is! Link) continue;
       if (!colmapSupportedImageExtensions.contains(
         path.extension(entity.path).toLowerCase(),
       )) {
         continue;
       }
+      if (entity is Link) {
+        throw ArgumentError.value(
+          entity.path,
+          'imagePath',
+          'links are not supported image inputs',
+        );
+      }
+      if (entity is! File) continue;
       final canonicalImage = await _canonicalize(entity.absolute.path);
       final image = File(canonicalImage);
       if (!await image.exists()) {
@@ -71,6 +78,13 @@ class IoColmapInputValidator implements ColmapInputValidator {
           entity.path,
           'imagePath',
           'does not identify an existing file',
+        );
+      }
+      if (await image.length() == 0) {
+        throw ArgumentError.value(
+          entity.path,
+          'imagePath',
+          'identifies an empty image file',
         );
       }
       if (!_samePath(path.dirname(canonicalImage), canonicalDirectory)) {

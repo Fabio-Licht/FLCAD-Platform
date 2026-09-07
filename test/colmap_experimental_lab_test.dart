@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flcad_mobile/app/reconstruction/colmap_experimental_lab_controller.dart';
 import 'package:flcad_mobile/app/reconstruction/colmap_operational_controller.dart';
 import 'package:flcad_mobile/app/reconstruction/widgets/colmap_experimental_lab.dart';
+import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph.dart';
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -220,6 +221,8 @@ class _InputValidator implements ColmapInputValidator {
   String workspaceRoot = r'C:\FLCAD Platform\managed workspace';
   Object? photoFailure;
   Object? workspaceFailure;
+  int photoCalls = 0;
+  final List<String> validatedPhotoPaths = [];
 
   @override
   Future<String> prepareWorkspaceRoot(String value) async {
@@ -231,6 +234,8 @@ class _InputValidator implements ColmapInputValidator {
   Future<ValidatedColmapPhotoDirectory> validatePhotoDirectory(
     String value,
   ) async {
+    photoCalls++;
+    validatedPhotoPaths.add(value);
     if (photoFailure != null) throw photoFailure!;
     return photoDirectory;
   }
@@ -695,6 +700,39 @@ void main() {
     },
   );
 
+  test('start revalidates and uses one fresh photo snapshot', () async {
+    final validator = _InputValidator();
+    final harness = await _Harness.create(inputValidator: validator);
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    validator.photoDirectory = ValidatedColmapPhotoDirectory(
+      canonicalPath: r'C:\capture jobs\fresh photo set',
+      canonicalImagePaths: const [
+        r'C:\capture jobs\fresh photo set\new 01.jpg',
+        r'C:\capture jobs\fresh photo set\new 02.jpg',
+      ],
+    );
+    await harness.lab.startReconstruction();
+
+    expect(validator.photoCalls, 2);
+    expect(validator.validatedPhotoPaths.last, r'C:\capture jobs\photo set');
+    expect(
+      harness.backend.request!.calibration['imagePath'],
+      r'C:\capture jobs\fresh photo set',
+    );
+    final captures = harness.backend.request!.evidenceGraph.nodes
+        .where((node) => node.kind == EvidenceNodeKind.capture)
+        .toList();
+    expect(captures, hasLength(2));
+    expect(captures.map((node) => node.payload['path']), [
+      r'C:\capture jobs\fresh photo set\new 01.jpg',
+      r'C:\capture jobs\fresh photo set\new 02.jpg',
+    ]);
+    expect(harness.lab.photoDirectory!.imageCount, 2);
+  });
+
   test('relative photo directory is rejected', () async {
     const validator = IoColmapInputValidator();
 
@@ -717,6 +755,38 @@ void main() {
     );
     await expectLater(
       validator.validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('empty image file is rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_zero_');
+    addTearDown(() => root.delete(recursive: true));
+    await File(
+      '${root.path}${Platform.pathSeparator}empty.jpg',
+    ).writeAsBytes(const []);
+
+    await expectLater(
+      const IoColmapInputValidator().validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('image link is rejected and never counted as a regular file', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_link_');
+    addTearDown(() => root.delete(recursive: true));
+    final target = await File(
+      '${root.path}${Platform.pathSeparator}target.bin',
+    ).writeAsBytes([1]);
+    final link = Link('${root.path}${Platform.pathSeparator}linked.jpg');
+    try {
+      await link.create(target.path);
+    } on FileSystemException {
+      return;
+    }
+
+    await expectLater(
+      const IoColmapInputValidator().validatePhotoDirectory(root.path),
       throwsArgumentError,
     );
   });

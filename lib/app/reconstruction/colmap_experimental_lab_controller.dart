@@ -8,6 +8,12 @@ import 'colmap_operational_controller.dart';
 
 typedef ColmapExecutablePicker = Future<String?> Function();
 typedef ColmapPhotoDirectoryPicker = Future<String?> Function();
+
+/// Supplies the private workspace root managed by FLCAD Platform.
+///
+/// This is a trusted internal application dependency. It must never return a
+/// path selected by the user; the returned root is reserved for application-
+/// managed COLMAP execution directories.
 typedef ColmapWorkspaceRootProvider = Future<String> Function();
 typedef ColmapRequestIdFactory = String Function();
 
@@ -137,8 +143,9 @@ class ColmapExperimentalLabController extends ChangeNotifier {
         _operationalController.state == ColmapOperationalState.activating) {
       return;
     }
-    final selection = _photoDirectory;
-    if (selection == null || selection.canonicalImagePaths.isEmpty) {
+    final selectedSnapshot = _photoDirectory;
+    if (selectedSnapshot == null ||
+        selectedSnapshot.canonicalImagePaths.isEmpty) {
       _setPresentationError(
         StateError('A pasta não contém fotografias compatíveis.'),
       );
@@ -150,6 +157,11 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     }
 
     try {
+      final selection = await _inputValidator.validatePhotoDirectory(
+        selectedSnapshot.canonicalPath,
+      );
+      if (_disposed) return;
+      _photoDirectory = selection;
       final managedRoot = await _workspaceRootProvider();
       final workspaceRoot = await _inputValidator.prepareWorkspaceRoot(
         managedRoot,
