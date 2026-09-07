@@ -416,6 +416,8 @@ void main() {
   test('passes paths as literal arguments and counts captures only', () async {
     final fixture = await _fixture('flcad colmap [literal] &-');
     addTearDown(() => fixture.root.delete(recursive: true));
+    final canonicalImages = await fixture.images.resolveSymbolicLinks();
+    final canonicalRoot = await fixture.root.resolveSymbolicLinks();
     final runner = _FakeColmapRunner();
     final result = await ColmapBackend(
       executable: _fakeColmapExecutable,
@@ -423,7 +425,12 @@ void main() {
     ).reconstruct(_request('request [1] & done', fixture.root, fixture.images));
 
     final extractor = runner.calls.first;
-    expect(extractor.arguments, contains(fixture.images.path));
+    expect(canonicalImages, contains('images [set] & source'));
+    expect(extractor.arguments, contains(canonicalImages));
+    expect(
+      extractor.arguments.where((argument) => argument == canonicalImages),
+      hasLength(1),
+    );
     expect(
       result.diagnostics.explanations.values,
       everyElement(contains('Capturas consideradas: 1.')),
@@ -431,7 +438,7 @@ void main() {
     expect(result.output.meshCandidate!['path'], isA<String>());
     expect(
       result.output.meshCandidate!['path'] as String,
-      startsWith(fixture.root.path),
+      startsWith(canonicalRoot),
     );
   });
 
