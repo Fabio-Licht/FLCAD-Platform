@@ -205,11 +205,10 @@ class _ColmapExperimentalLabState extends State<ColmapExperimentalLab> {
       '',
     );
     final singleLine = withoutControls.replaceAll(RegExp(r'[\r\n]+'), ' ');
-    final compact = singleLine.replaceAll(RegExp(r'\s+'), ' ').trim();
     const maximumLength = 1024;
-    return compact.length <= maximumLength
-        ? compact
-        : '${compact.substring(0, maximumLength - 1)}…';
+    return singleLine.length <= maximumLength
+        ? singleLine
+        : '${singleLine.substring(0, maximumLength - 1)}…';
   }
 }
 

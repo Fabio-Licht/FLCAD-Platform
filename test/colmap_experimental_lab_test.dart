@@ -1304,6 +1304,21 @@ void main() {
     expect(artifact, endsWith('…'));
   });
 
+  testWidgets('artifact path preserves ordinary spaces and Unicode exactly', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    const path = r'C:\Área de reconstrução\Peça  01\candidato final.ply';
+    harness.backend.artifactPath = path;
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.text('Artefato: $path'), findsOneWidget);
+  });
+
   testWidgets('controller replacement resets consent', (tester) async {
     final first = await _Harness.create();
     final second = await _Harness.create();
