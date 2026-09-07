@@ -75,6 +75,10 @@ class ColmapOperationalController extends ChangeNotifier {
   StackTrace? get errorStackTrace => _errorStackTrace;
   bool get isDisposed => _state == ColmapOperationalState.disposed;
 
+  /// Low-level operational activation retained for M-006C1 compatibility.
+  ///
+  /// This method does not validate or persist an installation record. Product
+  /// UI flows must use the coordinated external-selection transaction.
   Future<void> configureExternal(
     BackendInstallationRecord record, {
     required bool consent,
@@ -113,6 +117,52 @@ class ColmapOperationalController extends ChangeNotifier {
             ? ColmapOperationalState.ready
             : ColmapOperationalState.failed,
       );
+    }
+  }
+
+  Future<ColmapExternalActivationResult?> configureExternalSelection({
+    required BackendProvisioningManager provisioningManager,
+    required String executablePath,
+    required bool consent,
+    required bool allowExperimental,
+  }) async {
+    _ensureUsable();
+    if (_state == ColmapOperationalState.running ||
+        _state == ColmapOperationalState.cancelling ||
+        _state == ColmapOperationalState.activating) {
+      throw StateError('COLMAP is busy');
+    }
+    if (!consent || !allowExperimental) {
+      throw StateError('Explicit consent and experimental use are required');
+    }
+    final generation = ++_generation;
+    _clearOperation();
+    _setState(ColmapOperationalState.activating);
+    try {
+      final result =
+          await ColmapExternalActivationCoordinator(
+            provisioningManager: provisioningManager,
+            backendManager: _backendManager,
+            prepareBackend: _activate,
+          ).activateExternal(
+            executablePath: executablePath,
+            authorized: consent,
+            allowExperimental: allowExperimental,
+            shouldAbandonBeforeCommit: () => !_isCurrent(generation),
+          );
+      if (result == null || !_isCurrent(generation)) return null;
+      _setState(ColmapOperationalState.ready);
+      return result;
+    } catch (failure, stackTrace) {
+      if (!_isCurrent(generation)) return null;
+      _error = failure;
+      _errorStackTrace = stackTrace;
+      _setState(
+        _backendManager.contains('colmap')
+            ? ColmapOperationalState.ready
+            : ColmapOperationalState.failed,
+      );
+      return null;
     }
   }
 

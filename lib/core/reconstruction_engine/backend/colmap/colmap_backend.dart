@@ -8,6 +8,7 @@ import '../../../acquisition_intelligence/models/evidence_graph.dart';
 import '../../engine/reconstruction_engine.dart';
 import '../../models/reconstruction_contract.dart';
 import '../reconstruction_backend_contract.dart';
+import 'colmap_input_validation.dart';
 
 class ColmapCommandResult {
   const ColmapCommandResult({
@@ -66,6 +67,7 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
       streamError ??= error;
       streamStackTrace ??= stackTrace;
     }
+
     final stdoutSubscription = process.stdout
         .transform(const Utf8Decoder(allowMalformed: true))
         .listen(
@@ -123,11 +125,9 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
   @override
   Future<String?> version(String executable) async {
     try {
-      final result = await run(
-        executable,
-        const ['-h'],
-        workingDirectory: Directory.current,
-      );
+      final result = await run(executable, const [
+        '-h',
+      ], workingDirectory: Directory.current);
       final text = '${result.stdout}\n${result.stderr}';
       final match = RegExp(
         r'colmap[^\r\n]*',
@@ -145,11 +145,14 @@ class ColmapBackend implements ReconstructionBackend {
     required this.executable,
     this.detectedVersion = 'undetected',
     ColmapProcessRunner? processRunner,
-  }) : _processRunner = processRunner ?? const IoColmapProcessRunner();
+    ColmapInputValidator? inputValidator,
+  }) : _processRunner = processRunner ?? const IoColmapProcessRunner(),
+       _inputValidator = inputValidator ?? const IoColmapInputValidator();
 
   final String executable;
   final String detectedVersion;
   final ColmapProcessRunner _processRunner;
+  final ColmapInputValidator _inputValidator;
 
   @override
   String get id => 'colmap';
@@ -188,17 +191,23 @@ class ColmapBackend implements ReconstructionBackend {
     if (workspacePath == null || imagePath == null) {
       throw ArgumentError('workspacePath and imagePath are required');
     }
-    final workspaceRoot = Directory(workspacePath).absolute;
-    await workspaceRoot.create(recursive: true);
-    final images = Directory(imagePath).absolute;
-    await _validateImageDirectory(images);
+    final canonicalWorkspaceRoot = await _inputValidator.prepareWorkspaceRoot(
+      workspacePath,
+    );
+    final workspaceRoot = Directory(canonicalWorkspaceRoot);
+    final validatedImages = await _inputValidator.validatePhotoDirectory(
+      imagePath,
+    );
+    final images = Directory(validatedImages.canonicalPath);
     final workspace = await workspaceRoot.createTemp(
       '${_safeRunPrefix(request.id)}-',
     );
     final database = File(
       '${workspace.path}${Platform.pathSeparator}database.db',
     );
-    final sparse = Directory('${workspace.path}${Platform.pathSeparator}sparse');
+    final sparse = Directory(
+      '${workspace.path}${Platform.pathSeparator}sparse',
+    );
     final sparseText = Directory(
       '${workspace.path}${Platform.pathSeparator}sparse_text',
     );
@@ -297,11 +306,7 @@ class ColmapBackend implements ReconstructionBackend {
     final featureDatabaseFingerprint = await _fingerprint(database);
     await execute(
       ReconstructionStage.featureMatching,
-      [
-        'exhaustive_matcher',
-        '--database_path',
-        database.path,
-      ],
+      ['exhaustive_matcher', '--database_path', database.path],
       'COLMAP calculou correspondências entre as observações disponíveis.',
       () async {
         await _requireNonEmptyFile(database, 'database.db');
@@ -365,11 +370,11 @@ class ColmapBackend implements ReconstructionBackend {
         'TXT',
       ],
       'COLMAP disponibilizou a reconstrução esparsa para o contrato interno.',
-      () => _requireCompleteModel(
-        sparseText,
-        const ['cameras.txt', 'images.txt', 'points3D.txt'],
-        'sparse text model',
-      ),
+      () => _requireCompleteModel(sparseText, const [
+        'cameras.txt',
+        'images.txt',
+        'points3D.txt',
+      ], 'sparse text model'),
     );
     await execute(
       ReconstructionStage.denseReconstruction,
@@ -483,36 +488,6 @@ class ColmapBackend implements ReconstructionBackend {
   }
 }
 
-const _supportedImageExtensions = {
-  '.jpg',
-  '.jpeg',
-  '.png',
-  '.tif',
-  '.tiff',
-  '.bmp',
-  '.webp',
-};
-
-Future<void> _validateImageDirectory(Directory directory) async {
-  if (!await directory.exists()) {
-    throw ArgumentError.value(directory.path, 'imagePath', 'does not exist');
-  }
-  final hasSupportedImage = await directory.list(followLinks: false).any(
-    (entity) {
-      if (entity is! File) return false;
-      final name = entity.uri.pathSegments.last.toLowerCase();
-      return _supportedImageExtensions.any(name.endsWith);
-    },
-  );
-  if (!hasSupportedImage) {
-    throw ArgumentError.value(
-      directory.path,
-      'imagePath',
-      'does not contain a supported image',
-    );
-  }
-}
-
 String _safeRunPrefix(String requestId) {
   final safe = requestId.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
   final bounded = safe.length > 48 ? safe.substring(0, 48) : safe;
@@ -565,7 +540,7 @@ Future<void> _requireSupportedNonEmptyImage(
     )) {
       if (entity is! File || await entity.length() == 0) continue;
       final name = entity.uri.pathSegments.last.toLowerCase();
-      if (_supportedImageExtensions.any(name.endsWith)) return;
+      if (colmapSupportedImageExtensions.any(name.endsWith)) return;
     }
   }
   throw StateError('COLMAP did not produce a non-empty $label artifact.');

@@ -4,9 +4,8 @@ import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-String get _fakeColmapExecutable => Platform.isWindows
-    ? r'C:\fake-colmap\colmap.exe'
-    : '/fake-colmap/colmap';
+String get _fakeColmapExecutable =>
+    Platform.isWindows ? r'C:\fake-colmap\colmap.exe' : '/fake-colmap/colmap';
 
 class _FakeColmapRunner implements ColmapProcessRunner {
   _FakeColmapRunner({
@@ -65,7 +64,8 @@ class _FakeColmapRunner implements ColmapProcessRunner {
       await file.writeAsBytes(command == emptyArtifactFor ? const [] : [1]);
     }
 
-    String valueAfter(String option) => arguments[arguments.indexOf(option) + 1];
+    String valueAfter(String option) =>
+        arguments[arguments.indexOf(option) + 1];
     switch (command) {
       case 'feature_extractor':
         await write(valueAfter('--database_path'));
@@ -141,14 +141,40 @@ class _CancelledToken implements ReconstructionCancellation {
   bool get isCancelled => true;
 }
 
+class _RejectingInputValidator implements ColmapInputValidator {
+  _RejectingInputValidator({this.rejectWorkspace = false});
+
+  final bool rejectWorkspace;
+  int photoCalls = 0;
+  int workspaceCalls = 0;
+
+  @override
+  Future<String> prepareWorkspaceRoot(String value) async {
+    workspaceCalls++;
+    if (rejectWorkspace) {
+      throw ArgumentError.value(value, 'workspacePath', 'must be absolute');
+    }
+    return value;
+  }
+
+  @override
+  Future<ValidatedColmapPhotoDirectory> validatePhotoDirectory(
+    String value,
+  ) async {
+    photoCalls++;
+    throw ArgumentError.value(value, 'imagePath', 'must be absolute');
+  }
+}
+
 Future<({Directory root, Directory images})> _fixture(String prefix) async {
   final root = await Directory.systemTemp.createTemp(prefix);
   final images = Directory(
     '${root.path}${Platform.pathSeparator}images [set] & source',
   );
   await images.create();
-  await File('${images.path}${Platform.pathSeparator}capture 01.JPG')
-      .writeAsBytes([1]);
+  await File(
+    '${images.path}${Platform.pathSeparator}capture 01.JPG',
+  ).writeAsBytes([1]);
   return (root: root, images: images);
 }
 
@@ -173,13 +199,63 @@ ReconstructionRequest _request(
       ),
     ],
   ),
-  calibration: {
-    'workspacePath': workspaceRoot.path,
-    'imagePath': images.path,
-  },
+  calibration: {'workspacePath': workspaceRoot.path, 'imagePath': images.path},
 );
 
 void main() {
+  test(
+    'calls input validator and does not run COLMAP for invalid imagePath',
+    () async {
+      final runner = _FakeColmapRunner();
+      final validator = _RejectingInputValidator();
+      final backend = ColmapBackend(
+        executable: _fakeColmapExecutable,
+        processRunner: runner,
+        inputValidator: validator,
+      );
+      final request = ReconstructionRequest(
+        id: 'invalid-images',
+        projectId: 'project',
+        evidenceGraph: const EvidenceGraph(),
+        calibration: {
+          'workspacePath': Directory.systemTemp.absolute.path,
+          'imagePath': 'relative/images',
+        },
+      );
+
+      await expectLater(backend.reconstruct(request), throwsArgumentError);
+
+      expect(validator.workspaceCalls, 1);
+      expect(validator.photoCalls, 1);
+      expect(runner.calls, isEmpty);
+    },
+  );
+
+  test('rejects relative workspace before running COLMAP', () async {
+    final runner = _FakeColmapRunner();
+    final validator = _RejectingInputValidator(rejectWorkspace: true);
+    final backend = ColmapBackend(
+      executable: _fakeColmapExecutable,
+      processRunner: runner,
+      inputValidator: validator,
+    );
+    final request = ReconstructionRequest(
+      id: 'invalid-workspace',
+      projectId: 'project',
+      evidenceGraph: const EvidenceGraph(),
+      calibration: {
+        'workspacePath': 'relative/workspace',
+        'imagePath': Directory.systemTemp.absolute.path,
+      },
+    );
+
+    await expectLater(backend.reconstruct(request), throwsArgumentError);
+
+    expect(validator.workspaceCalls, 1);
+    expect(validator.photoCalls, 0);
+    expect(runner.calls, isEmpty);
+  });
+
   test('creates one retained atomic run workspace per invocation', () async {
     final fixture = await _fixture('flcad colmap & concurrent-');
     addTearDown(() => fixture.root.delete(recursive: true));
@@ -279,71 +355,82 @@ void main() {
     }
   }
 
-  test('reports runner exceptions and preserves cancellation semantics', () async {
-    final fixture = await _fixture('flcad-colmap-runner-error-');
-    addTearDown(() => fixture.root.delete(recursive: true));
-    final reports = <ReconstructionStageReport>[];
-    final backend = ColmapBackend(
-      executable: _fakeColmapExecutable,
-      processRunner: _FakeColmapRunner(throwFor: 'feature_extractor'),
-    );
+  test(
+    'reports runner exceptions and preserves cancellation semantics',
+    () async {
+      final fixture = await _fixture('flcad-colmap-runner-error-');
+      addTearDown(() => fixture.root.delete(recursive: true));
+      final reports = <ReconstructionStageReport>[];
+      final backend = ColmapBackend(
+        executable: _fakeColmapExecutable,
+        processRunner: _FakeColmapRunner(throwFor: 'feature_extractor'),
+      );
 
-    await expectLater(
-      backend.reconstruct(
-        _request('runner-error', fixture.root, fixture.images),
-        onStage: reports.add,
-      ),
-      throwsStateError,
-    );
-    expect(reports.single.status, ReconstructionStageStatus.failed);
+      await expectLater(
+        backend.reconstruct(
+          _request('runner-error', fixture.root, fixture.images),
+          onStage: reports.add,
+        ),
+        throwsStateError,
+      );
+      expect(reports.single.status, ReconstructionStageStatus.failed);
 
-    reports.clear();
-    final cancelledBackend = ColmapBackend(
-      executable: _fakeColmapExecutable,
-      processRunner: _FakeColmapRunner(cancelFor: 'feature_extractor'),
-    );
-    await expectLater(
-      cancelledBackend.reconstruct(
-        _request('cancelled', fixture.root, fixture.images),
-        onStage: reports.add,
-      ),
-      throwsA(isA<ReconstructionCancelled>()),
-    );
-    expect(reports, isEmpty);
-  });
+      reports.clear();
+      final cancelledBackend = ColmapBackend(
+        executable: _fakeColmapExecutable,
+        processRunner: _FakeColmapRunner(cancelFor: 'feature_extractor'),
+      );
+      await expectLater(
+        cancelledBackend.reconstruct(
+          _request('cancelled', fixture.root, fixture.images),
+          onStage: reports.add,
+        ),
+        throwsA(isA<ReconstructionCancelled>()),
+      );
+      expect(reports, isEmpty);
+    },
+  );
 
-  test('pre-cancelled reconstruction never invokes the process runner', () async {
-    final fixture = await _fixture('flcad-colmap-pre-cancelled-');
-    addTearDown(() => fixture.root.delete(recursive: true));
-    final runner = _FakeColmapRunner();
-    final backend = ColmapBackend(
-      executable: _fakeColmapExecutable,
-      processRunner: runner,
-    );
+  test(
+    'pre-cancelled reconstruction never invokes the process runner',
+    () async {
+      final fixture = await _fixture('flcad-colmap-pre-cancelled-');
+      addTearDown(() => fixture.root.delete(recursive: true));
+      final runner = _FakeColmapRunner();
+      final backend = ColmapBackend(
+        executable: _fakeColmapExecutable,
+        processRunner: runner,
+      );
 
-    await expectLater(
-      backend.reconstruct(
-        _request('pre-cancelled', fixture.root, fixture.images),
-        cancellation: const _CancelledToken(),
-      ),
-      throwsA(isA<ReconstructionCancelled>()),
-    );
-    expect(runner.calls, isEmpty);
-  });
+      await expectLater(
+        backend.reconstruct(
+          _request('pre-cancelled', fixture.root, fixture.images),
+          cancellation: const _CancelledToken(),
+        ),
+        throwsA(isA<ReconstructionCancelled>()),
+      );
+      expect(runner.calls, isEmpty);
+    },
+  );
 
   test('passes paths as literal arguments and counts captures only', () async {
     final fixture = await _fixture('flcad colmap [literal] &-');
     addTearDown(() => fixture.root.delete(recursive: true));
+    final canonicalImages = await fixture.images.resolveSymbolicLinks();
+    final canonicalRoot = await fixture.root.resolveSymbolicLinks();
     final runner = _FakeColmapRunner();
     final result = await ColmapBackend(
       executable: _fakeColmapExecutable,
       processRunner: runner,
-    ).reconstruct(
-      _request('request [1] & done', fixture.root, fixture.images),
-    );
+    ).reconstruct(_request('request [1] & done', fixture.root, fixture.images));
 
     final extractor = runner.calls.first;
-    expect(extractor.arguments, contains(fixture.images.path));
+    expect(canonicalImages, contains('images [set] & source'));
+    expect(extractor.arguments, contains(canonicalImages));
+    expect(
+      extractor.arguments.where((argument) => argument == canonicalImages),
+      hasLength(1),
+    );
     expect(
       result.diagnostics.explanations.values,
       everyElement(contains('Capturas consideradas: 1.')),
@@ -351,7 +438,7 @@ void main() {
     expect(result.output.meshCandidate!['path'], isA<String>());
     expect(
       result.output.meshCandidate!['path'] as String,
-      startsWith(fixture.root.path),
+      startsWith(canonicalRoot),
     );
   });
 
@@ -363,13 +450,11 @@ void main() {
     await ColmapBackend(
       executable: _fakeColmapExecutable,
       processRunner: runner,
-    ).reconstruct(
-      _request(requestId, fixture.root, fixture.images),
-    );
+    ).reconstruct(_request(requestId, fixture.root, fixture.images));
 
-    final name = Directory(runner.calls.first.workspace).uri.pathSegments
-        .where((segment) => segment.isNotEmpty)
-        .last;
+    final name = Directory(
+      runner.calls.first.workspace,
+    ).uri.pathSegments.where((segment) => segment.isNotEmpty).last;
     final expectedPrefix = requestId
         .replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_')
         .substring(0, 48);

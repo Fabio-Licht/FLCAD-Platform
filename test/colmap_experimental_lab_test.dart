@@ -1,0 +1,1424 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flcad_mobile/app/reconstruction/colmap_experimental_lab_controller.dart';
+import 'package:flcad_mobile/app/reconstruction/colmap_operational_controller.dart';
+import 'package:flcad_mobile/app/reconstruction/widgets/colmap_experimental_lab.dart';
+import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph.dart';
+import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
+
+class _Repository implements BackendProvisioningRepository {
+  List<BackendInstallationRecord> records = [];
+  Object? saveFailure;
+  int saveCalls = 0;
+  Completer<void>? saveBlock;
+  Completer<void>? saveStarted;
+
+  @override
+  List<ApprovedBackendRelease> get approvedReleases => const [];
+
+  @override
+  Future<List<BackendInstallationRecord>> loadInstallations() async => records;
+
+  @override
+  Future<void> saveInstallations(List<BackendInstallationRecord> value) async {
+    saveCalls++;
+    if (saveFailure != null) throw saveFailure!;
+    saveStarted?.complete();
+    if (saveBlock != null) await saveBlock!.future;
+    records = List.of(value);
+  }
+}
+
+class _NoDownload implements BackendDownloadManager {
+  @override
+  Future<File> download(Uri uri, File destination) =>
+      throw UnsupportedError('not used by the laboratory');
+}
+
+class _NoInstall implements BackendArchiveInstaller {
+  @override
+  Future<void> extract(File archive, Directory destination) =>
+      throw UnsupportedError('not used by the laboratory');
+}
+
+class _NoChecksum implements BackendChecksumVerifier {
+  @override
+  Future<bool> verify(File file, String expectedSha256) =>
+      throw UnsupportedError('not used by the laboratory');
+}
+
+class _NoSignature implements BackendSignatureVerifier {
+  @override
+  Future<bool> verify(File file, String signature) =>
+      throw UnsupportedError('not used by the laboratory');
+}
+
+class _SelfTest implements BackendSelfTest {
+  Object? failure;
+  String version = '3.13-test';
+  int calls = 0;
+
+  @override
+  Future<ReconstructionBackendCapabilities> validate(
+    String backendId,
+    String executablePath,
+  ) async {
+    calls++;
+    if (failure != null) throw failure!;
+    return ReconstructionBackendCapabilities(
+      supportsGpu: false,
+      supportsCpu: true,
+      incremental: false,
+      denseReconstruction: true,
+      texturing: false,
+      automaticCalibration: true,
+      license: 'BSD-3-Clause',
+      version: version,
+    );
+  }
+}
+
+class _ProvisioningManager extends BackendProvisioningManager {
+  _ProvisioningManager._(this.test, this.store)
+    : super(
+        repository: store,
+        downloader: _NoDownload(),
+        installer: _NoInstall(),
+        checksumVerifier: _NoChecksum(),
+        signatureVerifier: _NoSignature(),
+        selfTest: test,
+        installationRoot: Directory.systemTemp,
+        canonicalPathResolver: (value) async => File(value).absolute.path,
+        externalFileExists: (_) async => true,
+      );
+
+  factory _ProvisioningManager() =>
+      _ProvisioningManager._(_SelfTest(), _Repository());
+
+  final _SelfTest test;
+  final _Repository store;
+
+  Object? get failure => test.failure;
+  set failure(Object? value) => test.failure = value;
+  int get calls => test.calls;
+  int get commitCalls => store.saveCalls;
+  set commitFailure(Object? value) => store.saveFailure = value;
+  List<BackendInstallationRecord> get committed => store.records;
+  set saveBlock(Completer<void>? value) => store.saveBlock = value;
+  set saveStarted(Completer<void>? value) => store.saveStarted = value;
+}
+
+class _Cancellation implements OperationalReconstructionCancellation {
+  int calls = 0;
+
+  @override
+  bool isCancelled = false;
+
+  @override
+  void cancel() {
+    calls++;
+    isCancelled = true;
+  }
+}
+
+class _Backend implements ReconstructionBackend {
+  Completer<void>? block;
+  Object? failure;
+  String artifactPath = r'C:\work space\candidate mesh.ply';
+  int reportCount = 1;
+  ReconstructionRequest? request;
+  int calls = 0;
+
+  @override
+  String get id => 'colmap';
+
+  @override
+  ReconstructionBackendCapabilities get capabilities =>
+      const ReconstructionBackendCapabilities(
+        supportsGpu: false,
+        supportsCpu: true,
+        incremental: false,
+        denseReconstruction: true,
+        texturing: false,
+        automaticCalibration: true,
+        license: 'BSD-3-Clause',
+        version: '3.13-test',
+      );
+
+  @override
+  Future<ReconstructionBackendResult> reconstruct(
+    ReconstructionRequest request, {
+    void Function(ReconstructionStageReport report)? onStage,
+    ReconstructionCancellation? cancellation,
+  }) async {
+    calls++;
+    this.request = request;
+    if (block != null) await block!.future;
+    if (cancellation?.isCancelled ?? false) {
+      throw const ReconstructionCancelled();
+    }
+    if (failure != null) throw failure!;
+    final report = const ReconstructionStageReport(
+      stage: ReconstructionStage.meshGeneration,
+      status: ReconstructionStageStatus.completed,
+      confidence: 0.42,
+      quality: 0.7,
+      durationMs: 10,
+      residuals: {},
+      dependencies: [],
+      accepted: true,
+      explanation: 'Candidato técnico produzido.',
+    );
+    final reports = List<ReconstructionStageReport>.generate(
+      reportCount,
+      (_) => report,
+    );
+    for (final stageReport in reports) {
+      onStage?.call(stageReport);
+    }
+    final output = ReconstructionOutput(
+      requestId: request.id,
+      stageReports: reports,
+      confidenceMap: const [],
+      provenance: const {},
+      meshCandidate: {'path': artifactPath, 'final': false},
+      sparseCloud: const [],
+      denseCloud: const [],
+      evidenceGraph: request.evidenceGraph,
+    );
+    return ReconstructionBackendResult(
+      output: output,
+      diagnostics: const ReconstructionBackendDiagnostics(
+        backendId: 'colmap',
+        backendVersion: '3.13-test',
+        durationMs: 10,
+        memoryBytes: null,
+        confidence: 0.99,
+        completedStages: [ReconstructionStage.meshGeneration],
+        limitations: ['Technical completion only.'],
+        explanations: {},
+      ),
+    );
+  }
+}
+
+class _InputValidator implements ColmapInputValidator {
+  _InputValidator({ValidatedColmapPhotoDirectory? photoDirectory})
+    : photoDirectory =
+          photoDirectory ??
+          ValidatedColmapPhotoDirectory(
+            canonicalPath: r'C:\capture jobs\photo set',
+            canonicalImagePaths: const [
+              r'C:\capture jobs\photo set\image 01.jpg',
+            ],
+          );
+
+  ValidatedColmapPhotoDirectory photoDirectory;
+  String workspaceRoot = r'C:\FLCAD Platform\managed workspace';
+  Object? photoFailure;
+  Object? workspaceFailure;
+  int photoCalls = 0;
+  final List<String> validatedPhotoPaths = [];
+
+  @override
+  Future<String> prepareWorkspaceRoot(String value) async {
+    if (workspaceFailure != null) throw workspaceFailure!;
+    return workspaceRoot;
+  }
+
+  @override
+  Future<ValidatedColmapPhotoDirectory> validatePhotoDirectory(
+    String value,
+  ) async {
+    photoCalls++;
+    validatedPhotoPaths.add(value);
+    if (photoFailure != null) throw photoFailure!;
+    return photoDirectory;
+  }
+}
+
+class _Harness {
+  _Harness({
+    required this.executable,
+    required this.provisioning,
+    required this.backend,
+    required this.backendManager,
+    required this.operational,
+    required this.inputValidator,
+    required this.lab,
+  });
+
+  final String executable;
+  final _ProvisioningManager provisioning;
+  final _Backend backend;
+  final ReconstructionBackendManager backendManager;
+  final ColmapOperationalController operational;
+  final ColmapInputValidator inputValidator;
+  final ColmapExperimentalLabController lab;
+
+  static Future<_Harness> create({
+    Completer<ReconstructionBackend>? activation,
+    _Cancellation? cancellation,
+    ColmapExecutablePicker? selectExecutable,
+    ColmapPhotoDirectoryPicker? selectPhotoDirectory,
+    ColmapWorkspaceRootProvider? workspaceRootProvider,
+    ColmapInputValidator? inputValidator,
+  }) async {
+    final executable = Platform.isWindows
+        ? r'C:\Program Files\COLMAP\colmap.exe'
+        : '/opt/colmap/colmap';
+    final provisioning = _ProvisioningManager();
+    final backend = _Backend();
+    final validator = inputValidator ?? _InputValidator();
+    final backendManager = ReconstructionBackendManager();
+    final operational = ColmapOperationalController(
+      backendManager: backendManager,
+      activate: (record, {required allowUncertifiedExternal}) =>
+          activation?.future ?? Future.value(backend),
+      cancellationFactory: cancellation == null ? null : () => cancellation,
+    );
+    final lab = ColmapExperimentalLabController(
+      operationalController: operational,
+      provisioningManager: provisioning,
+      selectExecutable: selectExecutable ?? () async => executable,
+      selectPhotoDirectory:
+          selectPhotoDirectory ?? () async => r'C:\capture jobs\photo set',
+      workspaceRootProvider:
+          workspaceRootProvider ??
+          () async => r'C:\FLCAD Platform\managed workspace',
+      inputValidator: validator,
+      requestIdFactory: () => 'request-test',
+    );
+    return _Harness(
+      executable: executable,
+      provisioning: provisioning,
+      backend: backend,
+      backendManager: backendManager,
+      operational: operational,
+      inputValidator: validator,
+      lab: lab,
+    );
+  }
+
+  Future<void> activate() async {
+    await lab.chooseExecutable();
+    await lab.validateAndActivate(consent: true);
+  }
+
+  Future<void> dispose() async {
+    lab.dispose();
+    operational.dispose();
+  }
+}
+
+Future<void> _pumpLab(
+  WidgetTester tester,
+  ColmapExperimentalLabController controller,
+) async {
+  tester.view.physicalSize = const Size(1200, 1800);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(body: ColmapExperimentalLab(controller: controller)),
+    ),
+  );
+}
+
+void main() {
+  testWidgets('does not activate automatically when mounted', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+
+    await _pumpLab(tester, harness.lab);
+
+    expect(harness.provisioning.calls, 0);
+    expect(harness.operational.state, ColmapOperationalState.idle);
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(const Key('colmap-consent')))
+          .value,
+      isFalse,
+    );
+  });
+
+  testWidgets('requires explicit consent before activation', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('select-colmap')));
+    await tester.pump();
+
+    final activate = tester.widget<FilledButton>(
+      find.byKey(const Key('activate-colmap')),
+    );
+    expect(activate.onPressed, isNull);
+
+    await harness.lab.validateAndActivate(consent: false);
+    await tester.pump();
+    expect(find.textContaining('consentimento experimental'), findsOneWidget);
+    expect(harness.provisioning.calls, 0);
+  });
+
+  testWidgets('shows the operational activating state', (tester) async {
+    final activation = Completer<ReconstructionBackend>();
+    final harness = await _Harness.create(activation: activation);
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('activate-colmap')));
+    await tester.pump();
+
+    expect(find.text('Estado: ativando'), findsOneWidget);
+
+    activation.complete(harness.backend);
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('reports successful activation with version and active path', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.text('Estado: pronto'), findsOneWidget);
+    expect(find.text('Versão: 3.13-test'), findsOneWidget);
+    expect(
+      find.text('Executável ativo: ${harness.executable}'),
+      findsOneWidget,
+    );
+    expect(harness.provisioning.commitCalls, 1);
+    expect(
+      harness.provisioning.committed.single,
+      same(harness.lab.activeInstallation),
+    );
+  });
+
+  testWidgets('reports activation failure without fabricating installation', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    harness.provisioning.failure = StateError('self test rejected');
+    await harness.lab.chooseExecutable();
+    await harness.lab.validateAndActivate(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(harness.lab.activeInstallation, isNull);
+    expect(harness.backendManager.contains('colmap'), isFalse);
+    expect(
+      find.textContaining('configuração do COLMAP foi rejeitada'),
+      findsOneWidget,
+    );
+  });
+
+  test(
+    'failed reconfiguration preserves the previous active backend',
+    () async {
+      final harness = await _Harness.create();
+      addTearDown(harness.dispose);
+      await harness.activate();
+      final previousRecord = harness.lab.activeInstallation;
+      final previousBackend = harness.backendManager.get('colmap');
+      harness.provisioning.failure = StateError('replacement rejected');
+
+      await harness.lab.validateAndActivate(consent: true);
+
+      expect(harness.lab.activeInstallation, same(previousRecord));
+      expect(harness.backendManager.get('colmap'), same(previousBackend));
+      expect(harness.lab.presentationError, isNotNull);
+    },
+  );
+
+  test(
+    'persistence failure preserves backend and active installation',
+    () async {
+      final harness = await _Harness.create();
+      addTearDown(harness.dispose);
+      await harness.activate();
+      final previousRecord = harness.lab.activeInstallation;
+      final previousBackend = harness.backendManager.get('colmap');
+      harness.provisioning.commitFailure = StateError('save failed');
+
+      await harness.lab.validateAndActivate(consent: true);
+
+      expect(harness.lab.activeInstallation, same(previousRecord));
+      expect(harness.backendManager.get('colmap'), same(previousBackend));
+      expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
+    },
+  );
+
+  test(
+    'dispose before commit abandons activation without partial state',
+    () async {
+      final activation = Completer<ReconstructionBackend>();
+      final harness = await _Harness.create(activation: activation);
+      await harness.lab.chooseExecutable();
+      final operation = harness.lab.validateAndActivate(consent: true);
+      await Future<void>.delayed(Duration.zero);
+      harness.lab.dispose();
+      harness.operational.dispose();
+      activation.complete(harness.backend);
+      await operation;
+
+      expect(harness.provisioning.committed, isEmpty);
+      expect(harness.backendManager.contains('colmap'), isFalse);
+      await harness.dispose();
+    },
+  );
+
+  test('dispose after commit point completes without partial state', () async {
+    final harness = await _Harness.create();
+    final started = Completer<void>();
+    final release = Completer<void>();
+    harness.provisioning.saveStarted = started;
+    harness.provisioning.saveBlock = release;
+    await harness.lab.chooseExecutable();
+    final operation = harness.lab.validateAndActivate(consent: true);
+    await started.future;
+    harness.lab.dispose();
+    harness.operational.dispose();
+    release.complete();
+    await operation;
+
+    expect(harness.provisioning.committed, hasLength(1));
+    expect(harness.backendManager.get('colmap'), same(harness.backend));
+    await harness.dispose();
+  });
+
+  testWidgets('empty photo directory blocks reconstruction', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    final emptyLab = ColmapExperimentalLabController(
+      operationalController: harness.operational,
+      provisioningManager: harness.provisioning,
+      selectExecutable: () async => harness.executable,
+      selectPhotoDirectory: () async => r'C:\empty photos',
+      workspaceRootProvider: () async => r'C:\managed workspace',
+      inputValidator: _InputValidator(
+        photoDirectory: ValidatedColmapPhotoDirectory(
+          canonicalPath: r'C:\empty photos',
+          canonicalImagePaths: const [],
+        ),
+      ),
+    );
+    addTearDown(emptyLab.dispose);
+    await emptyLab.choosePhotoDirectory();
+    await emptyLab.startReconstruction(consent: true);
+    await _pumpLab(tester, emptyLab);
+
+    expect(harness.backend.calls, 0);
+    expect(
+      find.textContaining('não contém fotografias válidas'),
+      findsOneWidget,
+    );
+  });
+
+  test('preserves paths with spaces in the reconstruction evidence', () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    await harness.lab.startReconstruction(consent: true);
+
+    final capture = harness.backend.request!.evidenceGraph.nodes.firstWhere(
+      (node) => node.kind.name == 'capture',
+    );
+    expect(capture.payload['path'], contains('photo set'));
+    expect(capture.payload['path'], contains('image 01.jpg'));
+  });
+
+  testWidgets('double click does not duplicate a running reconstruction', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.block = Completer<void>();
+    await _pumpLab(tester, harness.lab);
+
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pump();
+
+    expect(harness.backend.calls, 1);
+    harness.backend.block!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('running enables only Cancel among operational actions', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.block = Completer<void>();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('activate-colmap')))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<OutlinedButton>(find.byKey(const Key('select-photos')))
+          .onPressed,
+      isNull,
+    );
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('cancel-reconstruction')))
+          .onPressed,
+      isNotNull,
+    );
+
+    harness.backend.block!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('cancelling prevents a second cancellation', (tester) async {
+    final cancellation = _Cancellation();
+    final harness = await _Harness.create(cancellation: cancellation);
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.block = Completer<void>();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('cancel-reconstruction')));
+    await tester.pump();
+
+    expect(find.text('Estado: cancelando'), findsOneWidget);
+    expect(cancellation.calls, 1);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('cancel-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+
+    harness.backend.block!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('success presents a mesh candidate and artifact path', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.byKey(const Key('mesh-candidate-result')), findsOneWidget);
+    expect(find.textContaining('candidate mesh.ply'), findsOneWidget);
+  });
+
+  testWidgets('failure allows a new attempt', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.failure = StateError('temporary reconstruction failure');
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    expect(find.text('Estado: falhou'), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNotNull,
+    );
+
+    harness.backend.failure = null;
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pumpAndSettle();
+    expect(harness.backend.calls, 2);
+    expect(find.text('Estado: concluído'), findsOneWidget);
+  });
+
+  testWidgets('diagnostic confidence is not presented as geometric quality', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.textContaining('99%'), findsNothing);
+    expect(find.textContaining('qualidade geométrica'), findsNothing);
+    expect(
+      find.text('Sucesso técnico não certifica precisão dimensional.'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('completion after widget dispose does not call setState', (
+    tester,
+  ) async {
+    final activation = Completer<ReconstructionBackend>();
+    final harness = await _Harness.create(activation: activation);
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('activate-colmap')));
+    await tester.pump();
+    await tester.pumpWidget(const SizedBox.shrink());
+
+    activation.complete(harness.backend);
+    await tester.pump();
+
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'status is communicated with text and semantics, not color alone',
+    (tester) async {
+      final harness = await _Harness.create();
+      addTearDown(harness.dispose);
+      await harness.activate();
+      await harness.lab.choosePhotoDirectory();
+      harness.backend.block = Completer<void>();
+      await _pumpLab(tester, harness.lab);
+      await tester.tap(find.byKey(const Key('colmap-consent')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('start-reconstruction')));
+      await tester.pump();
+
+      expect(find.text('Estado: executando'), findsOneWidget);
+      expect(
+        find.bySemanticsLabel('Estado do COLMAP: executando'),
+        findsOneWidget,
+      );
+
+      harness.backend.block!.complete();
+      await tester.pumpAndSettle();
+    },
+  );
+
+  test(
+    'request contains canonical image path and managed workspace root',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'flcad_input_contract_',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final photos = await Directory(
+        '${root.path}${Platform.pathSeparator}Fotos São Paulo',
+      ).create();
+      await File(
+        '${photos.path}${Platform.pathSeparator}peça 01.JPG',
+      ).writeAsBytes([1]);
+      final managedRoot =
+          '${root.path}${Platform.pathSeparator}Área gerenciada com espaços';
+      final validator = const IoColmapInputValidator();
+      final harness = await _Harness.create(
+        selectPhotoDirectory: () async => photos.path,
+        workspaceRootProvider: () async => managedRoot,
+        inputValidator: validator,
+      );
+      addTearDown(harness.dispose);
+      await harness.activate();
+
+      await harness.lab.choosePhotoDirectory();
+      await harness.lab.startReconstruction(consent: true);
+
+      final canonicalPhotos = await photos.resolveSymbolicLinks();
+      final canonicalWorkspace = await Directory(
+        managedRoot,
+      ).resolveSymbolicLinks();
+      expect(
+        harness.backend.request!.calibration['imagePath'],
+        canonicalPhotos,
+      );
+      expect(
+        harness.backend.request!.calibration['workspacePath'],
+        canonicalWorkspace,
+      );
+      expect(canonicalWorkspace, isNot(equals(canonicalPhotos)));
+      expect(path.isAbsolute(canonicalWorkspace), isTrue);
+      expect(canonicalPhotos, contains('Fotos São Paulo'));
+      expect(canonicalWorkspace, contains('Área gerenciada com espaços'));
+    },
+  );
+
+  test('start revalidates and uses one fresh photo snapshot', () async {
+    final validator = _InputValidator();
+    final harness = await _Harness.create(inputValidator: validator);
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    validator.photoDirectory = ValidatedColmapPhotoDirectory(
+      canonicalPath: r'C:\capture jobs\fresh photo set',
+      canonicalImagePaths: const [
+        r'C:\capture jobs\fresh photo set\new 01.jpg',
+        r'C:\capture jobs\fresh photo set\new 02.jpg',
+      ],
+    );
+    await harness.lab.startReconstruction(consent: true);
+
+    expect(validator.photoCalls, 2);
+    expect(validator.validatedPhotoPaths.last, r'C:\capture jobs\photo set');
+    expect(
+      harness.backend.request!.calibration['imagePath'],
+      r'C:\capture jobs\fresh photo set',
+    );
+    final captures = harness.backend.request!.evidenceGraph.nodes
+        .where((node) => node.kind == EvidenceNodeKind.capture)
+        .toList();
+    expect(captures, hasLength(2));
+    expect(captures.map((node) => node.payload['path']), [
+      r'C:\capture jobs\fresh photo set\new 01.jpg',
+      r'C:\capture jobs\fresh photo set\new 02.jpg',
+    ]);
+    expect(harness.lab.photoDirectory!.imageCount, 2);
+  });
+
+  test('relative photo directory is rejected', () async {
+    const validator = IoColmapInputValidator();
+
+    await expectLater(
+      validator.validatePhotoDirectory('relative/photos'),
+      throwsArgumentError,
+    );
+  });
+
+  test('missing and empty photo directories are rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_empty_');
+    addTearDown(() => root.delete(recursive: true));
+    const validator = IoColmapInputValidator();
+
+    await expectLater(
+      validator.validatePhotoDirectory(
+        '${root.path}${Platform.pathSeparator}missing',
+      ),
+      throwsArgumentError,
+    );
+    await expectLater(
+      validator.validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('empty image file is rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_zero_');
+    addTearDown(() => root.delete(recursive: true));
+    await File(
+      '${root.path}${Platform.pathSeparator}empty.jpg',
+    ).writeAsBytes(const []);
+
+    await expectLater(
+      const IoColmapInputValidator().validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('image link is rejected and never counted as a regular file', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_link_');
+    addTearDown(() => root.delete(recursive: true));
+    final target = await File(
+      '${root.path}${Platform.pathSeparator}target.bin',
+    ).writeAsBytes([1]);
+    final link = Link('${root.path}${Platform.pathSeparator}linked.jpg');
+    try {
+      await link.create(target.path);
+    } on FileSystemException {
+      return;
+    }
+
+    await expectLater(
+      const IoColmapInputValidator().validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test(
+    'all supported extensions and uppercase extensions are accepted',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'flcad_input_extensions_',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      for (final extension in colmapSupportedImageExtensions) {
+        await File(
+          '${root.path}${Platform.pathSeparator}image$extension',
+        ).writeAsBytes([1]);
+      }
+      await File(
+        '${root.path}${Platform.pathSeparator}uppercase.JPG',
+      ).writeAsBytes([1]);
+
+      final result = await const IoColmapInputValidator()
+          .validatePhotoDirectory(root.path);
+
+      expect(result.imageCount, colmapSupportedImageExtensions.length + 1);
+      expect(result.canonicalImagePaths, contains(endsWith('uppercase.JPG')));
+    },
+  );
+
+  test('canonical image escaping the selected directory is rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_escape_');
+    addTearDown(() => root.delete(recursive: true));
+    final photos = await Directory(
+      '${root.path}${Platform.pathSeparator}photos',
+    ).create();
+    final selected = await File(
+      '${photos.path}${Platform.pathSeparator}escape.jpg',
+    ).writeAsBytes([1]);
+    final external = await File(
+      '${root.path}${Platform.pathSeparator}external.jpg',
+    ).writeAsBytes([1]);
+    final validator = IoColmapInputValidator(
+      canonicalPathResolver: (value) async {
+        if (value == selected.absolute.path) return external.absolute.path;
+        return File(value).resolveSymbolicLinks();
+      },
+    );
+
+    await expectLater(
+      validator.validatePhotoDirectory(photos.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('duplicate canonical image paths are rejected', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'flcad_input_duplicate_',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final first = await File(
+      '${root.path}${Platform.pathSeparator}first.jpg',
+    ).writeAsBytes([1]);
+    final alias = await File(
+      '${root.path}${Platform.pathSeparator}alias.jpg',
+    ).writeAsBytes([1]);
+    final validator = IoColmapInputValidator(
+      canonicalPathResolver: (value) async {
+        if (value == alias.absolute.path) return first.absolute.path;
+        return File(value).resolveSymbolicLinks();
+      },
+    );
+
+    await expectLater(
+      validator.validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('photo enumeration is not recursive', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_flat_');
+    addTearDown(() => root.delete(recursive: true));
+    await File(
+      '${root.path}${Platform.pathSeparator}top.jpg',
+    ).writeAsBytes([1]);
+    final nested = await Directory(
+      '${root.path}${Platform.pathSeparator}nested',
+    ).create();
+    await File(
+      '${nested.path}${Platform.pathSeparator}nested.jpg',
+    ).writeAsBytes([1]);
+
+    final result = await const IoColmapInputValidator().validatePhotoDirectory(
+      root.path,
+    );
+
+    expect(result.imageCount, 1);
+    expect(result.canonicalImagePaths.single, endsWith('top.jpg'));
+  });
+
+  test('cancelled photo picker does not create a presentation error', () async {
+    final harness = await _Harness.create(
+      selectPhotoDirectory: () async => null,
+    );
+    addTearDown(harness.dispose);
+
+    await harness.lab.choosePhotoDirectory();
+
+    expect(harness.lab.photoDirectory, isNull);
+    expect(harness.lab.presentationError, isNull);
+  });
+
+  test('photo picker exception becomes a presentation error', () async {
+    final harness = await _Harness.create(
+      selectPhotoDirectory: () async => throw StateError('picker unavailable'),
+    );
+    addTearDown(harness.dispose);
+
+    await harness.lab.choosePhotoDirectory();
+
+    expect(harness.lab.photoDirectory, isNull);
+    expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
+  });
+
+  test('workspace provider failure prevents reconstruction start', () async {
+    final harness = await _Harness.create(
+      workspaceRootProvider: () async =>
+          throw StateError('workspace unavailable'),
+    );
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    await harness.lab.startReconstruction(consent: true);
+
+    expect(harness.backend.calls, 0);
+    expect(harness.lab.presentationFailure, isA<ColmapLabFailure>());
+  });
+
+  test('start rejects false consent independently of the UI', () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    await harness.lab.startReconstruction(consent: false);
+
+    expect(harness.backend.calls, 0);
+    expect(harness.lab.presentationFailure?.code, 'consent');
+  });
+
+  testWidgets('unchecking consent blocks a new start', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    await _pumpLab(tester, harness.lab);
+    final consent = find.byKey(const Key('colmap-consent'));
+
+    await tester.tap(consent);
+    await tester.pump();
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNotNull,
+    );
+    await tester.tap(consent);
+    await tester.pump();
+
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+  });
+
+  testWidgets('unchecking consent does not cancel running work', (
+    tester,
+  ) async {
+    final cancellation = _Cancellation();
+    final harness = await _Harness.create(cancellation: cancellation);
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.block = Completer<void>();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('start-reconstruction')));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    expect(cancellation.calls, 0);
+    expect(harness.operational.state, ColmapOperationalState.running);
+    harness.backend.block!.complete();
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('new executable is pending and blocks Start', (tester) async {
+    var selection = Platform.isWindows
+        ? r'C:\Program Files\COLMAP\colmap.exe'
+        : '/opt/colmap/colmap';
+    final harness = await _Harness.create(
+      selectExecutable: () async => selection,
+    );
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    selection = Platform.isWindows
+        ? r'C:\Tools\COLMAP Next\colmap.exe'
+        : '/opt/colmap-next/colmap';
+    await harness.lab.chooseExecutable();
+    await _pumpLab(tester, harness.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+
+    expect(harness.lab.hasPendingConfiguration, isTrue);
+    expect(
+      find.byKey(const Key('pending-colmap-configuration')),
+      findsOneWidget,
+    );
+    expect(find.textContaining(harness.executable), findsOneWidget);
+    expect(
+      tester
+          .widget<FilledButton>(find.byKey(const Key('start-reconstruction')))
+          .onPressed,
+      isNull,
+    );
+  });
+
+  test(
+    'failed pending activation preserves the identified active path',
+    () async {
+      var selection = Platform.isWindows
+          ? r'C:\Program Files\COLMAP\colmap.exe'
+          : '/opt/colmap/colmap';
+      final harness = await _Harness.create(
+        selectExecutable: () async => selection,
+      );
+      addTearDown(harness.dispose);
+      await harness.activate();
+      final active = harness.lab.activeExecutablePath;
+      selection = Platform.isWindows
+          ? r'C:\Rejected\colmap.exe'
+          : '/rejected/colmap';
+      await harness.lab.chooseExecutable();
+      harness.provisioning.failure = StateError('secret arguments --token');
+
+      await harness.lab.validateAndActivate(consent: true);
+
+      expect(harness.lab.activeExecutablePath, active);
+      expect(harness.lab.selectedExecutablePath, selection);
+      expect(harness.lab.hasPendingConfiguration, isTrue);
+      expect(harness.lab.canStart(consent: true), isFalse);
+    },
+  );
+
+  test('cancelled executable picker is not an error', () async {
+    final harness = await _Harness.create(selectExecutable: () async => null);
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    expect(harness.lab.presentationFailure, isNull);
+  });
+
+  test('executable picker exception is safely captured', () async {
+    final harness = await _Harness.create(
+      selectExecutable: () async => throw StateError('secret.exe --password'),
+    );
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    expect(harness.lab.presentationFailure?.code, 'executable-picker');
+    expect(
+      harness.lab.presentationFailure?.controlledTechnicalDetail,
+      isNot(contains('password')),
+    );
+  });
+
+  testWidgets('raw errors and stage explanations never appear', (tester) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.failure = StateError(
+      'Process.start colmap.exe --database_path C:\\private stderr stack trace',
+    );
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.textContaining('database_path'), findsNothing);
+    expect(find.textContaining('stack trace'), findsNothing);
+    expect(find.textContaining('StateError'), findsNothing);
+
+    harness.backend.failure = null;
+    await harness.lab.startReconstruction(consent: true);
+    await tester.pump();
+    expect(find.textContaining('Candidato técnico produzido.'), findsNothing);
+    expect(find.textContaining('Status: concluída'), findsOneWidget);
+  });
+
+  test('controlled technical detail is sanitized and limited', () {
+    final failure = ColmapLabFailure.from(
+      StateError('${List.filled(700, 'x').join()}\n\r\u0001secret'),
+      operation: 'start',
+    );
+    expect(failure.controlledTechnicalDetail!.length, lessThanOrEqualTo(512));
+    expect(failure.controlledTechnicalDetail, isNot(contains('\n')));
+    expect(failure.controlledTechnicalDetail, isNot(contains('\u0001')));
+    expect(
+      failure.controlledTechnicalDetail,
+      'operation=start; exception=StateError',
+    );
+  });
+
+  test(
+    'execution failure is cleared by a new selection and stays cleared',
+    () async {
+      final harness = await _Harness.create();
+      addTearDown(harness.dispose);
+      await harness.activate();
+      await harness.lab.choosePhotoDirectory();
+      harness.backend.failure = StateError('run failed');
+      await harness.lab.startReconstruction(consent: true);
+      expect(harness.lab.presentationFailure?.code, 'start');
+
+      await harness.lab.choosePhotoDirectory();
+
+      expect(harness.operational.error, isNotNull);
+      expect(harness.lab.presentationFailure, isNull);
+    },
+  );
+
+  test('activation failure is cleared without reappearing as start', () async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    harness.provisioning.failure = StateError('activation failed');
+    await harness.lab.chooseExecutable();
+    await harness.lab.validateAndActivate(consent: true);
+    expect(harness.lab.presentationFailure?.code, 'activation');
+
+    await harness.lab.chooseExecutable();
+
+    expect(harness.operational.error, isNotNull);
+    expect(harness.lab.presentationFailure, isNull);
+  });
+
+  test('disposed operational state is never allowed to start', () async {
+    final harness = await _Harness.create();
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.operational.dispose();
+
+    expect(harness.lab.canStart(consent: true), isFalse);
+    harness.lab.dispose();
+  });
+
+  testWidgets('status semantics preserve state version and active path', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.bySemanticsLabel('Estado do COLMAP: pronto'), findsOneWidget);
+    expect(
+      find.bySemanticsLabel(RegExp(r'Versão: 3\.13-test')),
+      findsOneWidget,
+    );
+    expect(
+      find.bySemanticsLabel(RegExp('Executável ativo:.*COLMAP')),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('failure semantics preserve details control and content', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final harness = await _Harness.create(
+      selectExecutable: () async => throw StateError('private argument'),
+    );
+    addTearDown(harness.dispose);
+    await harness.lab.chooseExecutable();
+    await _pumpLab(tester, harness.lab);
+
+    expect(
+      find.bySemanticsLabel('Falha: Não foi possível selecionar o executável.'),
+      findsOneWidget,
+    );
+    final details = find.byKey(const Key('colmap-technical-detail'));
+    expect(details, findsOneWidget);
+    expect(
+      tester
+          .getSemantics(find.byKey(const Key('colmap-technical-detail-label')))
+          .label,
+      contains('Detalhes técnicos'),
+    );
+
+    await tester.tap(details);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.bySemanticsLabel(
+        'operation=executable-picker; exception=StateError',
+      ),
+      findsOneWidget,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('artifact path is sanitized and bounded for presentation', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    harness.backend.artifactPath =
+        'C:\\candidate\\${List.filled(1200, 'a').join()}\n\r\u0001mesh.ply';
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    final artifact = tester
+        .widgetList<SelectableText>(find.byType(SelectableText))
+        .map((widget) => widget.data ?? '')
+        .firstWhere((value) => value.startsWith('Artefato:'));
+    expect(artifact, isNot(contains('\n')));
+    expect(artifact, isNot(contains('\u0001')));
+    expect(artifact.length, lessThanOrEqualTo(1034));
+    expect(artifact, endsWith('…'));
+  });
+
+  testWidgets('artifact path preserves ordinary spaces and Unicode exactly', (
+    tester,
+  ) async {
+    final harness = await _Harness.create();
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    const path = r'C:\Área de reconstrução\Peça  01\candidato final.ply';
+    harness.backend.artifactPath = path;
+    await harness.lab.startReconstruction(consent: true);
+    await _pumpLab(tester, harness.lab);
+
+    expect(find.text('Artefato: $path'), findsOneWidget);
+  });
+
+  testWidgets('controller replacement resets consent', (tester) async {
+    final first = await _Harness.create();
+    final second = await _Harness.create();
+    addTearDown(first.dispose);
+    addTearDown(second.dispose);
+    await _pumpLab(tester, first.lab);
+    await tester.tap(find.byKey(const Key('colmap-consent')));
+    await tester.pump();
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(const Key('colmap-consent')))
+          .value,
+      isTrue,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: ColmapExperimentalLab(controller: second.lab)),
+      ),
+    );
+
+    expect(
+      tester
+          .widget<CheckboxListTile>(find.byKey(const Key('colmap-consent')))
+          .value,
+      isFalse,
+    );
+  });
+
+  testWidgets('narrow viewport and high text scale do not overflow', (
+    tester,
+  ) async {
+    var executable = Platform.isWindows
+        ? r'C:\Program Files\COLMAP\colmap.exe'
+        : '/opt/colmap/colmap';
+    final harness = await _Harness.create(
+      selectExecutable: () async => executable,
+    );
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+    executable = Platform.isWindows
+        ? 'C:\\${List.filled(30, 'long folder').join('\\')}\\colmap.exe'
+        : '/${List.filled(30, 'long-folder').join('/')}/colmap';
+    await harness.lab.chooseExecutable();
+    tester.view.physicalSize = const Size(320, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MediaQuery(
+          data: const MediaQueryData(textScaler: TextScaler.linear(2)),
+          child: Scaffold(body: ColmapExperimentalLab(controller: harness.lab)),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('pending-colmap-configuration')),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(
+      find.byKey(const Key('pending-colmap-configuration')),
+      findsOneWidget,
+    );
+    await harness.lab.validateAndActivate(consent: true);
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+
+    harness.backend.reportCount = 8;
+    harness.backend.artifactPath =
+        'C:\\output\\${List.filled(100, 'candidate').join()} mesh.ply';
+    await harness.lab.startReconstruction(consent: true);
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('mesh-candidate-result')),
+      250,
+      scrollable: find.byType(Scrollable).first,
+    );
+    expect(find.byKey(const Key('mesh-candidate-result')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    harness.backend.failure = StateError('controlled failure');
+    await harness.lab.startReconstruction(consent: true);
+    await tester.pumpAndSettle();
+    expect(harness.lab.presentationFailure?.code, 'start');
+    await tester.drag(find.byType(ListView), const Offset(0, -3000));
+    await tester.pumpAndSettle();
+    final details = find.byKey(const Key('colmap-technical-detail'));
+    expect(details, findsOneWidget);
+    await tester.tap(details);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('colmap-technical-detail-content')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+}
