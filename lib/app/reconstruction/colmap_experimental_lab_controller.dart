@@ -30,7 +30,9 @@ class ColmapLabFailure {
   final String? controlledTechnicalDetail;
 
   static ColmapLabFailure from(Object error, {required String operation}) {
-    final detail = _sanitizeTechnicalDetail(error.runtimeType.toString());
+    final detail = _sanitizeTechnicalDetail(
+      'operation=$operation; exception=${error.runtimeType}',
+    );
     final message = switch (operation) {
       'executable-picker' => 'Não foi possível selecionar o executável.',
       'photo-picker' => 'Não foi possível selecionar a pasta de fotografias.',
@@ -110,16 +112,7 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   String? get activeExecutablePath => _activeInstallation?.executablePath;
   ValidatedColmapPhotoDirectory? get photoDirectory => _photoDirectory;
   BackendInstallationRecord? get activeInstallation => _activeInstallation;
-  ColmapLabFailure? get presentationFailure {
-    if (_presentationFailure != null) return _presentationFailure;
-    if (_operationalController.state == ColmapOperationalState.cancelled) {
-      return null;
-    }
-    final error = _operationalController.error;
-    return error == null
-        ? null
-        : ColmapLabFailure.from(error, operation: 'start');
-  }
+  ColmapLabFailure? get presentationFailure => _presentationFailure;
 
   @Deprecated('Use presentationFailure; raw exceptions are never UI content.')
   Object? get presentationError => _presentationFailure;
@@ -129,16 +122,26 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     return selected != null && selected != activeExecutablePath;
   }
 
-  bool canStart({required bool consent}) =>
-      !_disposed &&
-      consent &&
-      !_provisioning &&
-      !hasPendingConfiguration &&
-      _activeInstallation != null &&
-      (_photoDirectory?.imageCount ?? 0) > 0 &&
-      _operationalController.state != ColmapOperationalState.activating &&
-      _operationalController.state != ColmapOperationalState.running &&
-      _operationalController.state != ColmapOperationalState.cancelling;
+  bool canStart({required bool consent}) {
+    final stateAllowsStart = switch (_operationalController.state) {
+      ColmapOperationalState.ready ||
+      ColmapOperationalState.succeeded ||
+      ColmapOperationalState.failed ||
+      ColmapOperationalState.cancelled => true,
+      ColmapOperationalState.idle ||
+      ColmapOperationalState.activating ||
+      ColmapOperationalState.running ||
+      ColmapOperationalState.cancelling ||
+      ColmapOperationalState.disposed => false,
+    };
+    return !_disposed &&
+        consent &&
+        !_provisioning &&
+        stateAllowsStart &&
+        !hasPendingConfiguration &&
+        _activeInstallation != null &&
+        (_photoDirectory?.imageCount ?? 0) > 0;
+  }
 
   Future<void> chooseExecutable() async {
     try {
@@ -293,6 +296,20 @@ class ColmapExperimentalLabController extends ChangeNotifier {
           },
         ),
       );
+      if (_disposed) return;
+      if (_operationalController.state == ColmapOperationalState.failed &&
+          _operationalController.error != null) {
+        _setFailure(
+          _operationalController.error!,
+          operation: 'start',
+          notify: false,
+        );
+      } else if (_operationalController.state ==
+              ColmapOperationalState.succeeded ||
+          _operationalController.state == ColmapOperationalState.cancelled) {
+        _presentationFailure = null;
+      }
+      notifyListeners();
     } catch (error) {
       if (!_disposed) _setFailure(error, operation: 'start');
     }

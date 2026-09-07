@@ -194,9 +194,22 @@ class _ColmapExperimentalLabState extends State<ColmapExperimentalLab> {
       if (entry.value is String &&
           (entry.key.toLowerCase().contains('path') ||
               entry.key.toLowerCase().contains('file'))) {
-        yield entry.value as String;
+        yield _sanitizePresentedPath(entry.value as String);
       }
     }
+  }
+
+  static String _sanitizePresentedPath(String value) {
+    final withoutControls = value.replaceAll(
+      RegExp(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'),
+      '',
+    );
+    final singleLine = withoutControls.replaceAll(RegExp(r'[\r\n]+'), ' ');
+    final compact = singleLine.replaceAll(RegExp(r'\s+'), ' ').trim();
+    const maximumLength = 1024;
+    return compact.length <= maximumLength
+        ? compact
+        : '${compact.substring(0, maximumLength - 1)}…';
   }
 }
 
@@ -214,39 +227,47 @@ class _StatusPanel extends StatelessWidget {
             operational.state != ColmapOperationalState.activating
         ? 'Validando instalação externa'
         : _stateLabel(operational.state);
-    return Semantics(
-      container: true,
-      label: 'Estado do COLMAP: $label',
-      excludeSemantics: true,
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(Icons.info_outline),
-                  const SizedBox(width: 8),
-                  Flexible(
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const ExcludeSemantics(child: Icon(Icons.info_outline)),
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Semantics(
+                    container: true,
+                    label: 'Estado do COLMAP: $label',
+                    excludeSemantics: true,
                     child: Text(
                       'Estado: $label',
                       key: const Key('colmap-status'),
                     ),
                   ),
-                ],
+                ),
+              ],
+            ),
+            if (installation != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                'Versão: ${installation.version}',
+                key: const Key('active-colmap-version'),
               ),
-              if (installation != null) ...[
-                const SizedBox(height: 6),
-                Text('Versão: ${installation.version}'),
-                SelectableText(
+              Semantics(
+                container: true,
+                label: 'Executável ativo: ${installation.executablePath}',
+                excludeSemantics: true,
+                child: SelectableText(
                   'Executável ativo: ${installation.executablePath}',
                   key: const Key('active-colmap-path'),
                 ),
-              ],
+              ),
             ],
-          ),
+          ],
         ),
       ),
     );
@@ -271,30 +292,43 @@ class _FailurePanel extends StatelessWidget {
   final ColmapLabFailure failure;
 
   @override
-  Widget build(BuildContext context) => Semantics(
-    container: true,
-    label: 'Falha: ${failure.userMessage}',
-    excludeSemantics: true,
-    child: Card(
-      color: Theme.of(context).colorScheme.errorContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
+  Widget build(BuildContext context) => Card(
+    color: Theme.of(context).colorScheme.errorContainer,
+    child: Padding(
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Semantics(
+            container: true,
+            label: 'Falha: ${failure.userMessage}',
+            excludeSemantics: true,
+            child: Text(
               'Falha: ${failure.userMessage}',
               key: const Key('colmap-error'),
             ),
-            if (failure.controlledTechnicalDetail case final detail?)
-              ExpansionTile(
-                key: const Key('colmap-technical-detail'),
-                tilePadding: EdgeInsets.zero,
-                title: const Text('Detalhes técnicos'),
-                children: [SelectableText(detail)],
+          ),
+          if (failure.controlledTechnicalDetail case final detail?)
+            ExpansionTile(
+              key: const Key('colmap-technical-detail'),
+              tilePadding: EdgeInsets.zero,
+              title: const Text(
+                'Detalhes técnicos',
+                key: Key('colmap-technical-detail-label'),
               ),
-          ],
-        ),
+              children: [
+                Semantics(
+                  container: true,
+                  label: detail,
+                  excludeSemantics: true,
+                  child: SelectableText(
+                    detail,
+                    key: const Key('colmap-technical-detail-content'),
+                  ),
+                ),
+              ],
+            ),
+        ],
       ),
     ),
   );
