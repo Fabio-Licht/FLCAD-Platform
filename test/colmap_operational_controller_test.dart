@@ -214,57 +214,6 @@ void main() {
   });
 
   test(
-    'transaction failure before publication preserves previous backend',
-    () async {
-      final previous = _Backend();
-      final replacement = _Backend();
-      final manager = ReconstructionBackendManager(backends: [previous]);
-      final controller = ColmapOperationalController(
-        backendManager: manager,
-        activate: (record, {required allowUncertifiedExternal}) async =>
-            replacement,
-      );
-
-      await controller.configureExternalTransaction(
-        _record(),
-        consent: true,
-        allowExperimental: true,
-        beforePublish: () async => throw StateError('persistence failed'),
-      );
-
-      expect(manager.get('colmap'), same(previous));
-      expect(controller.state, ColmapOperationalState.ready);
-      expect(controller.error, isA<StateError>());
-    },
-  );
-
-  test(
-    'non-COLMAP candidate never invokes transactional persistence',
-    () async {
-      final manager = ReconstructionBackendManager();
-      var persistenceCalls = 0;
-      final controller = ColmapOperationalController(
-        backendManager: manager,
-        activate: (record, {required allowUncertifiedExternal}) async =>
-            _NonColmapBackend(),
-      );
-
-      await controller.configureExternalTransaction(
-        _record(),
-        consent: true,
-        allowExperimental: true,
-        beforePublish: () async {
-          persistenceCalls++;
-        },
-      );
-
-      expect(persistenceCalls, 0);
-      expect(manager.contains('colmap'), isFalse);
-      expect(controller.state, ColmapOperationalState.failed);
-    },
-  );
-
-  test(
     'concurrent controllers register or replace COLMAP atomically',
     () async {
       final firstActivation = Completer<ReconstructionBackend>();

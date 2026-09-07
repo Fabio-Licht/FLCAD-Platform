@@ -1,9 +1,14 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as path;
 
 import '../backend/reconstruction_backend_contract.dart';
+import '../backend/reconstruction_backend_manager.dart';
+
+part 'colmap_external_activation_coordinator.dart';
 
 const defaultBackendInstallationRoot = r'C:\ProgramData\FLSCAN\Backends';
 
@@ -120,21 +125,118 @@ abstract interface class BackendProvisioningRepository {
 
 class FileBackendProvisioningRepository
     implements BackendProvisioningRepository {
+  static int _temporarySequence = 0;
+
   FileBackendProvisioningRepository({
     required this.catalogFile,
     required this.installationsFile,
     required this.approvedReleases,
-  });
+    BackendFileRename? renameFile,
+  }) : _renameFile = renameFile ?? _rename;
 
   final File catalogFile;
   final File installationsFile;
+  final BackendFileRename _renameFile;
   @override
   final List<ApprovedBackendRelease> approvedReleases;
 
   @override
   Future<List<BackendInstallationRecord>> loadInstallations() async {
-    if (!await installationsFile.exists()) return const [];
-    final values = jsonDecode(await installationsFile.readAsString()) as List;
+    final backup = File('${installationsFile.path}.backup');
+    Object? primaryFailure;
+    if (await installationsFile.exists()) {
+      try {
+        return await _readRecords(installationsFile);
+      } catch (error) {
+        primaryFailure = error;
+      }
+    }
+    if (await backup.exists()) {
+      try {
+        final records = await _readRecords(backup);
+        if (!await installationsFile.exists()) {
+          try {
+            await _renameFile(backup, installationsFile.path);
+          } on FileSystemException {
+            // Loading the valid backup is still safe when rename fails.
+          }
+        }
+        return records;
+      } catch (backupFailure) {
+        throw StateError(
+          'Backend installation state and recovery backup are invalid: '
+          '$primaryFailure; $backupFailure',
+        );
+      }
+    }
+    if (primaryFailure != null) {
+      throw StateError(
+        'Backend installation state is invalid: $primaryFailure',
+      );
+    }
+    return const [];
+  }
+
+  @override
+  /// Writes a complete same-directory temporary file before replacement.
+  ///
+  /// On Windows-compatible filesystems the previous file is kept as a backup
+  /// across the two rename steps and restoration is best effort. This is not
+  /// an ACID transaction and cannot guarantee durability across power loss.
+  Future<void> saveInstallations(
+    List<BackendInstallationRecord> records,
+  ) async {
+    await installationsFile.parent.create(recursive: true);
+    final temporary = File(
+      '${installationsFile.path}.tmp-$pid-'
+      '${DateTime.now().microsecondsSinceEpoch}-${_temporarySequence++}',
+    );
+    final backup = File('${installationsFile.path}.backup');
+    var finalMovedToBackup = false;
+    try {
+      final output = await temporary.open(mode: FileMode.writeOnly);
+      try {
+        await output.writeString(
+          jsonEncode(records.map((record) => record.toJson()).toList()),
+        );
+        await output.flush();
+      } finally {
+        await output.close();
+      }
+      if (await installationsFile.exists()) {
+        if (await backup.exists()) await backup.delete();
+        await _renameFile(installationsFile, backup.path);
+        finalMovedToBackup = true;
+      }
+      try {
+        await _renameFile(temporary, installationsFile.path);
+      } catch (_) {
+        if (finalMovedToBackup &&
+            !await installationsFile.exists() &&
+            await backup.exists()) {
+          try {
+            await _renameFile(backup, installationsFile.path);
+          } on FileSystemException {
+            // Best effort. loadInstallations can recover this valid backup.
+          }
+        }
+        rethrow;
+      }
+      if (await backup.exists()) await backup.delete();
+    } finally {
+      try {
+        if (await temporary.exists()) await temporary.delete();
+      } on FileSystemException {
+        // Cleanup is best effort and must not hide the transaction result.
+      }
+    }
+  }
+
+  static Future<File> _rename(File source, String target) =>
+      source.rename(target);
+
+  static Future<List<BackendInstallationRecord>> _readRecords(File file) async {
+    final values = jsonDecode(await file.readAsString()) as List;
     return values
         .map(
           (value) => BackendInstallationRecord.fromJson(
@@ -142,17 +244,6 @@ class FileBackendProvisioningRepository
           ),
         )
         .toList();
-  }
-
-  @override
-  Future<void> saveInstallations(
-    List<BackendInstallationRecord> records,
-  ) async {
-    await installationsFile.parent.create(recursive: true);
-    await installationsFile.writeAsString(
-      jsonEncode(records.map((record) => record.toJson()).toList()),
-      flush: true,
-    );
   }
 
   Future<void> saveCatalog() async {
@@ -188,6 +279,16 @@ abstract interface class BackendSelfTest {
 }
 
 typedef BackendCanonicalPathResolver = Future<String> Function(String value);
+typedef BackendFileRename = Future<File> Function(File source, String target);
+typedef BackendFileExists = Future<bool> Function(String value);
+
+final class PreparedExternalBackendCandidate {
+  PreparedExternalBackendCandidate._(this._owner, this.record);
+
+  final BackendProvisioningManager _owner;
+  final BackendInstallationRecord record;
+  bool _consumed = false;
+}
 
 class BackendProvisioningEvent {
   const BackendProvisioningEvent({
@@ -220,10 +321,12 @@ class BackendProvisioningManager {
     required this.selfTest,
     Directory? installationRoot,
     BackendCanonicalPathResolver? canonicalPathResolver,
+    BackendFileExists? externalFileExists,
     void Function(BackendProvisioningEvent event)? onEvent,
   }) : installationRoot =
            installationRoot ?? Directory(defaultBackendInstallationRoot),
        _canonicalPathResolver = canonicalPathResolver ?? _resolveCanonicalPath,
+       _externalFileExists = externalFileExists ?? _fileExists,
        _onEvent = onEvent;
 
   final BackendProvisioningRepository repository;
@@ -233,6 +336,7 @@ class BackendProvisioningManager {
   final BackendSignatureVerifier signatureVerifier;
   final BackendSelfTest selfTest;
   final BackendCanonicalPathResolver _canonicalPathResolver;
+  final BackendFileExists _externalFileExists;
   final Directory installationRoot;
   final void Function(BackendProvisioningEvent event)? _onEvent;
   List<BackendInstallationRecord> _installations = [];
@@ -348,7 +452,7 @@ class BackendProvisioningManager {
     }
     _requireExpectedExecutable(backendId, executablePath);
     final executable = File(executablePath);
-    if (!await executable.exists()) {
+    if (!await _externalFileExists(executable.path)) {
       throw ArgumentError.value(
         executablePath,
         'executablePath',
@@ -397,7 +501,7 @@ class BackendProvisioningManager {
   }
 
   /// Validates an explicitly selected external COLMAP without publishing it.
-  Future<BackendInstallationRecord> validateExisting(
+  Future<PreparedExternalBackendCandidate> prepareExisting(
     String backendId, {
     required String executablePath,
     required bool authorized,
@@ -415,7 +519,7 @@ class BackendProvisioningManager {
     }
     _requireExpectedExecutable(backendId, executablePath);
     final executable = File(executablePath);
-    if (!await executable.exists()) {
+    if (!await _externalFileExists(executable.path)) {
       throw ArgumentError.value(
         executablePath,
         'executablePath',
@@ -440,7 +544,7 @@ class BackendProvisioningManager {
         origin: BackendInstallationOrigin.external,
       );
       _event('externalValidated', backendId, capabilities.version);
-      return record;
+      return PreparedExternalBackendCandidate._(this, record);
     } catch (error, stackTrace) {
       _event('failed', backendId, 'External self test failed: $error');
       Error.throwWithStackTrace(
@@ -451,48 +555,47 @@ class BackendProvisioningManager {
   }
 
   /// Persists a previously validated external COLMAP transactionally.
-  Future<void> commitValidatedExisting(
-    BackendInstallationRecord record, {
+  Future<void> _verifyPreparedExisting(
+    PreparedExternalBackendCandidate candidate,
+  ) async {
+    if (!identical(candidate._owner, this)) {
+      throw StateError('Prepared candidate belongs to another manager');
+    }
+    if (candidate._consumed) {
+      throw StateError('Prepared candidate was already consumed');
+    }
+    final record = candidate.record;
+    if (record.backendId != 'colmap' ||
+        record.origin != BackendInstallationOrigin.external ||
+        record.status != BackendInstallationStatus.installed ||
+        record.certification != BackendCertificationStatus.notCertified) {
+      throw StateError('Prepared candidate is no longer valid');
+    }
+    if (!path.isAbsolute(record.executablePath)) {
+      throw StateError('Prepared executable path is not absolute');
+    }
+    _requireExpectedExecutable(record.backendId, record.executablePath);
+    final executable = File(record.executablePath);
+    if (!await _externalFileExists(executable.path)) {
+      throw StateError('Prepared executable no longer exists');
+    }
+    final canonical = await _canonicalPathResolver(executable.path);
+    _requireExpectedExecutable(record.backendId, canonical);
+    if (canonical != record.executablePath) {
+      throw StateError('Prepared executable path is no longer canonical');
+    }
+  }
+
+  Future<void> _commitPreparedExisting(
+    PreparedExternalBackendCandidate candidate, {
     required bool authorized,
   }) async {
     if (!authorized) {
       throw StateError('External backend commit requires authorization');
     }
-    if (record.backendId != 'colmap' ||
-        record.origin != BackendInstallationOrigin.external ||
-        record.status != BackendInstallationStatus.installed ||
-        record.certification != BackendCertificationStatus.notCertified) {
-      throw ArgumentError.value(
-        record,
-        'record',
-        'must be a validated external COLMAP installation',
-      );
-    }
-    if (!path.isAbsolute(record.executablePath)) {
-      throw ArgumentError.value(
-        record.executablePath,
-        'executablePath',
-        'must be absolute',
-      );
-    }
-    _requireExpectedExecutable(record.backendId, record.executablePath);
-    final executable = File(record.executablePath);
-    if (!await executable.exists()) {
-      throw ArgumentError.value(
-        record.executablePath,
-        'executablePath',
-        'must identify an existing file',
-      );
-    }
-    final canonical = await _canonicalPathResolver(executable.path);
-    _requireExpectedExecutable(record.backendId, canonical);
-    if (canonical != record.executablePath) {
-      throw ArgumentError.value(
-        record.executablePath,
-        'executablePath',
-        'must be canonical',
-      );
-    }
+    await _verifyPreparedExisting(candidate);
+    candidate._consumed = true;
+    final record = candidate.record;
     final next = <BackendInstallationRecord>[
       ..._installations.where((item) => item.backendId != record.backendId),
       record,
@@ -678,6 +781,8 @@ class BackendProvisioningManager {
 
   static Future<String> _resolveCanonicalPath(String value) =>
       File(value).resolveSymbolicLinks();
+
+  static Future<bool> _fileExists(String value) => File(value).exists();
 
   static bool _isWithin(String root, String candidate) {
     final normalizedRoot = root.endsWith(Platform.pathSeparator)

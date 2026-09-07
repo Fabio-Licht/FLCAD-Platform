@@ -43,7 +43,6 @@ typedef ColmapActivationCallback =
 
 typedef OperationalCancellationFactory =
     OperationalReconstructionCancellation Function();
-typedef ColmapBeforePublish = Future<void> Function();
 
 /// Coordinates explicitly authorized COLMAP work without depending on the
 /// legacy alpha stack or [ReconstructionRuntime].
@@ -80,20 +79,6 @@ class ColmapOperationalController extends ChangeNotifier {
     BackendInstallationRecord record, {
     required bool consent,
     required bool allowExperimental,
-  }) => configureExternalTransaction(
-    record,
-    consent: consent,
-    allowExperimental: allowExperimental,
-    beforePublish: () async {},
-  );
-
-  /// Prepares COLMAP, completes every fallible transaction step, then
-  /// publishes the backend with one synchronous assignment.
-  Future<void> configureExternalTransaction(
-    BackendInstallationRecord record, {
-    required bool consent,
-    required bool allowExperimental,
-    required ColmapBeforePublish beforePublish,
   }) async {
     _ensureUsable();
     if (_state == ColmapOperationalState.running ||
@@ -113,9 +98,11 @@ class ColmapOperationalController extends ChangeNotifier {
       if (backend.id != 'colmap') {
         throw StateError('Activation returned a non-COLMAP backend');
       }
-      await beforePublish();
-      _backendManager.publishValidated(backend);
-      if (!_isCurrent(generation)) return;
+      if (_backendManager.contains('colmap')) {
+        _backendManager.replace(backend);
+      } else {
+        _backendManager.register(backend);
+      }
       _setState(ColmapOperationalState.ready);
     } catch (failure, stackTrace) {
       if (!_isCurrent(generation)) return;
@@ -126,6 +113,52 @@ class ColmapOperationalController extends ChangeNotifier {
             ? ColmapOperationalState.ready
             : ColmapOperationalState.failed,
       );
+    }
+  }
+
+  Future<ColmapExternalActivationResult?> configureExternalSelection({
+    required BackendProvisioningManager provisioningManager,
+    required String executablePath,
+    required bool consent,
+    required bool allowExperimental,
+  }) async {
+    _ensureUsable();
+    if (_state == ColmapOperationalState.running ||
+        _state == ColmapOperationalState.cancelling ||
+        _state == ColmapOperationalState.activating) {
+      throw StateError('COLMAP is busy');
+    }
+    if (!consent || !allowExperimental) {
+      throw StateError('Explicit consent and experimental use are required');
+    }
+    final generation = ++_generation;
+    _clearOperation();
+    _setState(ColmapOperationalState.activating);
+    try {
+      final result =
+          await ColmapExternalActivationCoordinator(
+            provisioningManager: provisioningManager,
+            backendManager: _backendManager,
+            prepareBackend: _activate,
+          ).activateExternal(
+            executablePath: executablePath,
+            authorized: consent,
+            allowExperimental: allowExperimental,
+            shouldAbandonBeforeCommit: () => !_isCurrent(generation),
+          );
+      if (result == null || !_isCurrent(generation)) return null;
+      _setState(ColmapOperationalState.ready);
+      return result;
+    } catch (failure, stackTrace) {
+      if (!_isCurrent(generation)) return null;
+      _error = failure;
+      _errorStackTrace = stackTrace;
+      _setState(
+        _backendManager.contains('colmap')
+            ? ColmapOperationalState.ready
+            : ColmapOperationalState.failed,
+      );
+      return null;
     }
   }
 

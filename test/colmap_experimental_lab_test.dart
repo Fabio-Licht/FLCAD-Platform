@@ -12,6 +12,10 @@ import 'package:path/path.dart' as path;
 
 class _Repository implements BackendProvisioningRepository {
   List<BackendInstallationRecord> records = [];
+  Object? saveFailure;
+  int saveCalls = 0;
+  Completer<void>? saveBlock;
+  Completer<void>? saveStarted;
 
   @override
   List<ApprovedBackendRelease> get approvedReleases => const [];
@@ -20,8 +24,13 @@ class _Repository implements BackendProvisioningRepository {
   Future<List<BackendInstallationRecord>> loadInstallations() async => records;
 
   @override
-  Future<void> saveInstallations(List<BackendInstallationRecord> value) async =>
-      records = value;
+  Future<void> saveInstallations(List<BackendInstallationRecord> value) async {
+    saveCalls++;
+    if (saveFailure != null) throw saveFailure!;
+    saveStarted?.complete();
+    if (saveBlock != null) await saveBlock!.future;
+    records = List.of(value);
+  }
 }
 
 class _NoDownload implements BackendDownloadManager {
@@ -74,61 +83,33 @@ class _SelfTest implements BackendSelfTest {
 }
 
 class _ProvisioningManager extends BackendProvisioningManager {
-  _ProvisioningManager()
+  _ProvisioningManager._(this.test, this.store)
     : super(
-        repository: _Repository(),
+        repository: store,
         downloader: _NoDownload(),
         installer: _NoInstall(),
         checksumVerifier: _NoChecksum(),
         signatureVerifier: _NoSignature(),
-        selfTest: _SelfTest(),
+        selfTest: test,
         installationRoot: Directory.systemTemp,
+        canonicalPathResolver: (value) async => File(value).absolute.path,
+        externalFileExists: (_) async => true,
       );
 
-  Object? failure;
-  String version = '3.13-test';
-  int calls = 0;
-  int commitCalls = 0;
-  Object? commitFailure;
-  final List<BackendInstallationRecord> committed = [];
+  factory _ProvisioningManager() =>
+      _ProvisioningManager._(_SelfTest(), _Repository());
 
-  @override
-  Future<BackendInstallationRecord> validateExisting(
-    String backendId, {
-    required String executablePath,
-    required bool authorized,
-  }) async {
-    calls++;
-    if (!authorized) {
-      throw StateError('External backend validation requires authorization');
-    }
-    if (failure != null) throw failure!;
-    return BackendInstallationRecord(
-      backendId: backendId,
-      version: version,
-      installedAt: DateTime.utc(2026),
-      source: Uri.file(executablePath),
-      sha256: '',
-      architecture: 'external',
-      status: BackendInstallationStatus.installed,
-      certification: BackendCertificationStatus.notCertified,
-      executablePath: executablePath,
-      origin: BackendInstallationOrigin.external,
-    );
-  }
+  final _SelfTest test;
+  final _Repository store;
 
-  @override
-  Future<void> commitValidatedExisting(
-    BackendInstallationRecord record, {
-    required bool authorized,
-  }) async {
-    commitCalls++;
-    if (!authorized) throw StateError('authorization required');
-    if (commitFailure != null) throw commitFailure!;
-    committed
-      ..removeWhere((item) => item.backendId == record.backendId)
-      ..add(record);
-  }
+  Object? get failure => test.failure;
+  set failure(Object? value) => test.failure = value;
+  int get calls => test.calls;
+  int get commitCalls => store.saveCalls;
+  set commitFailure(Object? value) => store.saveFailure = value;
+  List<BackendInstallationRecord> get committed => store.records;
+  set saveBlock(Completer<void>? value) => store.saveBlock = value;
+  set saveStarted(Completer<void>? value) => store.saveStarted = value;
 }
 
 class _Cancellation implements OperationalReconstructionCancellation {
@@ -281,7 +262,9 @@ class _Harness {
     ColmapWorkspaceRootProvider? workspaceRootProvider,
     ColmapInputValidator? inputValidator,
   }) async {
-    const executable = r'C:\Program Files\COLMAP\colmap.exe';
+    final executable = Platform.isWindows
+        ? r'C:\Program Files\COLMAP\colmap.exe'
+        : '/opt/colmap/colmap';
     final provisioning = _ProvisioningManager();
     final backend = _Backend();
     final validator = inputValidator ?? _InputValidator();
@@ -461,6 +444,44 @@ void main() {
       expect(harness.lab.presentationError, isA<StateError>());
     },
   );
+
+  test(
+    'dispose before commit abandons activation without partial state',
+    () async {
+      final activation = Completer<ReconstructionBackend>();
+      final harness = await _Harness.create(activation: activation);
+      await harness.lab.chooseExecutable();
+      final operation = harness.lab.validateAndActivate(consent: true);
+      await Future<void>.delayed(Duration.zero);
+      harness.lab.dispose();
+      harness.operational.dispose();
+      activation.complete(harness.backend);
+      await operation;
+
+      expect(harness.provisioning.committed, isEmpty);
+      expect(harness.backendManager.contains('colmap'), isFalse);
+      await harness.dispose();
+    },
+  );
+
+  test('dispose after commit point completes without partial state', () async {
+    final harness = await _Harness.create();
+    final started = Completer<void>();
+    final release = Completer<void>();
+    harness.provisioning.saveStarted = started;
+    harness.provisioning.saveBlock = release;
+    await harness.lab.chooseExecutable();
+    final operation = harness.lab.validateAndActivate(consent: true);
+    await started.future;
+    harness.lab.dispose();
+    harness.operational.dispose();
+    release.complete();
+    await operation;
+
+    expect(harness.provisioning.committed, hasLength(1));
+    expect(harness.backendManager.get('colmap'), same(harness.backend));
+    await harness.dispose();
+  });
 
   testWidgets('empty photo directory blocks reconstruction', (tester) async {
     final harness = await _Harness.create();

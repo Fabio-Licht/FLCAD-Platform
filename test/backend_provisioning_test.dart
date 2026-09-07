@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
@@ -102,6 +103,110 @@ BackendProvisioningManager managerFor(
 
 void main() {
   test(
+    'file repository restores previous file when final swap fails',
+    () async {
+      final root = await Directory.systemTemp.createTemp('flcad-file-swap-');
+      addTearDown(() => root.delete(recursive: true));
+      final file = File('${root.path}${Platform.pathSeparator}installs.json');
+      final oldRecord = BackendInstallationRecord(
+        backendId: 'old',
+        version: '1',
+        installedAt: DateTime.utc(2026),
+        source: Uri.file('old'),
+        sha256: '',
+        architecture: 'test',
+        status: BackendInstallationStatus.installed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: 'old',
+      );
+      await file.writeAsString(jsonEncode([oldRecord.toJson()]));
+      var renames = 0;
+      final repository = FileBackendProvisioningRepository(
+        catalogFile: File('${root.path}${Platform.pathSeparator}catalog.json'),
+        installationsFile: file,
+        approvedReleases: const [],
+        renameFile: (source, target) async {
+          renames++;
+          if (renames == 2) throw FileSystemException('swap failed');
+          return source.rename(target);
+        },
+      );
+
+      await expectLater(
+        repository.saveInstallations(const []),
+        throwsA(isA<FileSystemException>()),
+      );
+
+      expect((await repository.loadInstallations()).single.backendId, 'old');
+      expect(
+        root.listSync().where((item) => item.path.contains('.tmp-')),
+        isEmpty,
+      );
+    },
+  );
+
+  test('file repository preserves primary when backup rename fails', () async {
+    final root = await Directory.systemTemp.createTemp('flcad-file-preserve-');
+    addTearDown(() => root.delete(recursive: true));
+    final file = File('${root.path}${Platform.pathSeparator}installs.json');
+    await file.writeAsString('[]');
+    final repository = FileBackendProvisioningRepository(
+      catalogFile: File('${root.path}${Platform.pathSeparator}catalog.json'),
+      installationsFile: file,
+      approvedReleases: const [],
+      renameFile: (source, target) async {
+        throw FileSystemException('rename blocked');
+      },
+    );
+
+    await expectLater(
+      repository.saveInstallations(const []),
+      throwsA(isA<FileSystemException>()),
+    );
+
+    expect(await file.readAsString(), '[]');
+    expect(
+      root.listSync().where((item) => item.path.contains('.tmp-')),
+      isEmpty,
+    );
+  });
+
+  test(
+    'file repository loads valid backup for missing or invalid primary',
+    () async {
+      final root = await Directory.systemTemp.createTemp('flcad-file-recover-');
+      addTearDown(() => root.delete(recursive: true));
+      final file = File('${root.path}${Platform.pathSeparator}installs.json');
+      final backup = File('${file.path}.backup');
+      final record = BackendInstallationRecord(
+        backendId: 'colmap',
+        version: '1',
+        installedAt: DateTime.utc(2026),
+        source: Uri.file('colmap'),
+        sha256: '',
+        architecture: 'test',
+        status: BackendInstallationStatus.installed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: 'colmap',
+      );
+      await backup.writeAsString(jsonEncode([record.toJson()]));
+      final repository = FileBackendProvisioningRepository(
+        catalogFile: File('${root.path}${Platform.pathSeparator}catalog.json'),
+        installationsFile: file,
+        approvedReleases: const [],
+      );
+
+      expect((await repository.loadInstallations()).single.backendId, 'colmap');
+      await file.writeAsString('{invalid');
+      await backup.writeAsString(jsonEncode([record.toJson()]));
+      expect((await repository.loadInstallations()).single.backendId, 'colmap');
+
+      await backup.writeAsString('{also-invalid');
+      await expectLater(repository.loadInstallations(), throwsStateError);
+    },
+  );
+
+  test(
     'validates external COLMAP without mutating or persisting state',
     () async {
       final root = await Directory.systemTemp.createTemp('flcad-validate-');
@@ -122,15 +227,18 @@ void main() {
         installationRoot: root,
       );
 
-      final record = await manager.validateExisting(
+      final candidate = await manager.prepareExisting(
         'colmap',
         executablePath: executable.path,
         authorized: true,
       );
 
-      expect(record.status, BackendInstallationStatus.installed);
-      expect(record.origin, BackendInstallationOrigin.external);
-      expect(record.certification, BackendCertificationStatus.notCertified);
+      expect(candidate.record.status, BackendInstallationStatus.installed);
+      expect(candidate.record.origin, BackendInstallationOrigin.external);
+      expect(
+        candidate.record.certification,
+        BackendCertificationStatus.notCertified,
+      );
       expect(manager.installations, isEmpty);
       expect(repository.records, isEmpty);
       expect(repository.saveCalls, 0);
@@ -174,7 +282,7 @@ void main() {
       final savesBefore = repository.saveCalls;
 
       await expectLater(
-        manager.validateExisting(
+        manager.prepareExisting(
           'colmap',
           executablePath: executable.path,
           authorized: true,
@@ -185,42 +293,6 @@ void main() {
       expect(manager.installations, savedBefore);
       expect(repository.records, savedBefore);
       expect(repository.saveCalls, savesBefore);
-    },
-  );
-
-  test(
-    'failed validated commit preserves in-memory installation list',
-    () async {
-      final root = await Directory.systemTemp.createTemp('flcad-commit-');
-      addTearDown(() => root.delete(recursive: true));
-      final executable = await File(
-        '${root.path}${Platform.pathSeparator}'
-        '${Platform.isWindows ? 'colmap.exe' : 'colmap'}',
-      ).create();
-      final repository = _Repository(const []);
-      final manager = BackendProvisioningManager(
-        repository: repository,
-        downloader: _Downloader(executable),
-        installer: _Installer(),
-        checksumVerifier: _Checksum(),
-        signatureVerifier: _Signature(),
-        selfTest: _SelfTest(),
-        installationRoot: root,
-      );
-      final record = await manager.validateExisting(
-        'colmap',
-        executablePath: executable.path,
-        authorized: true,
-      );
-      repository.saveFailure = StateError('disk unavailable');
-
-      await expectLater(
-        manager.commitValidatedExisting(record, authorized: true),
-        throwsStateError,
-      );
-
-      expect(manager.installations, isEmpty);
-      expect(repository.records, isEmpty);
     },
   );
 

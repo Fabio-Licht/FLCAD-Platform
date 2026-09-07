@@ -91,30 +91,18 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     _presentationError = null;
     notifyListeners();
     try {
-      final record = await _provisioningManager.validateExisting(
-        'colmap',
+      final result = await _operationalController.configureExternalSelection(
+        provisioningManager: _provisioningManager,
         executablePath: executablePath,
-        authorized: consent,
-      );
-      if (_disposed) return;
-      if (record.status != BackendInstallationStatus.installed &&
-          record.status != BackendInstallationStatus.certified) {
-        throw StateError(record.lastError ?? 'A validação do COLMAP falhou.');
-      }
-      await _operationalController.configureExternalTransaction(
-        record,
         consent: consent,
         allowExperimental: true,
-        beforePublish: () => _provisioningManager.commitValidatedExisting(
-          record,
-          authorized: consent,
-        ),
       );
       if (_disposed) return;
       if (_operationalController.error != null) {
         _presentationError = _operationalController.error;
-      } else if (_operationalController.state == ColmapOperationalState.ready) {
-        _activeInstallation = record;
+      } else if (result != null &&
+          _operationalController.state == ColmapOperationalState.ready) {
+        _activeInstallation = result.installation;
       }
     } catch (error) {
       if (!_disposed) _presentationError = error;
