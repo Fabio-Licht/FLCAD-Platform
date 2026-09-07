@@ -75,6 +75,10 @@ class ColmapOperationalController extends ChangeNotifier {
   StackTrace? get errorStackTrace => _errorStackTrace;
   bool get isDisposed => _state == ColmapOperationalState.disposed;
 
+  /// Low-level operational activation retained for M-006C1 compatibility.
+  ///
+  /// This method does not validate or persist an installation record. Product
+  /// UI flows must use the coordinated external-selection transaction.
   Future<void> configureExternal(
     BackendInstallationRecord record, {
     required bool consent,

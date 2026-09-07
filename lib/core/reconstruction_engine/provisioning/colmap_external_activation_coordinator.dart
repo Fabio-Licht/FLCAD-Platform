@@ -65,7 +65,7 @@ final class ColmapExternalActivationCoordinator {
     if (!authorized || !allowExperimental) {
       throw StateError('Explicit consent and experimental use are required');
     }
-    await _provisioningManager._verifyPreparedExisting(candidate);
+    await _provisioningManager._verifyPreparedExistingPath(candidate);
     final backend = await _prepareBackend(
       candidate.record,
       allowUncertifiedExternal: true,
@@ -76,7 +76,7 @@ final class ColmapExternalActivationCoordinator {
     if (shouldAbandonBeforeCommit?.call() ?? false) return null;
 
     return _queue.run(() async {
-      await _provisioningManager._verifyPreparedExisting(candidate);
+      await _provisioningManager._verifyPreparedExistingPath(candidate);
       if (shouldAbandonBeforeCommit?.call() ?? false) return null;
 
       // Point of commit: consumption, persistence, provisioning memory and
@@ -84,12 +84,14 @@ final class ColmapExternalActivationCoordinator {
       await _provisioningManager._commitPreparedExisting(
         candidate,
         authorized: authorized,
+        publish: () {
+          if (_backendManager.contains('colmap')) {
+            _backendManager.replace(backend);
+          } else {
+            _backendManager.register(backend);
+          }
+        },
       );
-      if (_backendManager.contains('colmap')) {
-        _backendManager.replace(backend);
-      } else {
-        _backendManager.register(backend);
-      }
       return ColmapExternalActivationResult(
         installation: candidate.record,
         backend: backend,

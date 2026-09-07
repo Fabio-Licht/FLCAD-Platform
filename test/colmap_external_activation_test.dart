@@ -12,6 +12,7 @@ class _Repository implements BackendProvisioningRepository {
   final File? file;
   List<BackendInstallationRecord> memory = [];
   Object? saveFailure;
+  int saveCalls = 0;
 
   @override
   List<ApprovedBackendRelease> get approvedReleases => const [];
@@ -33,6 +34,7 @@ class _Repository implements BackendProvisioningRepository {
   Future<void> saveInstallations(
     List<BackendInstallationRecord> records,
   ) async {
+    saveCalls++;
     if (saveFailure != null) throw saveFailure!;
     memory = List.of(records);
     if (file != null) {
@@ -420,6 +422,84 @@ void main() {
       ).activatePrepared(candidate, authorized: true, allowExperimental: true),
       throwsStateError,
     );
+  });
+
+  test('concurrent claim across backend-manager pairs succeeds once', () async {
+    final root = await Directory.systemTemp.createTemp('flcad-claim-race-');
+    addTearDown(() => root.delete(recursive: true));
+    final executable = await File(
+      '${root.path}${Platform.pathSeparator}$_executableName',
+    ).create();
+    final repository = _Repository();
+    final provisioning = _manager(
+      repository: repository,
+      downloader: _NeverDownloader(),
+      installer: _NeverInstaller(),
+      selfTest: _SelfTest(),
+      root: root,
+    );
+    final candidate = await provisioning.prepareExisting(
+      'colmap',
+      executablePath: executable.path,
+      authorized: true,
+    );
+    ColmapExternalActivationCoordinator coordinator() =>
+        ColmapExternalActivationCoordinator(
+          provisioningManager: provisioning,
+          backendManager: ReconstructionBackendManager(),
+          prepareBackend: (record, {required allowUncertifiedExternal}) async =>
+              _Backend('candidate'),
+        );
+    Future<bool> attempt(ColmapExternalActivationCoordinator value) => value
+        .activatePrepared(candidate, authorized: true, allowExperimental: true)
+        .then((_) => true, onError: (_) => false);
+
+    final outcomes = await Future.wait([
+      attempt(coordinator()),
+      attempt(coordinator()),
+    ]);
+
+    expect(outcomes.where((value) => value), hasLength(1));
+    expect(repository.saveCalls, 1);
+    expect(provisioning.installations, hasLength(1));
+  });
+
+  test('throwing event observer cannot break coordinated activation', () async {
+    final root = await Directory.systemTemp.createTemp('flcad-events-');
+    addTearDown(() => root.delete(recursive: true));
+    final executable = await File(
+      '${root.path}${Platform.pathSeparator}$_executableName',
+    ).create();
+    final repository = _Repository();
+    final provisioning = BackendProvisioningManager(
+      repository: repository,
+      downloader: _NeverDownloader(),
+      installer: _NeverInstaller(),
+      checksumVerifier: _Verifier(),
+      signatureVerifier: _Verifier(),
+      selfTest: _SelfTest(),
+      installationRoot: root,
+      onEvent: (_) => throw StateError('observer failed'),
+    );
+    final backends = ReconstructionBackendManager();
+    final backend = _Backend('events');
+    final coordinator = ColmapExternalActivationCoordinator(
+      provisioningManager: provisioning,
+      backendManager: backends,
+      prepareBackend: (record, {required allowUncertifiedExternal}) async =>
+          backend,
+    );
+
+    final result = await coordinator.activateExternal(
+      executablePath: executable.path,
+      authorized: true,
+      allowExperimental: true,
+    );
+
+    expect(result!.backend, same(backend));
+    expect(repository.memory, hasLength(1));
+    expect(provisioning.installations, hasLength(1));
+    expect(backends.get('colmap'), same(backend));
   });
 
   test('candidate stays consumed when persistence fails', () async {
