@@ -28,6 +28,19 @@ class ReconstructionBackendManager {
     _backends[backend.id] = backend;
   }
 
+  bool contains(String id) => _backends.containsKey(id);
+
+  /// Atomically replaces an already registered backend with the same id.
+  ///
+  /// Callers must finish all asynchronous validation before invoking this
+  /// method so a failed replacement cannot remove the working backend.
+  void replace(ReconstructionBackend backend) {
+    if (!_backends.containsKey(backend.id)) {
+      throw StateError('Backend ${backend.id} not registered');
+    }
+    _backends[backend.id] = backend;
+  }
+
   ReconstructionBackend get(String id) =>
       _backends[id] ?? (throw StateError('Backend $id not registered'));
 
