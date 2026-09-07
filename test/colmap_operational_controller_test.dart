@@ -213,6 +213,43 @@ void main() {
     expect(controller.state, ColmapOperationalState.ready);
   });
 
+  test('concurrent controllers register or replace COLMAP atomically', () async {
+    final firstActivation = Completer<ReconstructionBackend>();
+    final secondActivation = Completer<ReconstructionBackend>();
+    final firstBackend = _Backend();
+    final secondBackend = _Backend();
+    final manager = ReconstructionBackendManager();
+    final firstController = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) =>
+          firstActivation.future,
+    );
+    final secondController = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) =>
+          secondActivation.future,
+    );
+
+    final firstConfiguration = firstController.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+    final secondConfiguration = secondController.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+    firstActivation.complete(firstBackend);
+    await firstConfiguration;
+    secondActivation.complete(secondBackend);
+    await secondConfiguration;
+
+    expect(manager.get('colmap'), same(secondBackend));
+    expect(firstController.state, ColmapOperationalState.ready);
+    expect(secondController.state, ColmapOperationalState.ready);
+  });
+
   test('failed reconfiguration preserves working backend and ready state', () async {
     final previous = _Backend();
     final manager = ReconstructionBackendManager(backends: [previous]);

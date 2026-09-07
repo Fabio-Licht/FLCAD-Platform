@@ -89,7 +89,6 @@ class ColmapOperationalController extends ChangeNotifier {
     if (!consent || !allowExperimental) {
       throw StateError('Explicit consent and experimental use are required');
     }
-    final hadBackend = _backendManager.contains('colmap');
     final generation = ++_generation;
     _clearOperation();
     _setState(ColmapOperationalState.activating);
@@ -102,7 +101,7 @@ class ColmapOperationalController extends ChangeNotifier {
       if (backend.id != 'colmap') {
         throw StateError('Activation returned a non-COLMAP backend');
       }
-      if (hadBackend) {
+      if (_backendManager.contains('colmap')) {
         _backendManager.replace(backend);
       } else {
         _backendManager.register(backend);
@@ -113,7 +112,7 @@ class ColmapOperationalController extends ChangeNotifier {
       _error = failure;
       _errorStackTrace = stackTrace;
       _setState(
-        hadBackend
+        _backendManager.contains('colmap')
             ? ColmapOperationalState.ready
             : ColmapOperationalState.failed,
       );
