@@ -3,7 +3,14 @@
 Data: 11/08/2026
 
 Após investigação em projeto mínimo foi homologado o ambiente oficial do
-FLCAD Mobile.
+repositório hoje denominado FLCAD Platform.
+
+## Compatibilidade de identidade
+
+A mudança do nome do repositório não altera ainda o package Dart
+`flcad_mobile`, o Android `applicationId`, nomes de binários nem a pasta local
+(por exemplo, `C:\flcad_mobile`). Esses identificadores permanecem válidos até
+uma migração técnica específica.
 
 ## Flutter
 

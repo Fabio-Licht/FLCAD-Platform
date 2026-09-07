@@ -2,6 +2,12 @@
 
 # Reverse AI
 
+> **Nomenclatura vigente:** FLCAD Reverse AI continua sendo o nome comercial do
+> produto, conforme o ADR-065. FLCAD Platform é o núcleo compartilhado; FLCAD
+> AI é uma capacidade/engine compartilhada e não substitui este produto. Consulte
+> [PRODUCT_ARCHITECTURE.md](PRODUCT_ARCHITECTURE.md) e o
+> [ADR-084](adr/ADR-084-flcad-platform-product-boundaries.md).
+
 Versão: 1.0
 
 Documento Oficial
@@ -14,7 +20,10 @@ Documento: 04_ReverseAI.md
 
 # Objetivo
 
-O FLCAD Reverse AI é a plataforma responsável por transformar malhas tridimensionais em modelos CAD paramétricos preparados para engenharia, inspeção e manufatura.
+O FLCAD Reverse AI é o produto responsável por transformar malhas
+tridimensionais em modelos CAD editáveis voltados à engenharia reversa. Recursos
+paramétricos avançados, Inspection e CAM dependem de seus respectivos marcos e
+não são afirmados como entregues por este documento.
 
 Seu propósito é reduzir drasticamente o trabalho manual atualmente necessário em softwares de Engenharia Reversa.
 
@@ -421,9 +430,9 @@ IA Completa
 
 # Integração com Mobile
 
-O Mobile será responsável pela aquisição.
-
-O Reverse AI será responsável pela reconstrução.
+O FLCAD Capture é responsável pela aquisição. O FLCAD Scan é o domínio canônico
+de reconstrução de nuvens e malhas. O FLCAD Reverse AI recebe a geometria e as
+evidências para a reconstrução CAD editável.
 
 A comunicação ocorrerá através do formato:
 

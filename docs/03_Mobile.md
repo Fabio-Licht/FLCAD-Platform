@@ -1,6 +1,6 @@
 # FLCAD PLATFORM
 
-# Mobile
+# Aquisição móvel — FLCAD Capture
 
 Versão: 1.0
 
@@ -14,11 +14,13 @@ Documento: 03_Mobile.md
 
 # Objetivo
 
-O FLCAD Mobile é responsável pela aquisição inteligente de dados do mundo físico.
+O FLCAD Capture é o aplicativo móvel responsável pela aquisição inteligente de
+dados do mundo físico. Este documento mantém o nome de arquivo histórico
+`03_Mobile.md`, mas a identidade oficial do produto é FLCAD Capture.
 
 Sua missão é permitir que qualquer usuário capture informações com rapidez, precisão e organização, preparando os dados para reconstrução tridimensional e engenharia reversa.
 
-O Mobile não substitui o Reverse AI.
+O Capture não substitui o FLCAD Scan nem o FLCAD Reverse AI.
 
 Ele o complementa.
 
@@ -41,8 +43,8 @@ Cada fotografia representa apenas uma evidência dentro desse processo.
 - Gerenciar sessões
 - Auxiliar a captura
 - Validar qualidade
-- Reconstruir STL
-- Exportar FLSCAN
+- Preparar evidências para reconstrução
+- Exportar o contrato `.flscan` (nome histórico FLSCAN)
 
 ---
 
@@ -308,15 +310,17 @@ Essa arquitetura permite expansão praticamente ilimitada.
 
 ---
 
-# Reconstrução
+# Integração com reconstrução
 
-O Mobile realizará reconstruções voltadas para:
+As capturas serão encaminhadas ao domínio FLCAD Scan, que poderá produzir
+reconstruções voltadas para:
 
 - impressão 3D;
 - visualização;
 - documentação.
 
-Reconstruções CAD permanecerão sob responsabilidade do Reverse AI.
+Reconstruções CAD editáveis permanecerão sob responsabilidade do FLCAD Reverse AI.
+FLCAD Scan ainda não representa um aplicativo separado já entregue.
 
 ---
 
@@ -324,7 +328,7 @@ Reconstruções CAD permanecerão sob responsabilidade do Reverse AI.
 
 Formatos previstos:
 
-- FLSCAN
+- `.flscan` (nome histórico FLSCAN)
 - STL
 - OBJ
 - PLY
@@ -334,7 +338,7 @@ Formatos previstos:
 
 # Integração
 
-A integração oficial com o Desktop ocorrerá através do formato:
+O contrato planejado de integração com o Desktop é:
 
 ```text
 .flscan
@@ -391,7 +395,7 @@ Permitir que qualquer profissional consiga gerar uma reconstrução tridimension
 
 # Definição de Sucesso
 
-O FLCAD Mobile será considerado bem-sucedido quando:
+O FLCAD Capture será considerado bem-sucedido quando:
 
 - reduzir significativamente o tempo de captura;
 - reduzir erros humanos;
@@ -402,7 +406,7 @@ O FLCAD Mobile será considerado bem-sucedido quando:
 
 # Visão de Longo Prazo
 
-O FLCAD Mobile evoluirá de um aplicativo de captura para um Assistente Inteligente de Aquisição de Dados.
+O FLCAD Capture evoluirá de um aplicativo de captura para um Assistente Inteligente de Aquisição de Dados.
 
 Seu objetivo não será apenas registrar informações.
 

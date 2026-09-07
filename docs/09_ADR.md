@@ -50,7 +50,8 @@ Separação entre Mobile e Reverse AI
 
 Status
 
-Aprovado
+Parcialmente substituído pelo
+[ADR-084](adr/ADR-084-flcad-platform-product-boundaries.md)
 
 ---
 
@@ -64,9 +65,10 @@ Essa abordagem limitaria a evolução do sistema e aumentaria significativamente
 
 ### Decisão
 
-O FLCAD Mobile será responsável exclusivamente pela aquisição inteligente de dados.
-
-O processamento pesado permanecerá no FLCAD Reverse AI.
+Decisão histórica: o FLCAD Mobile seria responsável exclusivamente pela
+aquisição inteligente de dados, e o processamento pesado permaneceria no
+FLCAD Reverse AI. O ADR-084 preserva a separação de responsabilidades, mas
+substitui a exclusividade associada aos nomes Mobile e Reverse AI.
 
 ---
 
