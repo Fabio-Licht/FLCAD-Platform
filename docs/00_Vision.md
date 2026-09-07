@@ -77,11 +77,14 @@ Histórico
 
 ---
 
-# Produtos da Plataforma
+# Produtos e domínios da Plataforma
 
-## FLCAD Mobile
+Os nomes e limites canônicos estão definidos em
+[`PRODUCT_ARCHITECTURE.md`](PRODUCT_ARCHITECTURE.md).
 
-Responsável pela aquisição inteligente de dados.
+## FLCAD Capture
+
+Aplicativo móvel responsável pela aquisição inteligente de dados.
 
 Principais recursos:
 
@@ -91,12 +94,19 @@ Principais recursos:
 - Organização
 - IA de Captura
 - Smart Measurements
-- Reconstrução STL
 - Exportação FLSCAN
 
 ---
 
-## FLCAD Reverse AI
+## FLCAD Scan
+
+Responsável por transformar evidências em reconstruções auditáveis, incluindo
+nuvens, malhas, escala e diagnóstico. É um domínio/produto planejado e ainda não
+deve ser apresentado como aplicativo separado já entregue.
+
+---
+
+## FLCAD Reverse
 
 Responsável pela engenharia reversa profissional.
 
@@ -108,6 +118,13 @@ Principais recursos:
 - Superfícies
 - Preparação CAM
 - Inteligência Artificial
+
+---
+
+## FLCAD AI
+
+Capacidades compartilhadas de orientação, análise e automação supervisionada.
+A IA auxilia; o profissional valida e decide.
 
 ---
 
@@ -156,9 +173,9 @@ Conhecimento gerado a partir delas possui muito mais.
 
 ---
 
-## 5. Mobile captura.
+## 5. Capture registra evidências.
 
-Desktop transforma.
+Scan reconstrói. Reverse transforma em CAD.
 
 Cada produto deve ser excelente naquilo que faz.
 

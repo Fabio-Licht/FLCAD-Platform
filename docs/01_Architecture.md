@@ -20,45 +20,33 @@ Seu objetivo é garantir que todos os produtos evoluam de forma consistente, esc
 
 # Visão Geral
 
-A plataforma FLCAD é composta por módulos especializados.
+A plataforma FLCAD é composta por produtos e domínios especializados sobre um
+núcleo compartilhado. A taxonomia canônica está em
+[`PRODUCT_ARCHITECTURE.md`](PRODUCT_ARCHITECTURE.md).
 
 Cada módulo possui responsabilidades bem definidas.
 
 ```text
-                 FLCAD PLATFORM
-
-                        │
-
-        ┌───────────────┼────────────────┐
-
-        │               │                │
-
-        ▼               ▼                ▼
-
-   Mobile App      Reverse AI        Cloud
-
-        │               │                │
-
-        └───────────────┼────────────────┘
-
-                        │
-
-                        ▼
-
-                     FLSCAN
-
-                        │
-
-                        ▼
-
-                     AI Engine
+FLCAD Capture ── evidências ──> FLCAD Scan ── geometria ──> FLCAD Reverse
+       │                              │                            │
+       └──────────────────── FLCAD Platform ──────────────────────┘
+                                      │
+                                  FLCAD AI
 ```
 
 ---
 
 # Produtos
 
-## FLCAD Mobile
+## FLCAD Platform
+
+Núcleo e repositório principal. Oferece contratos, domínio, persistência,
+viewport, kernel CAD, reconstrução e integração sem representar uma única
+interface de produto.
+
+---
+
+## FLCAD Capture
 
 Responsável pela aquisição inteligente de dados.
 
@@ -79,7 +67,15 @@ Não possui responsabilidade sobre:
 
 ---
 
-## FLCAD Reverse AI
+## FLCAD Scan
+
+Responsável por validação da captura, fotogrametria, nuvens, malhas, escala e
+diagnóstico. Neste momento é um domínio/produto, não um aplicativo separado já
+entregue.
+
+---
+
+## FLCAD Reverse
 
 Responsável pela engenharia reversa.
 
@@ -106,7 +102,7 @@ Responsável por:
 
 ---
 
-## AI Engine
+## FLCAD AI
 
 Responsável por toda inteligência da plataforma.
 
@@ -114,7 +110,8 @@ Não pertence ao Mobile.
 
 Não pertence ao Desktop.
 
-É um componente compartilhado.
+É uma capacidade compartilhada, supervisionada pelo profissional. Não implica
+autonomia infalível.
 
 ---
 
