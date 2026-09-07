@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -54,26 +55,60 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
     );
     final stdout = StringBuffer();
     final stderr = StringBuffer();
-    final stdoutSubscription = process.stdout.transform(utf8.decoder).listen(stdout.write);
-    final stderrSubscription = process.stderr.transform(utf8.decoder).listen(stderr.write);
-    while (true) {
-      if (cancellation?.isCancelled ?? false) {
-        process.kill(ProcessSignal.sigterm);
-        throw const ReconstructionCancelled();
+    final stdoutDone = Completer<void>();
+    final stderrDone = Completer<void>();
+    final stdoutSubscription = process.stdout.transform(utf8.decoder).listen(
+      stdout.write,
+      onError: (Object error, StackTrace stackTrace) {
+        if (!stdoutDone.isCompleted) {
+          stdoutDone.completeError(error, stackTrace);
+        }
+      },
+      onDone: () {
+        if (!stdoutDone.isCompleted) stdoutDone.complete();
+      },
+    );
+    final stderrSubscription = process.stderr.transform(utf8.decoder).listen(
+      stderr.write,
+      onError: (Object error, StackTrace stackTrace) {
+        if (!stderrDone.isCompleted) {
+          stderrDone.completeError(error, stackTrace);
+        }
+      },
+      onDone: () {
+        if (!stderrDone.isCompleted) stderrDone.complete();
+      },
+    );
+    final exit = process.exitCode;
+    try {
+      while (true) {
+        if (cancellation?.isCancelled ?? false) {
+          process.kill(ProcessSignal.sigterm);
+          try {
+            await exit.timeout(const Duration(seconds: 2));
+          } on TimeoutException {
+            // Best effort only: Process.kill targets this PID, not its tree.
+          }
+          throw const ReconstructionCancelled();
+        }
+        final exitCode = await Future.any<int?>([
+          exit,
+          Future<void>.delayed(
+            const Duration(milliseconds: 100),
+          ).then((_) => null),
+        ]);
+        if (exitCode == null) continue;
+        await Future.wait([stdoutDone.future, stderrDone.future]);
+        return ColmapCommandResult(
+          exitCode: exitCode,
+          stdout: stdout.toString(),
+          stderr: stderr.toString(),
+          durationMs: DateTime.now().difference(started).inMilliseconds,
+        );
       }
-      final exitCode = await Future.any<int?>([
-        process.exitCode,
-        Future<void>.delayed(const Duration(milliseconds: 100)).then((_) => null),
-      ]);
-      if (exitCode == null) continue;
+    } finally {
       await stdoutSubscription.cancel();
       await stderrSubscription.cancel();
-      return ColmapCommandResult(
-        exitCode: exitCode,
-        stdout: stdout.toString(),
-        stderr: stderr.toString(),
-        durationMs: DateTime.now().difference(started).inMilliseconds,
-      );
     }
   }
 
