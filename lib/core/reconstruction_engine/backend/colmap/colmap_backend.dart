@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:path/path.dart' as path;
+
 import '../../../acquisition_intelligence/models/evidence_graph.dart';
 import '../../engine/reconstruction_engine.dart';
 import '../../models/reconstruction_contract.dart';
@@ -97,11 +99,13 @@ class IoColmapProcessRunner implements ColmapProcessRunner {
 
 class ColmapBackend implements ReconstructionBackend {
   const ColmapBackend({
-    this.executable = 'colmap',
+    required this.executable,
+    this.detectedVersion = 'undetected',
     ColmapProcessRunner? processRunner,
   }) : _processRunner = processRunner ?? const IoColmapProcessRunner();
 
   final String executable;
+  final String detectedVersion;
   final ColmapProcessRunner _processRunner;
 
   @override
@@ -109,7 +113,7 @@ class ColmapBackend implements ReconstructionBackend {
 
   @override
   ReconstructionBackendCapabilities get capabilities =>
-      _capabilities('undetected');
+      _capabilities(detectedVersion);
 
   ReconstructionBackendCapabilities _capabilities(String version) =>
       ReconstructionBackendCapabilities(
@@ -124,6 +128,7 @@ class ColmapBackend implements ReconstructionBackend {
       );
 
   Future<ReconstructionBackendCapabilities> detectCapabilities() async {
+    _validateSelectedExecutable();
     final detectedVersion = await _processRunner.version(executable);
     return _capabilities(detectedVersion ?? 'undetected');
   }
@@ -134,6 +139,7 @@ class ColmapBackend implements ReconstructionBackend {
     void Function(ReconstructionStageReport report)? onStage,
     ReconstructionCancellation? cancellation,
   }) async {
+    _validateSelectedExecutable();
     final workspacePath = request.calibration['workspacePath'] as String?;
     final imagePath = request.calibration['imagePath'] as String?;
     if (workspacePath == null || imagePath == null) {
@@ -418,6 +424,16 @@ class ColmapBackend implements ReconstructionBackend {
         },
       ),
     );
+  }
+
+  void _validateSelectedExecutable() {
+    if (executable.isEmpty || !path.isAbsolute(executable)) {
+      throw ArgumentError.value(
+        executable,
+        'executable',
+        'must be an explicitly selected absolute path',
+      );
+    }
   }
 }
 

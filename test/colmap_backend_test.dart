@@ -4,6 +4,10 @@ import 'package:flcad_mobile/core/acquisition_intelligence/models/evidence_graph
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+String get _fakeColmapExecutable => Platform.isWindows
+    ? r'C:\fake-colmap\colmap.exe'
+    : '/fake-colmap/colmap';
+
 class _FakeColmapRunner implements ColmapProcessRunner {
   _FakeColmapRunner({
     this.omitArtifactFor,
@@ -174,7 +178,9 @@ void main() {
     addTearDown(() => fixture.root.delete(recursive: true));
     final runner = _FakeColmapRunner();
     final backend = ColmapBackend(
-      executable: 'C:/COLMAP & tools/colmap.exe',
+      executable: Platform.isWindows
+          ? r'C:\COLMAP & tools\colmap.exe'
+          : '/COLMAP & tools/colmap',
       processRunner: runner,
     );
     final request = _request('same/id & request', fixture.root, fixture.images);
@@ -205,7 +211,10 @@ void main() {
   test('validates the image directory and supported files', () async {
     final root = await Directory.systemTemp.createTemp('flcad-colmap-images-');
     addTearDown(() => root.delete(recursive: true));
-    final backend = ColmapBackend(processRunner: _FakeColmapRunner());
+    final backend = ColmapBackend(
+      executable: _fakeColmapExecutable,
+      processRunner: _FakeColmapRunner(),
+    );
     final missing = Directory('${root.path}${Platform.pathSeparator}missing');
     final empty = await Directory(
       '${root.path}${Platform.pathSeparator}empty',
@@ -242,6 +251,7 @@ void main() {
           addTearDown(() => fixture.root.delete(recursive: true));
           final reports = <ReconstructionStageReport>[];
           final backend = ColmapBackend(
+            executable: _fakeColmapExecutable,
             processRunner: _FakeColmapRunner(
               omitArtifactFor: empty ? null : command,
               emptyArtifactFor: empty ? command : null,
@@ -267,6 +277,7 @@ void main() {
     addTearDown(() => fixture.root.delete(recursive: true));
     final reports = <ReconstructionStageReport>[];
     final backend = ColmapBackend(
+      executable: _fakeColmapExecutable,
       processRunner: _FakeColmapRunner(throwFor: 'feature_extractor'),
     );
 
@@ -281,6 +292,7 @@ void main() {
 
     reports.clear();
     final cancelledBackend = ColmapBackend(
+      executable: _fakeColmapExecutable,
       processRunner: _FakeColmapRunner(cancelFor: 'feature_extractor'),
     );
     await expectLater(
@@ -297,7 +309,10 @@ void main() {
     final fixture = await _fixture('flcad colmap [literal] &-');
     addTearDown(() => fixture.root.delete(recursive: true));
     final runner = _FakeColmapRunner();
-    final result = await ColmapBackend(processRunner: runner).reconstruct(
+    final result = await ColmapBackend(
+      executable: _fakeColmapExecutable,
+      processRunner: runner,
+    ).reconstruct(
       _request('request [1] & done', fixture.root, fixture.images),
     );
 
@@ -319,7 +334,10 @@ void main() {
     addTearDown(() => fixture.root.delete(recursive: true));
     final runner = _FakeColmapRunner();
     final requestId = '${'unsafe/&'.padRight(80, 'x')}?';
-    await ColmapBackend(processRunner: runner).reconstruct(
+    await ColmapBackend(
+      executable: _fakeColmapExecutable,
+      processRunner: runner,
+    ).reconstruct(
       _request(requestId, fixture.root, fixture.images),
     );
 
