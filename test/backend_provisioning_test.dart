@@ -103,6 +103,92 @@ BackendProvisioningManager managerFor(
 
 void main() {
   test(
+    'loads recorded installations without validation or persistence',
+    () async {
+      final root = await Directory.systemTemp.createTemp('flcad-recorded-');
+      addTearDown(() => root.delete(recursive: true));
+      final repository = _Repository(const []);
+      repository.records = [
+        BackendInstallationRecord(
+          backendId: 'other',
+          version: '1',
+          installedAt: DateTime.utc(2026),
+          source: Uri.parse('file:///other'),
+          sha256: '',
+          architecture: 'test',
+          status: BackendInstallationStatus.installed,
+          certification: BackendCertificationStatus.notCertified,
+          executablePath: 'recorded-only',
+        ),
+      ];
+      final selfTest = _SelfTest();
+      final manager = BackendProvisioningManager(
+        repository: repository,
+        downloader: _Downloader(File('${root.path}/source')),
+        installer: _Installer(),
+        checksumVerifier: _Checksum(),
+        signatureVerifier: _Signature(),
+        selfTest: selfTest,
+        installationRoot: root,
+      );
+
+      final loaded = await manager.loadRecordedInstallations();
+
+      expect(loaded, hasLength(1));
+      expect(manager.installations.single.backendId, 'other');
+      expect(selfTest.calls, 0);
+      expect(repository.saveCalls, 0);
+    },
+  );
+
+  test('hydrated records survive a later COLMAP registration', () async {
+    final root = await Directory.systemTemp.createTemp('flcad-hydrated-');
+    addTearDown(() => root.delete(recursive: true));
+    final executable = await File(
+      '${root.path}${Platform.pathSeparator}${Platform.isWindows ? 'colmap.exe' : 'colmap'}',
+    ).create();
+    final repository = _Repository(const []);
+    repository.records = [
+      BackendInstallationRecord(
+        backendId: 'other',
+        version: 'kept',
+        installedAt: DateTime.utc(2026),
+        source: Uri.parse('file:///other'),
+        sha256: '',
+        architecture: 'test',
+        status: BackendInstallationStatus.installed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: 'other',
+      ),
+    ];
+    final manager = BackendProvisioningManager(
+      repository: repository,
+      downloader: _Downloader(File('${root.path}/source')),
+      installer: _Installer(),
+      checksumVerifier: _Checksum(),
+      signatureVerifier: _Signature(),
+      selfTest: _SelfTest(),
+      installationRoot: Directory('${root.path}/managed'),
+    );
+    await manager.loadRecordedInstallations();
+
+    await manager.registerExisting(
+      'colmap',
+      executablePath: executable.absolute.path,
+      authorized: true,
+    );
+
+    expect(manager.installations.map((record) => record.backendId), {
+      'other',
+      'colmap',
+    });
+    expect(repository.records.map((record) => record.backendId), {
+      'other',
+      'colmap',
+    });
+  });
+
+  test(
     'file repository restores previous file when final swap fails',
     () async {
       final root = await Directory.systemTemp.createTemp('flcad-file-swap-');

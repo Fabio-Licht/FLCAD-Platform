@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as path;
 
 import '../../core/acquisition_intelligence/models/evidence_graph.dart';
 import '../../core/reconstruction_engine/backend/colmap/colmap_input_validation.dart';
@@ -80,6 +83,7 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     required ColmapWorkspaceRootProvider workspaceRootProvider,
     ColmapInputValidator? inputValidator,
     ColmapRequestIdFactory? requestIdFactory,
+    String? knownExecutablePath,
   }) : _operationalController = operationalController,
        _provisioningManager = provisioningManager,
        _selectExecutable = selectExecutable,
@@ -88,7 +92,8 @@ class ColmapExperimentalLabController extends ChangeNotifier {
        _inputValidator = inputValidator ?? const IoColmapInputValidator(),
        _requestIdFactory =
            requestIdFactory ??
-           (() => 'colmap-${DateTime.now().toUtc().microsecondsSinceEpoch}') {
+           (() => 'colmap-${DateTime.now().toUtc().microsecondsSinceEpoch}'),
+       _selectedExecutablePath = _knownColmapPath(knownExecutablePath) {
     _operationalController.addListener(_forwardOperationalChange);
   }
 
@@ -120,6 +125,12 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   bool get hasPendingConfiguration {
     final selected = _selectedExecutablePath;
     return selected != null && selected != activeExecutablePath;
+  }
+
+  static String? _knownColmapPath(String? value) {
+    if (value == null || !path.isAbsolute(value)) return null;
+    final expected = Platform.isWindows ? 'colmap.exe' : 'colmap';
+    return path.basename(value).toLowerCase() == expected ? value : null;
   }
 
   bool canStart({required bool consent}) {

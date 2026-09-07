@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flcad_mobile/app/desktop/desktop_application.dart';
 import 'package:flcad_mobile/app/desktop/desktop_asset_manager.dart';
 import 'package:flcad_mobile/app/desktop/desktop_settings.dart';
 import 'package:flcad_mobile/app/desktop/desktop_theme.dart';
+import 'package:flcad_mobile/app/reconstruction/desktop_colmap_lab_runtime.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -24,6 +26,128 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('Professional Desktop Application', () {
+    testWidgets('shell and Settings remain available while lab initializes', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      late final Directory support;
+      await tester.runAsync(() async {
+        support = await Directory.systemTemp.createTemp('flcad-app-lab-');
+      });
+      addTearDown(() => support.delete(recursive: true));
+      const pathProviderChannel = MethodChannel(
+        'plugins.flutter.io/path_provider',
+      );
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(
+            pathProviderChannel,
+            (_) async => support.path,
+          );
+      addTearDown(
+        () => TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(pathProviderChannel, null),
+      );
+      var executablePickerCalls = 0;
+      var photoPickerCalls = 0;
+      var disposeCalls = 0;
+      late final DesktopColmapLabRuntime runtime;
+      await tester.runAsync(() async {
+        runtime = await DesktopColmapLabRuntime.create(
+          applicationSupportDirectoryProvider: () async => support,
+          selectExecutable: () async {
+            executablePickerCalls++;
+            return null;
+          },
+          selectPhotoDirectory: () async {
+            photoPickerCalls++;
+            return null;
+          },
+          onDispose: () => disposeCalls++,
+        );
+      });
+      final gate = Completer<DesktopColmapLabRuntime>();
+      final repository = MemoryDesktopSettingsRepository(
+        DesktopSettings(firstRunCompleted: true),
+      );
+
+      await tester.pumpWidget(
+        FLCADDesktopApplication(
+          settingsRepository: repository,
+          splashStep: Duration.zero,
+          platformInitializer: () async {},
+          colmapLabRuntimeFactory: () => gate.future,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byType(NavigationRail), findsOneWidget);
+      expect(
+        tester.widget<NavigationRail>(find.byType(NavigationRail)).destinations,
+        hasLength(3),
+      );
+      await tester.tap(find.text('Settings'));
+      await tester.pump();
+      expect(find.byKey(const Key('colmap-lab-initializing')), findsOneWidget);
+      expect(find.byKey(const Key('open-colmap-lab')), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('open-colmap-lab')))
+            .onPressed,
+        isNull,
+      );
+      expect(executablePickerCalls, 0);
+      expect(photoPickerCalls, 0);
+
+      gate.complete(runtime);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('colmap-lab-initializing')), findsNothing);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('open-colmap-lab')))
+            .onPressed,
+        isNotNull,
+      );
+      await tester.tap(find.byKey(const Key('open-colmap-lab')));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(disposeCalls, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+      expect(disposeCalls, 1);
+    });
+
+    testWidgets('lab factory failure keeps application Settings functional', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final gate = Completer<DesktopColmapLabRuntime>();
+      final repository = MemoryDesktopSettingsRepository(
+        DesktopSettings(firstRunCompleted: true),
+      );
+      await tester.pumpWidget(
+        FLCADDesktopApplication(
+          settingsRepository: repository,
+          splashStep: Duration.zero,
+          platformInitializer: () async {},
+          colmapLabRuntimeFactory: () => gate.future,
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Settings'));
+      await tester.pump();
+
+      gate.completeError(StateError('private startup detail'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('colmap-lab-unavailable')), findsOneWidget);
+      expect(find.textContaining('private startup detail'), findsNothing);
+      expect(find.text('Engineering tips'), findsOneWidget);
+    });
+
     test('official asset manager validates every managed asset', () async {
       expect(DesktopAssets.all, hasLength(3));
       expect(DesktopAssets.all.every((e) => e.startsWith('assets/')), isTrue);

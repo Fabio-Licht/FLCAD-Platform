@@ -26,6 +26,7 @@ class DesktopColmapLabRuntime {
     required this.applicationSupportDirectory,
     required this.workspaceRoot,
     required this.persistedInstallations,
+    this.onDispose,
   });
 
   final ReconstructionBackendManager backendManager;
@@ -35,6 +36,7 @@ class DesktopColmapLabRuntime {
   final Directory applicationSupportDirectory;
   final Directory workspaceRoot;
   final List<BackendInstallationRecord> persistedInstallations;
+  final VoidCallback? onDispose;
   bool _disposed = false;
 
   Widget buildLab(BuildContext context) =>
@@ -45,6 +47,7 @@ class DesktopColmapLabRuntime {
     ColmapExecutablePicker? selectExecutable,
     ColmapPhotoDirectoryPicker? selectPhotoDirectory,
     ColmapProcessRunner? processRunner,
+    VoidCallback? onDispose,
   }) async {
     final support =
         await (applicationSupportDirectoryProvider ??
@@ -61,7 +64,6 @@ class DesktopColmapLabRuntime {
       ),
       approvedReleases: const [],
     );
-    final persisted = await repository.loadInstallations();
     final runner = processRunner ?? const IoColmapProcessRunner();
     final provisioning = BackendProvisioningManager(
       repository: repository,
@@ -72,6 +74,15 @@ class DesktopColmapLabRuntime {
       selfTest: ColmapVersionSelfTest(processRunner: runner),
       installationRoot: Directory(path.join(privateRoot.path, 'managed')),
     );
+    final persisted = await provisioning.loadRecordedInstallations();
+    String? knownColmapPath;
+    for (final record in persisted.reversed) {
+      if (record.backendId == 'colmap' &&
+          record.origin == BackendInstallationOrigin.external) {
+        knownColmapPath = record.executablePath;
+        break;
+      }
+    }
     final backendManager = ReconstructionBackendManager();
     final operational = ColmapOperationalController(
       backendManager: backendManager,
@@ -83,6 +94,7 @@ class DesktopColmapLabRuntime {
       selectExecutable: selectExecutable ?? _pickExecutable,
       selectPhotoDirectory: selectPhotoDirectory ?? _pickPhotoDirectory,
       workspaceRootProvider: () async => workspaceRoot.path,
+      knownExecutablePath: knownColmapPath,
     );
     return DesktopColmapLabRuntime._(
       backendManager: backendManager,
@@ -92,6 +104,7 @@ class DesktopColmapLabRuntime {
       applicationSupportDirectory: support,
       workspaceRoot: workspaceRoot,
       persistedInstallations: List.unmodifiable(persisted),
+      onDispose: onDispose,
     );
   }
 
@@ -115,6 +128,7 @@ class DesktopColmapLabRuntime {
     }
     labController.dispose();
     operationalController.dispose();
+    onDispose?.call();
   }
 }
 
@@ -141,9 +155,9 @@ class ColmapVersionSelfTest implements BackendSelfTest {
       supportsCpu: true,
       incremental: true,
       denseReconstruction: true,
-      texturing: true,
+      texturing: false,
       automaticCalibration: true,
-      license: 'External COLMAP installation',
+      license: 'BSD-3-Clause',
       version: version.trim(),
     );
   }

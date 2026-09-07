@@ -372,6 +372,19 @@ class BackendProvisioningManager {
   List<BackendInstallationRecord> get installations =>
       List.unmodifiable(_installations);
 
+  /// Loads persisted records as known installations without validating or
+  /// activating them in the current session.
+  ///
+  /// This deliberately performs no self-test, version probe, backend
+  /// publication, consent check, or persistence write. A recorded external
+  /// backend must still pass [prepareExisting] before it can be executed.
+  Future<List<BackendInstallationRecord>> loadRecordedInstallations() =>
+      _persistenceQueue.run(() async {
+        final loaded = await repository.loadInstallations();
+        _installations = List<BackendInstallationRecord>.of(loaded);
+        return installations;
+      });
+
   Future<List<BackendInstallationRecord>> discover() => _persistenceQueue.run(
     () async {
       final loaded = await repository.loadInstallations();

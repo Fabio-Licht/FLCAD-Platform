@@ -60,10 +60,12 @@ class FLCADDesktopApplication extends StatefulWidget {
     this.settingsRepository,
     this.splashStep = const Duration(milliseconds: 250),
     this.colmapLabRuntimeFactory,
+    this.platformInitializer,
   });
   final DesktopSettingsRepository? settingsRepository;
   final Duration splashStep;
   final DesktopColmapLabRuntimeFactory? colmapLabRuntimeFactory;
+  final Future<void> Function()? platformInitializer;
   @override
   State<FLCADDesktopApplication> createState() =>
       _FLCADDesktopApplicationState();
@@ -74,6 +76,7 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
   Object? startupError;
   DesktopColmapLabRuntime? colmapLabRuntime;
   Object? colmapLabStartupError;
+  bool colmapLabInitializing = false;
   final ChangeNotifier emptyController = ChangeNotifier();
   @override
   void initState() {
@@ -86,34 +89,49 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
       final repository =
           widget.settingsRepository ??
           JsonDesktopSettingsRepository(await getApplicationSupportDirectory());
-      await DesktopAssetManager(rootBundle).validate();
-      await AppBootstrap.instance.initialize();
+      await (widget.platformInitializer ?? _initializePlatform)();
       final value = DesktopSettingsController(
         repository,
         await repository.load(),
       );
-      DesktopColmapLabRuntime? labRuntime;
-      Object? labError;
-      try {
-        labRuntime =
-            await (widget.colmapLabRuntimeFactory ??
-                DesktopColmapLabRuntime.create)();
-      } catch (error) {
-        labError = error;
-      }
       if (!mounted) {
-        labRuntime?.dispose();
         value.dispose();
         return;
       }
       setState(() {
         controller = value;
-        colmapLabRuntime = labRuntime;
-        colmapLabStartupError = labError;
+        colmapLabInitializing = true;
       });
+      unawaited(_initializeColmapLab());
     } catch (error) {
       if (mounted) setState(() => startupError = error);
     }
+  }
+
+  Future<void> _initializePlatform() async {
+    await DesktopAssetManager(rootBundle).validate();
+    await AppBootstrap.instance.initialize();
+  }
+
+  Future<void> _initializeColmapLab() async {
+    DesktopColmapLabRuntime? runtime;
+    Object? error;
+    try {
+      runtime =
+          await (widget.colmapLabRuntimeFactory ??
+              DesktopColmapLabRuntime.create)();
+    } catch (caught) {
+      error = caught;
+    }
+    if (!mounted) {
+      runtime?.dispose();
+      return;
+    }
+    setState(() {
+      colmapLabRuntime = runtime;
+      colmapLabStartupError = error;
+      colmapLabInitializing = false;
+    });
   }
 
   @override
@@ -146,6 +164,7 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
                 stepDuration: widget.splashStep,
                 colmapLabBuilder: colmapLabRuntime?.buildLab,
                 colmapLabStartupError: colmapLabStartupError,
+                colmapLabInitializing: colmapLabInitializing,
               ),
       ),
     );
@@ -183,11 +202,13 @@ class DesktopStartupSequence extends StatefulWidget {
     required this.stepDuration,
     this.colmapLabBuilder,
     this.colmapLabStartupError,
+    this.colmapLabInitializing = false,
   });
   final DesktopSettingsController controller;
   final Duration stepDuration;
   final WidgetBuilder? colmapLabBuilder;
   final Object? colmapLabStartupError;
+  final bool colmapLabInitializing;
   @override
   State<DesktopStartupSequence> createState() => _DesktopStartupSequenceState();
 }
@@ -227,6 +248,7 @@ class _DesktopStartupSequenceState extends State<DesktopStartupSequence> {
               controller: widget.controller,
               colmapLabBuilder: widget.colmapLabBuilder,
               colmapLabStartupError: widget.colmapLabStartupError,
+              colmapLabInitializing: widget.colmapLabInitializing,
             )
           : FirstRunWizard(controller: widget.controller);
     }
@@ -395,10 +417,12 @@ class DesktopShell extends StatefulWidget {
     required this.controller,
     this.colmapLabBuilder,
     this.colmapLabStartupError,
+    this.colmapLabInitializing = false,
   });
   final DesktopSettingsController controller;
   final WidgetBuilder? colmapLabBuilder;
   final Object? colmapLabStartupError;
+  final bool colmapLabInitializing;
   @override
   State<DesktopShell> createState() => _DesktopShellState();
 }
@@ -445,6 +469,7 @@ class _DesktopShellState extends State<DesktopShell> {
         controller: widget.controller,
         colmapLabBuilder: widget.colmapLabBuilder,
         colmapLabStartupError: widget.colmapLabStartupError,
+        colmapLabInitializing: widget.colmapLabInitializing,
       ),
     ];
     return Scaffold(
@@ -10259,10 +10284,12 @@ class DesktopSettingsScreen extends StatefulWidget {
     required this.controller,
     this.colmapLabBuilder,
     this.colmapLabStartupError,
+    this.colmapLabInitializing = false,
   });
   final DesktopSettingsController controller;
   final WidgetBuilder? colmapLabBuilder;
   final Object? colmapLabStartupError;
+  final bool colmapLabInitializing;
   @override
   State<DesktopSettingsScreen> createState() => _DesktopSettingsScreenState();
 }
@@ -10380,6 +10407,12 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
                     'O laboratório está temporariamente indisponível. '
                     'As demais configurações continuam disponíveis.',
                     key: Key('colmap-lab-unavailable'),
+                  ),
+                ] else if (widget.colmapLabInitializing) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Inicializando laboratório…',
+                    key: Key('colmap-lab-initializing'),
                   ),
                 ],
                 const SizedBox(height: 12),

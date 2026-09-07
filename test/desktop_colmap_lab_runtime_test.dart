@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flcad_mobile/app/reconstruction/desktop_colmap_lab_runtime.dart';
@@ -95,6 +96,85 @@ void main() {
       expect(executablePickerCalls, 0);
       expect(photoPickerCalls, 0);
       expect(runtime.labController.activeInstallation, isNull);
+    },
+  );
+
+  test(
+    'recorded COLMAP is known and pending without an automatic probe',
+    () async {
+      final support = await Directory.systemTemp.createTemp('flcad_support_');
+      addTearDown(() => support.delete(recursive: true));
+      final root = Directory(
+        path.join(support.path, 'FLCAD Platform', 'COLMAP'),
+      );
+      await root.create(recursive: true);
+      final expectedName = Platform.isWindows ? 'colmap.exe' : 'colmap';
+      final knownPath = path.join(support.path, 'known tools', expectedName);
+      final records = [
+        BackendInstallationRecord(
+          backendId: 'other',
+          version: '1',
+          installedAt: DateTime.utc(2026),
+          source: Uri.parse('file:///other'),
+          sha256: '',
+          architecture: 'test',
+          status: BackendInstallationStatus.installed,
+          certification: BackendCertificationStatus.notCertified,
+          executablePath: 'other',
+        ),
+        BackendInstallationRecord(
+          backendId: 'colmap',
+          version: 'recorded',
+          installedAt: DateTime.utc(2026),
+          source: Uri.file(knownPath),
+          sha256: '',
+          architecture: 'external',
+          status: BackendInstallationStatus.installed,
+          certification: BackendCertificationStatus.notCertified,
+          executablePath: knownPath,
+          origin: BackendInstallationOrigin.external,
+        ),
+      ];
+      await File(path.join(root.path, 'installations.json')).writeAsString(
+        jsonEncode(records.map((record) => record.toJson()).toList()),
+      );
+      final runner = _Runner();
+
+      final runtime = await DesktopColmapLabRuntime.create(
+        applicationSupportDirectoryProvider: () async => support,
+        processRunner: runner,
+        selectExecutable: () async => null,
+        selectPhotoDirectory: () async => null,
+      );
+      addTearDown(runtime.dispose);
+
+      expect(runtime.provisioningManager.installations, hasLength(2));
+      expect(runtime.labController.selectedExecutablePath, knownPath);
+      expect(runtime.labController.activeInstallation, isNull);
+      expect(runtime.labController.hasPendingConfiguration, isTrue);
+      expect(runtime.labController.canStart(consent: true), isFalse);
+      expect(runner.versionCalls, 0);
+    },
+  );
+
+  test(
+    'version self-test capabilities match the operational backend',
+    () async {
+      final runner = _Runner();
+      final tested = await ColmapVersionSelfTest(processRunner: runner)
+          .validate(
+            'colmap',
+            Platform.isWindows ? r'C:\tools\colmap.exe' : '/tools/colmap',
+          );
+      final backend = ColmapBackend(
+        executable: Platform.isWindows
+            ? r'C:\tools\colmap.exe'
+            : '/tools/colmap',
+        detectedVersion: '3.13-test',
+        processRunner: runner,
+      );
+
+      expect(tested.toJson(), backend.capabilities.toJson());
     },
   );
 
