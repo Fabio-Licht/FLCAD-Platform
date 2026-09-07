@@ -47,6 +47,7 @@ import '../modeling/entity_edit_contract.dart';
 import '../navigation/cad_camera_navigation_adapter.dart';
 import '../navigation/navigation_engine.dart';
 import '../operational_entities/operational_entity.dart';
+import '../reconstruction/desktop_colmap_lab_runtime.dart';
 import '../runtime/cad_runtime.dart';
 import 'desktop_asset_manager.dart';
 import 'desktop_cad_controller.dart';
@@ -58,9 +59,11 @@ class FLCADDesktopApplication extends StatefulWidget {
     super.key,
     this.settingsRepository,
     this.splashStep = const Duration(milliseconds: 250),
+    this.colmapLabRuntimeFactory,
   });
   final DesktopSettingsRepository? settingsRepository;
   final Duration splashStep;
+  final DesktopColmapLabRuntimeFactory? colmapLabRuntimeFactory;
   @override
   State<FLCADDesktopApplication> createState() =>
       _FLCADDesktopApplicationState();
@@ -69,6 +72,8 @@ class FLCADDesktopApplication extends StatefulWidget {
 class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
   DesktopSettingsController? controller;
   Object? startupError;
+  DesktopColmapLabRuntime? colmapLabRuntime;
+  Object? colmapLabStartupError;
   final ChangeNotifier emptyController = ChangeNotifier();
   @override
   void initState() {
@@ -87,7 +92,25 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
         repository,
         await repository.load(),
       );
-      if (mounted) setState(() => controller = value);
+      DesktopColmapLabRuntime? labRuntime;
+      Object? labError;
+      try {
+        labRuntime =
+            await (widget.colmapLabRuntimeFactory ??
+                DesktopColmapLabRuntime.create)();
+      } catch (error) {
+        labError = error;
+      }
+      if (!mounted) {
+        labRuntime?.dispose();
+        value.dispose();
+        return;
+      }
+      setState(() {
+        controller = value;
+        colmapLabRuntime = labRuntime;
+        colmapLabStartupError = labError;
+      });
     } catch (error) {
       if (mounted) setState(() => startupError = error);
     }
@@ -96,6 +119,7 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
   @override
   void dispose() {
     emptyController.dispose();
+    colmapLabRuntime?.dispose();
     controller?.dispose();
     super.dispose();
   }
@@ -120,6 +144,8 @@ class _FLCADDesktopApplicationState extends State<FLCADDesktopApplication> {
             : DesktopStartupSequence(
                 controller: value,
                 stepDuration: widget.splashStep,
+                colmapLabBuilder: colmapLabRuntime?.buildLab,
+                colmapLabStartupError: colmapLabStartupError,
               ),
       ),
     );
@@ -155,9 +181,13 @@ class DesktopStartupSequence extends StatefulWidget {
     super.key,
     required this.controller,
     required this.stepDuration,
+    this.colmapLabBuilder,
+    this.colmapLabStartupError,
   });
   final DesktopSettingsController controller;
   final Duration stepDuration;
+  final WidgetBuilder? colmapLabBuilder;
+  final Object? colmapLabStartupError;
   @override
   State<DesktopStartupSequence> createState() => _DesktopStartupSequenceState();
 }
@@ -193,7 +223,11 @@ class _DesktopStartupSequenceState extends State<DesktopStartupSequence> {
   Widget build(BuildContext context) {
     if (complete) {
       return widget.controller.settings.firstRunCompleted
-          ? DesktopShell(controller: widget.controller)
+          ? DesktopShell(
+              controller: widget.controller,
+              colmapLabBuilder: widget.colmapLabBuilder,
+              colmapLabStartupError: widget.colmapLabStartupError,
+            )
           : FirstRunWizard(controller: widget.controller);
     }
     final scheme = Theme.of(context).colorScheme;
@@ -356,8 +390,15 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
 }
 
 class DesktopShell extends StatefulWidget {
-  const DesktopShell({super.key, required this.controller});
+  const DesktopShell({
+    super.key,
+    required this.controller,
+    this.colmapLabBuilder,
+    this.colmapLabStartupError,
+  });
   final DesktopSettingsController controller;
+  final WidgetBuilder? colmapLabBuilder;
+  final Object? colmapLabStartupError;
   @override
   State<DesktopShell> createState() => _DesktopShellState();
 }
@@ -400,7 +441,11 @@ class _DesktopShellState extends State<DesktopShell> {
         commands: commands,
       ),
       OfficialEngineeringWorkspace(cad: cad, commands: commands),
-      DesktopSettingsScreen(controller: widget.controller),
+      DesktopSettingsScreen(
+        controller: widget.controller,
+        colmapLabBuilder: widget.colmapLabBuilder,
+        colmapLabStartupError: widget.colmapLabStartupError,
+      ),
     ];
     return Scaffold(
       appBar: AppBar(
@@ -10209,8 +10254,15 @@ class _PanelHeaderButton extends StatelessWidget {
 }
 
 class DesktopSettingsScreen extends StatefulWidget {
-  const DesktopSettingsScreen({super.key, required this.controller});
+  const DesktopSettingsScreen({
+    super.key,
+    required this.controller,
+    this.colmapLabBuilder,
+    this.colmapLabStartupError,
+  });
   final DesktopSettingsController controller;
+  final WidgetBuilder? colmapLabBuilder;
+  final Object? colmapLabStartupError;
   @override
   State<DesktopSettingsScreen> createState() => _DesktopSettingsScreenState();
 }
@@ -10235,6 +10287,7 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
         const SizedBox(height: 24),
         DropdownButtonFormField<String>(
           initialValue: value.language,
+          isExpanded: true,
           decoration: const InputDecoration(labelText: 'Language'),
           items: const [
             DropdownMenuItem(value: 'pt-BR', child: Text('Português (Brasil)')),
@@ -10247,22 +10300,29 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
           },
         ),
         const SizedBox(height: 16),
-        SegmentedButton<DesktopThemePreference>(
-          segments: const [
-            ButtonSegment(
-              value: DesktopThemePreference.dark,
-              label: Text('Dark'),
-              icon: Icon(Icons.dark_mode),
-            ),
-            ButtonSegment(
-              value: DesktopThemePreference.light,
-              label: Text('Light'),
-              icon: Icon(Icons.light_mode),
-            ),
-          ],
-          selected: {value.theme},
-          onSelectionChanged: (selection) =>
-              widget.controller.update(value.copyWith(theme: selection.single)),
+        LayoutBuilder(
+          builder: (context, constraints) =>
+              SegmentedButton<DesktopThemePreference>(
+                direction: constraints.maxWidth < 360
+                    ? Axis.vertical
+                    : Axis.horizontal,
+                segments: const [
+                  ButtonSegment(
+                    value: DesktopThemePreference.dark,
+                    label: Text('Dark'),
+                    icon: Icon(Icons.dark_mode),
+                  ),
+                  ButtonSegment(
+                    value: DesktopThemePreference.light,
+                    label: Text('Light'),
+                    icon: Icon(Icons.light_mode),
+                  ),
+                ],
+                selected: {value.theme},
+                onSelectionChanged: (selection) => widget.controller.update(
+                  value.copyWith(theme: selection.single),
+                ),
+              ),
         ),
         const SizedBox(height: 16),
         TextField(
@@ -10289,6 +10349,60 @@ class _DesktopSettingsScreenState extends State<DesktopSettingsScreen> {
             ),
             icon: const Icon(Icons.save),
             label: const Text('Save settings'),
+          ),
+        ),
+        const SizedBox(height: 32),
+        Text(
+          'Recursos experimentais',
+          style: Theme.of(context).textTheme.titleLarge,
+        ),
+        const SizedBox(height: 12),
+        Card(
+          key: const Key('colmap-experimental-settings-card'),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Laboratório experimental do COLMAP',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Reconstrução por pasta de fotografias no domínio FLCAD Scan. '
+                  'Exige um COLMAP externo autorizado e produz um candidato de '
+                  'malha; o resultado não certifica precisão dimensional.',
+                ),
+                if (widget.colmapLabStartupError != null) ...[
+                  const SizedBox(height: 10),
+                  const Text(
+                    'O laboratório está temporariamente indisponível. '
+                    'As demais configurações continuam disponíveis.',
+                    key: Key('colmap-lab-unavailable'),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                FilledButton(
+                  key: const Key('open-colmap-lab'),
+                  onPressed: widget.colmapLabBuilder == null
+                      ? null
+                      : () => Navigator.of(context).push<void>(
+                          MaterialPageRoute<void>(
+                            builder: (context) => Scaffold(
+                              appBar: AppBar(
+                                title: const Text(
+                                  'Laboratório experimental do COLMAP',
+                                ),
+                              ),
+                              body: widget.colmapLabBuilder!(context),
+                            ),
+                          ),
+                        ),
+                  child: const Text('Abrir laboratório'),
+                ),
+              ],
+            ),
           ),
         ),
       ],

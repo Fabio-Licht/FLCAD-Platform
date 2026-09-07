@@ -158,5 +158,102 @@ void main() {
       expect(DesktopThemeManager.dark().brightness, Brightness.dark);
       expect(DesktopThemeManager.light().brightness, Brightness.light);
     });
+
+    testWidgets('settings exposes and opens the experimental COLMAP lab', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(800, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final value = controller();
+      addTearDown(value.dispose);
+      var labBuilds = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: DesktopThemeManager.dark(),
+          home: Scaffold(
+            body: DesktopSettingsScreen(
+              controller: value,
+              colmapLabBuilder: (context) {
+                labBuilds++;
+                return const Center(child: Text('Laboratório hermético'));
+              },
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('Recursos experimentais'), findsOneWidget);
+      expect(find.text('Laboratório experimental do COLMAP'), findsOneWidget);
+      expect(labBuilds, 0);
+      await tester.ensureVisible(find.byKey(const Key('open-colmap-lab')));
+      await tester.tap(find.byKey(const Key('open-colmap-lab')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Laboratório hermético'), findsOneWidget);
+      expect(labBuilds, 1);
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(labBuilds, 1);
+    });
+
+    testWidgets('runtime initialization failure does not break Settings', (
+      tester,
+    ) async {
+      final value = controller();
+      addTearDown(value.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DesktopSettingsScreen(
+              controller: value,
+              colmapLabStartupError: StateError('private storage detail'),
+            ),
+          ),
+        ),
+      );
+      await tester.ensureVisible(
+        find.byKey(const Key('colmap-lab-unavailable')),
+      );
+
+      expect(find.byKey(const Key('colmap-lab-unavailable')), findsOneWidget);
+      expect(find.textContaining('private storage detail'), findsNothing);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('open-colmap-lab')))
+            .onPressed,
+        isNull,
+      );
+      expect(find.text('Engineering tips'), findsOneWidget);
+    });
+
+    testWidgets('experimental Settings card has no overflow at minimum width', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final value = controller();
+      addTearDown(value.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DesktopSettingsScreen(
+              controller: value,
+              colmapLabBuilder: (_) => const SizedBox.shrink(),
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('colmap-experimental-settings-card')),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(
+        find.byKey(const Key('colmap-experimental-settings-card')),
+        findsOneWidget,
+      );
+    });
   });
 }
