@@ -124,6 +124,11 @@ class _RecoveringBackend extends _Backend {
   }
 }
 
+class _NonColmapBackend extends _Backend {
+  @override
+  String get id => 'foundation';
+}
+
 class _Token implements OperationalReconstructionCancellation {
   @override
   bool isCancelled = false;
@@ -226,6 +231,27 @@ void main() {
     expect(manager.get('colmap'), same(previous));
     expect(controller.state, ColmapOperationalState.ready);
     expect(controller.error, isA<StateError>());
+  });
+
+  test('rejects a non-COLMAP activation without changing the manager', () async {
+    final previous = _Backend();
+    final manager = ReconstructionBackendManager(backends: [previous]);
+    final controller = ColmapOperationalController(
+      backendManager: manager,
+      activate: (record, {required allowUncertifiedExternal}) async =>
+          _NonColmapBackend(),
+    );
+
+    await controller.configureExternal(
+      _record(),
+      consent: true,
+      allowExperimental: true,
+    );
+
+    expect(manager.get('colmap'), same(previous));
+    expect(controller.state, ColmapOperationalState.ready);
+    expect(controller.error, isA<StateError>());
+    expect(() => manager.get('foundation'), throwsStateError);
   });
 
   test('consent is mandatory and activation failure changes no manager', () async {

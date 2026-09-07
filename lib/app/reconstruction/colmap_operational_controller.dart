@@ -99,6 +99,9 @@ class ColmapOperationalController extends ChangeNotifier {
         allowUncertifiedExternal: true,
       );
       if (!_isCurrent(generation)) return;
+      if (backend.id != 'colmap') {
+        throw StateError('Activation returned a non-COLMAP backend');
+      }
       if (hadBackend) {
         _backendManager.replace(backend);
       } else {
