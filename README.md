@@ -10,11 +10,12 @@ reconstrução 3D e engenharia reversa/CAD.
 - **FLCAD Scan** — domínio de reconstrução que transforma evidências em
   nuvens, malhas e resultados auditáveis. Não representa, por enquanto, um
   aplicativo separado já entregue.
-- **FLCAD Reverse** — ambiente de engenharia reversa e construção CAD
-  editável.
+- **FLCAD Reverse AI** — nome comercial vigente do ambiente de engenharia
+  reversa e construção CAD editável.
 - **FLCAD AI** — capacidades compartilhadas de assistência, análise e
-  automação supervisionada. A decisão técnica e a validação continuam sob
-  controle do profissional.
+  automação supervisionada. É uma capacidade/engine da Platform, não um novo
+  produto que substitua o FLCAD Reverse AI. A decisão técnica e a validação
+  continuam sob controle do profissional.
 
 As responsabilidades, limites e nomenclatura oficiais estão em
 [`docs/PRODUCT_ARCHITECTURE.md`](docs/PRODUCT_ARCHITECTURE.md). A decisão da

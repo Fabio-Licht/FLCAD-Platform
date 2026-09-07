@@ -10,8 +10,8 @@ reconstrução, referências métricas e infraestrutura compartilhada. Seu nome 
 não representava o escopo real.
 
 Ao mesmo tempo, o aplicativo móvel de aquisição passou a ter identidade própria
-como FLCAD Capture. FLCAD Scan e FLCAD Reverse precisam de limites claros para
-evitar confundir captura, reconstrução de malha e produção de CAD editável.
+como FLCAD Capture. FLCAD Scan e FLCAD Reverse AI precisam de limites claros
+para evitar confundir captura, reconstrução de malha e produção de CAD editável.
 
 O ADR-001 de `docs/09_ADR.md` decidiu que o FLCAD Mobile seria exclusivamente
 responsável pela aquisição e que todo processamento pesado pertenceria ao
@@ -26,10 +26,14 @@ nomes ficou obsoleta.
 - FLCAD Capture é o aplicativo móvel responsável pela aquisição.
 - FLCAD Scan é o domínio/produto de reconstrução; não se afirma que já exista
   como aplicativo separado.
-- FLCAD Reverse é o produto de engenharia reversa e CAD editável.
-- FLCAD AI reúne capacidades compartilhadas de assistência e automação
-  supervisionada; não representa autonomia mágica nem substituição do
-  profissional.
+- FLCAD Reverse AI mantém o nome comercial vigente, definido pelo ADR-065, e é
+  o produto de engenharia reversa e CAD editável. Este ADR não o renomeia.
+- FLCAD AI é uma capacidade/engine compartilhada de assistência e automação
+  supervisionada; não é um produto substituto, não representa autonomia mágica
+  nem substituição do profissional.
+- FLCAD Cloud é infraestrutura/serviço planejado, não uma entrega atual.
+- FLCAD Inspection e FLCAD CAM permanecem extensões planejadas; sua inclusão na
+  arquitetura não afirma implementação ou disponibilidade.
 - O processamento pesado pode executar em desktop, servidor ou outro backend
   autorizado, conforme requisitos técnicos, sem ser atribuído por definição a
   um único produto.
@@ -38,6 +42,13 @@ Esta decisão substitui **somente** a parte do ADR-001 que torna “FLCAD Mobile
 exclusivamente aquisição e atribui todo processamento pesado ao “Reverse AI”.
 A motivação histórica, a separação de responsabilidades e o registro original
 são preservados.
+
+Também substitui somente a taxonomia de produto do roadmap histórico FLSCAN:
+**FLCAD Scan** passa a ser o nome canônico do domínio/produto. `FLSCAN` continua
+válido como nomenclatura histórica e como nome do formato/contrato de
+intercâmbio `.flscan`. O roadmap original permanece preservado como registro.
+
+Este ADR não substitui nem modifica o ADR-065.
 
 ## Compatibilidade
 

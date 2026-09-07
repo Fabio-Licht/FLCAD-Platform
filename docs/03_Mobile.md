@@ -20,7 +20,7 @@ dados do mundo físico. Este documento mantém o nome de arquivo histórico
 
 Sua missão é permitir que qualquer usuário capture informações com rapidez, precisão e organização, preparando os dados para reconstrução tridimensional e engenharia reversa.
 
-O Capture não substitui o FLCAD Scan nem o FLCAD Reverse.
+O Capture não substitui o FLCAD Scan nem o FLCAD Reverse AI.
 
 Ele o complementa.
 
@@ -44,7 +44,7 @@ Cada fotografia representa apenas uma evidência dentro desse processo.
 - Auxiliar a captura
 - Validar qualidade
 - Preparar evidências para reconstrução
-- Exportar FLSCAN
+- Exportar o contrato `.flscan` (nome histórico FLSCAN)
 
 ---
 
@@ -319,7 +319,7 @@ reconstruções voltadas para:
 - visualização;
 - documentação.
 
-Reconstruções CAD editáveis permanecerão sob responsabilidade do FLCAD Reverse.
+Reconstruções CAD editáveis permanecerão sob responsabilidade do FLCAD Reverse AI.
 FLCAD Scan ainda não representa um aplicativo separado já entregue.
 
 ---
@@ -328,7 +328,7 @@ FLCAD Scan ainda não representa um aplicativo separado já entregue.
 
 Formatos previstos:
 
-- FLSCAN
+- `.flscan` (nome histórico FLSCAN)
 - STL
 - OBJ
 - PLY
@@ -338,7 +338,7 @@ Formatos previstos:
 
 # Integração
 
-A integração oficial com o Desktop ocorrerá através do formato:
+O contrato planejado de integração com o Desktop é:
 
 ```text
 .flscan

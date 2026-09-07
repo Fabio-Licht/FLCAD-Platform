@@ -27,7 +27,7 @@ núcleo compartilhado. A taxonomia canônica está em
 Cada módulo possui responsabilidades bem definidas.
 
 ```text
-FLCAD Capture ── evidências ──> FLCAD Scan ── geometria ──> FLCAD Reverse
+FLCAD Capture ── evidências ──> FLCAD Scan ── geometria ──> FLCAD Reverse AI
        │                              │                            │
        └──────────────────── FLCAD Platform ──────────────────────┘
                                       │
@@ -57,7 +57,7 @@ Responsabilidades:
 - Captura
 - Organização
 - Smart Measurements
-- Exportação FLSCAN
+- Exportação do contrato `.flscan` (nome histórico FLSCAN)
 
 Não possui responsabilidade sobre:
 
@@ -75,9 +75,10 @@ entregue.
 
 ---
 
-## FLCAD Reverse
+## FLCAD Reverse AI
 
-Responsável pela engenharia reversa.
+Produto responsável pela engenharia reversa. Mantém o nome comercial definido
+no ADR-065.
 
 Responsabilidades:
 
@@ -92,7 +93,9 @@ Responsabilidades:
 
 ## FLCAD Cloud
 
-Responsável por:
+Serviço e infraestrutura planejados; não constituem uma entrega atual.
+
+Escopo planejado:
 
 - Sincronização
 - Colaboração
@@ -104,13 +107,9 @@ Responsável por:
 
 ## FLCAD AI
 
-Responsável por toda inteligência da plataforma.
-
-Não pertence ao Mobile.
-
-Não pertence ao Desktop.
-
-É uma capacidade compartilhada, supervisionada pelo profissional. Não implica
+É a capacidade/engine de inteligência compartilhada da Platform. Pode apoiar
+Capture, Scan e Reverse AI sem pertencer exclusivamente a uma interface e sem
+constituir produto substituto. É supervisionada pelo profissional e não implica
 autonomia infalível.
 
 ---
@@ -193,11 +192,11 @@ Projeto
 
 ↓
 
-FLSCAN
+FLCAD Scan
 
 ↓
 
-Reverse AI
+FLCAD Reverse AI
 
 ↓
 
@@ -397,15 +396,16 @@ Cada IA possui responsabilidade única.
 
 ---
 
-# Formato Oficial
+# Formato de intercâmbio planejado
 
-Todo compartilhamento utilizará:
+O contrato nativo planejado para intercâmbio é:
 
 ```text
 .flscan
 ```
 
-Esse será o formato nativo da plataforma.
+`FLSCAN` permanece o nome histórico desse formato/contrato sob o domínio FLCAD
+Scan. Integrações também podem exigir formatos abertos ou APIs específicas.
 
 ---
 
@@ -444,9 +444,9 @@ Cada módulo poderá evoluir independentemente, mantendo compatibilidade atravé
 
 - Roadmap
 - Mobile
-- Reverse AI
+- Reverse AI (FLCAD Reverse AI)
 - AI
-- FLSCAN
+- Scan e formato `.flscan`
 - Business
 
 ---

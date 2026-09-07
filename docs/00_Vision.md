@@ -94,7 +94,7 @@ Principais recursos:
 - Organização
 - IA de Captura
 - Smart Measurements
-- Exportação FLSCAN
+- Exportação do contrato `.flscan` (nome histórico FLSCAN)
 
 ---
 
@@ -106,7 +106,7 @@ deve ser apresentado como aplicativo separado já entregue.
 
 ---
 
-## FLCAD Reverse
+## FLCAD Reverse AI
 
 Responsável pela engenharia reversa profissional.
 
@@ -123,14 +123,17 @@ Principais recursos:
 
 ## FLCAD AI
 
-Capacidades compartilhadas de orientação, análise e automação supervisionada.
-A IA auxilia; o profissional valida e decide.
+Capacidade/engine compartilhada de orientação, análise e automação
+supervisionada. Não é produto substituto do FLCAD Reverse AI. A IA auxilia; o
+profissional valida e decide.
 
 ---
 
 ## FLCAD Cloud
 
-Responsável por:
+Serviço e infraestrutura planejados, ainda não entregues.
+
+Escopo planejado:
 
 - sincronização;
 - colaboração;

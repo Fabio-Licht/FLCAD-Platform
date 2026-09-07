@@ -1,5 +1,11 @@
 # FLSCAN — Product Strategy and Development Roadmap
 
+> **Documento histórico.** O [ADR-084](adr/ADR-084-flcad-platform-product-boundaries.md)
+> substitui somente sua taxonomia de produto: **FLCAD Scan** é o nome canônico
+> do domínio/produto. `FLSCAN` permanece como nomenclatura histórica e como
+> formato/contrato de intercâmbio `.flscan`. O conteúdo técnico e o roadmap
+> abaixo não foram reescritos.
+
 ## Status
 
 **PLANNED — NOT AUTHORIZED FOR IMPLEMENTATION**
@@ -269,4 +275,3 @@ distribution.
 When implementation is authorized, begin only with **M-004 — Metric Reference
 Foundation**. Do not begin the real photogrammetry backend until the metric,
 unit, evidence and uncertainty contracts are frozen.
-

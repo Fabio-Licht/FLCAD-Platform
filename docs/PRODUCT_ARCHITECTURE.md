@@ -27,8 +27,9 @@ explícitos com o núcleo.
 |---|---|---|
 | **FLCAD Capture** | Aplicativo móvel de aquisição e organização de fotos, vídeos, medições e metadados | Não realiza engenharia reversa CAD profissional nem promete reconstrução métrica por si só |
 | **FLCAD Scan** | Domínio/produto de reconstrução: validação da captura, fotogrametria, nuvem, malha, escala e diagnóstico | Não deve ser descrito como aplicativo separado já existente; sua forma de entrega ainda será definida |
-| **FLCAD Reverse** | Engenharia reversa: alinhamento, referências, reconhecimento geométrico, sketches, superfícies e sólidos CAD editáveis | Não é o responsável primário pela aquisição móvel |
-| **FLCAD AI** | Capacidades compartilhadas de orientação, diagnóstico, sugestão e automação supervisionada | Não é uma inteligência autônoma infalível nem substitui decisão, medição ou validação profissional |
+| **FLCAD Reverse AI** | Produto de engenharia reversa: alinhamento, referências, reconhecimento geométrico, sketches, superfícies e sólidos CAD editáveis | Mantém o nome comercial definido no ADR-065 e não é o responsável primário pela aquisição móvel |
+| **FLCAD AI** | Capacidade/engine compartilhada de orientação, diagnóstico, sugestão e automação supervisionada | Não é produto autônomo, não substitui o FLCAD Reverse AI nem a decisão, medição ou validação profissional |
+| **FLCAD Cloud** | Serviço planejado de sincronização, colaboração, armazenamento e execução remota autorizada | É infraestrutura futura; não deve ser anunciado como serviço já entregue |
 
 ## Fluxo de valor
 
@@ -39,10 +40,10 @@ FLCAD Capture
 FLCAD Scan
     reconstrução e avaliação
             ↓
-FLCAD Reverse
+FLCAD Reverse AI
     geometria CAD editável
 
-FLCAD AI auxilia as três etapas por contratos compartilhados da Platform.
+FLCAD AI auxilia as três etapas como capacidade compartilhada da Platform.
 ```
 
 Uma entrega pode usar somente parte desse fluxo. A separação existe para que
@@ -54,7 +55,7 @@ dimensional editável.
 
 - `FLCAD-Platform` é o repositório principal desta base;
 - `FLCAD-Capture` permanece o aplicativo Android de aquisição;
-- FLCAD Scan e FLCAD Reverse são produtos/domínios sobre a Platform e não
+- FLCAD Scan e FLCAD Reverse AI são produtos/domínios sobre a Platform e não
   exigem novos repositórios neste momento;
 - repositórios e protótipos anteriores permanecem como histórico e laboratório
   até que uma migração explícita aprove ou descarte seus componentes.
@@ -82,9 +83,13 @@ mecânica global.
    não podem ser apresentados como equivalentes.
 6. Uma eventual separação física em novos repositórios será decidida por ADR,
    não presumida pelo nome do produto.
+7. FLCAD Inspection e FLCAD CAM são extensões planejadas; sua menção não afirma
+   implementação, disponibilidade ou compromisso de entrega.
 
 ## Autoridade documental
 
 Este documento é a referência canônica para nomes e limites de produtos.
 Detalhes técnicos permanecem nos documentos especializados e nos ADRs. Em caso
-de conflito sobre a antiga exclusividade do Mobile, prevalece o ADR-084.
+de conflito sobre a antiga exclusividade do Mobile ou sobre a taxonomia
+histórica FLSCAN, prevalece o ADR-084. O nome comercial FLCAD Reverse AI
+permanece regido pelo ADR-065.
