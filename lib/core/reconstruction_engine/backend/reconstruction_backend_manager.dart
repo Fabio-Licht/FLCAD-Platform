@@ -41,6 +41,11 @@ class ReconstructionBackendManager {
     _backends[backend.id] = backend;
   }
 
+  /// Publishes an already validated backend as one synchronous assignment.
+  void publishValidated(ReconstructionBackend backend) {
+    _backends[backend.id] = backend;
+  }
+
   ReconstructionBackend get(String id) =>
       _backends[id] ?? (throw StateError('Backend $id not registered'));
 

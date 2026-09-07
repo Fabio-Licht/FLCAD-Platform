@@ -223,8 +223,7 @@ class BackendProvisioningManager {
     void Function(BackendProvisioningEvent event)? onEvent,
   }) : installationRoot =
            installationRoot ?? Directory(defaultBackendInstallationRoot),
-       _canonicalPathResolver =
-           canonicalPathResolver ?? _resolveCanonicalPath,
+       _canonicalPathResolver = canonicalPathResolver ?? _resolveCanonicalPath,
        _onEvent = onEvent;
 
   final BackendProvisioningRepository repository;
@@ -397,6 +396,112 @@ class BackendProvisioningManager {
     return record;
   }
 
+  /// Validates an explicitly selected external COLMAP without publishing it.
+  Future<BackendInstallationRecord> validateExisting(
+    String backendId, {
+    required String executablePath,
+    required bool authorized,
+  }) async {
+    if (!authorized) {
+      throw StateError('External backend validation requires authorization');
+    }
+    _validatePathComponent(backendId, field: 'backendId');
+    if (!path.isAbsolute(executablePath)) {
+      throw ArgumentError.value(
+        executablePath,
+        'executablePath',
+        'must be absolute',
+      );
+    }
+    _requireExpectedExecutable(backendId, executablePath);
+    final executable = File(executablePath);
+    if (!await executable.exists()) {
+      throw ArgumentError.value(
+        executablePath,
+        'executablePath',
+        'must identify an existing file',
+      );
+    }
+    final canonical = await _canonicalPathResolver(executable.path);
+    _requireExpectedExecutable(backendId, canonical);
+    _event('externalValidationStarted', backendId, canonical);
+    try {
+      final capabilities = await selfTest.validate(backendId, canonical);
+      final record = BackendInstallationRecord(
+        backendId: backendId,
+        version: capabilities.version,
+        installedAt: DateTime.now().toUtc(),
+        source: Uri.file(canonical),
+        sha256: '',
+        architecture: 'external',
+        status: BackendInstallationStatus.installed,
+        certification: BackendCertificationStatus.notCertified,
+        executablePath: canonical,
+        origin: BackendInstallationOrigin.external,
+      );
+      _event('externalValidated', backendId, capabilities.version);
+      return record;
+    } catch (error, stackTrace) {
+      _event('failed', backendId, 'External self test failed: $error');
+      Error.throwWithStackTrace(
+        StateError('External self test failed: $error'),
+        stackTrace,
+      );
+    }
+  }
+
+  /// Persists a previously validated external COLMAP transactionally.
+  Future<void> commitValidatedExisting(
+    BackendInstallationRecord record, {
+    required bool authorized,
+  }) async {
+    if (!authorized) {
+      throw StateError('External backend commit requires authorization');
+    }
+    if (record.backendId != 'colmap' ||
+        record.origin != BackendInstallationOrigin.external ||
+        record.status != BackendInstallationStatus.installed ||
+        record.certification != BackendCertificationStatus.notCertified) {
+      throw ArgumentError.value(
+        record,
+        'record',
+        'must be a validated external COLMAP installation',
+      );
+    }
+    if (!path.isAbsolute(record.executablePath)) {
+      throw ArgumentError.value(
+        record.executablePath,
+        'executablePath',
+        'must be absolute',
+      );
+    }
+    _requireExpectedExecutable(record.backendId, record.executablePath);
+    final executable = File(record.executablePath);
+    if (!await executable.exists()) {
+      throw ArgumentError.value(
+        record.executablePath,
+        'executablePath',
+        'must identify an existing file',
+      );
+    }
+    final canonical = await _canonicalPathResolver(executable.path);
+    _requireExpectedExecutable(record.backendId, canonical);
+    if (canonical != record.executablePath) {
+      throw ArgumentError.value(
+        record.executablePath,
+        'executablePath',
+        'must be canonical',
+      );
+    }
+    final next = <BackendInstallationRecord>[
+      ..._installations.where((item) => item.backendId != record.backendId),
+      record,
+    ];
+    await repository.saveInstallations(next);
+    _installations = next;
+    _event('externalCommitted', record.backendId, record.version);
+  }
+
   Future<void> _replaceAndSave(BackendInstallationRecord record) async {
     _installations = [
       ..._installations.where((item) => item.backendId != record.backendId),
@@ -422,11 +527,13 @@ class BackendProvisioningManager {
   ApprovedBackendRelease release(String backendId, {String? version}) {
     _validatePathComponent(backendId, field: 'backendId');
     if (version != null) _parseVersion(version);
-    final matches = repository.approvedReleases.where(
-      (item) =>
-          item.backendId == backendId &&
-          (version == null || item.version == version),
-    ).map(_validateRelease);
+    final matches = repository.approvedReleases
+        .where(
+          (item) =>
+              item.backendId == backendId &&
+              (version == null || item.version == version),
+        )
+        .map(_validateRelease);
     if (matches.isEmpty) {
       throw StateError('No approved release for backend $backendId');
     }
@@ -481,7 +588,10 @@ class BackendProvisioningManager {
     }
     final canonicalExecutable = await _canonicalPathResolver(executable.path);
     if (!_isWithin(canonicalRoot, canonicalExecutable)) {
-      return _failed(approved, 'Installed executable escapes installation root');
+      return _failed(
+        approved,
+        'Installed executable escapes installation root',
+      );
     }
     _event('validationStarted', backendId);
     try {

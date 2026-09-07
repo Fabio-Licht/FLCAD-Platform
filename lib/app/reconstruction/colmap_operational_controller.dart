@@ -43,6 +43,7 @@ typedef ColmapActivationCallback =
 
 typedef OperationalCancellationFactory =
     OperationalReconstructionCancellation Function();
+typedef ColmapBeforePublish = Future<void> Function();
 
 /// Coordinates explicitly authorized COLMAP work without depending on the
 /// legacy alpha stack or [ReconstructionRuntime].
@@ -79,6 +80,20 @@ class ColmapOperationalController extends ChangeNotifier {
     BackendInstallationRecord record, {
     required bool consent,
     required bool allowExperimental,
+  }) => configureExternalTransaction(
+    record,
+    consent: consent,
+    allowExperimental: allowExperimental,
+    beforePublish: () async {},
+  );
+
+  /// Prepares COLMAP, completes every fallible transaction step, then
+  /// publishes the backend with one synchronous assignment.
+  Future<void> configureExternalTransaction(
+    BackendInstallationRecord record, {
+    required bool consent,
+    required bool allowExperimental,
+    required ColmapBeforePublish beforePublish,
   }) async {
     _ensureUsable();
     if (_state == ColmapOperationalState.running ||
@@ -98,11 +113,9 @@ class ColmapOperationalController extends ChangeNotifier {
       if (backend.id != 'colmap') {
         throw StateError('Activation returned a non-COLMAP backend');
       }
-      if (_backendManager.contains('colmap')) {
-        _backendManager.replace(backend);
-      } else {
-        _backendManager.register(backend);
-      }
+      await beforePublish();
+      _backendManager.publishValidated(backend);
+      if (!_isCurrent(generation)) return;
       _setState(ColmapOperationalState.ready);
     } catch (failure, stackTrace) {
       if (!_isCurrent(generation)) return;

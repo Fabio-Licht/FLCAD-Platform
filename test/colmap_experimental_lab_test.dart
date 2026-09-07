@@ -88,32 +88,46 @@ class _ProvisioningManager extends BackendProvisioningManager {
   Object? failure;
   String version = '3.13-test';
   int calls = 0;
+  int commitCalls = 0;
+  Object? commitFailure;
+  final List<BackendInstallationRecord> committed = [];
 
   @override
-  Future<BackendInstallationRecord> registerExisting(
+  Future<BackendInstallationRecord> validateExisting(
     String backendId, {
     required String executablePath,
     required bool authorized,
   }) async {
     calls++;
     if (!authorized) {
-      throw StateError('External backend registration requires authorization');
+      throw StateError('External backend validation requires authorization');
     }
+    if (failure != null) throw failure!;
     return BackendInstallationRecord(
       backendId: backendId,
-      version: failure == null ? version : 'undetected',
+      version: version,
       installedAt: DateTime.utc(2026),
       source: Uri.file(executablePath),
       sha256: '',
       architecture: 'external',
-      status: failure == null
-          ? BackendInstallationStatus.installed
-          : BackendInstallationStatus.failed,
+      status: BackendInstallationStatus.installed,
       certification: BackendCertificationStatus.notCertified,
       executablePath: executablePath,
       origin: BackendInstallationOrigin.external,
-      lastError: failure == null ? null : 'External self test failed: $failure',
     );
+  }
+
+  @override
+  Future<void> commitValidatedExisting(
+    BackendInstallationRecord record, {
+    required bool authorized,
+  }) async {
+    commitCalls++;
+    if (!authorized) throw StateError('authorization required');
+    if (commitFailure != null) throw commitFailure!;
+    committed
+      ..removeWhere((item) => item.backendId == record.backendId)
+      ..add(record);
   }
 }
 
@@ -390,6 +404,11 @@ void main() {
     expect(find.text('Estado: pronto'), findsOneWidget);
     expect(find.text('Versão: 3.13-test'), findsOneWidget);
     expect(find.text('Caminho ativo: ${harness.executable}'), findsOneWidget);
+    expect(harness.provisioning.commitCalls, 1);
+    expect(
+      harness.provisioning.committed.single,
+      same(harness.lab.activeInstallation),
+    );
   });
 
   testWidgets('reports activation failure without fabricating installation', (
@@ -422,6 +441,24 @@ void main() {
       expect(harness.lab.activeInstallation, same(previousRecord));
       expect(harness.backendManager.get('colmap'), same(previousBackend));
       expect(harness.lab.presentationError, isNotNull);
+    },
+  );
+
+  test(
+    'persistence failure preserves backend and active installation',
+    () async {
+      final harness = await _Harness.create();
+      addTearDown(harness.dispose);
+      await harness.activate();
+      final previousRecord = harness.lab.activeInstallation;
+      final previousBackend = harness.backendManager.get('colmap');
+      harness.provisioning.commitFailure = StateError('save failed');
+
+      await harness.lab.validateAndActivate(consent: true);
+
+      expect(harness.lab.activeInstallation, same(previousRecord));
+      expect(harness.backendManager.get('colmap'), same(previousBackend));
+      expect(harness.lab.presentationError, isA<StateError>());
     },
   );
 
