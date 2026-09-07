@@ -32,7 +32,7 @@ class _ColmapExperimentalLabState extends State<ColmapExperimentalLab> {
       final canStart =
           !isBusy &&
           controller.activeInstallation != null &&
-          (controller.photoDirectory?.compatibleImageCount ?? 0) > 0;
+          (controller.photoDirectory?.imageCount ?? 0) > 0;
 
       return ListView(
         padding: const EdgeInsets.all(24),
@@ -112,9 +112,9 @@ class _ColmapExperimentalLabState extends State<ColmapExperimentalLab> {
           ),
           if (controller.photoDirectory case final selection?) ...[
             const SizedBox(height: 8),
-            SelectableText('Pasta: ${selection.path}'),
+            SelectableText('Pasta: ${selection.canonicalPath}'),
             Text(
-              '${selection.compatibleImageCount} imagens compatíveis',
+              '${selection.imageCount} imagens compatíveis',
               key: const Key('compatible-image-count'),
             ),
           ],

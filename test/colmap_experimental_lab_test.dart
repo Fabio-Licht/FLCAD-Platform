@@ -7,6 +7,7 @@ import 'package:flcad_mobile/app/reconstruction/widgets/colmap_experimental_lab.
 import 'package:flcad_mobile/core/reconstruction_engine/reconstruction_engine.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as path;
 
 class _Repository implements BackendProvisioningRepository {
   List<BackendInstallationRecord> records = [];
@@ -204,6 +205,37 @@ class _Backend implements ReconstructionBackend {
   }
 }
 
+class _InputValidator implements ColmapInputValidator {
+  _InputValidator({ValidatedColmapPhotoDirectory? photoDirectory})
+    : photoDirectory =
+          photoDirectory ??
+          ValidatedColmapPhotoDirectory(
+            canonicalPath: r'C:\capture jobs\photo set',
+            canonicalImagePaths: const [
+              r'C:\capture jobs\photo set\image 01.jpg',
+            ],
+          );
+
+  ValidatedColmapPhotoDirectory photoDirectory;
+  String workspaceRoot = r'C:\FLCAD Platform\managed workspace';
+  Object? photoFailure;
+  Object? workspaceFailure;
+
+  @override
+  Future<String> prepareWorkspaceRoot(String value) async {
+    if (workspaceFailure != null) throw workspaceFailure!;
+    return workspaceRoot;
+  }
+
+  @override
+  Future<ValidatedColmapPhotoDirectory> validatePhotoDirectory(
+    String value,
+  ) async {
+    if (photoFailure != null) throw photoFailure!;
+    return photoDirectory;
+  }
+}
+
 class _Harness {
   _Harness({
     required this.executable,
@@ -211,6 +243,7 @@ class _Harness {
     required this.backend,
     required this.backendManager,
     required this.operational,
+    required this.inputValidator,
     required this.lab,
   });
 
@@ -219,15 +252,20 @@ class _Harness {
   final _Backend backend;
   final ReconstructionBackendManager backendManager;
   final ColmapOperationalController operational;
+  final ColmapInputValidator inputValidator;
   final ColmapExperimentalLabController lab;
 
   static Future<_Harness> create({
     Completer<ReconstructionBackend>? activation,
     _Cancellation? cancellation,
+    ColmapPhotoDirectoryPicker? selectPhotoDirectory,
+    ColmapWorkspaceRootProvider? workspaceRootProvider,
+    ColmapInputValidator? inputValidator,
   }) async {
     const executable = r'C:\Program Files\COLMAP\colmap.exe';
     final provisioning = _ProvisioningManager();
     final backend = _Backend();
+    final validator = inputValidator ?? _InputValidator();
     final backendManager = ReconstructionBackendManager();
     final operational = ColmapOperationalController(
       backendManager: backendManager,
@@ -239,10 +277,12 @@ class _Harness {
       operationalController: operational,
       provisioningManager: provisioning,
       selectExecutable: () async => executable,
-      selectPhotoDirectory: () async => ColmapPhotoDirectorySelection(
-        path: r'C:\capture jobs\photo set',
-        compatibleImagePaths: const [r'C:\capture jobs\photo set\image 01.jpg'],
-      ),
+      selectPhotoDirectory:
+          selectPhotoDirectory ?? () async => r'C:\capture jobs\photo set',
+      workspaceRootProvider:
+          workspaceRootProvider ??
+          () async => r'C:\FLCAD Platform\managed workspace',
+      inputValidator: validator,
       requestIdFactory: () => 'request-test',
     );
     return _Harness(
@@ -251,6 +291,7 @@ class _Harness {
       backend: backend,
       backendManager: backendManager,
       operational: operational,
+      inputValidator: validator,
       lab: lab,
     );
   }
@@ -387,9 +428,13 @@ void main() {
       operationalController: harness.operational,
       provisioningManager: harness.provisioning,
       selectExecutable: () async => harness.executable,
-      selectPhotoDirectory: () async => const ColmapPhotoDirectorySelection(
-        path: r'C:\empty photos',
-        compatibleImagePaths: [],
+      selectPhotoDirectory: () async => r'C:\empty photos',
+      workspaceRootProvider: () async => r'C:\managed workspace',
+      inputValidator: _InputValidator(
+        photoDirectory: ValidatedColmapPhotoDirectory(
+          canonicalPath: r'C:\empty photos',
+          canonicalImagePaths: const [],
+        ),
       ),
     );
     addTearDown(emptyLab.dispose);
@@ -603,4 +648,209 @@ void main() {
       await tester.pumpAndSettle();
     },
   );
+
+  test(
+    'request contains canonical image path and managed workspace root',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'flcad_input_contract_',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final photos = await Directory(
+        '${root.path}${Platform.pathSeparator}Fotos São Paulo',
+      ).create();
+      await File(
+        '${photos.path}${Platform.pathSeparator}peça 01.JPG',
+      ).writeAsBytes([1]);
+      final managedRoot =
+          '${root.path}${Platform.pathSeparator}Área gerenciada com espaços';
+      final validator = const IoColmapInputValidator();
+      final harness = await _Harness.create(
+        selectPhotoDirectory: () async => photos.path,
+        workspaceRootProvider: () async => managedRoot,
+        inputValidator: validator,
+      );
+      addTearDown(harness.dispose);
+      await harness.activate();
+
+      await harness.lab.choosePhotoDirectory();
+      await harness.lab.startReconstruction();
+
+      final canonicalPhotos = await photos.resolveSymbolicLinks();
+      final canonicalWorkspace = await Directory(
+        managedRoot,
+      ).resolveSymbolicLinks();
+      expect(
+        harness.backend.request!.calibration['imagePath'],
+        canonicalPhotos,
+      );
+      expect(
+        harness.backend.request!.calibration['workspacePath'],
+        canonicalWorkspace,
+      );
+      expect(canonicalWorkspace, isNot(equals(canonicalPhotos)));
+      expect(path.isAbsolute(canonicalWorkspace), isTrue);
+      expect(canonicalPhotos, contains('Fotos São Paulo'));
+      expect(canonicalWorkspace, contains('Área gerenciada com espaços'));
+    },
+  );
+
+  test('relative photo directory is rejected', () async {
+    const validator = IoColmapInputValidator();
+
+    await expectLater(
+      validator.validatePhotoDirectory('relative/photos'),
+      throwsArgumentError,
+    );
+  });
+
+  test('missing and empty photo directories are rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_empty_');
+    addTearDown(() => root.delete(recursive: true));
+    const validator = IoColmapInputValidator();
+
+    await expectLater(
+      validator.validatePhotoDirectory(
+        '${root.path}${Platform.pathSeparator}missing',
+      ),
+      throwsArgumentError,
+    );
+    await expectLater(
+      validator.validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test(
+    'all supported extensions and uppercase extensions are accepted',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'flcad_input_extensions_',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      for (final extension in colmapSupportedImageExtensions) {
+        await File(
+          '${root.path}${Platform.pathSeparator}image$extension',
+        ).writeAsBytes([1]);
+      }
+      await File(
+        '${root.path}${Platform.pathSeparator}uppercase.JPG',
+      ).writeAsBytes([1]);
+
+      final result = await const IoColmapInputValidator()
+          .validatePhotoDirectory(root.path);
+
+      expect(result.imageCount, colmapSupportedImageExtensions.length + 1);
+      expect(result.canonicalImagePaths, contains(endsWith('uppercase.JPG')));
+    },
+  );
+
+  test('canonical image escaping the selected directory is rejected', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_escape_');
+    addTearDown(() => root.delete(recursive: true));
+    final photos = await Directory(
+      '${root.path}${Platform.pathSeparator}photos',
+    ).create();
+    final selected = await File(
+      '${photos.path}${Platform.pathSeparator}escape.jpg',
+    ).writeAsBytes([1]);
+    final external = await File(
+      '${root.path}${Platform.pathSeparator}external.jpg',
+    ).writeAsBytes([1]);
+    final validator = IoColmapInputValidator(
+      canonicalPathResolver: (value) async {
+        if (value == selected.absolute.path) return external.absolute.path;
+        return File(value).resolveSymbolicLinks();
+      },
+    );
+
+    await expectLater(
+      validator.validatePhotoDirectory(photos.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('duplicate canonical image paths are rejected', () async {
+    final root = await Directory.systemTemp.createTemp(
+      'flcad_input_duplicate_',
+    );
+    addTearDown(() => root.delete(recursive: true));
+    final first = await File(
+      '${root.path}${Platform.pathSeparator}first.jpg',
+    ).writeAsBytes([1]);
+    final alias = await File(
+      '${root.path}${Platform.pathSeparator}alias.jpg',
+    ).writeAsBytes([1]);
+    final validator = IoColmapInputValidator(
+      canonicalPathResolver: (value) async {
+        if (value == alias.absolute.path) return first.absolute.path;
+        return File(value).resolveSymbolicLinks();
+      },
+    );
+
+    await expectLater(
+      validator.validatePhotoDirectory(root.path),
+      throwsArgumentError,
+    );
+  });
+
+  test('photo enumeration is not recursive', () async {
+    final root = await Directory.systemTemp.createTemp('flcad_input_flat_');
+    addTearDown(() => root.delete(recursive: true));
+    await File(
+      '${root.path}${Platform.pathSeparator}top.jpg',
+    ).writeAsBytes([1]);
+    final nested = await Directory(
+      '${root.path}${Platform.pathSeparator}nested',
+    ).create();
+    await File(
+      '${nested.path}${Platform.pathSeparator}nested.jpg',
+    ).writeAsBytes([1]);
+
+    final result = await const IoColmapInputValidator().validatePhotoDirectory(
+      root.path,
+    );
+
+    expect(result.imageCount, 1);
+    expect(result.canonicalImagePaths.single, endsWith('top.jpg'));
+  });
+
+  test('cancelled photo picker does not create a presentation error', () async {
+    final harness = await _Harness.create(
+      selectPhotoDirectory: () async => null,
+    );
+    addTearDown(harness.dispose);
+
+    await harness.lab.choosePhotoDirectory();
+
+    expect(harness.lab.photoDirectory, isNull);
+    expect(harness.lab.presentationError, isNull);
+  });
+
+  test('photo picker exception becomes a presentation error', () async {
+    final harness = await _Harness.create(
+      selectPhotoDirectory: () async => throw StateError('picker unavailable'),
+    );
+    addTearDown(harness.dispose);
+
+    await harness.lab.choosePhotoDirectory();
+
+    expect(harness.lab.photoDirectory, isNull);
+    expect(harness.lab.presentationError, isA<StateError>());
+  });
+
+  test('workspace provider failure prevents reconstruction start', () async {
+    final harness = await _Harness.create(
+      workspaceRootProvider: () async =>
+          throw StateError('workspace unavailable'),
+    );
+    addTearDown(harness.dispose);
+    await harness.activate();
+    await harness.lab.choosePhotoDirectory();
+
+    await harness.lab.startReconstruction();
+
+    expect(harness.backend.calls, 0);
+    expect(harness.lab.presentationError, isA<StateError>());
+  });
 }

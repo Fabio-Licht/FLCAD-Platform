@@ -1,27 +1,15 @@
 import 'package:flutter/foundation.dart';
 
 import '../../core/acquisition_intelligence/models/evidence_graph.dart';
+import '../../core/reconstruction_engine/backend/colmap/colmap_input_validation.dart';
 import '../../core/reconstruction_engine/models/reconstruction_contract.dart';
 import '../../core/reconstruction_engine/provisioning/backend_provisioning.dart';
 import 'colmap_operational_controller.dart';
 
 typedef ColmapExecutablePicker = Future<String?> Function();
-typedef ColmapPhotoDirectoryPicker =
-    Future<ColmapPhotoDirectorySelection?> Function();
+typedef ColmapPhotoDirectoryPicker = Future<String?> Function();
+typedef ColmapWorkspaceRootProvider = Future<String> Function();
 typedef ColmapRequestIdFactory = String Function();
-
-@immutable
-class ColmapPhotoDirectorySelection {
-  const ColmapPhotoDirectorySelection({
-    required this.path,
-    required this.compatibleImagePaths,
-  });
-
-  final String path;
-  final List<String> compatibleImagePaths;
-
-  int get compatibleImageCount => compatibleImagePaths.length;
-}
 
 /// Presentation facade for the isolated COLMAP laboratory.
 ///
@@ -34,11 +22,15 @@ class ColmapExperimentalLabController extends ChangeNotifier {
     required BackendProvisioningManager provisioningManager,
     required ColmapExecutablePicker selectExecutable,
     required ColmapPhotoDirectoryPicker selectPhotoDirectory,
+    required ColmapWorkspaceRootProvider workspaceRootProvider,
+    ColmapInputValidator? inputValidator,
     ColmapRequestIdFactory? requestIdFactory,
   }) : _operationalController = operationalController,
        _provisioningManager = provisioningManager,
        _selectExecutable = selectExecutable,
        _selectPhotoDirectory = selectPhotoDirectory,
+       _workspaceRootProvider = workspaceRootProvider,
+       _inputValidator = inputValidator ?? const IoColmapInputValidator(),
        _requestIdFactory =
            requestIdFactory ??
            (() => 'colmap-${DateTime.now().toUtc().microsecondsSinceEpoch}') {
@@ -49,10 +41,12 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   final BackendProvisioningManager _provisioningManager;
   final ColmapExecutablePicker _selectExecutable;
   final ColmapPhotoDirectoryPicker _selectPhotoDirectory;
+  final ColmapWorkspaceRootProvider _workspaceRootProvider;
+  final ColmapInputValidator _inputValidator;
   final ColmapRequestIdFactory _requestIdFactory;
 
   String? _selectedExecutablePath;
-  ColmapPhotoDirectorySelection? _photoDirectory;
+  ValidatedColmapPhotoDirectory? _photoDirectory;
   BackendInstallationRecord? _activeInstallation;
   Object? _presentationError;
   bool _provisioning = false;
@@ -60,7 +54,7 @@ class ColmapExperimentalLabController extends ChangeNotifier {
 
   ColmapOperationalController get operational => _operationalController;
   String? get selectedExecutablePath => _selectedExecutablePath;
-  ColmapPhotoDirectorySelection? get photoDirectory => _photoDirectory;
+  ValidatedColmapPhotoDirectory? get photoDirectory => _photoDirectory;
   BackendInstallationRecord? get activeInstallation => _activeInstallation;
   Object? get presentationError => _presentationError;
   bool get isProvisioning => _provisioning;
@@ -123,14 +117,17 @@ class ColmapExperimentalLabController extends ChangeNotifier {
   }
 
   Future<void> choosePhotoDirectory() async {
-    final selected = await _selectPhotoDirectory();
-    if (_disposed || selected == null) return;
-    _photoDirectory = ColmapPhotoDirectorySelection(
-      path: selected.path,
-      compatibleImagePaths: List.unmodifiable(selected.compatibleImagePaths),
-    );
-    _presentationError = null;
-    notifyListeners();
+    try {
+      final selected = await _selectPhotoDirectory();
+      if (_disposed || selected == null) return;
+      final validated = await _inputValidator.validatePhotoDirectory(selected);
+      if (_disposed) return;
+      _photoDirectory = validated;
+      _presentationError = null;
+      notifyListeners();
+    } catch (error) {
+      if (!_disposed) _setPresentationError(error);
+    }
   }
 
   Future<void> startReconstruction() async {
@@ -141,7 +138,7 @@ class ColmapExperimentalLabController extends ChangeNotifier {
       return;
     }
     final selection = _photoDirectory;
-    if (selection == null || selection.compatibleImagePaths.isEmpty) {
+    if (selection == null || selection.canonicalImagePaths.isEmpty) {
       _setPresentationError(
         StateError('A pasta não contém fotografias compatíveis.'),
       );
@@ -152,33 +149,46 @@ class ColmapExperimentalLabController extends ChangeNotifier {
       return;
     }
 
-    _presentationError = null;
-    notifyListeners();
-    final requestId = _requestIdFactory();
-    var graph = const EvidenceGraph();
-    for (
-      var index = 0;
-      index < selection.compatibleImagePaths.length;
-      index++
-    ) {
-      final imagePath = selection.compatibleImagePaths[index];
-      graph = graph.addCapture(
-        captureId: '$requestId:$index',
-        capture: {
-          'source': 'photograph',
-          'path': imagePath,
-          'directory': selection.path,
-        },
-        evidence: const {'role': 'reconstruction-input'},
+    try {
+      final managedRoot = await _workspaceRootProvider();
+      final workspaceRoot = await _inputValidator.prepareWorkspaceRoot(
+        managedRoot,
       );
+      if (_disposed) return;
+      _presentationError = null;
+      notifyListeners();
+      final requestId = _requestIdFactory();
+      var graph = const EvidenceGraph();
+      for (
+        var index = 0;
+        index < selection.canonicalImagePaths.length;
+        index++
+      ) {
+        final imagePath = selection.canonicalImagePaths[index];
+        graph = graph.addCapture(
+          captureId: '$requestId:$index',
+          capture: {
+            'source': 'photograph',
+            'path': imagePath,
+            'directory': selection.canonicalPath,
+          },
+          evidence: const {'role': 'reconstruction-input'},
+        );
+      }
+      await _operationalController.start(
+        ReconstructionRequest(
+          id: requestId,
+          projectId: 'colmap-experimental-lab',
+          evidenceGraph: graph,
+          calibration: {
+            'imagePath': selection.canonicalPath,
+            'workspacePath': workspaceRoot,
+          },
+        ),
+      );
+    } catch (error) {
+      if (!_disposed) _setPresentationError(error);
     }
-    await _operationalController.start(
-      ReconstructionRequest(
-        id: requestId,
-        projectId: 'colmap-experimental-lab',
-        evidenceGraph: graph,
-      ),
-    );
   }
 
   void cancel() {
