@@ -4,6 +4,10 @@ import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
+import 'package:flcad_mobile/core/feature_lifecycle/feature_dependencies.dart';
+import 'package:flcad_mobile/core/feature_lifecycle/feature_lifecycle.dart';
+import 'package:flcad_mobile/core/feature_lifecycle/feature_lifecycle_projector.dart';
+import 'package:flcad_mobile/core/cad_document/dependency_walk.dart';
 import 'cad_runtime_transaction_test.dart' show Repository, Gate, point;
 
 void main() {
@@ -810,11 +814,8 @@ void main() {
         CadDocumentEntity(
           id: 'B',
           kind: previous.kind,
-          data: {
-            ...previous.data,
-            'dependencies': [],
-            'collectionId': 'absent',
-          },
+          data: {...previous.data, 'collectionId': 'absent'}
+            ..remove('dependencies'),
         ),
       ]);
       expect(runtime.dependencyImpact('A').map((e) => e.id), ['B']);
@@ -841,6 +842,180 @@ void main() {
         feature('C', dependencies: ['B']),
       ]);
       await rejectUnchanged(() => recycle('A'));
+    },
+  );
+  void consistentDependencies(List<String> expected, {required bool explicit}) {
+    final document = runtime.document!;
+    final entity = document.entities['X']!;
+    expect(entity.data.containsKey('dependencies'), explicit);
+    expect(FeatureDependencies.resolve(entity.data), expected);
+    final roundTrip = CadDocument.fromJson(document.toJson());
+    expect(roundTrip.entities['X']!.data.containsKey('dependencies'), explicit);
+    expect(
+      FeatureDependencies.resolve(roundTrip.entities['X']!.data),
+      expected,
+    );
+    final projected = FeatureLifecycleProjector.normalize(
+      roundTrip,
+      command: 'check',
+    );
+    expect(
+      FeatureDependencies.resolve(projected.entities['X']!.data),
+      expected,
+    );
+    if (FeatureLifecycleContract.appliesTo(entity)) {
+      expect(FeatureLifecycleContract.require(entity).dependencyIds, expected);
+      expect(
+        FeatureLifecycleContract.require(
+          projected.entities['X']!,
+        ).dependencyIds,
+        expected,
+      );
+    }
+    final walk = DependencyWalk([
+      'X',
+      'X',
+    ], (id) => FeatureDependencies.resolve(document.entities[id]!.data));
+    expect(walk.components.expand((c) => c).toSet(), {'X', ...expected});
+    for (final source in ['A', 'B']) {
+      expect(
+        runtime.dependencyImpact(source).any((e) => e.id == 'X'),
+        expected.contains(source),
+      );
+    }
+  }
+
+  for (final authored in [false, true]) {
+    for (final reverse in [false, true]) {
+      for (final policy in ['empty', 'values', 'absent']) {
+        test(
+          'persisted dependencies $policy authored=$authored reversed=$reverse',
+          () async {
+            final fields = <String, dynamic>{
+              if (policy != 'absent')
+                'dependencies': policy == 'empty' ? <String>[] : ['A'],
+              'references': policy == 'values' ? ['B'] : ['A'],
+              'authoringRoot': authored,
+            };
+            final x = point('X')
+              ..data.addAll(
+                Map.fromEntries(
+                  reverse ? fields.entries.toList().reversed : fields.entries,
+                ),
+              );
+            await runtime.mutate(
+              command: 'create',
+              upsert: [feature('A'), feature('B'), x],
+            );
+            final expected = policy == 'empty' ? <String>[] : ['A'];
+            consistentDependencies(expected, explicit: policy != 'absent');
+            await runtime.save();
+            final disk = await repository.load('A', directory);
+            expect(
+              FeatureDependencies.resolve(disk.entities['X']!.data),
+              expected,
+            );
+            await runtime.close();
+            await runtime.open('A', directory);
+            consistentDependencies(expected, explicit: policy != 'absent');
+            expect(
+              runtime.document!.entities['X']!.data['references'],
+              fields['references'],
+            );
+            if (policy == 'empty') {
+              await runtime.removeEntity('A', command: 'remove');
+            } else {
+              await rejectUnchanged(
+                () => runtime.removeEntity('A', command: 'remove'),
+              );
+            }
+            // B is a reference, never an implicit addition to explicit dependencies.
+            await runtime.removeEntity('B', command: 'remove');
+            await add('unrelated');
+          },
+        );
+      }
+    }
+  }
+
+  test(
+    'review regression references A to B and remove B stays empty after open',
+    () async {
+      final x = feature('X')..data['references'] = ['A'];
+      await runtime.mutate(
+        command: 'create',
+        upsert: [feature('A'), feature('B'), x],
+      );
+      final before = runtime.document!.entities['X']!;
+      await runtime.mutate(
+        command: 'references-and-remove',
+        remove: ['B'],
+        upsert: [
+          CadDocumentEntity(
+            id: 'X',
+            kind: before.kind,
+            data: {
+              ...before.data,
+              'references': ['B'],
+            },
+          ),
+        ],
+      );
+      consistentDependencies([], explicit: true);
+      await runtime.undoDocument();
+      consistentDependencies([], explicit: true);
+      expect(runtime.document!.entities['X']!.data['references'], ['A']);
+      expect(runtime.document!.entities.containsKey('B'), isTrue);
+      await runtime.redoDocument();
+      consistentDependencies([], explicit: true);
+      await runtime.save(recordLifecycle: true);
+      await runtime.close();
+      await runtime.open('A', directory);
+      consistentDependencies([], explicit: true);
+      expect(runtime.document!.entities['X']!.data['references'], ['B']);
+      expect(runtime.document!.entities.containsKey('B'), isFalse);
+      expect(
+        runtime.read<List<String>>('document.integrityDiagnostics'),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'undo redo preserves absent versus explicit empty dependencies',
+    () async {
+      final x = point('X')
+        ..data.addAll({
+          'authoringRoot': true,
+          'references': ['A'],
+        });
+      await runtime.mutate(command: 'legacy', upsert: [feature('A'), x]);
+      consistentDependencies(['A'], explicit: false);
+      final old = runtime.document!.entities['X']!;
+      await runtime.mutate(
+        command: 'explicit-empty',
+        upsert: [
+          CadDocumentEntity(
+            id: 'X',
+            kind: old.kind,
+            data: {...old.data, 'dependencies': []},
+          ),
+        ],
+      );
+      consistentDependencies([], explicit: true);
+      await runtime.undoDocument();
+      consistentDependencies(['A'], explicit: false);
+      await rejectUnchanged(() => runtime.removeEntity('A', command: 'remove'));
+      await runtime.redoDocument();
+      consistentDependencies([], explicit: true);
+      await runtime.save();
+      await runtime.close();
+      await runtime.open('A', directory);
+      consistentDependencies([], explicit: true);
+      await runtime.undoDocument();
+      consistentDependencies(['A'], explicit: false);
+      await runtime.redoDocument();
+      consistentDependencies([], explicit: true);
     },
   );
 }

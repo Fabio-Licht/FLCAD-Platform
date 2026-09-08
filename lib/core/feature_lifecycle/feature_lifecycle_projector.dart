@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../cad_document/cad_document.dart';
 import 'feature_lifecycle.dart';
+import 'feature_dependencies.dart';
 
 /// Converts every authored entity to the same durable lifecycle contract.
 abstract final class FeatureLifecycleProjector {
@@ -10,7 +11,6 @@ abstract final class FeatureLifecycleProjector {
     required String command,
     CadDocument? previousDocument,
     Set<String> touchedIds = const {},
-    Set<String> dependencyUpdates = const {},
     Map<String, FeatureLifecycleState> stateOverrides = const {},
     Map<String, String> actionOverrides = const {},
   }) {
@@ -26,7 +26,6 @@ abstract final class FeatureLifecycleProjector {
         previousEntity: previousDocument?.entities[entity.id],
         command: command,
         touched: touchedIds.contains(entity.id),
-        dependencyUpdated: dependencyUpdates.contains(entity.id),
         stateOverride: stateOverrides[entity.id],
         actionOverride: actionOverrides[entity.id],
         fallbackOrder: order++,
@@ -78,7 +77,6 @@ abstract final class FeatureLifecycleProjector {
     required CadDocumentEntity? previousEntity,
     required String command,
     required bool touched,
-    required bool dependencyUpdated,
     required FeatureLifecycleState? stateOverride,
     required String? actionOverride,
     required int fallbackOrder,
@@ -125,17 +123,9 @@ abstract final class FeatureLifecycleProjector {
       state: state,
       createdBy: previous?.createdBy ?? command,
       parameters: _parameters(entity.data, previous),
-      references: _references(
-        entity.data,
-        previous,
-        explicitUpdate: dependencyUpdated,
-      ),
+      references: FeatureDependencies.references(entity.data),
       childIds: _children(entity.data, previous),
-      dependencyIds: _dependencies(
-        entity.data,
-        previous,
-        explicitUpdate: dependencyUpdated,
-      ),
+      dependencyIds: FeatureDependencies.resolve(entity.data),
       dependentIds: previous?.dependentIds ?? const [],
       treeParentId:
           entity.data['parentSketchId'] as String? ??
@@ -209,31 +199,6 @@ abstract final class FeatureLifecycleProjector {
       ? value.whereType<String>().toSet().toList(growable: false)
       : const [];
 
-  static List<String> _references(
-    Map<String, dynamic> data,
-    FeatureLifecycleRecord? previous, {
-    bool explicitUpdate = false,
-  }) {
-    final result = <String>{
-      ..._strings(data['references']),
-      ..._strings(data['sourceIds']),
-    };
-    final sketch = data['sketch'];
-    final metadata = sketch is Map ? sketch['metadata'] : null;
-    final support = metadata is Map ? metadata['supportEntityId'] : null;
-    if (support is String) result.add(support);
-    final sketchEntity = data['sketchEntity'];
-    final entityMetadata = sketchEntity is Map
-        ? sketchEntity['metadata']
-        : null;
-    if (entityMetadata is Map) {
-      result.addAll(_strings(entityMetadata['sourceEntityIds']));
-    }
-    return result.isEmpty && !explicitUpdate
-        ? previous?.references ?? const []
-        : result.toList();
-  }
-
   static List<String> _children(
     Map<String, dynamic> data,
     FeatureLifecycleRecord? previous,
@@ -245,26 +210,6 @@ abstract final class FeatureLifecycleProjector {
       ..._strings(data['dimensions']),
     };
     return result.isEmpty ? previous?.childIds ?? const [] : result.toList();
-  }
-
-  static List<String> _dependencies(
-    Map<String, dynamic> data,
-    FeatureLifecycleRecord? previous, {
-    bool explicitUpdate = false,
-  }) {
-    final explicit = _strings(data['dependencies']);
-    if (explicit.isNotEmpty ||
-        (explicitUpdate && data.containsKey('dependencies'))) {
-      return explicit;
-    }
-    final references = _references(
-      data,
-      previous,
-      explicitUpdate: explicitUpdate,
-    );
-    return references.isEmpty && !explicitUpdate
-        ? previous?.dependencyIds ?? const []
-        : references;
   }
 
   static String _workspace(CadDocumentEntityKind kind) => switch (kind) {

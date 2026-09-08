@@ -219,18 +219,5 @@ Map<String, Set<String>> _reverseDependencies(CadDocument document) {
   return reverse;
 }
 
-Set<String> _documentDependencies(CadDocumentEntity entity) {
-  final data = entity.data;
-  final result = <String>{};
-  if (FeatureLifecycleContract.appliesTo(entity)) {
-    result.addAll(FeatureLifecycleContract.require(entity).dependencyIds);
-  } else {
-    for (final key in ['dependencies', 'references', 'sourceIds']) {
-      final value = data[key];
-      if (value is List) result.addAll(value.whereType<String>());
-    }
-  }
-  final source = data['sourceEntityId'];
-  if (source is String) result.add(source);
-  return result;
-}
+Set<String> _documentDependencies(CadDocumentEntity entity) =>
+    FeatureDependencies.resolve(entity.data).toSet();

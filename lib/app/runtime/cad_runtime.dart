@@ -13,6 +13,7 @@ import '../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../core/cad_kernel/models/kernel_models.dart';
 import '../../core/cad_kernel/manager/kernel_manager.dart';
 import '../../core/feature_lifecycle/feature_lifecycle.dart';
+import '../../core/feature_lifecycle/feature_dependencies.dart';
 import '../../core/feature_lifecycle/feature_lifecycle_projector.dart';
 import '../../core/geometric_kernel/geometry/vectors.dart';
 import '../../core/geometric_kernel/linear_algebra/matrices.dart';
@@ -489,19 +490,6 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       command: command,
       previousDocument: before,
       touchedIds: touchedIds,
-      dependencyUpdates: {
-        for (final entity in requested)
-          if (before.entities.containsKey(entity.id) &&
-              ['dependencies', 'references', 'sourceIds'].any(
-                (key) =>
-                    entity.data.containsKey(key) &&
-                    !_sameJson(
-                      before.entities[entity.id]?.data[key],
-                      entity.data[key],
-                    ),
-              ))
-            entity.id,
-      },
       stateOverrides: stateOverrides,
     );
     _validateAssociations(before, candidate, requested);

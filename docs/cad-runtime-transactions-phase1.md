@@ -279,11 +279,18 @@ or inverse lifecycle dependentIds, to compute that explicitly requested batch.
 
 New dependency edges validate their reachable candidate graph. Removing/replacing
 edges is evaluated after the delta, so detaching a dependent and removing its old
-source can succeed atomically. The optional `dependencyUpdates` set on lifecycle
-normalization is supplied only for explicit relationship changes by the migrated
-writer. Empty dependency/reference/source lists then clear their old lifecycle
-values. The default is empty, preserving legacy fallback during open, undo/redo
-and other consumers; unrelated updates do not trigger this new behavior.
+source can succeed atomically. `FeatureDependencies.resolve` is the single
+persisted-data interpretation used by the lifecycle projector and runtime integrity
+validators (including the reverse index, diagnostics and dependency walk callbacks).
+A present `dependencies` key is authoritative: an empty list means no dependencies,
+and a nonempty list supplies exactly those IDs. References remain stored separately
+and never supplement an explicit dependency list. Only an absent key uses the legacy
+reference/source fallback, including persisted lifecycle metadata when the source
+fields are absent. No dependency key is synthesized during normalization.
+The former `dependencyUpdates`/`explicitUpdate` mode is removed; transaction, save,
+open and Undo/Redo interpret the same map identically. Legacy missing/deleted targets
+are still diagnosed without repair. Tests cover field order, authored/non-authored
+entities and the exact reference-change plus removal regression through reopen.
 Unchanged legacy defects do not block unrelated edits, including visibility on the defective entity. New edges
 cannot extend an invalid chain. Existing associations are not revalidated globally;
 new/revived associations must resolve in the final candidate.
