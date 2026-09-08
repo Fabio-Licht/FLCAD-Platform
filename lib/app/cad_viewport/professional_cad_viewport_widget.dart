@@ -121,6 +121,7 @@ class _ProfessionalCadViewportWidgetState
   }
 
   NavigationEngine _createNavigationEngine() => NavigationEngine(
+    profile: NavigationProfile.flcadReverseEngineering,
     camera: CadCameraNavigationAdapter(widget.camera),
     resolvePoint: (x, y) => picking
         .pick(

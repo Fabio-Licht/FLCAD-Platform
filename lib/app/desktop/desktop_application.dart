@@ -46,6 +46,7 @@ import '../modeling/modeling.dart';
 import '../modeling/entity_edit_contract.dart';
 import '../navigation/cad_camera_navigation_adapter.dart';
 import '../navigation/navigation_engine.dart';
+import '../navigation/navigation_contracts.dart';
 import '../operational_entities/operational_entity.dart';
 import '../reconstruction/desktop_colmap_lab_runtime.dart';
 import '../runtime/cad_runtime.dart';
@@ -1997,6 +1998,7 @@ class _OfficialEngineeringWorkspaceState
   void initState() {
     super.initState();
     navigation = NavigationEngine(
+      profile: NavigationProfile.flcadReverseEngineering,
       camera: CadCameraNavigationAdapter(camera),
       resolvePoint: (_, _) => null,
     );

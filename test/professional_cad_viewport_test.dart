@@ -31,6 +31,8 @@ import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
 import 'package:flcad_mobile/features/projects/data/project_repository.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
+import 'package:flcad_mobile/app/navigation/navigation_contracts.dart';
+import 'package:flcad_mobile/app/navigation/navigation_debug_panel.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -684,55 +686,70 @@ void main() {
     expect((camera.eye - camera.target).length, closeTo(5, 1e-9));
   });
 
-  testWidgets('object test translates presentation, not CAD camera state', (
-    tester,
-  ) async {
-    final scene = CadSceneGraph()
-      ..upsert(
-        MeshSceneAdapter.fromKernel(
-          id: 'mesh-1',
-          geometry: mesh,
-          bounds: bounds,
+  testWidgets(
+    'production viewport middle-pan moves camera and preserves presentation',
+    (tester) async {
+      final scene = CadSceneGraph()
+        ..upsert(
+          MeshSceneAdapter.fromKernel(
+            id: 'mesh-1',
+            geometry: mesh,
+            bounds: bounds,
+          ),
+        );
+      final camera = CadCameraController(
+        eye: const Vector3(0, 0, 5),
+        target: Vector3.zero,
+        up: const Vector3(0, 1, 0),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: SizedBox(
+            width: 800,
+            height: 600,
+            child: ProfessionalCadViewportWidget(
+              scene: scene,
+              camera: camera,
+              showNavigationDebug: true,
+            ),
+          ),
         ),
       );
-    final camera = CadCameraController(
-      eye: const Vector3(0, 0, 5),
-      target: Vector3.zero,
-      up: const Vector3(0, 1, 0),
-    );
-    await tester.pumpWidget(
-      MaterialApp(
-        home: SizedBox(
-          width: 800,
-          height: 600,
-          child: ProfessionalCadViewportWidget(scene: scene, camera: camera),
-        ),
-      ),
-    );
-    await tester.pump();
-    final viewBefore = camera.target - camera.eye;
-    final eyeBefore = camera.eye;
-    final presentationBefore = camera.presentationTranslation;
-    final mouse = TestPointer(7, PointerDeviceKind.mouse);
-    await tester.sendEventToBinding(
-      mouse.down(const Offset(400, 300), buttons: kMiddleMouseButton),
-    );
-    await tester.sendEventToBinding(
-      mouse.move(const Offset(470, 340), buttons: kMiddleMouseButton),
-    );
-    await tester.sendEventToBinding(mouse.up());
-    await tester.pump();
+      await tester.pump();
+      final engine = tester
+          .widget<NavigationDebugPanel>(find.byType(NavigationDebugPanel))
+          .engine;
+      expect(engine.profile, NavigationProfile.flcadReverseEngineering);
+      final targetBefore = camera.target;
+      final offsetXBefore = camera.presentationOffsetNdcX;
+      final offsetYBefore = camera.presentationOffsetNdcY;
+      final viewBefore = camera.target - camera.eye;
+      final eyeBefore = camera.eye;
+      final presentationBefore = camera.presentationTranslation;
+      final mouse = TestPointer(7, PointerDeviceKind.mouse);
+      await tester.sendEventToBinding(
+        mouse.down(const Offset(400, 300), buttons: kMiddleMouseButton),
+      );
+      await tester.sendEventToBinding(
+        mouse.move(const Offset(470, 340), buttons: kMiddleMouseButton),
+      );
+      await tester.sendEventToBinding(mouse.up());
+      await tester.pump();
 
-    expect(camera.eye.distanceTo(eyeBefore), lessThan(1e-12));
-    expect(
-      camera.presentationTranslation.distanceTo(presentationBefore),
-      greaterThan(0),
-    );
-    expect(
-      (camera.target - camera.eye).distanceTo(viewBefore),
-      lessThan(1e-10),
-    );
-  });
+      expect(camera.eye.distanceTo(eyeBefore), greaterThan(0));
+      expect(camera.target.distanceTo(targetBefore), greaterThan(0));
+      expect(camera.presentationOffsetNdcX, offsetXBefore);
+      expect(camera.presentationOffsetNdcY, offsetYBefore);
+      expect(
+        camera.presentationTranslation.distanceTo(presentationBefore),
+        lessThan(1e-12),
+      );
+      expect(
+        (camera.target - camera.eye).distanceTo(viewBefore),
+        lessThan(1e-10),
+      );
+    },
+  );
 
   testWidgets('CATIA chord transitions continuously from orbit to zoom', (
     tester,
@@ -895,10 +912,12 @@ void main() {
 
       expect(
         camera.presentationTranslation.distanceTo(presentationBefore),
-        greaterThan(1e-6),
+        lessThan(1e-12),
       );
-      expect(camera.eye.distanceTo(eyeBefore), lessThan(1e-12));
-      expect(camera.target.distanceTo(targetBefore), lessThan(1e-12));
+      expect(camera.eye.distanceTo(eyeBefore), greaterThan(1e-6));
+      expect(camera.target.distanceTo(targetBefore), greaterThan(1e-6));
+      expect(camera.presentationOffsetNdcX, 0);
+      expect(camera.presentationOffsetNdcY, 0);
       final scaleBeforeZoom = camera.viewScale;
       await tester.sendEventToBinding(
         const PointerScrollEvent(

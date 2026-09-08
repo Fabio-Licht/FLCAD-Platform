@@ -14,6 +14,7 @@ void main() {
     )..resize(800, 600);
     final commands = <String>[];
     final engine = NavigationEngine(
+      profile: NavigationProfile.objectManipulationTest,
       camera: CadCameraNavigationAdapter(camera),
       resolvePoint: (_, _) => Vector3.zero,
       onDebugChanged: (debug) => commands.add(debug.command),
@@ -34,6 +35,10 @@ void main() {
       ]),
     );
     expect(after.eye.distanceTo(before.eye), lessThan(1e-12));
+    expect(after.target.distanceTo(before.target), lessThan(1e-12));
+    expect(commands, isNot(contains('PanCommand')));
+    expect(camera.presentationOffsetNdcX.abs(), greaterThan(0));
+    expect(camera.presentationOffsetNdcY.abs(), greaterThan(0));
     expect(camera.presentationTranslation.length, greaterThan(0));
     expect(
       (after.target - after.eye).distanceTo(before.target - before.eye),
@@ -48,6 +53,52 @@ void main() {
     expect(after.viewScale, before.viewScale);
     expect(engine.state, NavigationState.idle);
   });
+
+  test(
+    'production middle-pan moves camera and preserves presentation offsets',
+    () {
+      for (final orthographic in [false, true]) {
+        final camera = CadCameraController(
+          eye: const Vector3(0, 0, 5),
+          target: Vector3.zero,
+          up: const Vector3(0, 1, 0),
+        )..resize(800, 600);
+        if (orthographic) camera.toggleProjection();
+        camera.translateOperationalScene(const Vector3(.2, -.1, 0));
+        final before = camera.snapshot();
+        final commands = <String>[];
+        final engine = NavigationEngine(
+          profile: NavigationProfile.flcadReverseEngineering,
+          camera: CadCameraNavigationAdapter(camera),
+          resolvePoint: (_, _) => null,
+          onDebugChanged: (debug) => commands.add(debug.command),
+        );
+        addTearDown(engine.dispose);
+
+        engine.pointerDown(
+          x: 400,
+          y: 300,
+          buttons: NavigationEngine.middleButton,
+        );
+        engine.pointerMove(
+          x: 470,
+          y: 340,
+          buttons: NavigationEngine.middleButton,
+        );
+        engine.pointerUp(x: 470, y: 340, buttons: 0);
+
+        final eyeDelta = camera.eye - before.eye;
+        final targetDelta = camera.target - before.target;
+        expect(commands, ['PanCommand', 'PanCommand', 'PanCommand']);
+        expect(eyeDelta.length, greaterThan(0));
+        expect(targetDelta.length, greaterThan(0));
+        expect(eyeDelta.distanceTo(targetDelta), lessThan(1e-10));
+        expect(camera.presentationTranslation, before.presentationTranslation);
+        expect(camera.presentationOffsetNdcX, before.presentationOffsetNdcX);
+        expect(camera.presentationOffsetNdcY, before.presentationOffsetNdcY);
+      }
+    },
+  );
 
   test('professional Pan translates near and far geometry by equal pixels', () {
     final camera = CadCameraController(
@@ -84,6 +135,7 @@ void main() {
     final camera = CadCameraController()..resize(800, 600);
     final commands = <String>[];
     final engine = NavigationEngine(
+      profile: NavigationProfile.flcadReverseEngineering,
       camera: CadCameraNavigationAdapter(camera),
       resolvePoint: (_, _) => null,
       onDebugChanged: (debug) => commands.add(debug.command),
@@ -201,6 +253,7 @@ void main() {
       )..resize(800, 600);
       final commands = <String>[];
       final engine = NavigationEngine(
+        profile: NavigationProfile.flcadReverseEngineering,
         camera: CadCameraNavigationAdapter(camera),
         resolvePoint: (_, _) => null,
         onDebugChanged: (debug) => commands.add(debug.command),
@@ -243,7 +296,7 @@ void main() {
     },
   );
 
-  test('continuous Orbit uses the controlled object response', () {
+  test('production Orbit uses a controlled response relative to classic', () {
     CadCameraController makeCamera() => CadCameraController(
       eye: const Vector3(0, 0, 5),
       target: Vector3.zero,
@@ -252,6 +305,7 @@ void main() {
     final controlledCamera = makeCamera();
     final classicCamera = makeCamera();
     final controlled = NavigationEngine(
+      profile: NavigationProfile.flcadReverseEngineering,
       camera: CadCameraNavigationAdapter(controlledCamera),
       resolvePoint: (_, _) => null,
     );

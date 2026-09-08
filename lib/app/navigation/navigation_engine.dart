@@ -10,7 +10,7 @@ class NavigationEngine implements NavigationStyleHost {
   NavigationEngine({
     required this.camera,
     required this.resolvePoint,
-    this.profile = NavigationProfile.objectManipulationTest,
+    required this.profile,
     this.context = NavigationContext.viewport,
     NavigationStyle? style,
     this.onNavigationChanged,
