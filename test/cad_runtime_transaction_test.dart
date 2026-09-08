@@ -937,7 +937,22 @@ void main() {
       () async {
         await add('one');
         if (category == 'export') {
-          await runtime.mutate(command: 'export', officialExportShapeId: 'one');
+          await runtime.mutate(
+            command: 'export',
+            upsert: [
+              CadDocumentEntity(
+                id: 'one',
+                kind: CadDocumentEntityKind.vertex,
+                data: point('one').data,
+                shape: ShapeHandle.reference(
+                  persistentId: 'one',
+                  kernelId: 'fixture',
+                  type: CADShapeType.solid,
+                ),
+              ),
+            ],
+            officialExportShapeId: 'one',
+          );
         }
         await add('two');
         await runtime.undoDocument();

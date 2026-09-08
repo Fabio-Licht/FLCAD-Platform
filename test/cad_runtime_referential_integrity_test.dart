@@ -32,6 +32,47 @@ void main() {
     command: 'add',
     upsert: [feature(id, dependencies: dependencies, collection: collection)],
   );
+  Future<void> legacy(
+    List<CadDocumentEntity> entities, {
+    String? official,
+  }) async {
+    final old = runtime.document!;
+    await repository.save(
+      CadDocument(
+        projectId: old.projectId,
+        entities: {...old.entities, for (final e in entities) e.id: e},
+        revisions: old.revisions,
+        parameters: old.parameters,
+        officialExportShapeId: official ?? old.officialExportShapeId,
+      ),
+      directory,
+    );
+    await runtime.open('A', directory);
+  }
+
+  CadDocumentEntity recycled(CadDocumentEntity e) => CadDocumentEntity(
+    id: e.id,
+    kind: e.kind,
+    shape: e.shape,
+    mesh: e.mesh,
+    data: {
+      ...e.data,
+      'deleted': true,
+      'collectionId': 'collection:recycle-bin',
+    },
+  );
+  CadDocumentEntity exportable(String id, {bool temporary = false}) =>
+      CadDocumentEntity(
+        id: id,
+        kind: CadDocumentEntityKind.vertex,
+        data: point(id).data,
+        shape: ShapeHandle.reference(
+          persistentId: id,
+          kernelId: 'fixture',
+          type: CADShapeType.solid,
+          metadata: {'temporary': temporary},
+        ),
+      );
   Future<void> recycle(String id) =>
       runtime.moveToRecycleBin(id, includeDependencies: false);
   Future<void> rejectUnchanged(Future<void> Function() operation) async {
@@ -75,11 +116,9 @@ void main() {
   test(
     'purged direct dependency rejects whole restore without notifications',
     () async {
-      await add('A');
-      await add('B', dependencies: ['A']);
-      await recycle('A');
-      await recycle('B');
-      await runtime.permanentlyDelete('A');
+      await legacy([
+        recycled(feature('B', dependencies: ['A'])),
+      ]);
       await add('selected');
       runtime.select({'selected'});
       await add('redo');
@@ -93,8 +132,7 @@ void main() {
     () async {
       await add('A');
       await add('B', dependencies: ['A']);
-      await recycle('A');
-      await recycle('B');
+      await runtime.moveToRecycleBin('A', includeDependencies: true);
       await rejectUnchanged(() => runtime.restoreFromRecycleBin('B'));
       final revision = runtime.runtimeRevision;
       await runtime.restoreFromRecycleBin('B', additionalIds: ['A']);
@@ -111,11 +149,10 @@ void main() {
   );
 
   test('missing indirect dependency rejects restoration', () async {
-    await add('A');
-    await add('B', dependencies: ['A']);
-    await add('C', dependencies: ['B']);
-    await recycle('C');
-    await runtime.removeEntity('A', command: 'remove');
+    await legacy([
+      feature('B', dependencies: ['A']),
+      recycled(feature('C', dependencies: ['B'])),
+    ]);
     await rejectUnchanged(() => runtime.restoreFromRecycleBin('C'));
   });
 
@@ -129,8 +166,7 @@ void main() {
           feature('B', dependencies: ['A']),
         ],
       );
-      await recycle('A');
-      await recycle('B');
+      await runtime.moveToRecycleBin('A', includeDependencies: true);
       await rejectUnchanged(() => runtime.restoreFromRecycleBin('A'));
       await runtime.restoreFromRecycleBin('A', additionalIds: ['B']);
       expect(runtime.scene.find('A'), isNotNull);
@@ -160,14 +196,26 @@ void main() {
         if (status == 'recycled') await recycle('C');
         await runtime.restoreFromRecycleBin('A');
         final expected = status == 'active' ? 'C' : null;
+        expect(
+          runtime.document!.entities['A']!.data.containsKey('collectionId'),
+          isTrue,
+        );
         expect(runtime.document!.entities['A']!.data['collectionId'], expected);
         await runtime.undoDocument();
         expect(runtime.document!.entities['A']!.data['deleted'], isTrue);
         await runtime.redoDocument();
+        expect(
+          runtime.document!.entities['A']!.data.containsKey('collectionId'),
+          isTrue,
+        );
         expect(runtime.document!.entities['A']!.data['collectionId'], expected);
         await runtime.save();
         await runtime.close();
         await runtime.open('A', directory);
+        expect(
+          runtime.document!.entities['A']!.data.containsKey('collectionId'),
+          isTrue,
+        );
         expect(runtime.document!.entities['A']!.data['collectionId'], expected);
       },
     );
@@ -181,7 +229,9 @@ void main() {
         feature('B', dependencies: ['A']),
       ],
     );
-    await recycle('A');
+    await legacy([
+      recycled(feature('A', dependencies: ['B'])),
+    ]);
     await rejectUnchanged(() => runtime.restoreFromRecycleBin('A'));
   });
 
@@ -272,7 +322,7 @@ void main() {
   test(
     'nonofficial removal keeps export and cleared no-op preserves redo',
     () async {
-      await add('official');
+      await runtime.mutate(command: 'add', upsert: [exportable('official')]);
       await runtime.mutate(command: 'set', officialExportShapeId: 'official');
       await add('other');
       await runtime.removeEntity('other', command: 'remove');
@@ -411,4 +461,386 @@ void main() {
     expect(runtime.document, same(committed));
     expect(runtime.document!.entities['one']!.data['collectionId'], isNull);
   });
+  for (final invalid in ['missing', 'no-shape', 'deleted', 'temporary']) {
+    test(
+      'invalid official set $invalid rejects all state including redo',
+      () async {
+        await runtime.mutate(
+          command: 'official',
+          upsert: [exportable('official')],
+          officialExport: const OfficialExportUpdate.set('official'),
+        );
+        await add('selected');
+        runtime.select({'selected'});
+        await add('redo');
+        await runtime.undoDocument();
+        final target = switch (invalid) {
+          'missing' => <CadDocumentEntity>[],
+          'no-shape' => [feature('invalid')],
+          'deleted' => [recycled(exportable('invalid'))],
+          _ => [exportable('invalid', temporary: true)],
+        };
+        await rejectUnchanged(
+          () => runtime.mutate(
+            command: 'invalid',
+            upsert: target,
+            remove: ['selected'],
+            officialExport: const OfficialExportUpdate.set('invalid'),
+          ),
+        );
+        expect(runtime.document!.officialExportShapeId, 'official');
+        await runtime.redoDocument();
+        expect(runtime.document!.entities.containsKey('redo'), isTrue);
+      },
+    );
+  }
+
+  test(
+    'legacy invalid export keep is unconditional and set same ID rejects',
+    () async {
+      await legacy([
+        feature('broken', dependencies: ['absent']),
+      ], official: 'absent');
+      final diagnostics = runtime.read<List<String>>(
+        'document.integrityDiagnostics',
+      )!;
+      expect(diagnostics, contains('Invalid official export: absent'));
+      expect(diagnostics, contains('Invalid dependency: broken -> absent'));
+      await rejectUnchanged(
+        () => runtime.mutate(
+          command: 'set',
+          officialExport: const OfficialExportUpdate.set('absent'),
+        ),
+      );
+      await add('unrelated');
+      await runtime.setEntityVisibility('broken', false);
+      expect(runtime.document!.officialExportShapeId, 'absent');
+      await runtime.undoDocument();
+      await runtime.redoDocument();
+      await runtime.save();
+      await runtime.close();
+      await runtime.open('A', directory);
+      expect(runtime.document!.officialExportShapeId, 'absent');
+      expect(runtime.document!.entities['broken']!.data['dependencies'], [
+        'absent',
+      ]);
+    },
+  );
+
+  for (final operation in [
+    'removeCollection',
+    'removeMembership',
+    'recycleCollection',
+  ]) {
+    test(
+      '$operation persists intentional root through undo redo and open',
+      () async {
+        await runtime.mutate(
+          command: 'collection',
+          upsert: [
+            const CadDocumentEntity(
+              id: 'C',
+              kind: CadDocumentEntityKind.collection,
+              data: {},
+            ),
+            feature('member', collection: 'C'),
+          ],
+        );
+        switch (operation) {
+          case 'removeCollection':
+            await runtime.removeEntity('C', command: 'remove');
+          case 'removeMembership':
+            await runtime.updateCollection('C', removeMembers: ['member']);
+          case 'recycleCollection':
+            await recycle('C');
+        }
+        void root() {
+          final data = runtime.document!.entities['member']!.data;
+          expect(data.containsKey('collectionId'), isTrue);
+          expect(data['collectionId'], isNull);
+        }
+
+        root();
+        await runtime.undoDocument();
+        expect(runtime.document!.entities['member']!.data['collectionId'], 'C');
+        await runtime.redoDocument();
+        root();
+        await runtime.save();
+        await runtime.close();
+        await runtime.open('A', directory);
+        root();
+      },
+    );
+  }
+
+  test(
+    'open migrates missing collection key but preserves explicit null',
+    () async {
+      final explicit = feature('root')..data['collectionId'] = null;
+      await legacy([feature('missing-key'), explicit]);
+      expect(
+        runtime.document!.entities['missing-key']!.data['collectionId'],
+        isNotNull,
+      );
+      expect(
+        runtime.document!.entities['root']!.data.containsKey('collectionId'),
+        isTrue,
+      );
+      expect(runtime.document!.entities['root']!.data['collectionId'], isNull);
+    },
+  );
+
+  for (final reverse in [false, true]) {
+    test(
+      'active cycle accepts external restoration, reversed=$reverse',
+      () async {
+        final entities = [
+          feature('A', dependencies: ['B']),
+          feature('B', dependencies: ['A']),
+          recycled(feature('X', dependencies: ['A'])),
+        ];
+        await legacy(reverse ? entities.reversed.toList() : entities);
+        await runtime.restoreFromRecycleBin('X', additionalIds: ['X']);
+        expect(runtime.document!.entities['X']!.data['deleted'], isNot(true));
+      },
+    );
+    test(
+      'complete cycle restoration is independent of batch order $reverse',
+      () async {
+        await legacy([
+          recycled(feature('A', dependencies: ['B'])),
+          recycled(feature('B', dependencies: ['A'])),
+        ]);
+        await runtime.restoreFromRecycleBin(
+          reverse ? 'B' : 'A',
+          additionalIds: reverse ? ['A', 'B'] : ['B', 'A'],
+        );
+        expect(runtime.scene.find('A'), isNotNull);
+        expect(runtime.scene.find('B'), isNotNull);
+      },
+    );
+    for (final purge in [false, true]) {
+      test(
+        'explicit full retirement batch undo redo purge=$purge reverse=$reverse',
+        () async {
+          await runtime.mutate(
+            command: 'chain',
+            upsert: [
+              feature('A'),
+              feature('B', dependencies: ['A']),
+              feature('C', dependencies: ['B']),
+            ],
+          );
+          final ids = reverse ? ['C', 'B', 'A'] : ['A', 'B', 'C'];
+          final revision = runtime.runtimeRevision;
+          if (purge) {
+            await runtime.mutate(command: 'remove.batch', remove: ids);
+          } else {
+            await runtime.mutate(
+              command: 'recycle.batch',
+              upsert: ids.map(
+                (id) => recycled(runtime.document!.entities[id]!),
+              ),
+            );
+          }
+          expect(runtime.runtimeRevision, revision + 1);
+          for (final id in ids) {
+            expect(
+              purge
+                  ? !runtime.document!.entities.containsKey(id)
+                  : runtime.document!.entities[id]!.data['deleted'] == true,
+              isTrue,
+            );
+          }
+          await runtime.undoDocument();
+          for (final id in ids) {
+            expect(runtime.scene.find(id), isNotNull);
+          }
+          await runtime.redoDocument();
+          for (final id in ids) {
+            expect(runtime.scene.find(id), isNull);
+          }
+        },
+      );
+    }
+  }
+
+  test('cycle with missing reference cannot be restored', () async {
+    await legacy([
+      recycled(feature('A', dependencies: ['B'])),
+      recycled(feature('B', dependencies: ['A', 'absent'])),
+    ]);
+    await rejectUnchanged(
+      () => runtime.restoreFromRecycleBin('A', additionalIds: ['B']),
+    );
+  });
+
+  test(
+    'partial recycling chain rejects wrappers and generic batches preserving redo',
+    () async {
+      await runtime.mutate(
+        command: 'chain',
+        upsert: [
+          feature('A'),
+          feature('B', dependencies: ['A']),
+          feature('C', dependencies: ['B']),
+        ],
+      );
+      runtime.select({'C'});
+      await add('redo');
+      await runtime.undoDocument();
+      await rejectUnchanged(() => recycle('A'));
+      await rejectUnchanged(
+        () => runtime.mutate(
+          command: 'partial',
+          upsert: [
+            recycled(runtime.document!.entities['A']!),
+            recycled(runtime.document!.entities['B']!),
+          ],
+        ),
+      );
+      await rejectUnchanged(() => runtime.removeEntity('A', command: 'remove'));
+      await rejectUnchanged(
+        () => runtime.mutate(command: 'remove', remove: ['A', 'B']),
+      );
+      await runtime.redoDocument();
+      expect(runtime.document!.entities.containsKey('redo'), isTrue);
+      await runtime.moveToRecycleBin('A', includeDependencies: true);
+      for (final id in ['A', 'B', 'C']) {
+        expect(runtime.document!.entities[id]!.data['deleted'], isTrue);
+      }
+    },
+  );
+
+  for (final dependentDeleted in [false, true]) {
+    test(
+      'purge protects preserved dependent deleted=$dependentDeleted',
+      () async {
+        final b = feature('B', dependencies: ['A']);
+        await legacy([
+          recycled(feature('A')),
+          dependentDeleted ? recycled(b) : b,
+        ]);
+        await rejectUnchanged(() => runtime.permanentlyDelete('A'));
+        await rejectUnchanged(
+          () => runtime.mutate(command: 'purge', remove: ['A']),
+        );
+        await runtime.mutate(command: 'purge.batch', remove: ['B', 'A']);
+        expect(runtime.document!.entities.containsKey('A'), isFalse);
+        await runtime.undoDocument();
+        expect(runtime.document!.entities.containsKey('A'), isTrue);
+        await runtime.redoDocument();
+        expect(runtime.document!.entities.containsKey('B'), isFalse);
+      },
+    );
+  }
+
+  test(
+    'replacement removes dependency before retirement; unrelated legacy defect survives',
+    () async {
+      await legacy([
+        feature('broken', dependencies: ['missing']),
+      ]);
+      await runtime.mutate(
+        command: 'chain',
+        upsert: [
+          feature('A'),
+          feature('B', dependencies: ['A']),
+        ],
+      );
+      final b = runtime.document!.entities['B']!;
+      await runtime.mutate(
+        command: 'detach.and.remove',
+        remove: ['A'],
+        upsert: [
+          CadDocumentEntity(
+            id: b.id,
+            kind: b.kind,
+            data: {...b.data, 'dependencies': []},
+          ),
+        ],
+      );
+      expect(runtime.document!.entities.containsKey('A'), isFalse);
+      expect(runtime.dependencyImpact('A'), isEmpty);
+      await runtime.save();
+      await runtime.open('A', directory);
+      expect(runtime.dependencyImpact('A'), isEmpty);
+      expect(
+        runtime.read<List<String>>('document.integrityDiagnostics'),
+        contains('Invalid dependency: broken -> missing'),
+      );
+      await rejectUnchanged(() => add('new', dependencies: ['broken']));
+    },
+  );
+  for (final key in ['references', 'sourceIds']) {
+    test('explicit empty $key removes dependency atomically', () async {
+      final b = point('B')..data[key] = ['A'];
+      await runtime.mutate(command: 'create', upsert: [feature('A'), b]);
+      final previous = runtime.document!.entities['B']!;
+      await runtime.mutate(
+        command: 'detach',
+        remove: ['A'],
+        upsert: [
+          CadDocumentEntity(
+            id: 'B',
+            kind: previous.kind,
+            data: {...previous.data, key: []},
+          ),
+        ],
+      );
+      expect(runtime.dependencyImpact('A'), isEmpty);
+      await runtime.save();
+      await runtime.open('A', directory);
+      expect(runtime.dependencyImpact('A'), isEmpty);
+    });
+  }
+
+  test(
+    'open preserves legacy lifecycle fallback and reports invalid collection',
+    () async {
+      await runtime.mutate(
+        command: 'chain',
+        upsert: [
+          feature('A'),
+          feature('B', dependencies: ['A']),
+        ],
+      );
+      final previous = runtime.document!.entities['B']!;
+      await legacy([
+        CadDocumentEntity(
+          id: 'B',
+          kind: previous.kind,
+          data: {
+            ...previous.data,
+            'dependencies': [],
+            'collectionId': 'absent',
+          },
+        ),
+      ]);
+      expect(runtime.dependencyImpact('A').map((e) => e.id), ['B']);
+      expect(
+        runtime.read<List<String>>('document.integrityDiagnostics'),
+        contains('Invalid collection: B -> absent'),
+      );
+      await runtime.setEntityVisibility('B', false);
+      expect(runtime.dependencyImpact('A').map((e) => e.id), ['B']);
+      await runtime.close();
+      expect(
+        runtime.read<List<String>>('document.integrityDiagnostics'),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'active indirect dependent across recycled intermediary rejects recycling',
+    () async {
+      await legacy([
+        feature('A'),
+        recycled(feature('B', dependencies: ['A'])),
+        feature('C', dependencies: ['B']),
+      ]);
+      await rejectUnchanged(() => recycle('A'));
+    },
+  );
 }

@@ -154,7 +154,15 @@ void main() {
           kind: CadDocumentEntityKind.collection,
           data: {'name': 'Sketches'},
         ),
-        sketch(),
+        sketch(
+          extra: {
+            'references': ['project:world:xy-plane'],
+            'sketch': {
+              'id': 'Sketch001',
+              'metadata': {'supportEntityId': 'project:world:xy-plane'},
+            },
+          },
+        ),
       ],
     );
     await runtime.transitionFeature(

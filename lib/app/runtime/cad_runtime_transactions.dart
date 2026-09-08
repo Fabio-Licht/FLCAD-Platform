@@ -397,17 +397,24 @@ extension _CadTransactions on CadRuntime {
     final imported = _readImport(candidate);
     final prepared = await _prepareScene(tx, candidate, directory);
     final bounds = _recalculateWorkspaceBounds(entities: prepared);
-    void publish() => _install(
-      tx,
-      candidate,
-      directory,
-      undo,
-      redo,
-      prepared,
-      boundary: true,
-      imported: imported,
-      bounds: bounds,
-    );
+    final diagnostics = _legacyIntegrityDiagnostics(candidate);
+    void publish() {
+      _install(
+        tx,
+        candidate,
+        directory,
+        undo,
+        redo,
+        prepared,
+        boundary: true,
+        imported: imported,
+        bounds: bounds,
+      );
+      // Existing runtime state/notification channel; an opening diagnostic, not
+      // a repair or a strict writer validation. Prepared before publication.
+      write('document.integrityDiagnostics', diagnostics);
+    }
+
     if (jsonEncode(candidate.toJson()) != jsonEncode(loaded.toJson())) {
       await _persistSnapshot(
         tx,

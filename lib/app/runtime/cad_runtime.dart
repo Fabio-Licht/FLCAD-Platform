@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
 import '../../core/cad_document/cad_document.dart';
+import '../../core/cad_document/dependency_walk.dart';
 import '../../core/cad_document/cad_document_repository.dart';
 import '../../core/cad_kernel/api/geometry_kernel_api.dart';
 import '../../core/cad_kernel/io/kernel_io_models.dart';
@@ -446,6 +447,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     final before = _snapshots.document(_requireDocument());
     // Only known normalized snapshots can bypass normalization safely.
     if (stateOverrides.isEmpty &&
+        officialExport.action != OfficialExportAction.set &&
         _snapshots.isNormalized(before) &&
         !removed.any(before.entities.containsKey) &&
         (officialExport.resolve(before.officialExportShapeId) ==
@@ -474,7 +476,12 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         command: command,
         upsert: requested,
         remove: removed,
-        officialExport: officialExport,
+        officialExport: _exportUpdateForDelta(
+          before,
+          requested,
+          removed,
+          officialExport,
+        ),
       ),
     );
     final candidate = FeatureLifecycleProjector.normalize(
@@ -482,10 +489,29 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       command: command,
       previousDocument: before,
       touchedIds: touchedIds,
+      dependencyUpdates: {
+        for (final entity in requested)
+          if (before.entities.containsKey(entity.id) &&
+              ['dependencies', 'references', 'sourceIds'].any(
+                (key) =>
+                    entity.data.containsKey(key) &&
+                    !_sameJson(
+                      before.entities[entity.id]?.data[key],
+                      entity.data[key],
+                    ),
+              ))
+            entity.id,
+      },
       stateOverrides: stateOverrides,
     );
-    _validateAssociations(candidate, requested);
-    _validateRestoredDependencies(candidate, restoredIds);
+    _validateAssociations(before, candidate, requested);
+    _validateDependencyDelta(
+      before,
+      candidate,
+      requested,
+      removed,
+      restoredIds,
+    );
     final candidateContent = candidate.toJson()..remove('revisions');
     final previousContent = before.toJson()..remove('revisions');
     if (_sameJson(candidateContent, previousContent)) return;
@@ -612,7 +638,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     for (final member in document.entities.values) {
       if (!ids.contains(member.id) &&
           removedCollections.contains(member.data['collectionId'])) {
-        final data = {...member.data}..remove('collectionId');
+        final data = {...member.data, 'collectionId': null};
         detached.add(
           CadDocumentEntity(
             id: member.id,
@@ -1224,7 +1250,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         data['collectionId'] = id;
         if (visible != null) data['sceneVisible'] = visible;
       } else {
-        data.remove('collectionId');
+        data['collectionId'] = null;
       }
       members[memberId] = CadDocumentEntity(
         id: member.id,
@@ -1311,30 +1337,15 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
 
   List<CadDocumentEntity> dependencyImpact(String entityId) {
     final document = _requireDocument();
-    final impacted = <String>{};
-    var changed = true;
-    while (changed) {
-      changed = false;
-      final sources = {entityId, ...impacted};
-      for (final entity in document.entities.values) {
-        if (entity.id == entityId || impacted.contains(entity.id)) continue;
-        if (sources.any((source) => _containsReference(entity.data, source))) {
-          changed = impacted.add(entity.id) || changed;
-        }
+    final reverse = _reverseDependencies(document);
+    final seen = {entityId}, pending = [entityId];
+    while (pending.isNotEmpty) {
+      for (final id in reverse[pending.removeLast()] ?? const <String>{}) {
+        if (seen.add(id)) pending.add(id);
       }
     }
-    return impacted.map((id) => document.entities[id]!).toList();
-  }
-
-  bool _containsReference(Object? value, String id) {
-    if (value == id) return true;
-    if (value is Map) {
-      return value.values.any((item) => _containsReference(item, id));
-    }
-    if (value is Iterable) {
-      return value.any((item) => _containsReference(item, id));
-    }
-    return false;
+    seen.remove(entityId);
+    return seen.map((id) => document.entities[id]!).toList();
   }
 
   Future<void> moveToRecycleBin(

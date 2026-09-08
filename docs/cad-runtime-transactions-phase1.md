@@ -210,6 +210,11 @@ A dependency restored in the same batch is valid regardless of request order.
 The documentary model represents cycles; a cycle involving restoration must be
 restored completely in that batch. Invalid chains or partial cycles reject the
 whole operation without notification, revision, selection or file changes.
+Traversal uses iterative Tarjan strongly connected components, O(V + E) for
+reachable vertices/edges, without recursive stack depth or repeated path searches.
+An intact active cycle reached from an external restored entity is allowed. Only
+components intersecting the restored set must be wholly restored. Duplicate roots
+are expanded once. Tests instrument 5,000 vertices and 4,999 edges in both orders.
 This validates restored reachable graphs, not all legacy/unmigrated producers.
 
 An original collection is usable only if it exists, is a collection and is not
@@ -232,10 +237,16 @@ Existing import/upsert/transform producers and their consumers keep the adapter;
 no producer is migrated or edited. Constructors/deserializers/snapshot copies
 still carry the stored nullable ID directly, rather than representing an update.
 
-Every actual document delta clears the official ID if its resulting entity is
-missing or deleted, including recycle, purge and batched removal. Removing other
-entities preserves it. The getter returns null safely for legacy missing/deleted
-targets. Cleared state persists as JSON null; Undo/Redo restore the earlier ID and
+Keep unconditionally preserves the prior ID, including an invalid legacy ID.
+Set validates the resulting entity exists, is non-deleted, has a shape and is not
+temporary (the documentary eligibility rule in ExportValidation). Invalid set
+rejects the entire transaction, including set to the same invalid legacy ID; it
+never becomes clear or a no-op. Geometric validation still belongs to actual
+export and is not invoked here. The transactional writer explicitly converts keep
+to clear when its delta removes or newly recycles the official entity. An upsert
+wins over removal, as in the document model. Unrelated deltas never sanitize the
+legacy ID. The getter returns null safely for legacy missing/deleted targets.
+Cleared state persists as JSON null; Undo/Redo restore the earlier ID and
 replay clearing. Repeated clear on an already-cleared snapshot is a no-op and
 preserves Redo. No native resource is destroyed.
 
@@ -243,3 +254,45 @@ Capability state is private, exposed only through a getter; private _revoke only
 sets it false and is idempotent. There is no setter or reactivation method. The
 escaped-context test verifies assigning active fails and the old callback still
 awaits actual drainage. Active-instance identity checks remain.
+
+## Remaining phase 2A integrity policies
+
+Intentional root membership is always `collectionId: null`. The two old key-removal
+sites, `_removeDocumentEntities` and `_updateCollection`, now agree with collection
+retirement and restoration. JSON and deep snapshots retain the key; only an absent
+key triggers the existing legacy default-collection migration. Undo/Redo and
+save/close/open retain this distinction.
+
+Each migrated writer supplies requested/removed IDs to the common transaction.
+The validator derives removed, newly recycled, restored and newly added dependency
+relations from before/final candidate (including generic mutate). Validation is
+separated into restoration, retirement, association and official-export policies.
+Retirement builds a reverse dependency index and walks it iteratively. Recycling
+rejects any surviving active dependent, including across a recycled intermediary.
+Removal rejects any preserved dependent, active or recycled, so purge cannot make
+another recycled entity unrestorable. The caller must explicitly request the full
+batch: existing `mutate` supports removal/upsert batches; `includeDependencies: true`
+explicitly requests the dependent recycling batch. There is no new writer, automatic
+cascade or physical resource deletion. `transitionFeature` has no deleted state.
+`dependencyImpact` now uses real outbound dependencies, not arbitrary equal strings
+or inverse lifecycle dependentIds, to compute that explicitly requested batch.
+
+New dependency edges validate their reachable candidate graph. Removing/replacing
+edges is evaluated after the delta, so detaching a dependent and removing its old
+source can succeed atomically. The optional `dependencyUpdates` set on lifecycle
+normalization is supplied only for explicit relationship changes by the migrated
+writer. Empty dependency/reference/source lists then clear their old lifecycle
+values. The default is empty, preserving legacy fallback during open, undo/redo
+and other consumers; unrelated updates do not trigger this new behavior.
+Unchanged legacy defects do not block unrelated edits, including visibility on the defective entity. New edges
+cannot extend an invalid chain. Existing associations are not revalidated globally;
+new/revived associations must resolve in the final candidate.
+
+Open retains the established migrations and does not apply strict writer validation
+to old data. It adds no silent repair: missing/deleted dependencies, invalid collection
+references and invalid official export are reported through the existing runtime
+state/notification mechanism, `read<List<String>>('document.integrityDiagnostics')`.
+This immutable list describes the successful opening, is published with its document,
+and is cleared/replaced on document boundaries. It is not a continuously refreshed
+validation report. Existing legacy migrations are unchanged. Unmigrated producers,
+manual Apply, CommandManager and native resource ownership remain outside this block.

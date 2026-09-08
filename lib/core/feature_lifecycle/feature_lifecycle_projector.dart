@@ -10,6 +10,7 @@ abstract final class FeatureLifecycleProjector {
     required String command,
     CadDocument? previousDocument,
     Set<String> touchedIds = const {},
+    Set<String> dependencyUpdates = const {},
     Map<String, FeatureLifecycleState> stateOverrides = const {},
     Map<String, String> actionOverrides = const {},
   }) {
@@ -25,6 +26,7 @@ abstract final class FeatureLifecycleProjector {
         previousEntity: previousDocument?.entities[entity.id],
         command: command,
         touched: touchedIds.contains(entity.id),
+        dependencyUpdated: dependencyUpdates.contains(entity.id),
         stateOverride: stateOverrides[entity.id],
         actionOverride: actionOverrides[entity.id],
         fallbackOrder: order++,
@@ -76,6 +78,7 @@ abstract final class FeatureLifecycleProjector {
     required CadDocumentEntity? previousEntity,
     required String command,
     required bool touched,
+    required bool dependencyUpdated,
     required FeatureLifecycleState? stateOverride,
     required String? actionOverride,
     required int fallbackOrder,
@@ -122,9 +125,17 @@ abstract final class FeatureLifecycleProjector {
       state: state,
       createdBy: previous?.createdBy ?? command,
       parameters: _parameters(entity.data, previous),
-      references: _references(entity.data, previous),
+      references: _references(
+        entity.data,
+        previous,
+        explicitUpdate: dependencyUpdated,
+      ),
       childIds: _children(entity.data, previous),
-      dependencyIds: _dependencies(entity.data, previous),
+      dependencyIds: _dependencies(
+        entity.data,
+        previous,
+        explicitUpdate: dependencyUpdated,
+      ),
       dependentIds: previous?.dependentIds ?? const [],
       treeParentId:
           entity.data['parentSketchId'] as String? ??
@@ -200,8 +211,9 @@ abstract final class FeatureLifecycleProjector {
 
   static List<String> _references(
     Map<String, dynamic> data,
-    FeatureLifecycleRecord? previous,
-  ) {
+    FeatureLifecycleRecord? previous, {
+    bool explicitUpdate = false,
+  }) {
     final result = <String>{
       ..._strings(data['references']),
       ..._strings(data['sourceIds']),
@@ -217,7 +229,9 @@ abstract final class FeatureLifecycleProjector {
     if (entityMetadata is Map) {
       result.addAll(_strings(entityMetadata['sourceEntityIds']));
     }
-    return result.isEmpty ? previous?.references ?? const [] : result.toList();
+    return result.isEmpty && !explicitUpdate
+        ? previous?.references ?? const []
+        : result.toList();
   }
 
   static List<String> _children(
@@ -235,12 +249,20 @@ abstract final class FeatureLifecycleProjector {
 
   static List<String> _dependencies(
     Map<String, dynamic> data,
-    FeatureLifecycleRecord? previous,
-  ) {
+    FeatureLifecycleRecord? previous, {
+    bool explicitUpdate = false,
+  }) {
     final explicit = _strings(data['dependencies']);
-    if (explicit.isNotEmpty) return explicit;
-    final references = _references(data, previous);
-    return references.isEmpty
+    if (explicit.isNotEmpty ||
+        (explicitUpdate && data.containsKey('dependencies'))) {
+      return explicit;
+    }
+    final references = _references(
+      data,
+      previous,
+      explicitUpdate: explicitUpdate,
+    );
+    return references.isEmpty && !explicitUpdate
         ? previous?.dependencyIds ?? const []
         : references;
   }

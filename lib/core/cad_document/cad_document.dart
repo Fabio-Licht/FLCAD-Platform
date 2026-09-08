@@ -176,7 +176,17 @@ class CadDocument {
       next[entity.id] = entity;
     }
     final requestedExport = officialExport.resolve(officialExportShapeId);
-    final exportEntity = next[requestedExport];
+    if (officialExport.action == OfficialExportAction.set) {
+      final entity = next[requestedExport];
+      // ExportValidation rejects temporary handles. Geometric diagnostics remain
+      // the export engine's responsibility; this documentary update does no IO.
+      if (entity == null ||
+          entity.data['deleted'] == true ||
+          entity.shape == null ||
+          entity.shape!.metadata['temporary'] == true) {
+        throw StateError('Invalid official export target: $requestedExport');
+      }
+    }
     return CadDocument(
       projectId: projectId,
       entities: Map.unmodifiable(next),
@@ -185,10 +195,7 @@ class CadDocument {
         CadDocumentRevision(revision + 1, command, DateTime.now()),
       ]),
       parameters: parameters,
-      officialExportShapeId:
-          exportEntity == null || exportEntity.data['deleted'] == true
-          ? null
-          : requestedExport,
+      officialExportShapeId: requestedExport,
     );
   }
 
