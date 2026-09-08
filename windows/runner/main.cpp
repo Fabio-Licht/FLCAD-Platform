@@ -30,7 +30,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(40, 40);
   Win32Window::Size size(1440, 900);
-  if (!window.Create(L"FLCAD Reverse AI — Engineering Intelligence Platform", origin, size)) {
+  if (!window.Create(L"FLCAD Reverse AI \u2014 Engineering Intelligence Platform", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);
