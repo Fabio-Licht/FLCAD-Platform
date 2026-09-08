@@ -7,6 +7,25 @@ class CadDocumentSceneProjection {
   final CadSceneGraph scene;
   final Map<String, CadSceneEntity> _transient = {};
 
+  Iterable<CadSceneEntity> get permanentEntities =>
+      scene.entities.where((entity) => !_transient.containsKey(entity.id));
+
+  void discardTransient() => _transient.clear();
+
+  void installPrepared(
+    Iterable<CadSceneEntity> prepared,
+    Set<String> selected,
+  ) {
+    final entities = {
+      for (final entity in prepared) entity.id: entity,
+      ..._transient,
+    };
+    scene.replaceAll(
+      entities.values.map((e) => e.copyWith(selected: selected.contains(e.id))),
+      notify: false,
+    );
+  }
+
   void select(Set<String> ids) => scene.select(ids);
 
   void upsertTransient(CadSceneEntity entity) {

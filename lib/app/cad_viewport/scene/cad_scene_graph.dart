@@ -42,6 +42,16 @@ class CadSceneGraph extends ChangeNotifier {
   final Map<String, CadSceneEntity> _entities = {};
   Iterable<CadSceneEntity> get entities => _entities.values;
   CadSceneEntity? find(String id) => _entities[id];
+
+  /// Installs a prepared scene without exposing intermediate entities.
+  void replaceAll(Iterable<CadSceneEntity> entities, {bool notify = true}) {
+    final replacement = {for (final entity in entities) entity.id: entity};
+    _entities
+      ..clear()
+      ..addAll(replacement);
+    if (notify) notifyListeners();
+  }
+
   void upsert(CadSceneEntity entity) {
     _entities[entity.id] = entity;
     notifyListeners();

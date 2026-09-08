@@ -59,11 +59,58 @@ class CadDocumentRepository {
     'redo': redo.map((value) => value.toJson()).toList(),
   });
 
-  Future<void> _atomic(File target, Map<String, dynamic> value) async {
-    final temporary = File('${target.path}.tmp');
-    await temporary.writeAsString(jsonEncode(value), flush: true);
-    if (await target.exists()) await target.delete();
-    await temporary.rename(target.path);
+  /// In-process recovery only. The two JSON files are NOT crash-atomic.
+  Future<Map<String, List<int>?>> captureFiles(Directory project) async {
+    final result = <String, List<int>?>{};
+    for (final target in [file(project), historyFile(project)]) {
+      result[path.basename(target.path)] = await target.exists()
+          ? await target.readAsBytes()
+          : null;
+    }
+    return result;
+  }
+
+  Future<void> restoreFiles(
+    Directory project,
+    Map<String, List<int>?> backup,
+  ) async {
+    for (final entry in backup.entries) {
+      final target = File(path.join(project.path, entry.key));
+      if (entry.value == null) {
+        if (await target.exists()) await target.delete();
+      } else {
+        await _atomicBytes(target, entry.value!);
+      }
+    }
+    final restored = await captureFiles(project);
+    for (final entry in backup.entries) {
+      final actual = restored[entry.key];
+      if (entry.value == null
+          ? actual != null
+          : actual == null ||
+                base64Encode(actual) != base64Encode(entry.value!)) {
+        throw StateError('CAD persistence recovery could not be verified.');
+      }
+    }
+  }
+
+  Future<void> _atomic(File target, Map<String, dynamic> value) =>
+      _atomicBytes(target, utf8.encode(jsonEncode(value)));
+
+  Future<void> _atomicBytes(File target, List<int> bytes) async {
+    // Exclusive directory per write: concurrent transactions/processes never
+    // share a temporary name. Same volume as the destination for rename.
+    final temporaryDirectory = await target.parent.createTemp(
+      '${path.basename(target.path)}.txn-',
+    );
+    final temporary = File(path.join(temporaryDirectory.path, 'payload'));
+    try {
+      await temporary.writeAsBytes(bytes, flush: true);
+      if (await target.exists()) await target.delete();
+      await temporary.rename(target.path);
+    } finally {
+      await temporaryDirectory.delete(recursive: true);
+    }
   }
 }
 

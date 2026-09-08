@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
@@ -23,6 +24,8 @@ import '../engineering_bridge/selection/geometry_selection_manager.dart';
 import '../operational_entities/operational_entity.dart';
 import '../operational_entities/operational_entity_resolver.dart';
 import 'world_coordinate_system.dart';
+
+part 'cad_runtime_transactions.dart';
 
 class CadRuntime extends ChangeNotifier {
   CadRuntime({
@@ -55,6 +58,22 @@ class CadRuntime extends ChangeNotifier {
   CommandManager? _commands;
   Object? recognitionSession, sketchSession, surfaceSession;
   final Map<String, Object?> _state = {};
+
+  // Phase 1: only the six queued entry points participate in this protocol.
+  Future<void> _transactionTail = Future<void>.value();
+  _CadTransaction? _transaction;
+  int _nextTransaction = 0, _runtimeRevision = 0, _lifecycleGeneration = 0;
+  int _sessionIdentity = 0;
+  bool _sessionActive = false, _closingAdmission = false;
+  bool _recoveryRequired = false, _notifierDisposed = false;
+  Future<void>? _shutdownFuture;
+  void _notifyTransactionComplete() => notifyListeners();
+
+  int get runtimeRevision => _runtimeRevision;
+  int get lifecycleGeneration => _lifecycleGeneration;
+  int get sessionIdentity => _sessionIdentity;
+  bool get sessionActive => _sessionActive;
+  bool get recoveryRequired => _recoveryRequired;
 
   CadDocument? get document => _document;
   ImportedCadDocument? get activeImport => _activeImport;
@@ -130,93 +149,43 @@ class CadRuntime extends ChangeNotifier {
     if (notify) notifyListeners();
   }
 
-  Future<void> open(String projectId, Directory directory) async {
-    // A project boundary is also a hard boundary for every interaction-only
-    // state. None of these values belongs to the durable CAD document.
-    projection.clearTransient();
-    geometrySelection.clear();
-    operationalSelection.clear();
-    operationalResolver.clear();
-    operationalEntities.clear();
-    recognitionSession = sketchSession = surfaceSession = null;
-    _state.clear();
-    _workspaceBounds = null;
-    scene.clear();
-
-    // 1. Load permanent document geometry and engineering entities.
-    _projectDirectory = directory;
-    _document = await _repository.load(projectId, directory);
-    final sanitized = _sanitizeLegacyWorkspaceState(_document!);
-    if (!identical(sanitized, _document)) {
-      _document = sanitized;
-      await _repository.save(_document!, directory);
+  Future<void> open(String projectId, Directory directory) {
+    if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
+    if (Zone.current[_transactionZone] == this) {
+      return Future.error(StateError('Reentrant runtime transaction.'));
     }
-    final initialized = _ensureProfessionalCollections(
-      WorldCoordinateSystem.ensure(_document!),
+    final generation = ++_lifecycleGeneration;
+    return _enqueue(
+      (tx) => _openInTransaction(tx, projectId, directory),
+      lifecycle: generation,
     );
-    if (!identical(initialized, _document)) {
-      _document = initialized;
-      await _repository.save(_document!, directory);
-    }
-    final lifecycleDocument = FeatureLifecycleProjector.normalize(
-      _document!,
-      command: 'project.open.lifecycle-migration',
-    );
-    if (jsonEncode(lifecycleDocument.toJson()) !=
-        jsonEncode(_document!.toJson())) {
-      _document = lifecycleDocument;
-      await _repository.save(_document!, directory);
-    }
-    final history = await _repository.loadHistory(directory);
-    _displayMeshes = KernelDisplayMeshPipeline(
-      kernel: kernels.active,
-      projectId: projectId,
-      projectDirectory: directory,
-      scene: scene,
-    );
-    _restoreActiveImport();
-
-    // 2. Rebuild the complete SceneGraph before publishing the project.
-    await projection.synchronize(_document!, displayMeshes: _displayMeshes);
-
-    // 3. Never trust a persisted display bound for camera recovery. Derive it
-    // again from the rebuilt, permanent scene geometry.
-    _workspaceBounds = _recalculateWorkspaceBounds();
-
-    // 4. Enforce an empty transient layer after reconstruction as well. This
-    // prevents a producer invoked during loading from leaking a preview.
-    projection.clearTransient();
-    geometrySelection.clear();
-    operationalSelection.clear();
-    _undo
-      ..clear()
-      ..addAll(history.undo.where((item) => item.projectId == projectId));
-    _redo
-      ..clear()
-      ..addAll(history.redo.where((item) => item.projectId == projectId));
-    notifyListeners();
   }
 
-  Future<void> close() async {
-    await save();
-    _document = null;
-    _projectDirectory = null;
-    _activeImport = null;
-    _activeMeshGeometry = null;
-    _displayMeshes = null;
-    _workspaceBounds = null;
-    geometrySelection.clear();
-    operationalSelection.clear();
-    operationalResolver.clear();
-    operationalEntities.clear();
-    recognitionSession = sketchSession = surfaceSession = null;
-    _state.clear();
-    projection.clearTransient();
-    await projection.synchronize(CadDocument.empty('closed'));
-    notifyListeners();
+  Future<void> close() {
+    if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
+    if (Zone.current[_transactionZone] == this) {
+      return Future.error(StateError('Reentrant runtime transaction.'));
+    }
+    final generation = ++_lifecycleGeneration;
+    return _enqueue((tx) async {
+      try {
+        await _saveInTransaction(tx);
+        tx.validate();
+        _install(tx, null, null, const [], const [], const [], boundary: true);
+      } catch (_) {
+        if (!_closingAdmission && _lifecycleGeneration == generation) {
+          _sessionIdentity++;
+          _sessionActive = _document != null;
+          tx.notify = true;
+        }
+        rethrow;
+      }
+    }, lifecycle: generation);
   }
 
-  KernelBounds? _recalculateWorkspaceBounds() {
+  KernelBounds? _recalculateWorkspaceBounds({
+    Iterable<CadSceneEntity>? entities,
+  }) {
     var minX = double.infinity, minY = double.infinity, minZ = double.infinity;
     var maxX = double.negativeInfinity;
     var maxY = double.negativeInfinity;
@@ -243,7 +212,7 @@ class CadRuntime extends ChangeNotifier {
       maxZ = math.max(maxZ, z);
     }
 
-    for (final entity in scene.entities) {
+    for (final entity in entities ?? scene.entities) {
       if (!entity.visible ||
           entity.id.contains(':world:') ||
           entity.kind == CadSceneEntityKind.preview) {
@@ -422,47 +391,33 @@ class CadRuntime extends ChangeNotifier {
     Iterable<CadDocumentEntity> upsert = const [],
     Iterable<String> remove = const [],
     String? officialExportShapeId,
-  }) async {
+  }) {
     final requested = upsert.toList(growable: false);
     final removed = remove.toList(growable: false);
-    final before = _requireDocument();
-    final touchedIds = requested
-        .where((entity) {
-          final previous = before.entities[entity.id];
-          return previous == null ||
-              _definitionJson(previous) != _definitionJson(entity);
-        })
-        .map((entity) => entity.id)
-        .toSet();
-    _undo.add(before);
-    _redo.clear();
-    final mutated = before.mutate(
-      command: command,
-      upsert: requested,
-      remove: removed,
-      officialExportShapeId: officialExportShapeId,
-    );
-    _document = FeatureLifecycleProjector.normalize(
-      mutated,
-      command: command,
-      previousDocument: before,
-      touchedIds: touchedIds,
-    );
-    final changed = _document!.entities.values
-        .where((entity) {
-          final previous = before.entities[entity.id];
-          return previous == null ||
-              jsonEncode(previous.toJson()) != jsonEncode(entity.toJson());
-        })
-        .toList(growable: false);
-    await projection.synchronizeChanges(
-      _document!,
-      upsert: changed,
-      remove: removed,
-      displayMeshes: _displayMeshes,
-    );
-    await save();
-    notifyListeners();
+    return _enqueue((tx) async {
+      final before = _requireDocument();
+      final touchedIds = requested
+          .where((entity) {
+            final previous = before.entities[entity.id];
+            return previous == null ||
+                _definitionJson(previous) != _definitionJson(entity);
+          })
+          .map((entity) => entity.id)
+          .toSet();
+      final mutated = before.mutate(
+        command: command,
+        upsert: requested,
+        remove: removed,
+        officialExportShapeId: officialExportShapeId,
+      );
+      final candidate = FeatureLifecycleProjector.normalize(
+        mutated,
+        command: command,
+        previousDocument: before,
+        touchedIds: touchedIds,
+      );
+      await _commitDocument(tx, candidate, [..._undo, before], const []);
+    });
   }
 
   Future<void> transitionFeature(
@@ -1330,56 +1285,49 @@ class CadRuntime extends ChangeNotifier {
     await removeEntity(entityId, command: 'recycle.purge');
   }
 
-  Future<void> undoDocument() async {
+  Future<void> undoDocument() => _enqueue((tx) async {
     if (_undo.isEmpty) return;
-    final current = _requireDocument();
-    _redo.add(current);
-    _document = FeatureLifecycleProjector.normalize(
-      _undo.removeLast(),
+    final candidate = FeatureLifecycleProjector.normalize(
+      _undo.last,
       command: 'document.undo.lifecycle-restore',
     );
-    _restoreActiveImport();
-    await projection.synchronize(_document!, displayMeshes: _displayMeshes);
-    await save();
-    notifyListeners();
-  }
+    await _commitDocument(tx, candidate, _undo.sublist(0, _undo.length - 1), [
+      ..._redo,
+      _requireDocument(),
+    ]);
+  });
 
-  Future<void> redoDocument() async {
+  Future<void> redoDocument() => _enqueue((tx) async {
     if (_redo.isEmpty) return;
-    final current = _requireDocument();
-    _undo.add(current);
-    _document = FeatureLifecycleProjector.normalize(
-      _redo.removeLast(),
+    final candidate = FeatureLifecycleProjector.normalize(
+      _redo.last,
       command: 'document.redo.lifecycle-restore',
     );
-    _restoreActiveImport();
-    await projection.synchronize(_document!, displayMeshes: _displayMeshes);
-    await save();
-    notifyListeners();
-  }
+    await _commitDocument(tx, candidate, [
+      ..._undo,
+      _requireDocument(),
+    ], _redo.sublist(0, _redo.length - 1));
+  });
 
-  Future<void> save({bool recordLifecycle = false}) async {
-    var document = _document;
-    final directory = _projectDirectory;
-    if (document != null && directory != null) {
-      if (recordLifecycle) {
-        final featureIds = document.entities.values
-            .where(FeatureLifecycleContract.appliesTo)
-            .map((entity) => entity.id)
-            .toSet();
-        document = FeatureLifecycleProjector.normalize(
-          document,
-          command: 'project.save',
-          previousDocument: document,
-          touchedIds: featureIds,
-          actionOverrides: {for (final id in featureIds) id: 'saved'},
-        );
-        _document = document;
-      }
-      await _repository.save(document, directory);
-      await _repository.saveHistory(directory, undo: _undo, redo: _redo);
+  Future<void> save({bool recordLifecycle = false}) => _enqueue((tx) async {
+    final document = _document;
+    if (recordLifecycle && document != null) {
+      final featureIds = document.entities.values
+          .where(FeatureLifecycleContract.appliesTo)
+          .map((e) => e.id)
+          .toSet();
+      final candidate = FeatureLifecycleProjector.normalize(
+        document,
+        command: 'project.save',
+        previousDocument: document,
+        touchedIds: featureIds,
+        actionOverrides: {for (final id in featureIds) id: 'saved'},
+      );
+      await _commitDocument(tx, candidate, List.of(_undo), List.of(_redo));
+    } else {
+      await _saveInTransaction(tx);
     }
-  }
+  });
 
   void select(Set<String> ids) {
     geometrySelection.replace(ids);
@@ -1398,16 +1346,24 @@ class CadRuntime extends ChangeNotifier {
   }
 
   void _restoreActiveImport() {
-    _activeImport = null;
-    _activeMeshGeometry = null;
-    final imports = _document!.entities.values
+    final state = _readImport(_document!);
+    _activeImport = state.$1;
+    _activeMeshGeometry = state.$2;
+  }
+
+  (ImportedCadDocument?, KernelMeshGeometry?) _readImport(
+    CadDocument document,
+  ) {
+    ImportedCadDocument? imported;
+    KernelMeshGeometry? geometry;
+    final imports = document.entities.values
         .where((entity) => entity.kind == CadDocumentEntityKind.import)
         .toList();
-    if (imports.isEmpty) return;
+    if (imports.isEmpty) return (null, null);
     final value = imports.last, data = value.data;
-    _activeImport = ImportedCadDocument(
+    imported = ImportedCadDocument(
       id: value.id,
-      projectId: _document!.projectId,
+      projectId: document.projectId,
       sourcePath: data['sourcePath'] as String,
       registeredPath: data['registeredPath'] as String,
       format: CadImportFormat.values.byName(data['format'] as String),
@@ -1417,7 +1373,7 @@ class CadRuntime extends ChangeNotifier {
     );
     final sceneGeometry = data['sceneGeometry'];
     if (sceneGeometry is Map && sceneGeometry['nodes'] is List) {
-      _activeMeshGeometry = KernelMeshGeometry(
+      geometry = KernelMeshGeometry(
         nodes: (sceneGeometry['nodes'] as List)
             .cast<num>()
             .map((value) => value.toDouble())
@@ -1425,14 +1381,41 @@ class CadRuntime extends ChangeNotifier {
         triangles: (sceneGeometry['triangles'] as List).cast<int>(),
       );
     }
+    return (imported, geometry);
+  }
+
+  /// Stops admission immediately; dependency disposal waits for admitted work.
+  Future<void> shutdown() {
+    if (_shutdownFuture != null) return _shutdownFuture!;
+    if (Zone.current[_transactionZone] == this && !_notifierDisposed) {
+      return Future.error(
+        StateError('Cannot await shutdown inside a transaction.'),
+      );
+    }
+    _closingAdmission = true;
+    _lifecycleGeneration++;
+    _sessionActive = false;
+    final done = Completer<void>();
+    _shutdownFuture = done.future;
+    unawaited(
+      _transactionTail
+          .then((_) {
+            operationalSelection.dispose();
+            operationalEntities.dispose();
+            geometrySelection.dispose();
+            scene.dispose();
+          })
+          .then(done.complete, onError: done.completeError),
+    );
+    dispose();
+    return _shutdownFuture!;
   }
 
   @override
   void dispose() {
-    operationalSelection.dispose();
-    operationalEntities.dispose();
-    geometrySelection.dispose();
-    scene.dispose();
+    if (_notifierDisposed) return;
+    _notifierDisposed = true;
+    unawaited(shutdown());
     super.dispose();
   }
 }
