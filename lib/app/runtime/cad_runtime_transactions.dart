@@ -28,7 +28,9 @@ class _CadCapability {
   _CadCapability(this.runtimeIdentity, this.id);
   final Object runtimeIdentity;
   final int id;
-  bool active = true;
+  bool _active = true;
+  bool get active => _active;
+  void _revoke() => _active = false;
 }
 
 class _CadTransaction {
@@ -115,7 +117,7 @@ extension _CadTransactions on CadRuntime {
           zoneValues: {_transactionZone: tx.capability},
         );
       } finally {
-        tx.capability.active = false;
+        tx.capability._revoke();
         _transaction = null;
         // No listener runs while the document/scene/history are being installed.
         // This continuation is outside the transaction Zone: listeners enqueue.

@@ -508,6 +508,8 @@ void main() {
         ),
       );
       expect(capability.active, isFalse);
+      expect(() => capability.active = true, throwsNoSuchMethodError);
+      expect(capability.active, isFalse);
       expect(capability.runtimeIdentity.runtimeType, Object);
       expect(() => capability.owner, throwsNoSuchMethodError);
       expect(() => capability.document, throwsNoSuchMethodError);

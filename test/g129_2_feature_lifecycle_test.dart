@@ -146,7 +146,17 @@ void main() {
     addTearDown(() async => directory.delete(recursive: true));
     final runtime = CadRuntime(kernels: KernelManager());
     await runtime.open('project', directory);
-    await runtime.mutate(command: 'feature.create', upsert: [sketch()]);
+    await runtime.mutate(
+      command: 'feature.create',
+      upsert: [
+        const CadDocumentEntity(
+          id: 'collection:sketches',
+          kind: CadDocumentEntityKind.collection,
+          data: {'name': 'Sketches'},
+        ),
+        sketch(),
+      ],
+    );
     await runtime.transitionFeature(
       'Sketch001',
       FeatureLifecycleState.closed,

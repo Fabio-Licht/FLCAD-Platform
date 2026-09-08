@@ -112,6 +112,27 @@ class CadDocumentRevision {
       );
 }
 
+enum OfficialExportAction { keep, set, clear }
+
+class OfficialExportUpdate {
+  const OfficialExportUpdate.keep()
+    : action = OfficialExportAction.keep,
+      id = null;
+  const OfficialExportUpdate.set(String value)
+    : action = OfficialExportAction.set,
+      id = value;
+  const OfficialExportUpdate.clear()
+    : action = OfficialExportAction.clear,
+      id = null;
+  final OfficialExportAction action;
+  final String? id;
+  String? resolve(String? previous) => switch (action) {
+    OfficialExportAction.keep => previous,
+    OfficialExportAction.set => id,
+    OfficialExportAction.clear => null,
+  };
+}
+
 class CadDocument {
   const CadDocument({
     required this.projectId,
@@ -129,9 +150,10 @@ class CadDocument {
   final String? officialExportShapeId;
 
   int get revision => revisions.length;
-  ShapeHandle? get officialExportShape => officialExportShapeId == null
-      ? null
-      : entities[officialExportShapeId!]?.shape;
+  ShapeHandle? get officialExportShape {
+    final entity = entities[officialExportShapeId];
+    return entity?.data['deleted'] == true ? null : entity?.shape;
+  }
 
   factory CadDocument.empty(String projectId) => CadDocument(
     projectId: projectId,
@@ -144,7 +166,7 @@ class CadDocument {
     required String command,
     Iterable<CadDocumentEntity> upsert = const [],
     Iterable<String> remove = const [],
-    String? officialExportShapeId,
+    OfficialExportUpdate officialExport = const OfficialExportUpdate.keep(),
   }) {
     final next = Map<String, CadDocumentEntity>.from(entities);
     for (final id in remove) {
@@ -153,6 +175,8 @@ class CadDocument {
     for (final entity in upsert) {
       next[entity.id] = entity;
     }
+    final requestedExport = officialExport.resolve(officialExportShapeId);
+    final exportEntity = next[requestedExport];
     return CadDocument(
       projectId: projectId,
       entities: Map.unmodifiable(next),
@@ -162,7 +186,9 @@ class CadDocument {
       ]),
       parameters: parameters,
       officialExportShapeId:
-          officialExportShapeId ?? this.officialExportShapeId,
+          exportEntity == null || exportEntity.data['deleted'] == true
+          ? null
+          : requestedExport,
     );
   }
 

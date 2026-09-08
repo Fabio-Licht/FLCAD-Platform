@@ -28,6 +28,7 @@ import 'notification_gate.dart';
 
 part 'cad_runtime_transactions.dart';
 part 'cad_runtime_snapshots.dart';
+part 'cad_runtime_integrity.dart';
 
 class CadRuntime extends ChangeNotifier with NotificationGate {
   CadRuntime({
@@ -401,10 +402,18 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     Iterable<CadDocumentEntity> upsert = const [],
     Iterable<String> remove = const [],
     String? officialExportShapeId,
+    OfficialExportUpdate officialExport = const OfficialExportUpdate.keep(),
   }) {
     final rejection = _admissionError;
     if (rejection != null) return Future<void>.error(rejection);
     try {
+      if (officialExportShapeId != null &&
+          officialExport.action != OfficialExportAction.keep) {
+        throw ArgumentError('Specify only one official export update.');
+      }
+      final exportUpdate = officialExportShapeId == null
+          ? officialExport
+          : OfficialExportUpdate.set(officialExportShapeId);
       final requested = upsert
           .map(_snapshots.captureEntity)
           .toList(growable: false);
@@ -415,7 +424,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           command: command,
           requested: requested,
           removed: removed,
-          officialExportShapeId: officialExportShapeId,
+          officialExport: exportUpdate,
         ),
       );
     } catch (error, stack) {
@@ -428,7 +437,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     required String command,
     List<CadDocumentEntity> requested = const [],
     List<String> removed = const [],
-    String? officialExportShapeId,
+    OfficialExportUpdate officialExport = const OfficialExportUpdate.keep(),
+    Set<String> restoredIds = const {},
     Map<String, FeatureLifecycleState> stateOverrides = const {},
     bool displayOnly = false,
   }) async {
@@ -438,8 +448,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     if (stateOverrides.isEmpty &&
         _snapshots.isNormalized(before) &&
         !removed.any(before.entities.containsKey) &&
-        (officialExportShapeId == null ||
-            officialExportShapeId == before.officialExportShapeId) &&
+        (officialExport.resolve(before.officialExportShapeId) ==
+            before.officialExportShapeId) &&
         requested.every(
           (entity) =>
               before.entities[entity.id] != null &&
@@ -458,11 +468,14 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             .map((entity) => entity.id)
             .toSet()
           ..addAll(stateOverrides.keys);
-    final mutated = before.mutate(
-      command: command,
-      upsert: requested,
-      remove: removed,
-      officialExportShapeId: officialExportShapeId,
+    final mutated = _detachRetiredCollections(
+      before,
+      before.mutate(
+        command: command,
+        upsert: requested,
+        remove: removed,
+        officialExport: officialExport,
+      ),
     );
     final candidate = FeatureLifecycleProjector.normalize(
       mutated,
@@ -471,6 +484,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       touchedIds: touchedIds,
       stateOverrides: stateOverrides,
     );
+    _validateAssociations(candidate, requested);
+    _validateRestoredDependencies(candidate, restoredIds);
     final candidateContent = candidate.toJson()..remove('revisions');
     final previousContent = before.toJson()..remove('revisions');
     if (_sameJson(candidateContent, previousContent)) return;
@@ -1061,7 +1076,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     }
     for (final entity in document.entities.values) {
       if (entity.kind == CadDocumentEntityKind.collection ||
-          entity.data['collectionId'] != null) {
+          entity.data.containsKey('collectionId')) {
         continue;
       }
       missing.add(
@@ -1146,6 +1161,9 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     final collection = document.entities[id];
     if (collection?.kind != CadDocumentEntityKind.collection) {
       throw StateError('Unknown Collection: $id');
+    }
+    if (addMembers.isNotEmpty && collection!.data['deleted'] == true) {
+      throw StateError('Recycled collection cannot receive members: $id');
     }
     final collectionData = Map<String, dynamic>.from(collection!.data);
     if (name != null) collectionData['name'] = name;
@@ -1371,6 +1389,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       final ids = {entityId, ...additionalIds}.toList(growable: false);
       return _enqueue((tx) async {
         final updates = <CadDocumentEntity>[];
+        final restoring = <String>{};
         for (final entityId in ids) {
           final entity =
               _requireDocument().entities[entityId] ??
@@ -1378,11 +1397,17 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           if (entity.data['deleted'] != true) {
             continue;
           }
+          restoring.add(entityId);
           final data = Map<String, dynamic>.from(entity.data)
             ..remove('deleted')
             ..remove('deletedAt');
+          final previousId = data.remove('previousCollectionId');
+          final collection = _requireDocument().entities[previousId];
           data['collectionId'] =
-              data.remove('previousCollectionId') ?? 'collection:original';
+              collection?.kind == CadDocumentEntityKind.collection &&
+                  collection?.data['deleted'] != true
+              ? previousId
+              : null;
           data['sceneVisible'] = true;
           updates.add(
             CadDocumentEntity(
@@ -1398,6 +1423,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           tx,
           command: 'recycle.restore',
           requested: updates,
+          restoredIds: restoring,
         );
       });
     } catch (error, stack) {

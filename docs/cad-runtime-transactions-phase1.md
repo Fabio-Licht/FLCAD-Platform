@@ -199,3 +199,47 @@ member/dependency/restore atomicity, no-op preservation, selection reconciliatio
 physical-payload retention, and a failed transaction's escaped lightweight
 capability awaiting real shutdown drainage. A kernel double rejects any unexpected
 meshing during documentary display/lifecycle updates.
+
+
+## Phase 2A referential integrity correction
+
+Restore validates the complete normalized candidate before projection or writes.
+It traverses lifecycle dependencies and documentary source references, including
+indirect dependencies. Every reached entity must exist and be non-deleted.
+A dependency restored in the same batch is valid regardless of request order.
+The documentary model represents cycles; a cycle involving restoration must be
+restored completely in that batch. Invalid chains or partial cycles reject the
+whole operation without notification, revision, selection or file changes.
+This validates restored reachable graphs, not all legacy/unmigrated producers.
+
+An original collection is usable only if it exists, is a collection and is not
+recycled. Otherwise restore writes an explicit null collectionId: the entity is
+at the document root. Open preserves this explicit root instead of applying the
+legacy default for missing collectionId. Restore never implicitly restores a
+collection. Active here means non-deleted, not the active working-collection flag.
+Member associations through updateCollection or the common mutate helper must
+resolve to a non-deleted collection in the candidate. Removing membership from a
+recycled collection remains allowed. Removing/recycling a collection detaches its
+surviving active members to the root in the same transaction; undo restores them.
+
+OfficialExportUpdate has keep, set(id), and clear constructors. CadDocument.mutate
+uses this explicit three-state operation. CadRuntime.mutate accepts it too; its
+existing officialExportShapeId argument remains a compatibility adapter:
+null/omitted means keep and a String means set. Supplying both a legacy value and
+an explicit non-keep update rejects asynchronously. The runtime converts at
+admission and passes the explicit operation through the common helper.
+Existing import/upsert/transform producers and their consumers keep the adapter;
+no producer is migrated or edited. Constructors/deserializers/snapshot copies
+still carry the stored nullable ID directly, rather than representing an update.
+
+Every actual document delta clears the official ID if its resulting entity is
+missing or deleted, including recycle, purge and batched removal. Removing other
+entities preserves it. The getter returns null safely for legacy missing/deleted
+targets. Cleared state persists as JSON null; Undo/Redo restore the earlier ID and
+replay clearing. Repeated clear on an already-cleared snapshot is a no-op and
+preserves Redo. No native resource is destroyed.
+
+Capability state is private, exposed only through a getter; private _revoke only
+sets it false and is idempotent. There is no setter or reactivation method. The
+escaped-context test verifies assigning active fails and the old callback still
+awaits actual drainage. Active-instance identity checks remain.
