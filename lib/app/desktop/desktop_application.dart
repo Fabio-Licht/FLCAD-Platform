@@ -1263,11 +1263,11 @@ class _OfficialEngineeringWorkspaceState
                 _InspectorProperty(label: 'ID', value: entity.id),
                 _InspectorProperty(
                   label: 'Source Plane',
-                  value: raw['planeId'] ?? 'â€”',
+                  value: raw['planeId'] ?? '—',
                 ),
                 _InspectorProperty(
                   label: 'Source Mesh',
-                  value: raw['meshId'] ?? 'â€”',
+                  value: raw['meshId'] ?? '—',
                 ),
                 _InspectorProperty(
                   label: 'Length',
@@ -1596,7 +1596,7 @@ class _OfficialEngineeringWorkspaceState
                 _InspectorProperty(label: 'Revision', value: raw['revision']),
                 _InspectorProperty(
                   label: 'Kernel',
-                  value: (raw['handle'] as Map?)?['kernelId'] ?? 'â€”',
+                  value: (raw['handle'] as Map?)?['kernelId'] ?? '—',
                 ),
                 for (final item in const [
                   ('valid', 'Valid'),
@@ -1730,14 +1730,14 @@ class _OfficialEngineeringWorkspaceState
                 value:
                     ((raw['parameters'] as Map?)?['topology']
                         as Map?)?['area'] ??
-                    'â€”',
+                    '—',
               ),
               _InspectorProperty(
                 label: 'Perimeter',
                 value:
                     ((raw['parameters'] as Map?)?['topology']
                         as Map?)?['perimeter'] ??
-                    'â€”',
+                    '—',
               ),
               _InspectorProperty(
                 label: 'Edges',
@@ -1764,11 +1764,11 @@ class _OfficialEngineeringWorkspaceState
               _InspectorProperty(label: 'Revision', value: raw['revision']),
               _InspectorProperty(
                 label: 'Kernel',
-                value: (raw['handle'] as Map?)?['kernelId'] ?? 'â€”',
+                value: (raw['handle'] as Map?)?['kernelId'] ?? '—',
               ),
               _InspectorProperty(
                 label: 'Normal',
-                value: (raw['parameters'] as Map?)?['normal'] ?? 'â€”',
+                value: (raw['parameters'] as Map?)?['normal'] ?? '—',
               ),
               _InspectorProperty(label: 'Valid', value: raw['valid']),
               _InspectorProperty(
