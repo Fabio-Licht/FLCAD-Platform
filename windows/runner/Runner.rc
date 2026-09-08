@@ -94,7 +94,7 @@ BEGIN
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "flcad_reverse_ai" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 FLCAD MODEL. All rights reserved." "\0"
-            VALUE "OriginalFilename", "FLCAD Reverse AI.exe" "\0"
+            VALUE "OriginalFilename", "flcad_mobile.exe" "\0"
             VALUE "ProductName", "FLCAD Reverse AI" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
