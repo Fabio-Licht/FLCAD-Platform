@@ -33,10 +33,17 @@ class _CadTransaction {
   final int id, revision, session, lifecycle;
   final CadDocument? document;
   final Directory? directory;
+  bool active = true;
+  bool isActiveFor(CadRuntime runtime) =>
+      active &&
+      identical(owner, runtime) &&
+      identical(runtime._transaction, this) &&
+      runtime._transaction?.id == id;
+
   bool notify = false, boundary = false, committed = false;
 
   void validate() {
-    if (!identical(owner._transaction, this)) {
+    if (!isActiveFor(owner)) {
       throw StateError('Transaction is not owned by this runtime execution.');
     }
     if (owner._closingAdmission ||
@@ -51,21 +58,30 @@ class _CadTransaction {
 }
 
 extension _CadTransactions on CadRuntime {
+  _CadTransaction? get _callingTransaction {
+    final inherited = Zone.current[_transactionZone];
+    return inherited is _CadTransaction && inherited.isActiveFor(this)
+        ? inherited
+        : null;
+  }
+
+  Object? get _admissionError {
+    if (_closingAdmission) return const CadRuntimeShuttingDown();
+    if (_recoveryRequired) {
+      return StateError('CAD runtime requires verified recovery.');
+    }
+    if (_callingTransaction != null) {
+      return StateError('Use the existing transaction internally.');
+    }
+    return null;
+  }
+
   Future<void> _enqueue(
     Future<void> Function(_CadTransaction) action, {
     int? lifecycle,
   }) {
-    if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
-    if (_recoveryRequired) {
-      return Future.error(
-        StateError('CAD runtime requires verified recovery.'),
-      );
-    }
-    if (Zone.current[_transactionZone] == this) {
-      return Future.error(
-        StateError('Use the existing transaction internally.'),
-      );
-    }
+    final rejection = _admissionError;
+    if (rejection != null) return Future<void>.error(rejection);
     final generation = lifecycle ?? _lifecycleGeneration;
     final admittedSession = _sessionIdentity;
     final result = _transactionTail.then((_) async {
@@ -78,8 +94,9 @@ extension _CadTransactions on CadRuntime {
       final tx = _CadTransaction(this, ++_nextTransaction, generation);
       _transaction = tx;
       try {
-        await runZoned(() => action(tx), zoneValues: {_transactionZone: this});
+        await runZoned(() => action(tx), zoneValues: {_transactionZone: tx});
       } finally {
+        tx.active = false;
         _transaction = null;
         // No listener runs while the document/scene/history are being installed.
         // This continuation is outside the transaction Zone: listeners enqueue.
@@ -197,10 +214,10 @@ extension _CadTransactions on CadRuntime {
     if (current == null || directory == null) return;
     await _persistSnapshot(
       tx,
-      _freezeDocument(current),
+      _snapshots.document(current),
       directory,
-      _freezeHistory(_undo),
-      _freezeHistory(_redo),
+      _snapshots.history(_undo),
+      _snapshots.history(_redo),
     );
   }
 
@@ -211,9 +228,9 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> redo,
   ) async {
     tx.validate();
-    candidate = _freezeDocument(candidate);
-    undo = _freezeHistory(undo);
-    redo = _freezeHistory(redo);
+    candidate = _snapshots.document(candidate, normalized: true);
+    undo = _snapshots.history(undo);
+    redo = _snapshots.history(redo);
     final directory = tx.directory!;
     // Validate derived import data before persistence or active publication.
     final imported = _readImport(candidate);
@@ -298,20 +315,21 @@ extension _CadTransactions on CadRuntime {
   ) async {
     final loaded = await _repository.load(projectId, directory);
     tx.validate();
-    final candidate = _freezeDocument(
+    final candidate = _snapshots.document(
       FeatureLifecycleProjector.normalize(
         _ensureProfessionalCollections(
           WorldCoordinateSystem.ensure(_sanitizeLegacyWorkspaceState(loaded)),
         ),
         command: 'project.open.lifecycle-migration',
       ),
+      normalized: true,
     );
     final history = await _repository.loadHistory(directory);
     tx.validate();
-    final undo = _freezeHistory(
+    final undo = _snapshots.history(
       history.undo.where((d) => d.projectId == projectId),
     );
-    final redo = _freezeHistory(
+    final redo = _snapshots.history(
       history.redo.where((d) => d.projectId == projectId),
     );
     final imported = _readImport(candidate);
@@ -344,21 +362,6 @@ extension _CadTransactions on CadRuntime {
   }
 }
 
-// The persistence contract is JSON. Round-tripping detaches all nested data;
-// recursive immutable collections also protect published snapshots from writes.
-Object? _immutableJson(Object? value) {
-  if (value is Map) {
-    return Map<String, dynamic>.unmodifiable({
-      for (final entry in value.entries)
-        entry.key as String: _immutableJson(entry.value),
-    });
-  }
-  if (value is List) {
-    return List<dynamic>.unmodifiable(value.map(_immutableJson));
-  }
-  return value;
-}
-
 Object? _orderedJson(Object? value) {
   if (value is Map) {
     final keys = value.keys.cast<String>().toList()..sort();
@@ -370,46 +373,3 @@ Object? _orderedJson(Object? value) {
 
 bool _sameJson(Object? a, Object? b) =>
     jsonEncode(_orderedJson(a)) == jsonEncode(_orderedJson(b));
-
-CadDocumentEntity _freezeEntity(CadDocumentEntity source) {
-  final json =
-      _immutableJson(jsonDecode(jsonEncode(source.toJson())))
-          as Map<String, dynamic>;
-  final copy = CadDocumentEntity.fromJson(json);
-  final mesh = copy.mesh;
-  return CadDocumentEntity(
-    id: copy.id,
-    kind: copy.kind,
-    shape: copy.shape,
-    data: Map.unmodifiable(copy.data),
-    mesh: mesh == null
-        ? null
-        : KernelMeshHandle(
-            persistentId: mesh.persistentId,
-            kernelId: mesh.kernelId,
-            fingerprint: mesh.fingerprint,
-            vertexCount: mesh.vertexCount,
-            triangleCount: mesh.triangleCount,
-            bounds: mesh.bounds,
-            hasNormals: mesh.hasNormals,
-            degenerateTriangleCount: mesh.degenerateTriangleCount,
-            metadata: Map.unmodifiable(mesh.metadata),
-          ),
-  );
-}
-
-CadDocument _freezeDocument(CadDocument source) => CadDocument(
-  projectId: source.projectId,
-  entities: Map.unmodifiable({
-    for (final entry in source.entities.entries)
-      entry.key: _freezeEntity(entry.value),
-  }),
-  revisions: List.unmodifiable(source.revisions),
-  parameters:
-      _immutableJson(jsonDecode(jsonEncode(source.parameters)))
-          as Map<String, dynamic>,
-  officialExportShapeId: source.officialExportShapeId,
-);
-
-List<CadDocument> _freezeHistory(Iterable<CadDocument> values) =>
-    List.unmodifiable(values.map(_freezeDocument));

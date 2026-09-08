@@ -27,6 +27,7 @@ import 'world_coordinate_system.dart';
 import 'notification_gate.dart';
 
 part 'cad_runtime_transactions.dart';
+part 'cad_runtime_snapshots.dart';
 
 class CadRuntime extends ChangeNotifier with NotificationGate {
   CadRuntime({
@@ -66,6 +67,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   final Map<String, Object?> _state = {};
 
   // Phase 1: only the six queued entry points participate in this protocol.
+  final _snapshots = _CadSnapshots();
   Future<void> _transactionTail = Future<void>.value();
   _CadTransaction? _transaction;
   int _nextTransaction = 0, _runtimeRevision = 0, _lifecycleGeneration = 0;
@@ -158,7 +160,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
 
   Future<void> open(String projectId, Directory directory) {
     if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
-    if (Zone.current[_transactionZone] == this) {
+    if (_callingTransaction != null) {
       return Future.error(StateError('Reentrant runtime transaction.'));
     }
     final generation = ++_lifecycleGeneration;
@@ -170,7 +172,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
 
   Future<void> close() {
     if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
-    if (Zone.current[_transactionZone] == this) {
+    if (_callingTransaction != null) {
       return Future.error(StateError('Reentrant runtime transaction.'));
     }
     final generation = ++_lifecycleGeneration;
@@ -399,35 +401,58 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     Iterable<String> remove = const [],
     String? officialExportShapeId,
   }) {
-    final requested = upsert.map(_freezeEntity).toList(growable: false);
-    final removed = remove.toList(growable: false);
-    return _enqueue((tx) async {
-      final before = _freezeDocument(_requireDocument());
-      final touchedIds = requested
-          .where((entity) {
-            final previous = before.entities[entity.id];
-            return previous == null ||
-                _definitionJson(previous) != _definitionJson(entity);
-          })
-          .map((entity) => entity.id)
-          .toSet();
-      final mutated = before.mutate(
-        command: command,
-        upsert: requested,
-        remove: removed,
-        officialExportShapeId: officialExportShapeId,
-      );
-      final candidate = FeatureLifecycleProjector.normalize(
-        mutated,
-        command: command,
-        previousDocument: before,
-        touchedIds: touchedIds,
-      );
-      final candidateContent = candidate.toJson()..remove('revisions');
-      final previousContent = before.toJson()..remove('revisions');
-      if (_sameJson(candidateContent, previousContent)) return;
-      await _commitDocument(tx, candidate, [..._undo, before], const []);
-    });
+    final rejection = _admissionError;
+    if (rejection != null) return Future<void>.error(rejection);
+    try {
+      final requested = upsert
+          .map(_snapshots.captureEntity)
+          .toList(growable: false);
+      final removed = remove.toList(growable: false);
+      return _enqueue((tx) async {
+        final before = _snapshots.document(_requireDocument());
+        // Only known normalized snapshots can bypass normalization safely.
+        if (_snapshots.isNormalized(before) &&
+            !removed.any(before.entities.containsKey) &&
+            (officialExportShapeId == null ||
+                officialExportShapeId == before.officialExportShapeId) &&
+            requested.every(
+              (entity) =>
+                  before.entities[entity.id] != null &&
+                  _sameJson(
+                    before.entities[entity.id]!.toJson(),
+                    entity.toJson(),
+                  ),
+            )) {
+          return;
+        }
+        final touchedIds = requested
+            .where((entity) {
+              final previous = before.entities[entity.id];
+              return previous == null ||
+                  _definitionJson(previous) != _definitionJson(entity);
+            })
+            .map((entity) => entity.id)
+            .toSet();
+        final mutated = before.mutate(
+          command: command,
+          upsert: requested,
+          remove: removed,
+          officialExportShapeId: officialExportShapeId,
+        );
+        final candidate = FeatureLifecycleProjector.normalize(
+          mutated,
+          command: command,
+          previousDocument: before,
+          touchedIds: touchedIds,
+        );
+        final candidateContent = candidate.toJson()..remove('revisions');
+        final previousContent = before.toJson()..remove('revisions');
+        if (_sameJson(candidateContent, previousContent)) return;
+        await _commitDocument(tx, candidate, [..._undo, before], const []);
+      });
+    } catch (error, stack) {
+      return Future<void>.error(error, stack);
+    }
   }
 
   Future<void> transitionFeature(
@@ -1394,11 +1419,24 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     return (imported, geometry);
   }
 
-  /// Internal callers acknowledge the request; only external callers drain.
+  /// Public completion always means drainage, never internal acknowledgement.
   Future<void> shutdown() {
+    final tx = _callingTransaction;
+    if (tx != null) {
+      _requestTransactionShutdown(tx);
+      return Future<void>.error(
+        StateError(
+          'The active transaction cannot await its own shutdown drainage.',
+        ),
+      );
+    }
     _requestShutdown();
-    if (Zone.current[_transactionZone] == this) return Future<void>.value();
     return _shutdownFuture!;
+  }
+
+  void _requestTransactionShutdown(_CadTransaction tx) {
+    if (!tx.isActiveFor(this)) throw const StaleCadTransaction();
+    _requestShutdown();
   }
 
   void _requestShutdown() {

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
@@ -328,13 +329,13 @@ void main() {
 
   for (final externalFirst in [false, true]) {
     test(
-      'internal shutdown acknowledges without self-wait (external=$externalFirst)',
+      'active transaction cannot await public drainage (external=$externalFirst)',
       () async {
         final gate = Gate();
         final events = <String>[];
         repository.onSave = (_) async {
           await gate.wait();
-          await runtime.shutdown();
+          await expectLater(runtime.shutdown(), throwsStateError);
           events.add('producer-returned');
           // Dependency remains usable until this transaction leaves the queue.
           runtime.scene.addListener(() {});
@@ -366,6 +367,235 @@ void main() {
       },
     );
   }
+
+  test(
+    'escaped revoked context awaits another transaction before shutdown completes',
+    () async {
+      final resumeOld = Completer<void>();
+      final requested = Completer<void>();
+      late Future<void> oldCallback;
+      repository.onSave = (_) async {
+        oldCallback = resumeOld.future.then((_) {
+          final drainage = runtime.shutdown();
+          requested.complete();
+          return drainage;
+        });
+      };
+      await add('one');
+      final secondGate = Gate();
+      repository.onSave = (_) => secondGate.wait();
+      final second = add('two');
+      final cancelled = expectLater(
+        second,
+        throwsA(isA<StaleCadTransaction>()),
+      );
+      await secondGate.entered.future;
+      var drained = false;
+      final callbackCompleted = oldCallback.then((_) => drained = true);
+      resumeOld.complete();
+      await requested.future;
+      expect(drained, isFalse);
+      runtime.scene.addListener(
+        () {},
+      ); // Still owned until producer has returned.
+      await expectLater(add('three'), throwsA(isA<CadRuntimeShuttingDown>()));
+      final external = runtime.shutdown();
+      expect(runtime.shutdown(), same(external));
+      secondGate.release.complete();
+      await cancelled;
+      await callbackCompleted;
+      await external;
+      runtime.dispose();
+      await runtime.shutdown();
+      expect(() => runtime.scene.addListener(() {}), throwsFlutterError);
+    },
+  );
+
+  test(
+    'revoked context can enqueue ordinary work without false reentry',
+    () async {
+      late Zone oldZone;
+      repository.onSave = (_) async => oldZone = Zone.current;
+      await add('one');
+      repository.onSave = null;
+      await oldZone.run(() => add('two'));
+      expect(runtime.document!.entities.containsKey('two'), isTrue);
+    },
+  );
+
+  test(
+    'capability belonging to another runtime never acknowledges its drainage',
+    () async {
+      final otherRepository = Repository();
+      final other = CadRuntime(
+        kernels: KernelManager(),
+        repository: otherRepository,
+      );
+      await other.open('B', b);
+      final gate = Gate();
+      otherRepository.onSave = (_) => gate.wait();
+      final otherWrite = other.mutate(
+        command: 'other',
+        upsert: [point('other')],
+      );
+      final cancelled = expectLater(
+        otherWrite,
+        throwsA(isA<StaleCadTransaction>()),
+      );
+      await gate.entered.future;
+      final request = Completer<void>();
+      var drained = false;
+      repository.onSave = (_) async {
+        final future = other.shutdown();
+        request.complete();
+        await future;
+        drained = true;
+      };
+      final ownWrite = add('one');
+      await request.future;
+      expect(drained, isFalse);
+      gate.release.complete();
+      await cancelled;
+      await ownWrite;
+      await other.shutdown();
+      expect(drained, isTrue);
+      expect(runtime.document!.entities.containsKey('one'), isTrue);
+    },
+  );
+
+  for (final invalidKind in ['nan', 'infinity', 'cycle', 'object']) {
+    test(
+      'invalid $invalidKind rejects only through Future and does not enter queue',
+      () async {
+        final entity = point('invalid');
+        final cycle = <Object?>[];
+        cycle.add(cycle);
+        entity.data['invalid'] = switch (invalidKind) {
+          'nan' => double.nan,
+          'infinity' => double.infinity,
+          'cycle' => cycle,
+          _ => Object(),
+        };
+        final before = runtime.document;
+        final revision = runtime.runtimeRevision;
+        final scenes = runtime.scene.entities.toList();
+        final files = await repository.captureFiles(a);
+        Object? error;
+        StackTrace? stack;
+        late Future<void> pending;
+        expect(() {
+          pending = runtime.mutate(command: 'invalid', upsert: [entity]);
+        }, returnsNormally);
+        await pending.catchError((Object e, StackTrace s) {
+          error = e;
+          stack = s;
+        });
+        expect(error, isA<JsonUnsupportedObjectError>());
+        expect(stack.toString(), contains('captureEntity'));
+        expect(stack.toString(), contains('json'));
+        expect(runtime.document, same(before));
+        expect(runtime.scene.entities.toList(), scenes);
+        expect(runtime.runtimeRevision, revision);
+        expect(runtime.canUndo, isFalse);
+        expect(await repository.captureFiles(a), files);
+        await add('valid');
+        expect(runtime.document!.entities.containsKey('valid'), isTrue);
+        final shutdown = runtime.shutdown();
+        await expectLater(
+          runtime.mutate(command: 'invalid', upsert: [entity]),
+          throwsA(isA<CadRuntimeShuttingDown>()),
+        );
+        await shutdown;
+      },
+    );
+  }
+
+  test(
+    'capture preserves original error and stack from a throwing public producer',
+    () async {
+      final error = StateError('original producer');
+      final stack = StackTrace.current;
+      Iterable<CadDocumentEntity> inputs() sync* {
+        Error.throwWithStackTrace(error, stack);
+      }
+
+      Object? caught;
+      StackTrace? caughtStack;
+      await runtime.mutate(command: 'capture', upsert: inputs()).catchError((
+        Object e,
+        StackTrace s,
+      ) {
+        caught = e;
+        caughtStack = s;
+      });
+      expect(caught, same(error));
+      expect(caughtStack.toString(), stack.toString());
+      await add('valid');
+    },
+  );
+
+  test(
+    'owned immutable history and large unchanged geometry are reused by identity',
+    () async {
+      final nodes = List<int>.generate(12000, (i) => i);
+      final input = point('large');
+      input.data['sceneGeometry']['nodes'] = nodes;
+      await runtime.mutate(command: 'large', upsert: [input]);
+      final first = runtime.document!;
+      final originalNodes =
+          first.entities['large']!.data['sceneGeometry']['nodes'];
+      nodes[0] = -99;
+      expect((originalNodes as List).first, 0);
+      final oldSnapshots = <CadDocument>[first];
+      for (var i = 0; i < 4; i++) {
+        await add('small-$i');
+        final history = repository.histories.last.undo;
+        for (var index = 0; index < oldSnapshots.length; index++) {
+          expect(history[index + 1], same(oldSnapshots[index]));
+        }
+        expect(
+          runtime.document!.entities['large']!.data['sceneGeometry']['nodes'],
+          same(originalNodes),
+        );
+        oldSnapshots.add(runtime.document!);
+      }
+      final beforeNoop = runtime.document;
+      final historyBefore = repository.histories.last;
+      final saves = repository.saved.length;
+      await runtime.mutate(command: 'empty');
+      expect(runtime.document, same(beforeNoop));
+      expect(repository.saved.length, saves);
+      expect(repository.histories.last, same(historyBefore));
+      expect(() => originalNodes.add(1), throwsUnsupportedError);
+      expect(
+        () => first.entities['large']!.data['new'] = true,
+        throwsUnsupportedError,
+      );
+      await runtime.undoDocument();
+      await runtime.redoDocument();
+      expect(
+        runtime.document!.entities['large']!.data['sceneGeometry']['nodes'],
+        same(originalNodes),
+      );
+      expect(
+        (await repository.load('A', a)).toJson(),
+        runtime.document!.toJson(),
+      );
+      // A consumer cannot reuse our authority: even a published entity re-entering
+      // through mutate is captured afresh when the operation genuinely changes it.
+      final changed = CadDocumentEntity.fromJson(
+        first.entities['large']!.toJson(),
+      );
+      changed.data['label'] = 'changed';
+      final revision = runtime.runtimeRevision;
+      await runtime.mutate(command: 'real', upsert: [changed]);
+      expect(runtime.runtimeRevision, revision + 1);
+      expect(
+        runtime.document!.entities['large']!.data['sceneGeometry']['nodes'],
+        isNot(same(originalNodes)),
+      );
+    },
+  );
 
   test('work admitted during open cannot retarget the new document', () async {
     final gate = Gate();
