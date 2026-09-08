@@ -25,6 +25,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     required this.scene,
     required this.camera,
     this.onPick,
+    this.onNormalTap,
     this.onSketchSupportPick,
     this.onSketchEntityPick,
     this.onSketchEntityDoublePick,
@@ -48,6 +49,9 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final CadSceneGraph scene;
   final CadCameraController camera;
   final ValueChanged<CadViewportPick>? onPick;
+
+  /// Overrides only normal picking; Sketch gestures retain priority.
+  final ValueChanged<Offset>? onNormalTap;
   final ValueChanged<CadViewportPick>? onSketchSupportPick;
   final ValueChanged<CadViewportPick>? onSketchEntityPick;
   final ValueChanged<CadViewportPick>? onSketchEntityDoublePick;
@@ -134,6 +138,48 @@ class _ProfessionalCadViewportWidgetState
     onNavigationChanged: widget.onNavigationChanged,
     onRotationCenterSet: _showRotationCenterMarker,
   );
+
+  bool get _hasSketchGesture =>
+      widget.onSketchEntityPick != null ||
+      widget.onSketchSupportPick != null ||
+      widget.onSketchTap != null ||
+      widget.onSketchEntityDoublePick != null ||
+      widget.onSketchEntityDragStart != null;
+
+  void _handleTap(TapUpDetails event) {
+    if (_hasSketchGesture) {
+      final hit = picking.pick(
+        position: event.localPosition,
+        camera: widget.camera,
+        scene: widget.scene,
+      );
+      if (hit != null &&
+          widget.scene.find(hit.entityId)?.kind == CadSceneEntityKind.sketch &&
+          widget.onSketchEntityPick != null) {
+        widget.onSketchEntityPick!(hit);
+      } else if (widget.onSketchSupportPick != null) {
+        if (hit != null) widget.onSketchSupportPick!(hit);
+      } else {
+        widget.onSketchTap?.call(event.localPosition);
+      }
+      return;
+    }
+    if (!widget.enablePicking) return;
+    if (widget.onNormalTap != null) {
+      widget.onNormalTap!(event.localPosition);
+      return;
+    }
+    if (widget.onPick == null) return;
+    final hit = picking.pick(
+      position: event.localPosition,
+      camera: widget.camera,
+      scene: widget.scene,
+    );
+    if (hit != null) {
+      navigation.focus(hit.hit.point);
+      widget.onPick!(hit);
+    }
+  }
 
   void _orbitFromViewCube(Offset delta) {
     const calibration = NavigationProfileCalibration.geomagicCatia;
@@ -332,48 +378,12 @@ class _ProfessionalCadViewportWidgetState
                         widget.onSketchEntityDoublePick!(hit);
                       }
                     },
-              onTapUp: widget.onSketchTap != null
-                  ? (event) {
-                      final hit = picking.pick(
-                        position: event.localPosition,
-                        camera: widget.camera,
-                        scene: widget.scene,
-                      );
-                      final existing = hit == null
-                          ? null
-                          : widget.scene.find(hit.entityId);
-                      if (hit != null &&
-                          existing?.kind == CadSceneEntityKind.sketch &&
-                          widget.onSketchEntityPick != null) {
-                        widget.onSketchEntityPick!(hit);
-                      } else {
-                        widget.onSketchTap!(event.localPosition);
-                      }
-                    }
-                  : widget.onSketchSupportPick != null
-                  ? (event) {
-                      final hit = picking.pick(
-                        position: event.localPosition,
-                        camera: widget.camera,
-                        scene: widget.scene,
-                      );
-                      if (hit != null) widget.onSketchSupportPick!(hit);
-                    }
-                  : !widget.enablePicking
-                  ? null
-                  : widget.onPick == null
-                  ? null
-                  : (event) {
-                      final hit = picking.pick(
-                        position: event.localPosition,
-                        camera: widget.camera,
-                        scene: widget.scene,
-                      );
-                      if (hit != null) {
-                        navigation.focus(hit.hit.point);
-                        widget.onPick!(hit);
-                      }
-                    },
+              onTapUp:
+                  _hasSketchGesture ||
+                      (widget.enablePicking &&
+                          (widget.onNormalTap != null || widget.onPick != null))
+                  ? _handleTap
+                  : null,
               onSecondaryTapUp: widget.onSketchSecondaryTap == null
                   ? null
                   : (_) => widget.onSketchSecondaryTap!(),

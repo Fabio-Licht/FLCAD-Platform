@@ -21,6 +21,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     required this.scene,
     required this.camera,
     this.onPick,
+    this.nativeBridgeFactory,
     this.onSketchSupportPick,
     this.onSketchEntityPick,
     this.onSketchEntityDoublePick,
@@ -36,6 +37,8 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.operationalSelection,
   });
 
+  /// The viewport owns and disposes the bridge returned by this factory.
+  final NativeViewportBridge Function()? nativeBridgeFactory;
   final CadSceneGraph scene;
   final CadCameraController camera;
   final ValueChanged<CadViewportPick>? onPick;
@@ -61,7 +64,8 @@ class IntegratedCadViewportWidget extends StatefulWidget {
 
 class _IntegratedCadViewportWidgetState
     extends State<IntegratedCadViewportWidget> {
-  final NativeViewportBridge native = NativeViewportBridge();
+  late final NativeViewportBridge native;
+  int _tapGeneration = 0;
   late final OperationalEntityRegistry operationalEntities;
   late final OperationalEntityResolver operationalResolver;
   late final OperationalSelectionManager operationalSelection;
@@ -81,6 +85,7 @@ class _IntegratedCadViewportWidgetState
   Offset? _lastHoverPosition;
 
   void _setRenderStyle(CadRenderStyle style) {
+    _tapGeneration++;
     setState(() {
       _renderStyle = style;
       // The native pipeline currently provides the optimized opaque shaded
@@ -91,6 +96,47 @@ class _IntegratedCadViewportWidgetState
           ? ViewportBackend.nativeGpu
           : ViewportBackend.flutterCanvas;
     });
+  }
+
+  bool _canPublishTap(int token, CadSceneGraph scene) =>
+      mounted &&
+      token == _tapGeneration &&
+      identical(scene, widget.scene) &&
+      backend == ViewportBackend.nativeGpu &&
+      native.available &&
+      !_nativeNavigating;
+
+  Future<void> _pickNativeTap(Offset position) async {
+    final token = ++_tapGeneration;
+    final scene = widget.scene;
+    final additive = HardwareKeyboard.instance.isShiftPressed;
+    final toggle = HardwareKeyboard.instance.isControlPressed;
+    if (!_canPublishTap(token, scene)) return;
+    final result = await native.pick(position.dx, position.dy);
+    if (!_canPublishTap(token, scene)) return;
+    // No hit (or an unresolvable hit) leaves selection unchanged, just as
+    // Canvas picking does. Never substitute the last hover for this click.
+    if (result == null || result.kind == NativePickKind.none) return;
+    final resolved = await operationalResolver.resolve(result, scene);
+    if (!_canPublishTap(token, scene) || resolved == null) return;
+    operationalSelection.select(
+      resolved.entity.id,
+      additive: additive,
+      toggle: toggle,
+    );
+    final point = result.point;
+    if (point.length >= 3 && point.take(3).every((value) => value.isFinite)) {
+      widget.onPick?.call(
+        CadViewportPick(
+          entityId: resolved.entity.ownerId,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(point[0], point[1], point[2]),
+            distance: 0,
+          ),
+        ),
+      );
+    }
   }
 
   Future<void> _updateNativeHover(Offset position) async {
@@ -135,6 +181,7 @@ class _IntegratedCadViewportWidgetState
   @override
   void initState() {
     super.initState();
+    native = widget.nativeBridgeFactory?.call() ?? NativeViewportBridge();
     native.addListener(_changed);
     operationalEntities =
         widget.operationalEntities ?? OperationalEntityRegistry();
@@ -155,21 +202,26 @@ class _IntegratedCadViewportWidgetState
   void didUpdateWidget(covariant IntegratedCadViewportWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.scene != widget.scene) {
+      _tapGeneration++;
+      operationalResolver.prepare(widget.scene);
       oldWidget.scene.removeListener(_sceneChanged);
       widget.scene.addListener(_sceneChanged);
       if (native.available) native.sendInitial(widget.scene);
     }
     if (oldWidget.camera != widget.camera) {
+      _tapGeneration++;
       oldWidget.camera.removeListener(_cameraChanged);
       widget.camera.addListener(_cameraChanged);
     }
   }
 
   void _changed() {
+    if (!native.available) _tapGeneration++;
     if (mounted) setState(() {});
   }
 
   void _sceneChanged() {
+    _tapGeneration++;
     operationalResolver.prepare(widget.scene);
     if (!native.available) return;
     _deltaDebounce?.cancel();
@@ -179,6 +231,7 @@ class _IntegratedCadViewportWidgetState
   }
 
   void _cameraChanged() {
+    _tapGeneration++;
     CameraPanAudit.record(
       'Componente IntegratedCadViewportWidget._cameraChanged consome\n'
       '${widget.camera.auditState()}',
@@ -230,6 +283,7 @@ class _IntegratedCadViewportWidgetState
       await native.setCamera(widget.camera);
       _operationalSelectionChanged();
     } else if (mounted) {
+      _tapGeneration++;
       setState(() => backend = ViewportBackend.flutterCanvas);
     }
     _initializing = false;
@@ -237,6 +291,7 @@ class _IntegratedCadViewportWidgetState
 
   @override
   void dispose() {
+    _tapGeneration++;
     _deltaDebounce?.cancel();
     widget.scene.removeListener(_sceneChanged);
     widget.camera.removeListener(_cameraChanged);
@@ -286,165 +341,136 @@ class _IntegratedCadViewportWidgetState
                 });
               }
             : null,
-        child: GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTapUp: useNative && _operationalHover != null
-              ? (_) {
-                  final resolved = _operationalHover!;
-                  operationalSelection.select(
-                    resolved.entity.id,
-                    additive: HardwareKeyboard.instance.isShiftPressed,
-                    toggle: HardwareKeyboard.instance.isControlPressed,
-                  );
-                  final point = _nativeHover?.point;
-                  if (point != null && point.length >= 3) {
-                    widget.onPick?.call(
-                      CadViewportPick(
-                        entityId: resolved.entity.ownerId,
-                        hit: MeshHit(
-                          triangleIndex: -1,
-                          point: Vector3(point[0], point[1], point[2]),
-                          distance: 0,
-                        ),
-                      ),
-                    );
-                  }
-                }
-              : null,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: useNative
-                    ? Texture(
-                        textureId: native.textureId!,
-                        filterQuality: FilterQuality.none,
-                      )
-                    : const SizedBox.shrink(),
-              ),
-              Positioned.fill(
-                child: ProfessionalCadViewportWidget(
-                  scene: widget.scene,
-                  camera: widget.camera,
-                  onPick: widget.onPick,
-                  onSketchSupportPick: widget.onSketchSupportPick,
-                  onSketchEntityPick: widget.onSketchEntityPick,
-                  onSketchEntityDoublePick: widget.onSketchEntityDoublePick,
-                  onSketchTap: widget.onSketchTap,
-                  onSketchSecondaryTap: widget.onSketchSecondaryTap,
-                  onSketchHover: widget.onSketchHover,
-                  onSketchEntityDragStart: widget.onSketchEntityDragStart,
-                  onSketchEntityDragUpdate: widget.onSketchEntityDragUpdate,
-                  onSketchEntityDragEnd: widget.onSketchEntityDragEnd,
-                  showSketchGrid: widget.showSketchGrid,
-                  renderStyle: _renderStyle,
-                  onRenderStyleChanged: _setRenderStyle,
-                  showRenderControls: false,
-                  renderMeshes: !useNative,
-                  paintBackground: !useNative,
-                  // Picking remains on in the transparent Flutter interaction
-                  // layer even when meshes are rendered by the native GPU.
-                  // Sketch profiles and construction geometry do not exist in
-                  // the native triangle-only pick buffer.
-                  enablePicking: true,
-                  onNavigationChanged: useNative
-                      ? (navigating) {
-                          _nativeNavigating = navigating;
-                          if (navigating) {
-                            _pendingHover = null;
-                            native.clearHover();
-                            if (_nativeHover != null) {
-                              setState(() {
-                                _nativeHover = null;
-                                _operationalHover = null;
-                              });
-                            }
-                          } else if (_lastHoverPosition != null) {
-                            _updateNativeHover(_lastHoverPosition!);
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: useNative
+                  ? Texture(
+                      textureId: native.textureId!,
+                      filterQuality: FilterQuality.none,
+                    )
+                  : const SizedBox.shrink(),
+            ),
+            Positioned.fill(
+              child: ProfessionalCadViewportWidget(
+                scene: widget.scene,
+                camera: widget.camera,
+                onPick: widget.onPick,
+                onNormalTap: useNative ? _pickNativeTap : null,
+                onSketchSupportPick: widget.onSketchSupportPick,
+                onSketchEntityPick: widget.onSketchEntityPick,
+                onSketchEntityDoublePick: widget.onSketchEntityDoublePick,
+                onSketchTap: widget.onSketchTap,
+                onSketchSecondaryTap: widget.onSketchSecondaryTap,
+                onSketchHover: widget.onSketchHover,
+                onSketchEntityDragStart: widget.onSketchEntityDragStart,
+                onSketchEntityDragUpdate: widget.onSketchEntityDragUpdate,
+                onSketchEntityDragEnd: widget.onSketchEntityDragEnd,
+                showSketchGrid: widget.showSketchGrid,
+                renderStyle: _renderStyle,
+                onRenderStyleChanged: _setRenderStyle,
+                showRenderControls: false,
+                renderMeshes: !useNative,
+                paintBackground: !useNative,
+                // Picking remains on in the transparent Flutter interaction
+                // layer even when meshes are rendered by the native GPU.
+                // Sketch profiles and construction geometry do not exist in
+                // the native triangle-only pick buffer.
+                enablePicking: true,
+                onNavigationChanged: useNative
+                    ? (navigating) {
+                        _nativeNavigating = navigating;
+                        if (navigating) {
+                          _tapGeneration++;
+                          _pendingHover = null;
+                          native.clearHover();
+                          if (_nativeHover != null) {
+                            setState(() {
+                              _nativeHover = null;
+                              _operationalHover = null;
+                            });
                           }
+                        } else if (_lastHoverPosition != null) {
+                          _updateNativeHover(_lastHoverPosition!);
                         }
-                      : null,
-                ),
-              ),
-              Positioned(
-                top: 10,
-                left: 10,
-                child: SegmentedButton<CadRenderStyle>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(
-                      value: CadRenderStyle.shaded,
-                      label: Text('Shaded'),
-                    ),
-                    ButtonSegment(
-                      value: CadRenderStyle.wireframe,
-                      label: Text('Wireframe'),
-                    ),
-                    ButtonSegment(
-                      value: CadRenderStyle.hiddenLine,
-                      label: Text('Arestas'),
-                    ),
-                    ButtonSegment(
-                      value: CadRenderStyle.transparent,
-                      label: Text('Transparência'),
-                    ),
-                  ],
-                  selected: {_renderStyle},
-                  onSelectionChanged: (value) => _setRenderStyle(value.first),
-                ),
-              ),
-              Positioned(
-                top: 10,
-                right: 10,
-                child: SegmentedButton<ViewportBackend>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(
-                      value: ViewportBackend.flutterCanvas,
-                      label: Text('Flutter Canvas'),
-                    ),
-                    ButtonSegment(
-                      value: ViewportBackend.nativeGpu,
-                      label: Text('Native GPU'),
-                    ),
-                  ],
-                  selected: {backend},
-                  onSelectionChanged: (selection) {
-                    final next = selection.first;
-                    setState(() {
-                      backend = next;
-                      if (next == ViewportBackend.nativeGpu) {
-                        _renderStyle = CadRenderStyle.shaded;
                       }
-                    });
-                    if (next == ViewportBackend.nativeGpu) _ensureNative(size);
-                  },
-                ),
+                    : null,
               ),
-              if (useNative &&
-                  !_nativeNavigating &&
-                  _operationalHover != null &&
-                  _lastHoverPosition != null)
-                Positioned(
-                  left: (_lastHoverPosition!.dx + 16)
-                      .clamp(
-                        8.0,
-                        (size.width - 236).clamp(8.0, double.infinity),
-                      )
-                      .toDouble(),
-                  top: (_lastHoverPosition!.dy + 18)
-                      .clamp(
-                        8.0,
-                        (size.height - 112).clamp(8.0, double.infinity),
-                      )
-                      .toDouble(),
-                  child: IgnorePointer(
-                    child: _OperationalHoverCard(
-                      entity: _operationalHover!.entity,
-                    ),
+            ),
+            Positioned(
+              top: 10,
+              left: 10,
+              child: SegmentedButton<CadRenderStyle>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                    value: CadRenderStyle.shaded,
+                    label: Text('Shaded'),
+                  ),
+                  ButtonSegment(
+                    value: CadRenderStyle.wireframe,
+                    label: Text('Wireframe'),
+                  ),
+                  ButtonSegment(
+                    value: CadRenderStyle.hiddenLine,
+                    label: Text('Arestas'),
+                  ),
+                  ButtonSegment(
+                    value: CadRenderStyle.transparent,
+                    label: Text('Transparência'),
+                  ),
+                ],
+                selected: {_renderStyle},
+                onSelectionChanged: (value) => _setRenderStyle(value.first),
+              ),
+            ),
+            Positioned(
+              top: 10,
+              right: 10,
+              child: SegmentedButton<ViewportBackend>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                    value: ViewportBackend.flutterCanvas,
+                    label: Text('Flutter Canvas'),
+                  ),
+                  ButtonSegment(
+                    value: ViewportBackend.nativeGpu,
+                    label: Text('Native GPU'),
+                  ),
+                ],
+                selected: {backend},
+                onSelectionChanged: (selection) {
+                  final next = selection.first;
+                  _tapGeneration++;
+                  setState(() {
+                    backend = next;
+                    if (next == ViewportBackend.nativeGpu) {
+                      _renderStyle = CadRenderStyle.shaded;
+                    }
+                  });
+                  if (next == ViewportBackend.nativeGpu) _ensureNative(size);
+                },
+              ),
+            ),
+            if (useNative &&
+                !_nativeNavigating &&
+                _operationalHover != null &&
+                _lastHoverPosition != null)
+              Positioned(
+                left: (_lastHoverPosition!.dx + 16)
+                    .clamp(8.0, (size.width - 236).clamp(8.0, double.infinity))
+                    .toDouble(),
+                top: (_lastHoverPosition!.dy + 18)
+                    .clamp(8.0, (size.height - 112).clamp(8.0, double.infinity))
+                    .toDouble(),
+                child: IgnorePointer(
+                  child: _OperationalHoverCard(
+                    entity: _operationalHover!.entity,
                   ),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       );
     },
