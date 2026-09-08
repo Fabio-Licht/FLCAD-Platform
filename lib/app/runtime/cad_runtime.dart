@@ -24,20 +24,26 @@ import '../engineering_bridge/selection/geometry_selection_manager.dart';
 import '../operational_entities/operational_entity.dart';
 import '../operational_entities/operational_entity_resolver.dart';
 import 'world_coordinate_system.dart';
+import 'notification_gate.dart';
 
 part 'cad_runtime_transactions.dart';
 
-class CadRuntime extends ChangeNotifier {
+class CadRuntime extends ChangeNotifier with NotificationGate {
   CadRuntime({
     required this.kernels,
     CadDocumentRepository repository = const CadDocumentRepository(),
   }) : _repository = repository,
        scene = CadSceneGraph() {
+    notificationAllowed = () => !_closingAdmission;
+    scene.notificationAllowed = () => !_closingAdmission;
     projection = CadDocumentSceneProjection(scene);
-    geometrySelection = GeometrySelectionManager(scene);
-    operationalEntities = OperationalEntityRegistry();
+    geometrySelection = GeometrySelectionManager(scene)
+      ..notificationAllowed = () => !_closingAdmission;
+    operationalEntities = OperationalEntityRegistry()
+      ..notificationAllowed = () => !_closingAdmission;
     operationalResolver = OperationalEntityResolver(operationalEntities);
-    operationalSelection = OperationalSelectionManager(operationalEntities);
+    operationalSelection = OperationalSelectionManager(operationalEntities)
+      ..notificationAllowed = () => !_closingAdmission;
   }
 
   final CadDocumentRepository _repository;
@@ -66,6 +72,7 @@ class CadRuntime extends ChangeNotifier {
   int _sessionIdentity = 0;
   bool _sessionActive = false, _closingAdmission = false;
   bool _recoveryRequired = false, _notifierDisposed = false;
+  bool _shutdownFinished = false;
   Future<void>? _shutdownFuture;
   void _notifyTransactionComplete() => notifyListeners();
 
@@ -392,10 +399,10 @@ class CadRuntime extends ChangeNotifier {
     Iterable<String> remove = const [],
     String? officialExportShapeId,
   }) {
-    final requested = upsert.toList(growable: false);
+    final requested = upsert.map(_freezeEntity).toList(growable: false);
     final removed = remove.toList(growable: false);
     return _enqueue((tx) async {
-      final before = _requireDocument();
+      final before = _freezeDocument(_requireDocument());
       final touchedIds = requested
           .where((entity) {
             final previous = before.entities[entity.id];
@@ -416,6 +423,9 @@ class CadRuntime extends ChangeNotifier {
         previousDocument: before,
         touchedIds: touchedIds,
       );
+      final candidateContent = candidate.toJson()..remove('revisions');
+      final previousContent = before.toJson()..remove('revisions');
+      if (_sameJson(candidateContent, previousContent)) return;
       await _commitDocument(tx, candidate, [..._undo, before], const []);
     });
   }
@@ -1342,7 +1352,7 @@ class CadRuntime extends ChangeNotifier {
     final data = Map<String, dynamic>.from(json['data'] as Map)
       ..remove(FeatureLifecycleContract.dataKey);
     json['data'] = data;
-    return jsonEncode(json);
+    return jsonEncode(_orderedJson(json));
   }
 
   void _restoreActiveImport() {
@@ -1384,14 +1394,15 @@ class CadRuntime extends ChangeNotifier {
     return (imported, geometry);
   }
 
-  /// Stops admission immediately; dependency disposal waits for admitted work.
+  /// Internal callers acknowledge the request; only external callers drain.
   Future<void> shutdown() {
-    if (_shutdownFuture != null) return _shutdownFuture!;
-    if (Zone.current[_transactionZone] == this && !_notifierDisposed) {
-      return Future.error(
-        StateError('Cannot await shutdown inside a transaction.'),
-      );
-    }
+    _requestShutdown();
+    if (Zone.current[_transactionZone] == this) return Future<void>.value();
+    return _shutdownFuture!;
+  }
+
+  void _requestShutdown() {
+    if (_shutdownFuture != null) return;
     _closingAdmission = true;
     _lifecycleGeneration++;
     _sessionActive = false;
@@ -1404,18 +1415,21 @@ class CadRuntime extends ChangeNotifier {
             operationalEntities.dispose();
             geometrySelection.dispose();
             scene.dispose();
+            _shutdownFinished = true;
+            dispose();
           })
           .then(done.complete, onError: done.completeError),
     );
-    dispose();
-    return _shutdownFuture!;
   }
 
   @override
   void dispose() {
     if (_notifierDisposed) return;
+    if (!_shutdownFinished) {
+      _requestShutdown();
+      return;
+    }
     _notifierDisposed = true;
-    unawaited(shutdown());
     super.dispose();
   }
 }

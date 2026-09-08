@@ -1,11 +1,12 @@
 import 'package:flutter/foundation.dart';
+import '../../runtime/notification_gate.dart';
 
 import '../../../core/cad_kernel/models/kernel_models.dart';
 import '../../cad_viewport/scene/cad_scene_graph.dart';
 
 /// Synchronizes Explorer and viewport entity selection and resolves only
 /// kernel handles that were persisted by the producing geometry API.
-class GeometrySelectionManager extends ChangeNotifier {
+class GeometrySelectionManager extends ChangeNotifier with NotificationGate {
   GeometrySelectionManager(this.scene) {
     scene.addListener(_sceneChanged);
   }

@@ -8,7 +8,7 @@ The experimental manual transformation changes are not included or enabled.
 `mutate`, `undoDocument`, `redoDocument`, `open`, `close`, and `save` share one
 private FIFO Future chain. Internal helpers receive the current transaction and
 never acquire that chain again. A transaction Zone rejects accidental public
-reacquisition; listeners run outside that Zone after synchronous installation
+reacquisition; internal shutdown only acknowledges the synchronous request; listeners run outside that Zone after synchronous installation
 and may enqueue new work. Queue errors do not poison subsequent entries.
 
 At execution the context captures runtime owner, transaction ID, independent
@@ -26,14 +26,23 @@ metadata are prepared first. Each installation increments the runtime revision
 once; plain save and unsuccessful operations do not. This counter is independent
 of the revision stored in documents and therefore never rewinds with undo.
 
-`shutdown()` closes admission and revokes lifecycle immediately. It returns the
-same Future on repeated calls, drains admitted work (obsolete queued entries are
-rejected), then disposes child dependencies. Synchronous `dispose()` delegates to
-it and detaches runtime listeners immediately. Callers needing confirmed resource
+`shutdown()` closes admission and revokes lifecycle immediately. External callers
+receive the same drainage Future. Calls from the active transaction acknowledge
+the request immediately, even when external shutdown already exists; they never
+await their own drainage. The queue drains admitted work (obsolete entries are
+rejected), then disposes dependencies once. Synchronous dispose requests that same
+shutdown. Per-listener gates immediately stop delivery, including the remainder
+of notifications already running; actual ChangeNotifier disposal waits for drainage. Callers needing confirmed resource
 shutdown must await `shutdown()` before unloading external kernel dependencies.
 
 ## Persistence and recovery limits
 
+Transaction candidates and history are deeply detached and recursively immutable
+at their JSON persistence boundary, before projection or other relevant awaits.
+Shape/mesh metadata and document parameters are included. The exact candidate
+prepared for projection is passed to persistence and installed; history snapshots
+are independently frozen. Input entities are detached at admission. Unsupported
+non-JSON values fail before publication, matching the persistence contract.
 Save freezes document and both history stacks together before the first write.
 Every write, including recovery, owns an OS-created exclusive temporary directory
 on the destination volume. No transaction shares another transaction's temporary
@@ -68,8 +77,24 @@ identity validation where possible; this is not isolation from unmigrated writer
 Kernel meshing/restore can still have persistent file/token side effects during
 detached projection. Ownership, native rollback, paired crash-atomic persistence,
 read-only document exposure, and asynchronous disposal of external producers remain
-future phases. Existing mutable nested document data is not made globally immutable.
+future phases. Writers outside the migrated boundary may still expose mutable state.
 
 The coordinator is new code written on main; no experimental commits were copied
 or cherry-picked. Scene batch installation and repository byte recovery are support
 for these six entry points, not migration of geometry or application producers.
+
+## Corrective invariants
+
+No-op detection compares normalized document content structurally (map order is
+irrelevant), excluding the command revision list. An unchanged document does not
+write files, project, notify, increment revision, or clear redo. A genuine
+normalization/export/entity change still commits once.
+
+A transaction records confirmed installation separately from notification delivery.
+Notifications check shutdown between boundaries, and runtime-owned notifiers gate
+each listener. Listener errors use FlutterError reporting; they do not undo a
+confirmed commit or replace the result of a failed transaction.
+
+Tests use controlled producer/storage gates, including two runtime instances with
+simultaneously live distinct temporaries. Their final writes are deliberately
+sequenced: cross-process final-file arbitration remains outside this phase.

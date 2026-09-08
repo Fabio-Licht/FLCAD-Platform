@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../../runtime/notification_gate.dart';
 
 enum CadSceneEntityKind {
   mesh,
@@ -38,7 +39,7 @@ class CadSceneEntity {
       );
 }
 
-class CadSceneGraph extends ChangeNotifier {
+class CadSceneGraph extends ChangeNotifier with NotificationGate {
   final Map<String, CadSceneEntity> _entities = {};
   Iterable<CadSceneEntity> get entities => _entities.values;
   CadSceneEntity? find(String id) => _entities[id];

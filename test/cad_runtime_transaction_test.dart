@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document_repository.dart';
 import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
+import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
+import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
 
 class Gate {
   final entered = Completer<void>();
@@ -20,6 +23,19 @@ class Repository extends CadDocumentRepository {
   Future<void> Function(String)? onLoad;
   Future<void> Function()? onHistory;
   bool failRecovery = false;
+  Future<void> Function(File, Directory)? onTemporary;
+  @override
+  Future<Directory> createTemporaryDirectory(File target) async {
+    final temporary = await super.createTemporaryDirectory(target);
+    try {
+      if (onTemporary != null) await onTemporary!(target, temporary);
+      return temporary;
+    } catch (_) {
+      await temporary.delete(recursive: true);
+      rethrow;
+    }
+  }
+
   final saved = <CadDocument>[];
   final histories = <CadDocumentHistoryState>[];
   @override
@@ -96,9 +112,22 @@ void main() {
         doc.entities.containsKey('one') && !doc.entities.containsKey('two')
         ? gate.wait()
         : Future.value();
+    final documentBefore = runtime.document;
+    final sceneBefore = runtime.scene.entities.toList();
+    final filesBefore = await repository.captureFiles(a);
+    var notifications = 0;
+    runtime.addListener(() => notifications++);
+    runtime.scene.addListener(() => notifications++);
+    runtime.geometrySelection.addListener(() => notifications++);
     final first = add('one');
     await gate.entered.future;
     final second = add('two');
+    expect(runtime.document, same(documentBefore));
+    expect(runtime.scene.entities.toList(), sceneBefore);
+    expect(runtime.selection, isEmpty);
+    expect(repository.histories, isEmpty);
+    expect(notifications, 0);
+    expect(await repository.captureFiles(a), filesBefore);
     expect(runtime.document!.entities.containsKey('one'), isFalse);
     expect(runtime.canUndo, isFalse);
     gate.release.complete();
@@ -297,16 +326,46 @@ void main() {
     },
   );
 
-  test(
-    'shutdown awaited from a producer is rejected without deadlock',
-    () async {
-      repository.onSave = (_) => runtime.shutdown();
-      await expectLater(add('one'), throwsStateError);
-      repository.onSave = null;
-      await add('two');
-      expect(runtime.document!.entities.containsKey('two'), isTrue);
-    },
-  );
+  for (final externalFirst in [false, true]) {
+    test(
+      'internal shutdown acknowledges without self-wait (external=$externalFirst)',
+      () async {
+        final gate = Gate();
+        final events = <String>[];
+        repository.onSave = (_) async {
+          await gate.wait();
+          await runtime.shutdown();
+          events.add('producer-returned');
+          // Dependency remains usable until this transaction leaves the queue.
+          runtime.scene.addListener(() {});
+        };
+        final mutation = add('one');
+        final result = expectLater(
+          mutation,
+          throwsA(isA<StaleCadTransaction>()),
+        );
+        await gate.entered.future;
+        Future<void>? external;
+        if (externalFirst) external = runtime.shutdown();
+        gate.release.complete();
+        await result;
+        events.add('transaction-returned');
+        external ??= runtime.shutdown();
+        await external;
+        events.add('drained');
+        expect(runtime.shutdown(), same(external));
+        runtime.dispose();
+        await runtime.shutdown();
+        expect(events, [
+          'producer-returned',
+          'transaction-returned',
+          'drained',
+        ]);
+        await expectLater(add('two'), throwsA(isA<CadRuntimeShuttingDown>()));
+        expect(() => runtime.scene.addListener(() {}), throwsFlutterError);
+      },
+    );
+  }
 
   test('work admitted during open cannot retarget the new document', () async {
     final gate = Gate();
@@ -413,35 +472,335 @@ void main() {
   );
 
   test(
-    'concurrent repository writes use distinct exclusive temporary paths',
+    'two runtimes own distinct live temporaries and both saves succeed',
     () async {
-      final seen = <String>{};
-      final created = Completer<void>();
-      final subscription = a.watch(events: FileSystemEvent.create).listen((
-        event,
-      ) {
-        if (event.path.contains('.txn-')) {
-          seen.add(event.path);
-          if (seen.length >= 2 && !created.isCompleted) created.complete();
-        }
-      });
+      final second = CadRuntime(
+        kernels: KernelManager(),
+        repository: repository,
+      );
+      await second.open('A', a);
+      final gates = [Gate(), Gate()];
+      final temporaryPaths = <String>[];
+      repository.onTemporary = (target, directory) async {
+        if (!target.path.endsWith('cad-document.json')) return;
+        final index = temporaryPaths.length;
+        temporaryPaths.add(directory.path);
+        await gates[index].wait();
+      };
       try {
-        // Direct repository writes intentionally bypass the runtime queue here.
-        // Destination concurrency is not promised; temporary isolation is.
-        Future<void> write() async {
-          try {
-            await repository.save(runtime.document!, a);
-          } on FileSystemException {
-            /* destination race is outside this contract */
-          }
+        final firstSave = runtime.save();
+        await gates[0].entered.future;
+        final secondSave = second.save();
+        await gates[1].entered.future;
+        expect(temporaryPaths.toSet(), hasLength(2));
+        for (final temporary in temporaryPaths) {
+          expect(await Directory(temporary).exists(), isTrue);
+          expect(Directory(temporary).parent.absolute.path, a.absolute.path);
         }
-
-        await Future.wait([write(), write()]);
-        await created.future;
-        expect(seen.length, greaterThanOrEqualTo(2));
+        // Final-file multi-writer arbitration is explicitly outside this phase.
+        gates[0].release.complete();
+        await firstSave;
+        gates[1].release.complete();
+        await secondSave;
+        for (final temporary in temporaryPaths) {
+          expect(await Directory(temporary).exists(), isFalse);
+        }
+        expect(
+          (await repository.load('A', a)).toJson(),
+          runtime.document!.toJson(),
+        );
       } finally {
-        await subscription.cancel();
+        await second.shutdown();
       }
+    },
+  );
+
+  test(
+    'one deeply frozen candidate backs scene, disk, history and effective redo',
+    () async {
+      final initial = point('one');
+      initial.data['sceneGeometry']['nodes'] =
+          initial.data['sceneGeometry']['position'];
+      await runtime.mutate(command: 'initial', upsert: [initial]);
+      final oldDocument = runtime.document!;
+      final input = point('one');
+      input.data['sceneGeometry']['nodes'] =
+          input.data['sceneGeometry']['position'];
+      (input.data['sceneGeometry']['position'] as List)[0] = 5;
+      input.data['custom'] = {
+        'nested': [
+          {'value': 7},
+        ],
+      };
+      final gate = Gate();
+      repository.onSave = (_) => gate.wait();
+      final previousRevision = runtime.runtimeRevision;
+      final pending = runtime.mutate(command: 'change', upsert: [input]);
+      await gate.entered.future;
+      (input.data['sceneGeometry']['position'] as List)[0] = 500;
+      input.data['custom']['nested'][0]['value'] = 700;
+      (initial.data['sceneGeometry']['position'] as List)[0] = 900;
+      expect(runtime.document, same(oldDocument));
+      expect(runtime.scene.find('one')!.geometry['position'], [0, 0, 0]);
+      gate.release.complete();
+      await pending;
+      final committed = runtime.document!;
+      expect(runtime.runtimeRevision, previousRevision + 1);
+      expect(repository.saved.last, same(committed));
+      expect(
+        committed.entities['one']!.data['custom']['nested'][0]['value'],
+        7,
+      );
+      expect(runtime.scene.find('one')!.geometry['position'], [5, 0, 0]);
+      expect(runtime.workspaceBounds!.minX, 5);
+      expect((await repository.load('A', a)).toJson(), committed.toJson());
+      expect(
+        repository
+            .histories
+            .last
+            .undo
+            .last
+            .entities['one']!
+            .data['sceneGeometry']['position'],
+        [0, 0, 0],
+      );
+      (input.data['sceneGeometry']['position'] as List)[0] = 999;
+      expect(committed.entities['one']!.data['sceneGeometry']['position'], [
+        5,
+        0,
+        0,
+      ]);
+      expect(
+        () =>
+            (committed.entities['one']!.data['sceneGeometry']['position']
+                    as List)[0] =
+                1,
+        throwsUnsupportedError,
+      );
+      final revision = runtime.runtimeRevision;
+      await runtime.undoDocument();
+      expect(runtime.scene.find('one')!.geometry['position'], [0, 0, 0]);
+      await runtime.redoDocument();
+      expect(runtime.runtimeRevision, revision + 2);
+      expect(runtime.scene.find('one')!.geometry['position'], [5, 0, 0]);
+      expect(
+        runtime.document!.entities['one']!.data['custom']['nested'][0]['value'],
+        7,
+      );
+      expect(
+        (await repository.load('A', a)).toJson(),
+        runtime.document!.toJson(),
+      );
+    },
+  );
+
+  test(
+    'shape and mesh nested metadata detach without creating native resources',
+    () async {
+      final metadata = <String, dynamic>{
+        'nested': {
+          'values': [1, 2],
+        },
+      };
+      final source = CadDocumentEntity(
+        id: 'metadata',
+        kind: CadDocumentEntityKind.vertex,
+        data: point('metadata').data,
+        shape: ShapeHandle.reference(
+          persistentId: 'shape',
+          kernelId: 'none',
+          type: CADShapeType.solid,
+          metadata: metadata,
+        ),
+        mesh: KernelMeshHandle(
+          persistentId: 'mesh',
+          kernelId: 'none',
+          fingerprint: 'mesh',
+          vertexCount: 0,
+          triangleCount: 0,
+          bounds: const KernelBounds(0, 0, 0, 0, 0, 0),
+          hasNormals: false,
+          metadata: metadata,
+        ),
+      );
+      final gate = Gate();
+      repository.onSave = (_) => gate.wait();
+      final pending = runtime.mutate(command: 'metadata', upsert: [source]);
+      await gate.entered.future;
+      metadata['nested']['values'][0] = 999;
+      gate.release.complete();
+      await pending;
+      final entity = runtime.document!.entities['metadata']!;
+      expect(entity.shape!.metadata['nested']['values'], [1, 2]);
+      expect(entity.mesh!.metadata['nested']['values'], [1, 2]);
+      expect(
+        () => (entity.mesh!.metadata['nested']['values'] as List).add(3),
+        throwsUnsupportedError,
+      );
+      expect(
+        (await repository.load('A', a)).toJson(),
+        runtime.document!.toJson(),
+      );
+    },
+  );
+
+  for (final source in ['scene', 'selection', 'runtime']) {
+    test(
+      'dispose in $source listener stops delivery without undoing commit',
+      () async {
+        await add('one');
+        runtime.select({'one'});
+        var later = 0;
+        final notifier = source == 'scene'
+            ? runtime.scene
+            : source == 'selection'
+            ? runtime.geometrySelection
+            : runtime;
+        notifier.addListener(() => runtime.dispose());
+        notifier.addListener(() => later++);
+        await runtime.mutate(command: 'remove', remove: ['one']);
+        expect(later, 0);
+        expect(runtime.document!.entities.containsKey('one'), isFalse);
+        expect(
+          (await repository.load('A', a)).entities.containsKey('one'),
+          isFalse,
+        );
+        final draining = runtime.shutdown();
+        await draining;
+        runtime.dispose();
+        expect(runtime.shutdown(), same(draining));
+        expect(() => runtime.scene.addListener(() {}), throwsFlutterError);
+      },
+    );
+  }
+
+  test(
+    'post-commit listener error is reported without failing mutation',
+    () async {
+      final reported = <FlutterErrorDetails>[];
+      final previous = FlutterError.onError;
+      FlutterError.onError = reported.add;
+      try {
+        runtime.addListener(() => throw StateError('observer failed'));
+        await add('one');
+        expect(reported, hasLength(1));
+        expect(runtime.document!.entities.containsKey('one'), isTrue);
+        expect(
+          (await repository.load('A', a)).entities.containsKey('one'),
+          isTrue,
+        );
+      } finally {
+        FlutterError.onError = previous;
+      }
+    },
+  );
+
+  for (final category in [
+    'empty',
+    'missing',
+    'equivalent',
+    'export',
+    'normalized',
+  ]) {
+    test(
+      'no-op $category preserves functional redo and all published state',
+      () async {
+        await add('one');
+        if (category == 'export') {
+          await runtime.mutate(command: 'export', officialExportShapeId: 'one');
+        }
+        await add('two');
+        await runtime.undoDocument();
+        final before = runtime.document;
+        final sceneBefore = runtime.scene.entities.toList();
+        final files = await repository.captureFiles(a);
+        final revision = runtime.runtimeRevision;
+        repository.saved.clear();
+        var notifications = 0;
+        runtime.addListener(() => notifications++);
+        runtime.scene.addListener(() => notifications++);
+        await runtime.mutate(
+          command: 'no-op',
+          remove: category == 'missing' ? ['missing'] : const [],
+          upsert: category == 'equivalent'
+              ? [
+                  CadDocumentEntity.fromJson({
+                    ...runtime.document!.entities['one']!.toJson(),
+                    'data': Map.fromEntries(
+                      runtime.document!.entities['one']!.data.entries
+                          .toList()
+                          .reversed,
+                    ),
+                  }),
+                ]
+              : const [],
+          officialExportShapeId: category == 'export'
+              ? runtime.document!.officialExportShapeId
+              : null,
+        );
+        expect(runtime.document, same(before));
+        expect(runtime.scene.entities.toList(), sceneBefore);
+        expect(runtime.runtimeRevision, revision);
+        expect(repository.saved, isEmpty);
+        expect(notifications, 0);
+        expect(await repository.captureFiles(a), files);
+        expect(runtime.canRedo, isTrue);
+        await runtime.redoDocument();
+        expect(runtime.document!.entities.containsKey('two'), isTrue);
+        expect(runtime.runtimeRevision, revision + 1);
+      },
+    );
+  }
+
+  test(
+    'failure of first queued mutation does not prevent second from committing',
+    () async {
+      final gate = Gate();
+      repository.onSave = (doc) async {
+        if (doc.entities.containsKey('one')) {
+          await gate.wait();
+          throw StateError('first failed');
+        }
+      };
+      final first = add('one');
+      final rejected = expectLater(first, throwsStateError);
+      await gate.entered.future;
+      final second = add('two');
+      gate.release.complete();
+      await rejected;
+      await second;
+      expect(runtime.document!.entities.containsKey('one'), isFalse);
+      expect(runtime.document!.entities.containsKey('two'), isTrue);
+    },
+  );
+
+  test(
+    'projection failure preserves document scene selection and redo',
+    () async {
+      await add('one');
+      await add('two');
+      await runtime.undoDocument();
+      runtime.select({'one'});
+      final before = runtime.document;
+      final sceneBefore = runtime.scene.entities.toList();
+      final revision = runtime.runtimeRevision;
+      final files = await repository.captureFiles(a);
+      var notifications = 0;
+      runtime.scene.addListener(() => notifications++);
+      runtime.addListener(() => notifications++);
+      final invalid = point('invalid');
+      invalid.data['sceneKind'] = 'not-a-scene-kind';
+      await expectLater(
+        runtime.mutate(command: 'invalid', upsert: [invalid]),
+        throwsArgumentError,
+      );
+      expect(runtime.document, same(before));
+      expect(runtime.scene.entities.toList(), sceneBefore);
+      expect(runtime.selection, {'one'});
+      expect(runtime.runtimeRevision, revision);
+      expect(runtime.canRedo, isTrue);
+      expect(notifications, 0);
+      expect(await repository.captureFiles(a), files);
     },
   );
 }

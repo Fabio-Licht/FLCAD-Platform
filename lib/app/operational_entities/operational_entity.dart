@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../runtime/notification_gate.dart';
 
 enum OperationalEntityType {
   meshRegion,
@@ -61,7 +62,7 @@ class OperationalEntity {
   final bool available;
 }
 
-class OperationalEntityRegistry extends ChangeNotifier {
+class OperationalEntityRegistry extends ChangeNotifier with NotificationGate {
   final Map<String, OperationalEntity> _entities = {};
 
   OperationalEntity? find(String id) => _entities[id];
@@ -82,7 +83,7 @@ class OperationalEntityRegistry extends ChangeNotifier {
   }
 }
 
-class OperationalSelectionManager extends ChangeNotifier {
+class OperationalSelectionManager extends ChangeNotifier with NotificationGate {
   OperationalSelectionManager(this.registry);
   final OperationalEntityRegistry registry;
   final List<String> _selectedIds = [];

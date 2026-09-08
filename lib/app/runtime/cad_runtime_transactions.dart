@@ -33,7 +33,7 @@ class _CadTransaction {
   final int id, revision, session, lifecycle;
   final CadDocument? document;
   final Directory? directory;
-  bool notify = false, boundary = false;
+  bool notify = false, boundary = false, committed = false;
 
   void validate() {
     if (!identical(owner._transaction, this)) {
@@ -84,14 +84,33 @@ extension _CadTransactions on CadRuntime {
         // No listener runs while the document/scene/history are being installed.
         // This continuation is outside the transaction Zone: listeners enqueue.
         if (tx.notify && !_closingAdmission) {
-          if (tx.boundary) {
-            geometrySelection.clear();
-            operationalSelection.clear();
-            operationalResolver.clear();
-            operationalEntities.clear();
+          try {
+            if (tx.boundary) {
+              geometrySelection.clear();
+              if (!_closingAdmission) operationalSelection.clear();
+              if (!_closingAdmission) operationalResolver.clear();
+              if (!_closingAdmission) operationalEntities.clear();
+            }
+            if (!_closingAdmission) scene.invalidatePresentation();
+            if (!_closingAdmission) _notifyTransactionComplete();
+          } catch (error, stack) {
+            // Observational errors must never replace success or the original
+            // pre-commit exception propagating through this finally block.
+            scheduleMicrotask(
+              () => FlutterError.reportError(
+                FlutterErrorDetails(
+                  exception: error,
+                  stack: stack,
+                  library: 'CAD transaction notification',
+                  context: ErrorDescription(
+                    tx.committed
+                        ? 'after confirmed commit'
+                        : 'after failed transaction',
+                  ),
+                ),
+              ),
+            );
           }
-          scene.invalidatePresentation();
-          _notifyTransactionComplete();
         }
       }
     });
@@ -153,24 +172,12 @@ extension _CadTransactions on CadRuntime {
     void Function()? publish,
   }) async {
     tx.validate();
-    // Freeze document AND history before the first write/await.
-    final frozen = CadDocument.fromJson(
-      jsonDecode(jsonEncode(candidate.toJson())),
-    );
-    List<CadDocument> freeze(List<CadDocument> values) => values
-        .map((d) => CadDocument.fromJson(jsonDecode(jsonEncode(d.toJson()))))
-        .toList(growable: false);
-    final undoSnapshot = freeze(undo), redoSnapshot = freeze(redo);
     final backup = await _repository.captureFiles(directory);
     tx.validate();
     try {
-      await _repository.save(frozen, directory);
+      await _repository.save(candidate, directory);
       tx.validate();
-      await _repository.saveHistory(
-        directory,
-        undo: undoSnapshot,
-        redo: redoSnapshot,
-      );
+      await _repository.saveHistory(directory, undo: undo, redo: redo);
       tx.validate();
       publish?.call();
     } catch (error, stack) {
@@ -190,10 +197,10 @@ extension _CadTransactions on CadRuntime {
     if (current == null || directory == null) return;
     await _persistSnapshot(
       tx,
-      current,
+      _freezeDocument(current),
       directory,
-      List.of(_undo),
-      List.of(_redo),
+      _freezeHistory(_undo),
+      _freezeHistory(_redo),
     );
   }
 
@@ -204,6 +211,9 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> redo,
   ) async {
     tx.validate();
+    candidate = _freezeDocument(candidate);
+    undo = _freezeHistory(undo);
+    redo = _freezeHistory(redo);
     final directory = tx.directory!;
     // Validate derived import data before persistence or active publication.
     final imported = _readImport(candidate);
@@ -276,6 +286,7 @@ extension _CadTransactions on CadRuntime {
           );
     _workspaceBounds = bounds;
     _runtimeRevision++;
+    tx.committed = true;
     tx.boundary = boundary;
     tx.notify = true;
   }
@@ -287,16 +298,22 @@ extension _CadTransactions on CadRuntime {
   ) async {
     final loaded = await _repository.load(projectId, directory);
     tx.validate();
-    final candidate = FeatureLifecycleProjector.normalize(
-      _ensureProfessionalCollections(
-        WorldCoordinateSystem.ensure(_sanitizeLegacyWorkspaceState(loaded)),
+    final candidate = _freezeDocument(
+      FeatureLifecycleProjector.normalize(
+        _ensureProfessionalCollections(
+          WorldCoordinateSystem.ensure(_sanitizeLegacyWorkspaceState(loaded)),
+        ),
+        command: 'project.open.lifecycle-migration',
       ),
-      command: 'project.open.lifecycle-migration',
     );
     final history = await _repository.loadHistory(directory);
     tx.validate();
-    final undo = history.undo.where((d) => d.projectId == projectId).toList();
-    final redo = history.redo.where((d) => d.projectId == projectId).toList();
+    final undo = _freezeHistory(
+      history.undo.where((d) => d.projectId == projectId),
+    );
+    final redo = _freezeHistory(
+      history.redo.where((d) => d.projectId == projectId),
+    );
     final imported = _readImport(candidate);
     final prepared = await _prepareScene(tx, candidate, directory);
     final bounds = _recalculateWorkspaceBounds(entities: prepared);
@@ -326,3 +343,73 @@ extension _CadTransactions on CadRuntime {
     }
   }
 }
+
+// The persistence contract is JSON. Round-tripping detaches all nested data;
+// recursive immutable collections also protect published snapshots from writes.
+Object? _immutableJson(Object? value) {
+  if (value is Map) {
+    return Map<String, dynamic>.unmodifiable({
+      for (final entry in value.entries)
+        entry.key as String: _immutableJson(entry.value),
+    });
+  }
+  if (value is List) {
+    return List<dynamic>.unmodifiable(value.map(_immutableJson));
+  }
+  return value;
+}
+
+Object? _orderedJson(Object? value) {
+  if (value is Map) {
+    final keys = value.keys.cast<String>().toList()..sort();
+    return {for (final key in keys) key: _orderedJson(value[key])};
+  }
+  if (value is List) return value.map(_orderedJson).toList();
+  return value;
+}
+
+bool _sameJson(Object? a, Object? b) =>
+    jsonEncode(_orderedJson(a)) == jsonEncode(_orderedJson(b));
+
+CadDocumentEntity _freezeEntity(CadDocumentEntity source) {
+  final json =
+      _immutableJson(jsonDecode(jsonEncode(source.toJson())))
+          as Map<String, dynamic>;
+  final copy = CadDocumentEntity.fromJson(json);
+  final mesh = copy.mesh;
+  return CadDocumentEntity(
+    id: copy.id,
+    kind: copy.kind,
+    shape: copy.shape,
+    data: Map.unmodifiable(copy.data),
+    mesh: mesh == null
+        ? null
+        : KernelMeshHandle(
+            persistentId: mesh.persistentId,
+            kernelId: mesh.kernelId,
+            fingerprint: mesh.fingerprint,
+            vertexCount: mesh.vertexCount,
+            triangleCount: mesh.triangleCount,
+            bounds: mesh.bounds,
+            hasNormals: mesh.hasNormals,
+            degenerateTriangleCount: mesh.degenerateTriangleCount,
+            metadata: Map.unmodifiable(mesh.metadata),
+          ),
+  );
+}
+
+CadDocument _freezeDocument(CadDocument source) => CadDocument(
+  projectId: source.projectId,
+  entities: Map.unmodifiable({
+    for (final entry in source.entities.entries)
+      entry.key: _freezeEntity(entry.value),
+  }),
+  revisions: List.unmodifiable(source.revisions),
+  parameters:
+      _immutableJson(jsonDecode(jsonEncode(source.parameters)))
+          as Map<String, dynamic>,
+  officialExportShapeId: source.officialExportShapeId,
+);
+
+List<CadDocument> _freezeHistory(Iterable<CadDocument> values) =>
+    List.unmodifiable(values.map(_freezeDocument));

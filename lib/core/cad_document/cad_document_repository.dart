@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:path/path.dart' as path;
+import 'package:flutter/foundation.dart' show protected;
 import 'cad_document.dart';
 
 class CadDocumentRepository {
@@ -97,12 +98,15 @@ class CadDocumentRepository {
   Future<void> _atomic(File target, Map<String, dynamic> value) =>
       _atomicBytes(target, utf8.encode(jsonEncode(value)));
 
+  /// Storage boundary for fault injection; ownership passes to _atomicBytes.
+  @protected
+  Future<Directory> createTemporaryDirectory(File target) =>
+      target.parent.createTemp('${path.basename(target.path)}.txn-');
+
   Future<void> _atomicBytes(File target, List<int> bytes) async {
     // Exclusive directory per write: concurrent transactions/processes never
     // share a temporary name. Same volume as the destination for rename.
-    final temporaryDirectory = await target.parent.createTemp(
-      '${path.basename(target.path)}.txn-',
-    );
+    final temporaryDirectory = await createTemporaryDirectory(target);
     final temporary = File(path.join(temporaryDirectory.path, 'payload'));
     try {
       await temporary.writeAsBytes(bytes, flush: true);
