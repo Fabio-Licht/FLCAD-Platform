@@ -23,9 +23,18 @@ class CadRecoveryFailure implements Exception {
 
 final Object _transactionZone = Object();
 
+// A standalone identity has no back-reference to its runtime or document.
+class _CadCapability {
+  _CadCapability(this.runtimeIdentity, this.id);
+  final Object runtimeIdentity;
+  final int id;
+  bool active = true;
+}
+
 class _CadTransaction {
   _CadTransaction(this.owner, this.id, this.lifecycle)
-    : revision = owner._runtimeRevision,
+    : capability = _CadCapability(owner._runtimeIdentity, id),
+      revision = owner._runtimeRevision,
       session = owner._sessionIdentity,
       document = owner._document,
       directory = owner._projectDirectory;
@@ -33,14 +42,17 @@ class _CadTransaction {
   final int id, revision, session, lifecycle;
   final CadDocument? document;
   final Directory? directory;
-  bool active = true;
+  final _CadCapability capability;
   bool isActiveFor(CadRuntime runtime) =>
-      active &&
+      capability.active &&
+      identical(capability.runtimeIdentity, runtime._runtimeIdentity) &&
       identical(owner, runtime) &&
       identical(runtime._transaction, this) &&
       runtime._transaction?.id == id;
 
   bool notify = false, boundary = false, committed = false;
+  bool selectionChanged = false;
+  bool operationalSelectionChanged = false;
 
   void validate() {
     if (!isActiveFor(owner)) {
@@ -60,8 +72,12 @@ class _CadTransaction {
 extension _CadTransactions on CadRuntime {
   _CadTransaction? get _callingTransaction {
     final inherited = Zone.current[_transactionZone];
-    return inherited is _CadTransaction && inherited.isActiveFor(this)
-        ? inherited
+    final current = _transaction;
+    return inherited is _CadCapability &&
+            current != null &&
+            identical(inherited, current.capability) &&
+            current.isActiveFor(this)
+        ? current
         : null;
   }
 
@@ -94,9 +110,12 @@ extension _CadTransactions on CadRuntime {
       final tx = _CadTransaction(this, ++_nextTransaction, generation);
       _transaction = tx;
       try {
-        await runZoned(() => action(tx), zoneValues: {_transactionZone: tx});
+        await runZoned(
+          () => action(tx),
+          zoneValues: {_transactionZone: tx.capability},
+        );
       } finally {
-        tx.active = false;
+        tx.capability.active = false;
         _transaction = null;
         // No listener runs while the document/scene/history are being installed.
         // This continuation is outside the transaction Zone: listeners enqueue.
@@ -107,6 +126,12 @@ extension _CadTransactions on CadRuntime {
               if (!_closingAdmission) operationalSelection.clear();
               if (!_closingAdmission) operationalResolver.clear();
               if (!_closingAdmission) operationalEntities.clear();
+            }
+            if (tx.selectionChanged && !_closingAdmission) {
+              geometrySelection.publishReconciliation();
+            }
+            if (tx.operationalSelectionChanged && !_closingAdmission) {
+              operationalSelection.publishReconciliation();
             }
             if (!_closingAdmission) scene.invalidatePresentation();
             if (!_closingAdmission) _notifyTransactionComplete();
@@ -158,13 +183,27 @@ extension _CadTransactions on CadRuntime {
       final stagedProjection = CadDocumentSceneProjection(staging);
       if (incremental) {
         final previous = tx.document!;
+        final rebuild = <CadDocumentEntity>[];
+        for (final entity in candidate.entities.values) {
+          final old = previous.entities[entity.id];
+          final visual = staging.find(entity.id);
+          if (old != null &&
+              visual != null &&
+              entity.data['deleted'] != true &&
+              _sameJson(_renderDefinition(old), _renderDefinition(entity))) {
+            staging.upsert(
+              visual.copyWith(
+                visible: entity.data['sceneVisible'] as bool? ?? true,
+                transparent: entity.data['sceneTransparent'] as bool? ?? false,
+              ),
+            );
+          } else if (!_sameJson(old?.toJson(), entity.toJson())) {
+            rebuild.add(entity);
+          }
+        }
         await stagedProjection.synchronizeChanges(
           candidate,
-          upsert: candidate.entities.values.where(
-            (entity) =>
-                jsonEncode(previous.entities[entity.id]?.toJson()) !=
-                jsonEncode(entity.toJson()),
-          ),
+          upsert: rebuild,
           remove: previous.entities.keys.where(
             (id) => !candidate.entities.containsKey(id),
           ),
@@ -174,7 +213,19 @@ extension _CadTransactions on CadRuntime {
         await stagedProjection.synchronize(candidate, displayMeshes: meshes);
       }
       tx.validate();
-      return staging.entities.toList(growable: false);
+      return staging.entities
+          .map((visual) {
+            final entity = candidate.entities[visual.id];
+            final collection = candidate.entities[entity?.data['collectionId']];
+            return visual.copyWith(
+              visible:
+                  entity?.data['deleted'] != true &&
+                  (entity?.data['sceneVisible'] as bool? ?? true) &&
+                  collection?.data['visible'] != false &&
+                  collection?.data['deleted'] != true,
+            );
+          })
+          .toList(growable: false);
     } finally {
       staging.dispose();
     }
@@ -293,6 +344,15 @@ extension _CadTransactions on CadRuntime {
       _sessionActive = candidate != null;
     }
     projection.installPrepared(prepared, boundary ? const {} : selection);
+    tx.selectionChanged = geometrySelection.retainVisible(notify: false);
+    tx.operationalSelectionChanged = operationalSelection.retainWhere(
+      (entity) => scene.find(entity.ownerId)?.visible == true,
+      notify: false,
+    );
+    // Correct pruned flags without callbacks; unchanged selection needs no second pass.
+    if (tx.selectionChanged) {
+      projection.installPrepared(prepared, boundary ? const {} : selection);
+    }
     _displayMeshes = candidate == null
         ? null
         : KernelDisplayMeshPipeline(
@@ -361,6 +421,14 @@ extension _CadTransactions on CadRuntime {
     }
   }
 }
+
+Object _renderDefinition(CadDocumentEntity entity) => {
+  'kind': entity.kind.name,
+  'shape': entity.shape?.toJson(),
+  'mesh': entity.toJson()['mesh'],
+  'sceneKind': entity.data['sceneKind'],
+  'sceneGeometry': entity.data['sceneGeometry'],
+};
 
 Object? _orderedJson(Object? value) {
   if (value is Map) {

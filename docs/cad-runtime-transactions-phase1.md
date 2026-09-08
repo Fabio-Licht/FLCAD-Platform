@@ -1,14 +1,19 @@
-# CadRuntime transaction foundation ? phase 1
+# CadRuntime transaction foundation - phases 1 and 2A
 
 This is an incomplete, internal coordinator, not a global transaction guarantee.
 The experimental manual transformation changes are not included or enabled.
 
 ## Migrated boundary
 
-`mutate`, `undoDocument`, `redoDocument`, `open`, `close`, and `save` share one
+`mutate`, `undoDocument`, `redoDocument`, `open`, `close`, `save`,
+`transitionFeature`, `setEntityVisibility`, `updateCollection`, `removeEntity`,
+`moveToRecycleBin`, `restoreFromRecycleBin`, and `permanentlyDelete` share one
 private FIFO Future chain. Internal helpers receive the current transaction and
-never acquire that chain again. A private revocable capability records owner,
-exact transaction ID and active instance. It is revoked in finally on success or
+never acquire that chain again. A private lightweight capability records a standalone runtime identity object,
+exact transaction ID and active/revoked flag. It has no runtime back-reference,
+document, history, directory, scene, kernel or snapshot. The full context is held
+only by the controlled transaction execution. Active capability identity must
+match the capability of that context. It is revoked in finally on success or
 failure. The Zone carries that capability for reentry detection only: authority
 requires identity with the runtime's active transaction and an active capability.
 Inherited contexts from finished transactions do not block new work or authorize
@@ -82,8 +87,6 @@ other runtime instances/processes. The repository still uses delete + rename.
 
 - Manual Apply/alignment and its native creation/persistence before mutate.
 - registerImport, upsertEntity/Batch, duplicateCollection and other producers.
-- transitionFeature, setEntityVisibility and updateCollection direct writers.
-- Recycle-bin wrappers and their pre-mutation validation.
 - CommandManager's independent command history/piles.
 - loadShape, persistShape, native token restoration and kernel unload.
 - Mesh/BREP pipeline files, transient operations and direct scene consumers.
@@ -98,7 +101,7 @@ future phases. Writers outside the migrated boundary may still expose mutable st
 
 The coordinator is new code written on main; no experimental commits were copied
 or cherry-picked. Scene batch installation and repository byte recovery are support
-for these six entry points, not migration of geometry or application producers.
+for the migrated documentary entry points, not migration of geometry or application producers.
 
 ## Corrective invariants
 
@@ -125,3 +128,74 @@ undo/redo, and reject mutations through published references. This removes
 historical deep-cloning; serialization of the existing history file still costs
 O(serialized history size). Persistent/structural document normalization is not
 rewritten in this phase.
+
+
+## Phase 2A inventory and migration
+
+Inventory below describes the paths before migration. D = document; S = scene;
+U = undo/redo; P = persistence. None explicitly changed selection, but scene
+notifications could prune IDs before persistence had succeeded.
+
+| Entry | Previous effects | Calls public mutate | Await before mutate |
+| --- | --- | --- | --- |
+| transitionFeature | D/S/U directly, P via save | no | not applicable |
+| setEntityVisibility | S before D/U/P, incomplete rollback | no | not applicable |
+| updateCollection, visibility only | D/S/U directly, P via save | no | not applicable |
+| updateCollection, rename/lock/activate | reads collection/members before queue; D/S/U/P through mutate | yes | no |
+| removeEntity | protection check before queue; D/S/U/P through mutate | yes | no |
+| moveToRecycleBin | target/dependency preparation before queue; D/S/U/P through mutate | yes | no |
+| restoreFromRecycleBin | target preparation before queue; D/S/U/P through mutate | yes | no |
+| permanentlyDelete | validation before public removeEntity | indirectly | no |
+| duplicateCollection | logical copying mixed with native transform and BREP persistence | yes | yes, native operations |
+| upsertEntity / upsertEntityBatch / registerImport | document preparation mixed with native/import resources | yes | yes, potentially |
+| applyEntityTransform / applyAlignmentTransform | native transformation and persistence | yes | yes |
+| _ensureProfessionalCollections / sanitization | pure candidate preparation within migrated open | no | no |
+
+No separate createCollection/renameCollection/removeCollection/member APIs existed.
+Collection creation and generic entity association use the already queued mutate;
+rename uses updateCollection, and removal uses removeEntity. Native-capable upsert
+and duplicateCollection remain deliberately unmigrated in their entirety, including
+their logical branches, to avoid splitting a resource-producing operation.
+External command/Sketch/surface producers are not migrated by this block.
+
+The migrated wrappers now read/validate within their single queue admission and
+call _mutateDocument with their existing context, never public mutate/save. The
+common helper owns normalization, no-op detection and one document/history commit.
+Membership lists passed to updateCollection(addMembers/removeMembers) are captured
+at call time, then every member is validated inside the transaction before commit.
+A batch can create no partial association. Removing a collection with removeEntity
+also detaches its surviving members in the same revision. Generic mutate remains
+a low-level document delta API, not a validator for every producer's domain rules.
+
+restoreFromRecycleBin accepts optional additionalIds for one atomic restoration.
+Unknown restore targets reject the whole batch. Already-restored targets, repeated
+recycling, same lifecycle state, unchanged visibility/collection fields, removal
+of absent IDs and purge of an absent ID are idempotent no-ops. Purge of an existing
+non-recycled entity still rejects. These explicit no-ops preserve redo and files.
+Visibility-only operations preserve lifecycle state/history; actual transitions
+retain their lifecycle revision and event rules.
+
+Detached scene preparation reuses the existing display geometry when shape, mesh,
+scene kind and geometric definition are unchanged. Metadata and visibility changes
+do not invoke tessellation. Effective visibility includes the owning collection;
+collection visibility still updates its members' sceneVisible flags. Nothing is
+installed until persistence completes. At installation the latest selection is
+pruned to existing visible scene entities, including operational owner IDs; visual
+flags and selection are reconciled silently before post-commit notifications.
+A failed candidate never restores an old selection over a newer user selection.
+Restoration does not resurrect old selection. Notifiers still stop after dispose.
+
+permanentlyDelete only commits logical removal. Physical cleanup is deferred,
+not attempted or silently assumed successful: undo/redo and other snapshots may
+still reference BREP/STL/mesh payloads. No ownership registry or safe physical
+reclamation protocol is introduced here. Native resources created by unmigrated
+producers and detached native projection still have the phase 1 ownership limits.
+The two JSON files still lack crash-atomic joint publication. Global transaction
+safety requires the remaining writer migrations.
+
+The additional tests use Completers (no delays), repository failure barriers and
+real temporary JSON files. They cover FIFO writers, old-document rejection,
+member/dependency/restore atomicity, no-op preservation, selection reconciliation,
+physical-payload retention, and a failed transaction's escaped lightweight
+capability awaiting real shutdown drainage. A kernel double rejects any unexpected
+meshing during documentary display/lifecycle updates.

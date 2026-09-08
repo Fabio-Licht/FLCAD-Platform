@@ -94,6 +94,24 @@ class OperationalSelectionManager extends ChangeNotifier with NotificationGate {
   OperationalEntity? get active =>
       _activeId == null ? null : registry.find(_activeId!);
 
+  /// Reconciles a prepared document without notifying during installation.
+  void publishReconciliation() => notifyListeners();
+
+  bool retainWhere(
+    bool Function(OperationalEntity) keep, {
+    bool notify = true,
+  }) {
+    final count = _selectedIds.length;
+    _selectedIds.removeWhere((id) {
+      final entity = registry.find(id);
+      return entity == null || !keep(entity);
+    });
+    if (!_selectedIds.contains(_activeId)) _activeId = _selectedIds.lastOrNull;
+    final changed = count != _selectedIds.length;
+    if (changed && notify) notifyListeners();
+    return changed;
+  }
+
   void select(String id, {bool additive = false, bool toggle = false}) {
     if (registry.find(id) == null) return;
     if (toggle) {

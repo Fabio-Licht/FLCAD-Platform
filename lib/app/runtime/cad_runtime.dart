@@ -66,7 +66,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   Object? recognitionSession, sketchSession, surfaceSession;
   final Map<String, Object?> _state = {};
 
-  // Phase 1: only the six queued entry points participate in this protocol.
+  // Native producers remain outside this documentary transaction protocol.
+  final Object _runtimeIdentity = Object();
   final _snapshots = _CadSnapshots();
   Future<void> _transactionTail = Future<void>.value();
   _CadTransaction? _transaction;
@@ -408,58 +409,79 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           .map(_snapshots.captureEntity)
           .toList(growable: false);
       final removed = remove.toList(growable: false);
-      return _enqueue((tx) async {
-        final before = _snapshots.document(_requireDocument());
-        // Only known normalized snapshots can bypass normalization safely.
-        if (_snapshots.isNormalized(before) &&
-            !removed.any(before.entities.containsKey) &&
-            (officialExportShapeId == null ||
-                officialExportShapeId == before.officialExportShapeId) &&
-            requested.every(
-              (entity) =>
-                  before.entities[entity.id] != null &&
-                  _sameJson(
-                    before.entities[entity.id]!.toJson(),
-                    entity.toJson(),
-                  ),
-            )) {
-          return;
-        }
-        final touchedIds = requested
-            .where((entity) {
-              final previous = before.entities[entity.id];
-              return previous == null ||
-                  _definitionJson(previous) != _definitionJson(entity);
-            })
-            .map((entity) => entity.id)
-            .toSet();
-        final mutated = before.mutate(
+      return _enqueue(
+        (tx) => _mutateDocument(
+          tx,
           command: command,
-          upsert: requested,
-          remove: removed,
+          requested: requested,
+          removed: removed,
           officialExportShapeId: officialExportShapeId,
-        );
-        final candidate = FeatureLifecycleProjector.normalize(
-          mutated,
-          command: command,
-          previousDocument: before,
-          touchedIds: touchedIds,
-        );
-        final candidateContent = candidate.toJson()..remove('revisions');
-        final previousContent = before.toJson()..remove('revisions');
-        if (_sameJson(candidateContent, previousContent)) return;
-        await _commitDocument(tx, candidate, [..._undo, before], const []);
-      });
+        ),
+      );
     } catch (error, stack) {
       return Future<void>.error(error, stack);
     }
+  }
+
+  Future<void> _mutateDocument(
+    _CadTransaction tx, {
+    required String command,
+    List<CadDocumentEntity> requested = const [],
+    List<String> removed = const [],
+    String? officialExportShapeId,
+    Map<String, FeatureLifecycleState> stateOverrides = const {},
+    bool displayOnly = false,
+  }) async {
+    tx.validate();
+    final before = _snapshots.document(_requireDocument());
+    // Only known normalized snapshots can bypass normalization safely.
+    if (stateOverrides.isEmpty &&
+        _snapshots.isNormalized(before) &&
+        !removed.any(before.entities.containsKey) &&
+        (officialExportShapeId == null ||
+            officialExportShapeId == before.officialExportShapeId) &&
+        requested.every(
+          (entity) =>
+              before.entities[entity.id] != null &&
+              _sameJson(before.entities[entity.id]!.toJson(), entity.toJson()),
+        )) {
+      return;
+    }
+    final touchedIds =
+        requested
+            .where((entity) {
+              final previous = before.entities[entity.id];
+              return !displayOnly &&
+                  (previous == null ||
+                      _definitionJson(previous) != _definitionJson(entity));
+            })
+            .map((entity) => entity.id)
+            .toSet()
+          ..addAll(stateOverrides.keys);
+    final mutated = before.mutate(
+      command: command,
+      upsert: requested,
+      remove: removed,
+      officialExportShapeId: officialExportShapeId,
+    );
+    final candidate = FeatureLifecycleProjector.normalize(
+      mutated,
+      command: command,
+      previousDocument: before,
+      touchedIds: touchedIds,
+      stateOverrides: stateOverrides,
+    );
+    final candidateContent = candidate.toJson()..remove('revisions');
+    final previousContent = before.toJson()..remove('revisions');
+    if (_sameJson(candidateContent, previousContent)) return;
+    await _commitDocument(tx, candidate, [..._undo, before], const []);
   }
 
   Future<void> transitionFeature(
     String id,
     FeatureLifecycleState state, {
     required String command,
-  }) async {
+  }) => _enqueue((tx) async {
     final current =
         _requireDocument().entities[id] ??
         (throw StateError('Unknown Feature: $id'));
@@ -468,33 +490,14 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         '$id does not implement the Feature Lifecycle Contract.',
       );
     }
-    final before = _requireDocument();
-    _undo.add(before);
-    _redo.clear();
-    final mutated = before.mutate(command: command, upsert: [current]);
-    _document = FeatureLifecycleProjector.normalize(
-      mutated,
+    if (FeatureLifecycleContract.require(current).state == state) return;
+    await _mutateDocument(
+      tx,
       command: command,
-      previousDocument: before,
-      touchedIds: {id},
+      requested: [current],
       stateOverrides: {id: state},
     );
-    final changed = _document!.entities.values
-        .where((entity) {
-          final previous = before.entities[entity.id];
-          return previous == null ||
-              jsonEncode(previous.toJson()) != jsonEncode(entity.toJson());
-        })
-        .toList(growable: false);
-    await projection.synchronizeChanges(
-      _document!,
-      upsert: changed,
-      remove: const [],
-      displayMeshes: _displayMeshes,
-    );
-    await save();
-    notifyListeners();
-  }
+  });
 
   Future<void> upsertEntity({
     required String command,
@@ -567,50 +570,78 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     _ => 'collection:modified',
   };
 
-  Future<void> removeEntity(String id, {required String command}) {
-    final entity = _requireDocument().entities[id];
-    if (entity != null && WorldCoordinateSystem.isProtected(entity)) {
-      throw StateError('${entity.data['name']} is a protected system entity.');
+  Future<void> removeEntity(String id, {required String command}) =>
+      _enqueue((tx) => _removeDocumentEntities(tx, [id], command: command));
+
+  Future<void> _removeDocumentEntities(
+    _CadTransaction tx,
+    List<String> ids, {
+    required String command,
+  }) {
+    final document = _requireDocument();
+    for (final id in ids) {
+      final entity = document.entities[id];
+      if (entity != null && WorldCoordinateSystem.isProtected(entity)) {
+        throw StateError(
+          '${entity.data['name']} is a protected system entity.',
+        );
+      }
     }
-    return mutate(command: command, remove: [id]);
+    final removedCollections = ids
+        .where(
+          (id) =>
+              document.entities[id]?.kind == CadDocumentEntityKind.collection,
+        )
+        .toSet();
+    final detached = <CadDocumentEntity>[];
+    for (final member in document.entities.values) {
+      if (!ids.contains(member.id) &&
+          removedCollections.contains(member.data['collectionId'])) {
+        final data = {...member.data}..remove('collectionId');
+        detached.add(
+          CadDocumentEntity(
+            id: member.id,
+            kind: member.kind,
+            shape: member.shape,
+            mesh: member.mesh,
+            data: data,
+          ),
+        );
+      }
+    }
+    return _mutateDocument(
+      tx,
+      command: command,
+      removed: ids,
+      requested: detached,
+    );
   }
 
-  Future<void> setEntityVisibility(String id, bool visible) async {
-    final entity =
-        _requireDocument().entities[id] ??
-        (throw StateError('Unknown document entity: $id'));
-    final sceneEntity = scene.find(id);
-    if (sceneEntity != null && sceneEntity.visible != visible) {
-      scene.upsert(sceneEntity.copyWith(visible: visible));
-    }
-    final before = _requireDocument();
-    try {
-      // Visibility is a display-state delta. Do not route it through the
-      // general projection synchronizer: that path may republish/tessellate a
-      // native shape even though no geometry changed.
-      _undo.add(before);
-      _redo.clear();
-      _document = before.mutate(
-        command: 'display.visibility',
-        upsert: [
-          CadDocumentEntity(
-            id: entity.id,
-            kind: entity.kind,
-            shape: entity.shape,
-            mesh: entity.mesh,
-            data: {...entity.data, 'sceneVisible': visible},
-          ),
-        ],
-      );
-      await save();
-      notifyListeners();
-    } catch (_) {
-      _document = before;
-      if (_undo.isNotEmpty && identical(_undo.last, before)) _undo.removeLast();
-      if (sceneEntity != null) scene.upsert(sceneEntity);
-      rethrow;
-    }
-  }
+  Future<void> setEntityVisibility(String id, bool visible) =>
+      _enqueue((tx) async {
+        final entity =
+            _requireDocument().entities[id] ??
+            (throw StateError('Unknown document entity: $id'));
+        if (entity.kind == CadDocumentEntityKind.collection) {
+          await _updateCollection(tx, id, visible: visible);
+          return;
+        }
+        if ((entity.data['sceneVisible'] ?? true) == visible) return;
+        await _mutateDocument(
+          tx,
+          command: 'display.visibility',
+          displayOnly: true,
+          requested: [
+            CadDocumentEntity(
+              id: entity.id,
+              kind: entity.kind,
+              shape: entity.shape,
+              mesh: entity.mesh,
+              data: {...entity.data, 'sceneVisible': visible},
+            ),
+          ],
+        );
+      });
 
   Future<void> applyAlignmentTransform(Matrix4 matrix) async {
     final ids = _requireDocument().entities.values
@@ -1076,6 +1107,40 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     bool? visible,
     bool? locked,
     bool? active,
+    Iterable<String> addMembers = const [],
+    Iterable<String> removeMembers = const [],
+  }) {
+    final rejection = _admissionError;
+    if (rejection != null) return Future<void>.error(rejection);
+    try {
+      final added = addMembers.toList(growable: false);
+      final removed = removeMembers.toList(growable: false);
+      return _enqueue(
+        (tx) => _updateCollection(
+          tx,
+          id,
+          name: name,
+          visible: visible,
+          locked: locked,
+          active: active,
+          addMembers: added,
+          removeMembers: removed,
+        ),
+      );
+    } catch (error, stack) {
+      return Future<void>.error(error, stack);
+    }
+  }
+
+  Future<void> _updateCollection(
+    _CadTransaction tx,
+    String id, {
+    String? name,
+    bool? visible,
+    bool? locked,
+    bool? active,
+    List<String> addMembers = const [],
+    List<String> removeMembers = const [],
   }) async {
     final document = _requireDocument();
     final collection = document.entities[id];
@@ -1123,39 +1188,47 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             ),
       );
     }
-    if (visible != null && name == null && locked == null && active == null) {
-      final before = _requireDocument();
-      _undo.add(before);
-      _redo.clear();
-      try {
-        _document = before.mutate(
-          command: 'collection.visibility',
-          upsert: updates,
-        );
-        for (final update in updates.skip(1)) {
-          final visual = scene.find(update.id);
-          if (visual != null && visual.visible != visible) {
-            scene.upsert(visual.copyWith(visible: visible));
-          }
-        }
-        await save();
-        notifyListeners();
-      } catch (_) {
-        _document = before;
-        if (_undo.isNotEmpty && identical(_undo.last, before)) {
-          _undo.removeLast();
-        }
-        for (final update in updates.skip(1)) {
-          final visual = scene.find(update.id);
-          if (visual != null && visual.visible == visible) {
-            scene.upsert(visual.copyWith(visible: !visible));
-          }
-        }
-        rethrow;
+    final members = <String, CadDocumentEntity>{
+      for (final e in updates) e.id: e,
+    };
+    for (final memberId in {...removeMembers, ...addMembers}) {
+      final member = document.entities[memberId];
+      if (member == null ||
+          member.kind == CadDocumentEntityKind.collection ||
+          WorldCoordinateSystem.isProtected(member) ||
+          member.data['deleted'] == true) {
+        throw StateError('Invalid collection member: $memberId');
       }
-      return;
+      final added = addMembers.contains(memberId);
+      if (!added && member.data['collectionId'] != id) continue;
+      final data = {...(members[memberId] ?? member).data};
+      if (added) {
+        data['collectionId'] = id;
+        if (visible != null) data['sceneVisible'] = visible;
+      } else {
+        data.remove('collectionId');
+      }
+      members[memberId] = CadDocumentEntity(
+        id: member.id,
+        kind: member.kind,
+        shape: member.shape,
+        mesh: member.mesh,
+        data: data,
+      );
     }
-    await mutate(command: 'collection.update', upsert: updates);
+    final visibilityOnly =
+        visible != null &&
+        name == null &&
+        locked == null &&
+        active == null &&
+        addMembers.isEmpty &&
+        removeMembers.isEmpty;
+    await _mutateDocument(
+      tx,
+      command: visibilityOnly ? 'collection.visibility' : 'collection.update',
+      displayOnly: visibilityOnly,
+      requested: members.values.toList(),
+    );
   }
 
   Future<void> duplicateCollection(String id) async {
@@ -1249,7 +1322,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   Future<void> moveToRecycleBin(
     String entityId, {
     required bool includeDependencies,
-  }) async {
+  }) => _enqueue((tx) async {
     final document = _requireDocument();
     final target =
         document.entities[entityId] ??
@@ -1258,12 +1331,17 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       throw StateError('World Coordinate System entities cannot be deleted.');
     }
     final entities = <CadDocumentEntity>[
-      target,
-      if (includeDependencies) ...dependencyImpact(entityId),
+      if (target.data['deleted'] != true) target,
+      if (includeDependencies)
+        ...dependencyImpact(entityId).where((e) => e.data['deleted'] != true),
     ];
-    await mutate(
+    if (entities.any(WorldCoordinateSystem.isProtected)) {
+      throw StateError('Protected entities cannot be recycled.');
+    }
+    await _mutateDocument(
+      tx,
       command: 'recycle.delete',
-      upsert: [
+      requested: [
         for (final entity in entities)
           CadDocumentEntity(
             id: entity.id,
@@ -1281,44 +1359,61 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           ),
       ],
     );
-  }
+  });
 
-  Future<void> restoreFromRecycleBin(String entityId) async {
-    final entity =
-        _requireDocument().entities[entityId] ??
-        (throw StateError('Unknown document entity: $entityId'));
-    if (entity.data['deleted'] != true) {
-      throw StateError('${entity.data['name'] ?? entity.id} is not deleted.');
+  Future<void> restoreFromRecycleBin(
+    String entityId, {
+    Iterable<String> additionalIds = const [],
+  }) {
+    final rejection = _admissionError;
+    if (rejection != null) return Future<void>.error(rejection);
+    try {
+      final ids = {entityId, ...additionalIds}.toList(growable: false);
+      return _enqueue((tx) async {
+        final updates = <CadDocumentEntity>[];
+        for (final entityId in ids) {
+          final entity =
+              _requireDocument().entities[entityId] ??
+              (throw StateError('Unknown document entity: $entityId'));
+          if (entity.data['deleted'] != true) {
+            continue;
+          }
+          final data = Map<String, dynamic>.from(entity.data)
+            ..remove('deleted')
+            ..remove('deletedAt');
+          data['collectionId'] =
+              data.remove('previousCollectionId') ?? 'collection:original';
+          data['sceneVisible'] = true;
+          updates.add(
+            CadDocumentEntity(
+              id: entity.id,
+              kind: entity.kind,
+              shape: entity.shape,
+              mesh: entity.mesh,
+              data: data,
+            ),
+          );
+        }
+        await _mutateDocument(
+          tx,
+          command: 'recycle.restore',
+          requested: updates,
+        );
+      });
+    } catch (error, stack) {
+      return Future<void>.error(error, stack);
     }
-    final data = Map<String, dynamic>.from(entity.data)
-      ..remove('deleted')
-      ..remove('deletedAt');
-    data['collectionId'] =
-        data.remove('previousCollectionId') ?? 'collection:original';
-    data['sceneVisible'] = true;
-    await mutate(
-      command: 'recycle.restore',
-      upsert: [
-        CadDocumentEntity(
-          id: entity.id,
-          kind: entity.kind,
-          shape: entity.shape,
-          mesh: entity.mesh,
-          data: data,
-        ),
-      ],
-    );
   }
 
-  Future<void> permanentlyDelete(String entityId) async {
-    final entity =
-        _requireDocument().entities[entityId] ??
-        (throw StateError('Unknown document entity: $entityId'));
+  Future<void> permanentlyDelete(String entityId) => _enqueue((tx) async {
+    final entity = _requireDocument().entities[entityId];
+    if (entity == null) return;
     if (entity.data['deleted'] != true) {
       throw StateError('Only Recycle Bin entities can be permanently deleted.');
     }
-    await removeEntity(entityId, command: 'recycle.purge');
-  }
+    // Physical cleanup is deferred: undo/redo still own the resource references.
+    await _removeDocumentEntities(tx, [entityId], command: 'recycle.purge');
+  });
 
   Future<void> undoDocument() => _enqueue((tx) async {
     if (_undo.isEmpty) return;

@@ -78,6 +78,22 @@ class GeometrySelectionManager extends ChangeNotifier with NotificationGate {
     notifyListeners();
   }
 
+  /// Used during atomic scene installation; the runtime notifies after commit.
+  void publishReconciliation() => notifyListeners();
+
+  bool retainVisible({bool notify = true}) {
+    final previous = _selectedIds.length;
+    _selectedIds.removeWhere((id) => scene.find(id)?.visible != true);
+    if (!_selectedIds.contains(_anchorId)) _anchorId = _selectedIds.lastOrNull;
+    _refreshOrder();
+    final changed = previous != _selectedIds.length;
+    if (changed && notify) {
+      scene.select(_selectedIds);
+      notifyListeners();
+    }
+    return changed;
+  }
+
   void _sceneChanged() {
     final existing = scene.entities.map((entity) => entity.id).toSet();
     final count = _selectedIds.length;
