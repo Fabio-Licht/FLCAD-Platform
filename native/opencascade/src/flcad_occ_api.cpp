@@ -169,7 +169,8 @@ enum class Fault {
   fingerprint,
   shape_insert,
   mesh_insert,
-  serialization
+  serialization,
+  registry_reserve
 };
 thread_local Fault fault = Fault::none;
 thread_local size_t fault_insertion = 1;
@@ -202,6 +203,9 @@ void publish_batch(Registry &registry, const Entries &entries,
   std::vector<typename Registry::iterator> inserted;
   inserted.reserve(entries.size());
   std::lock_guard<std::mutex> lock(registry_mutex);
+#ifdef FLCAD_OCC_TESTING
+  inject(Fault::registry_reserve);
+#endif
   registry.reserve(registry.size() + entries.size());
   try {
     for (const auto &entry : entries) {
@@ -1840,3 +1844,9 @@ size_t flcad_occ_shape_count() {
   return shapes.size();
 }
 }
+
+#include "flcad_occ_mesh_stream.inc"
+
+#include "flcad_occ_brep_stream.inc"
+
+#include "flcad_occ_source.inc"
