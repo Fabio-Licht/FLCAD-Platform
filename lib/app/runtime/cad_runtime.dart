@@ -1,7 +1,11 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ffi' as ffi;
 import 'dart:math' as math;
+import 'dart:ui' show RootIsolateToken;
+import 'package:crypto/crypto.dart';
+import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
@@ -11,6 +15,7 @@ import '../../core/cad_document/cad_document_repository.dart';
 import '../../core/cad_kernel/api/geometry_kernel_api.dart';
 import '../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../core/cad_kernel/models/kernel_models.dart';
+import '../../core/cad_kernel/opencascade/open_cascade_kernel_adapter.dart';
 import '../../core/cad_kernel/manager/kernel_manager.dart';
 import '../../core/feature_lifecycle/feature_lifecycle.dart';
 import '../../core/feature_lifecycle/feature_dependencies.dart';
@@ -31,12 +36,16 @@ import 'notification_gate.dart';
 part 'cad_runtime_transactions.dart';
 part 'cad_runtime_snapshots.dart';
 part 'cad_runtime_integrity.dart';
+part 'cad_asset_staging.dart';
+part 'cad_asset_storage.dart';
 
 class CadRuntime extends ChangeNotifier with NotificationGate {
   CadRuntime({
     required this.kernels,
     CadDocumentRepository repository = const CadDocumentRepository(),
+    CadAssetStorage assetStorage = const CadAssetStorage(),
   }) : _repository = repository,
+       _assetStorage = assetStorage,
        scene = CadSceneGraph() {
     notificationAllowed = () => !_closingAdmission;
     scene.notificationAllowed = () => !_closingAdmission;
@@ -51,6 +60,9 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   }
 
   final CadDocumentRepository _repository;
+  final CadAssetStorage _assetStorage;
+  final String _assetInstance = _assetId('i1');
+  final _assetShutdown = Completer<void>();
   final KernelManager kernels;
   final CadSceneGraph scene;
   late final CadDocumentSceneProjection projection;
@@ -1562,6 +1574,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   void _requestShutdown() {
     if (_shutdownFuture != null) return;
     _closingAdmission = true;
+    if (!_assetShutdown.isCompleted) _assetShutdown.complete();
     _lifecycleGeneration++;
     _sessionActive = false;
     final done = Completer<void>();
