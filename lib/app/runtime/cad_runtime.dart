@@ -1,11 +1,10 @@
+import 'cad_asset_fs_native.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:ffi' as ffi;
 import 'dart:math' as math;
 import 'dart:ui' show RootIsolateToken;
 import 'package:crypto/crypto.dart';
-import 'package:ffi/ffi.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 

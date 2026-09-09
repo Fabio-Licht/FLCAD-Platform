@@ -145,8 +145,9 @@ void open_relative(Node &n, const std::wstring &name, bool create) {
   HANDLE raw = nullptr;
   const ACCESS_MASK access =
       FILE_READ_ATTRIBUTES | SYNCHRONIZE |
-      (n.directory ? FILE_LIST_DIRECTORY : FILE_READ_DATA) |
-      (create ? DELETE | (n.directory ? 0 : FILE_WRITE_DATA) : 0);
+      (n.directory ? FILE_LIST_DIRECTORY : FILE_GENERIC_READ) |
+      (create ? (n.created ? DELETE : 0) | (n.directory ? 0 : FILE_WRITE_DATA)
+              : 0);
   // No SHARE_DELETE: directory identity cannot be moved out of the pinned tree.
   // Directory share-write is necessary for the target-directory open performed
   // by NT rename. It is NOT a reparse defense; relative opens refuse reparsing.
@@ -190,7 +191,7 @@ uint64_t reserve(const std::shared_ptr<Node> &n) {
   return id;
 }
 caf_result child(uint64_t parent, const uint16_t *name, uint32_t units,
-                 bool directory, bool create) {
+                 bool directory, bool create, bool movable = true) {
   return boundary([&](caf_result &r) {
     auto p = get(parent);
     if (!p->directory)
@@ -200,7 +201,7 @@ caf_result child(uint64_t parent, const uint16_t *name, uint32_t units,
     auto n = std::make_shared<Node>();
     n->parent = p;
     n->directory = directory;
-    n->created = create;
+    n->created = create && movable;
     n->root = p->root;
     CAF_CHECKPOINT("before_reserve");
     const auto id = reserve(n);
@@ -244,6 +245,83 @@ void crypto(NTSTATUS s) {
 } // namespace
 extern "C" {
 uint32_t caf_abi_version(void) { return 1; }
+uint32_t caf_gateway_version(void) { return 1; }
+caf_result caf_read(uint64_t id, uint64_t offset, uint8_t *data,
+                    uint32_t capacity) {
+  return boundary([&](caf_result &r) {
+    auto n = get(id);
+    if (n->directory || !data || capacity > 65536 || offset > INT64_MAX)
+      fail(CAF_ARGUMENT);
+    LARGE_INTEGER position{};
+    position.QuadPart = static_cast<LONGLONG>(offset);
+    os(SetFilePointerEx(n->handle.value, position, nullptr, FILE_BEGIN) != 0);
+    DWORD count = 0;
+    os(ReadFile(n->handle.value, data, capacity, &count, nullptr) != 0);
+    r.bytes = count;
+    fill(r, *n);
+  });
+}
+caf_result caf_lock(uint64_t id) {
+  return boundary([&](caf_result &r) {
+    auto n = get(id);
+    if (n->directory)
+      fail(CAF_ARGUMENT);
+    OVERLAPPED overlapped{};
+    os(LockFileEx(n->handle.value,
+                  LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0,
+                  &overlapped) != 0);
+    r.object = id;
+  });
+}
+caf_result caf_entry(uint64_t id, uint32_t index, uint16_t *name,
+                     uint32_t capacity) {
+  return boundary([&](caf_result &r) {
+    auto n = get(id);
+    if (!n->directory || !name || capacity < 256)
+      fail(CAF_ARGUMENT);
+    std::vector<uint8_t> buffer(65536);
+    uint32_t current = 0;
+    bool restart = true;
+    for (;;) {
+      const auto ok = GetFileInformationByHandleEx(
+          n->handle.value,
+          restart ? FileIdBothDirectoryRestartInfo : FileIdBothDirectoryInfo,
+          buffer.data(), static_cast<DWORD>(buffer.size()));
+      restart = false;
+      if (!ok) {
+        const auto error = GetLastError();
+        if (error == ERROR_NO_MORE_FILES)
+          return;
+        fail(CAF_OS, error);
+      }
+      size_t offset = 0;
+      for (;;) {
+        if (offset + offsetof(FILE_ID_BOTH_DIR_INFO, FileName) > buffer.size())
+          fail(CAF_INTERNAL);
+        const auto e = reinterpret_cast<const FILE_ID_BOTH_DIR_INFO *>(
+            buffer.data() + offset);
+        if (e->FileNameLength > 510 ||
+            offset + offsetof(FILE_ID_BOTH_DIR_INFO, FileName) +
+                    e->FileNameLength >
+                buffer.size())
+          fail(CAF_POLICY);
+        const std::wstring s(e->FileName, e->FileNameLength / sizeof(wchar_t));
+        if (s != L"." && s != L".." && current++ == index) {
+          segment(s);
+          std::memcpy(name, s.data(), e->FileNameLength);
+          r.bytes = s.size();
+          r.reserved =
+              ((e->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1U : 0U) |
+              ((e->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? 2U : 0U);
+          return;
+        }
+        if (!e->NextEntryOffset)
+          break;
+        offset += e->NextEntryOffset;
+      }
+    }
+  });
+}
 caf_result caf_open_root(const uint16_t *absolute, uint32_t units) {
   return boundary([&](caf_result &r) {
     nt_create();
@@ -302,6 +380,9 @@ caf_result caf_open_dir(uint64_t p, const uint16_t *n, uint32_t u) {
 }
 caf_result caf_create_dir(uint64_t p, const uint16_t *n, uint32_t u) {
   return child(p, n, u, true, true);
+}
+caf_result caf_create_pinned_dir(uint64_t p, const uint16_t *n, uint32_t u) {
+  return child(p, n, u, true, true, false);
 }
 caf_result caf_open_file(uint64_t p, const uint16_t *n, uint32_t u) {
   return child(p, n, u, false, false);

@@ -35,13 +35,14 @@ void check(bool value, const char *why) {
   if (!value)
     throw std::runtime_error(why);
 }
-void good(caf_result r) {
+caf_result good(caf_result r) {
   if (r.status) {
     std::cerr << "status=" << r.status << " win=" << r.win32_error
               << " nt=" << std::hex << r.nt_status << std::dec
               << " effect=" << r.effect << "\n";
     throw std::runtime_error("unexpected ABI failure");
   }
+  return r;
 }
 const uint16_t *u(const std::wstring &s) {
   return reinterpret_cast<const uint16_t *>(s.data());
@@ -730,6 +731,33 @@ void faults() {
   }
 }
 #endif
+void gateway() {
+  Fixture fixture;
+  Object r(root(fixture.project));
+  const std::wstring name = L"shared";
+  Object d(caf_create_pinned_dir(r.id, u(name), count(name)));
+  Object second(caf_open_dir(r.id, u(name), count(name)));
+  Object f(file(d.id, L"payload"));
+  const uint8_t bytes[] = {1, 2, 3};
+  good(caf_write(f.id, bytes, 3));
+  good(caf_seal(f.id, 3));
+  uint8_t data[3]{};
+  auto read = good(caf_read(f.id, 1, data, 3));
+  check(read.bytes == 2 && data[0] == 2 && data[1] == 3,
+        "handle relative read");
+  uint16_t entry[256]{};
+  auto e = good(caf_entry(d.id, 0, entry, 256));
+  check(e.bytes == 7 &&
+            std::wstring(reinterpret_cast<wchar_t *>(entry), 7) == L"payload",
+        "handle directory enumeration");
+  check(good(caf_entry(d.id, 1, entry, 256)).bytes == 0, "enumeration EOF");
+  good(caf_lock(f.id));
+  check(caf_read(0, 0, data, 3).status == CAF_HANDLE,
+        "invalid read capability");
+  check(caf_entry(f.id, 0, entry, 256).status == CAF_ARGUMENT,
+        "file is not directory");
+  check(caf_gateway_version() == 1, "gateway ABI");
+}
 int wmain(int argc, wchar_t **argv) {
   try {
     if (argc > 1 && std::wstring(argv[1]) == L"child")
@@ -767,7 +795,9 @@ int wmain(int argc, wchar_t **argv) {
                    "integration claim\n";
       return 77;
     }
-    if (name == L"basic")
+    if (name == L"gateway")
+      gateway();
+    else if (name == L"basic")
       basic();
     else if (name == L"names")
       names();

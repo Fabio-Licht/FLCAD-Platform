@@ -38,6 +38,26 @@ typedef struct caf_result {
 } caf_result;
 #pragma pack(pop)
 CAF_API uint32_t caf_abi_version(void);
+/* Additive gateway contract v1. ABI v1 result layout remains unchanged.
+ *
+ * read: offset, capacity <= 64 KiB; bytes = actual read count (0 at EOF).
+ *
+ * entry: UTF-16 name capacity >= 256; bytes = units, 0 at EOF;
+ * reserved bit
+ * 0 = directory, bit 1 = reparse (never followed).
+ * lock: exclusive byte
+ * [0,1), fails immediately on contention; close releases.
+ * pinned_dir:
+ * exclusive creation without DELETE authority; cannot rename.
+ */
+CAF_API uint32_t caf_gateway_version(void);
+CAF_API caf_result caf_create_pinned_dir(uint64_t parent, const uint16_t *name,
+                                         uint32_t units);
+CAF_API caf_result caf_read(uint64_t object, uint64_t offset, uint8_t *data,
+                            uint32_t capacity);
+CAF_API caf_result caf_entry(uint64_t directory, uint32_t index, uint16_t *name,
+                             uint32_t capacity);
+CAF_API caf_result caf_lock(uint64_t object);
 CAF_API caf_result caf_open_root(const uint16_t *absolute, uint32_t units);
 CAF_API caf_result caf_open_dir(uint64_t parent, const uint16_t *name,
                                 uint32_t units);

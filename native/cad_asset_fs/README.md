@@ -1,14 +1,15 @@
 # CAD asset filesystem — ABI v1
 
-Independent Windows foundation; no OpenCascade linkage, ABI changes, Flutter
-integration, transaction commits, GC, deletion API or document publication.
+Independent Windows library, now used by the opt-in Dart 2B1B gateway. No
+OpenCascade linkage or ABI changes, GC, deletion API or document publication.
 
 **Not fully approved:** the real two-NTFS-volume integration test remains
 pending because this machine only has C:. The owner explicitly prohibited
 creating/mounting/formatting disks or VHDs. The identity-policy double is a unit
 test, not evidence that the two-volume integration test passed. **2B1B remains
-blocked** until the Dart gateway integrates this foundation for payloads,
-descriptors, journal, locking and recovery, and that integration is validated.
+formally unapproved** while the real two-volume qualification is pending.
+Payloads, descriptors, journal, locking and read-only recovery use the native
+gateway; 2B2 producers have not been migrated.
 
 ## Platform and threat model
 
@@ -134,7 +135,7 @@ load the real DLL. A separate executable compiles the same implementation with
 test-only fault/barrier instrumentation; those hooks are absent from the DLL.
 All synthetic faults are checked as errors, with effects and resource counts.
 
-19 CTest cases: known SHA-256, invalid names, static junction and symlink,
+20 CTest cases: gateway read/enumeration/lock, known SHA-256, invalid names, static junction and symlink,
 real-process ancestor races, exclusive collisions, relative no-replace rename,
 sharing violation, denied ACL, invalid capabilities, handle counts, Unicode/
 spaces/long paths, threads plus concurrent processes, abrupt process exit at
@@ -142,7 +143,7 @@ six operation boundaries, volume-policy doubles, real two-volume integration,
 in-place reparse during create and rename, and deterministic faults including
 post-create/query failure and partial write.
 
-Current result: **18 passed, 1 pending** (`caf_volume`, skip code 77). When a
+Current result: **19 passed, 1 pending** (`caf_volume`, skip code 77). When a
 second real NTFS volume is supplied, set `CAF_SECOND_VOLUME` to an existing test
 directory there and run `ctest ... -R '^caf_volume$' -V`. The test checks distinct
 real serials and requires cross-volume refusal without a rename effect. It does

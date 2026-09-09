@@ -1,3 +1,4 @@
+import 'package:flcad_mobile/app/runtime/cad_asset_fs_native.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -756,12 +757,12 @@ void main() {
       final failure = StateError('journal fault'),
           cleanup = StateError('cleanup fault');
       late String directory;
-      late Map<String, dynamic> confirmed;
+      late String confirmedState;
       await expectLater(
         runtime.withGeometryStaging((op) async {
           directory = op.stagingDirectory;
           await payload(op);
-          confirmed = await _data(directory);
+          confirmedState = op.state.name;
           storage.onPhase = (s) async {
             if (s == 'manifest:prepared:$phase') throw failure;
             if (s.startsWith('manifest:quarantined:')) throw cleanup;
@@ -774,7 +775,8 @@ void main() {
               .having((e) => e.cleanup, 'cleanup', same(cleanup)),
         ),
       );
-      expect(await _data(directory), confirmed);
+      final confirmed = await _data(directory);
+      expect(confirmed['state'], confirmedState);
       final previous = await _data(directory, previous: true);
       expect(
         previous['sequence'],
@@ -793,14 +795,16 @@ void main() {
         directory = op.stagingDirectory;
         await payload(op);
         await op.prepare();
-        final current = await _data(directory),
-            previous = await _data(directory, previous: true);
-        expect(current['state'], 'prepared');
-        expect(previous['sequence'], lessThan(current['sequence'] as int));
+        expect(op.state, CadAssetStageState.prepared);
         await File(
           p.join(directory, 'manifest.unfinished.tmp'),
         ).writeAsString('{');
       });
+      final current = await _data(directory),
+          previous = await _data(directory, previous: true);
+      expect(current['state'], 'rolledBack');
+      expect(previous['state'], 'rollingBack');
+      expect(previous['sequence'], lessThan(current['sequence'] as int));
       expect(
         (await inspectCadAssetStaging(project)).single.classification,
         'rolledBackRetained',
@@ -917,7 +921,10 @@ void main() {
         await op.prepare();
         return op.promote();
       });
-      expect(storage.chunks, greaterThan(128));
+      expect(
+        storage.chunks,
+        128,
+      ); // Borrowed source only; owned hashing is native streaming.
       expect(storage.maxChunk, lessThanOrEqualTo(65536));
       expect((await sha256.bind(source.openRead()).first).toString(), before);
       expect(
@@ -1182,7 +1189,14 @@ void main() {
         outside.path,
       ]);
       expect(creation.exitCode, 0);
-      await expectLater(promote(runtime), throwsStateError);
+      await expectLater(
+        promote(runtime),
+        throwsA(
+          isA<CadAssetNativeError>()
+              .having((e) => e.status, 'policy', 3)
+              .having((e) => e.effect, 'no mutation', 0),
+        ),
+      );
       expect(await sentinel.readAsString(), 'safe');
       expect(
         await outside

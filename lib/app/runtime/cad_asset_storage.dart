@@ -51,46 +51,26 @@ class CadAssetStorage {
       Timer(timeout, expired);
   @protected
   Stream<List<int>> read(File source) => source.openRead();
-
-  Future<Map<String, dynamic>> _digest(File file) async {
-    final output = _DigestSink();
-    final input = sha256.startChunkedConversion(output);
-    var size = 0;
-    await for (final chunk in read(file)) {
-      size += chunk.length;
-      input.add(chunk);
-    }
-    input.close();
-    return {'size': size, 'sha256': output.value.toString()};
-  }
-}
-
-final class _DigestSink implements Sink<Digest> {
-  Digest? value;
-  @override
-  void add(Digest data) => value = data;
-  @override
-  void close() {}
 }
 
 final class _AssetPaths {
-  _AssetPaths(this.root);
-  final String root;
-  String get lockKey => Platform.isWindows ? root.toLowerCase() : root;
-  static Future<_AssetPaths> open(Directory project) async {
-    final absolute = path.normalize(path.absolute(project.path));
-    final resolved = path.normalize(await project.resolveSymbolicLinks());
-    if (!_same(absolute, resolved)) {
-      throw StateError('Project root is redirected');
-    }
-    final result = _AssetPaths(resolved);
-    await result.check(resolved);
-    return result;
+  _AssetPaths(this.root) : native = CadAssetNativeFs(root) {
+    _dirs[root] = native.root;
   }
-
-  static bool _same(String a, String b) =>
-      Platform.isWindows ? a.toLowerCase() == b.toLowerCase() : a == b;
-
+  final String root;
+  final CadAssetNativeFs native;
+  final _dirs = <String, int>{}, _files = <String, int>{};
+  // Capture once: releasing local admission must not require another syscall
+  // against a root that may have become unreadable/reparsed during the body.
+  late final String lockKey = native
+      .info(native.root)
+      .entries
+      .where((e) => e.key != 'size')
+      .map((e) => e.value)
+      .join(':');
+  static Future<_AssetPaths> open(Directory project) async =>
+      _AssetPaths(path.absolute(project.path));
+  void dispose() => native.dispose();
   String location(List<String> parts) {
     for (final part in parts) {
       if (!RegExp(r'^[a-zA-Z0-9_.-]+$').hasMatch(part) ||
@@ -103,84 +83,230 @@ final class _AssetPaths {
     return path.joinAll([root, ...parts]);
   }
 
-  Future<void> check(String target) async {
-    final absolute = path.normalize(path.absolute(target));
-    if (!_same(root, absolute) && !path.isWithin(root, absolute)) {
-      throw StateError('Path escapes project');
+  List<String> _parts(String target) {
+    if (target == root) return [];
+    if (!path.isWithin(root, target)) throw StateError('Path escapes project');
+    final parts = path.split(path.relative(target, from: root));
+    if (parts.any((p) => p == '.' || p == '..')) {
+      throw StateError('Invalid path');
     }
-    var current = root;
-    final segments = _same(root, absolute)
-        ? <String>[]
-        : path.split(path.relative(absolute, from: root));
-    for (final segment in <String>['', ...segments]) {
-      if (segment.isNotEmpty) current = path.join(current, segment);
-      final type = await FileSystemEntity.type(current, followLinks: false);
-      if (type == FileSystemEntityType.link) {
-        throw StateError('Linked path is not permitted');
+    return parts;
+  }
+
+  int directory(String target, {void Function()? authorize}) {
+    var current = root, id = native.root;
+    for (final part in _parts(target)) {
+      current = path.join(current, part);
+      final cached = _dirs[current];
+      if (cached != null) {
+        native.info(cached);
+        id = cached;
+        continue;
       }
-      if (type == FileSystemEntityType.notFound) continue;
-      final resolved = path.normalize(
-        await (type == FileSystemEntityType.directory
-            ? Directory(current).resolveSymbolicLinks()
-            : File(current).resolveSymbolicLinks()),
-      );
-      if (!_same(current, resolved)) {
-        throw StateError('Reparse or redirected path is not permitted');
+      try {
+        id = native.child(id, part, directory: true);
+      } on CadAssetNativeError catch (e) {
+        if (!e.notFound || authorize == null) rethrow;
+        authorize();
+        try {
+          id = native.child(
+            id,
+            part,
+            directory: true,
+            create: true,
+            pinned: !part.startsWith('ga1_'),
+          );
+        } on CadAssetNativeError catch (collision) {
+          if (!collision.collision) rethrow;
+          id = native.child(id, part, directory: true);
+        }
       }
+      _dirs[current] = id;
     }
+    return id;
   }
 
   Future<void> directories(
     String target, {
     required void Function() authorize,
   }) async {
-    await check(target);
-    var current = root;
-    for (final segment in path.split(path.relative(target, from: root))) {
-      current = path.join(current, segment);
-      await check(current);
-      authorize();
-      await Directory(current).create();
-      await check(current);
+    directory(target, authorize: authorize);
+  }
+
+  Future<void> check(String target) async {
+    _parts(target);
+    if (_dirs.containsKey(target)) {
+      native.info(_dirs[target]!);
+    } else if (_files.containsKey(target)) {
+      native.info(_files[target]!);
     }
   }
 
   Future<bool> exists(String target) async {
-    await check(target);
-    return await FileSystemEntity.type(target, followLinks: false) !=
-        FileSystemEntityType.notFound;
+    try {
+      final parent = directory(path.dirname(target));
+      return native
+          .entries(parent)
+          .any(
+            (e) => e.name.toLowerCase() == path.basename(target).toLowerCase(),
+          );
+    } on CadAssetNativeError catch (e) {
+      if (e.notFound) return false;
+      rethrow;
+    }
+  }
+
+  _NativeAssetFile file(String target) {
+    _parts(target);
+    return _NativeAssetFile(this, target);
+  }
+
+  int openFile(String target) => _files[target] ??= native.child(
+    directory(path.dirname(target)),
+    path.basename(target),
+  );
+  void release(String target) {
+    final id = _files.remove(target);
+    if (id != null) native.close(id);
+  }
+
+  Future<Map<String, dynamic>> digest(String target) async {
+    final owned = _files.containsKey(target);
+    try {
+      return native.info(openFile(target), digest: true);
+    } finally {
+      if (!owned) release(target);
+    }
+  }
+
+  Stream<FileSystemEntity> list(
+    String target, {
+    bool recursive = false,
+  }) async* {
+    final entries = native.entries(directory(target));
+    for (final e in entries) {
+      final child = path.join(target, e.name);
+      if (e.reparse) {
+        yield Link(child);
+      } else if (e.directory) {
+        yield Directory(child);
+        if (recursive) yield* list(child, recursive: true);
+      } else {
+        yield File(child);
+      }
+    }
+  }
+
+  void rename(String source, String destination) {
+    final id = _dirs[source] ?? _files[source];
+    if (id == null) throw StateError('Rename requires owned live capability');
+    // NTFS requires descendant handles closed for directory promotion. The
+    // source directory and its ancestors remain pinned throughout.
+    for (final key in _dirs.keys.toList().reversed) {
+      if (path.isWithin(source, key)) native.close(_dirs.remove(key)!);
+    }
+    native.rename(
+      id,
+      directory(path.dirname(destination)),
+      path.basename(destination),
+    );
+
+    for (final table in [_dirs, _files]) {
+      for (final key in table.keys.toList()) {
+        if (key == source || path.isWithin(source, key)) {
+          table[key == source
+                  ? destination
+                  : path.join(destination, path.relative(key, from: source))] =
+              table.remove(key)!;
+        }
+      }
+    }
+  }
+
+  void retire(String target) {
+    if (_files.containsKey(target)) {
+      rename(
+        target,
+        path.join(path.dirname(target), 'retained.${_assetId('j1')}.json'),
+      );
+    } else {
+      throw StateError('Cannot replace unowned journal');
+    }
   }
 }
 
-/// OS no-replace primitive: unlike Directory.rename this never replaces an
-/// existing directory, even an empty one. No OpenCascade ABI is involved.
-void _renameAssetNoReplace(String source, String destination) {
-  if (!Platform.isWindows) {
-    throw UnsupportedError(
-      'Atomic no-replace asset promotion currently requires Windows',
+final class _NativeAssetFile {
+  _NativeAssetFile(this.paths, this.path);
+  final _AssetPaths paths;
+  final String path;
+  Directory get parent => Directory(Directory(path).parent.path);
+  Future<void> create({required bool exclusive}) async {
+    if (!exclusive) throw StateError('Exclusive creation required');
+    final id = paths.native.child(
+      paths.directory(parent.path),
+      File(path).uri.pathSegments.last,
+      create: true,
     );
+    paths._files[path] = id;
   }
-  final library = ffi.DynamicLibrary.open('kernel32.dll');
-  final move = library
-      .lookupFunction<
-        ffi.Int32 Function(ffi.Pointer<Utf16>, ffi.Pointer<Utf16>, ffi.Uint32),
-        int Function(ffi.Pointer<Utf16>, ffi.Pointer<Utf16>, int)
-      >('MoveFileExW');
-  final getError = library
-      .lookupFunction<ffi.Uint32 Function(), int Function()>('GetLastError');
-  final from = source.toNativeUtf16(), to = destination.toNativeUtf16();
-  try {
-    // WRITE_THROUGH only; deliberately omit REPLACE_EXISTING and COPY_ALLOWED.
-    if (move(from, to, 8) == 0) {
-      throw FileSystemException(
-        'No-replace promotion failed',
-        destination,
-        OSError('MoveFileExW', getError()),
+
+  Future<_NativeAssetFile> open({FileMode? mode}) async {
+    paths.openFile(path);
+    return this;
+  }
+
+  Future<void> writeFrom(List<int> bytes, [int start = 0, int? end]) async {
+    paths.native.write(paths.openFile(path), bytes.sublist(start, end));
+  }
+
+  Future<void> flush() async {
+    paths.native.info(paths.openFile(path), digest: true);
+  }
+
+  Future<void> close() async {
+    paths.release(path);
+  }
+
+  Future<void> writeAsBytes(List<int> bytes, {bool flush = false}) async {
+    for (var i = 0; i < bytes.length; i += 65536) {
+      paths.native.write(
+        paths.openFile(path),
+        bytes.sublist(i, math.min(i + 65536, bytes.length)),
       );
     }
-  } finally {
-    calloc.free(from);
-    calloc.free(to);
+    if (flush) paths.native.info(paths.openFile(path), digest: true);
+  }
+
+  Future<void> writeAsString(String text, {bool flush = false}) =>
+      writeAsBytes(utf8.encode(text), flush: flush);
+  Future<int> length() async =>
+      paths.native.info(paths.openFile(path))['size'] as int;
+  Future<String> readAsString() async {
+    final borrowed = !paths._files.containsKey(path);
+    try {
+      final id = paths.openFile(path), bytes = <int>[];
+      final size = paths.native.info(id)['size'] as int;
+      if (size > 1024 * 1024) {
+        throw const FormatException('Manifest exceeds limit');
+      }
+      for (var offset = 0; offset < size;) {
+        final chunk = paths.native.read(
+          id,
+          offset,
+          math.min(65536, size - offset),
+        );
+        if (chunk.isEmpty) throw const FormatException('Truncated manifest');
+        bytes.addAll(chunk);
+        offset += chunk.length;
+      }
+      return utf8.decode(bytes);
+    } finally {
+      if (borrowed) paths.release(path);
+    }
+  }
+
+  Future<void> rename(String destination) async {
+    paths.rename(path, destination);
   }
 }
 
@@ -244,7 +370,7 @@ final class _ProjectAssetLocks {
       }
     }
 
-    RandomAccessFile? handle;
+    int? handle;
     Completer<void>? local;
     var locked = false;
     try {
@@ -265,18 +391,30 @@ final class _ProjectAssetLocks {
         await paths.directories(path.dirname(lockPath), authorize: validate);
         await paths.check(lockPath);
         validate();
-        handle = await File(lockPath).open(mode: FileMode.append);
         try {
-          await handle.lock(FileLock.exclusive, 0, 1);
+          try {
+            handle = paths.native.child(
+              paths.directory(path.dirname(lockPath)),
+              'project.lock',
+              create: true,
+            );
+          } on CadAssetNativeError catch (e) {
+            if (!e.collision) rethrow;
+            handle = paths.native.child(
+              paths.directory(path.dirname(lockPath)),
+              'project.lock',
+            );
+          }
+          paths.native.lock(handle);
           locked = true;
           break;
-        } on FileSystemException catch (error) {
-          await handle.close();
+        } on CadAssetNativeError catch (error) {
+          if (handle != null) paths.native.close(handle);
           handle = null;
           held.remove(paths.lockKey);
           local.complete();
           local = null;
-          if (![11, 13, 33, 35].contains(error.osError?.errorCode)) rethrow;
+          if (!error.contention) rethrow;
           await storage.checkpoint('lock:contended');
           // Cross-process locks have no Dart notification API. Bounded polling
           // is only the fallback; tests synchronize using contention barriers.
@@ -288,18 +426,6 @@ final class _ProjectAssetLocks {
         throw TimeoutException('Project asset lock timed out', timeout);
       }
       timer.cancel();
-      final bytes = utf8.encode(
-        jsonEncode({
-          'schema': 'flcad.asset-lock',
-          'version': 1,
-          'instance': instance,
-          'operation': operation,
-        }),
-      );
-      await handle.setPosition(0);
-      await handle.writeFrom(bytes);
-      await handle.truncate(bytes.length);
-      await handle.flush();
       await storage.checkpoint('lock:acquired');
       validate();
       return await runZoned(
@@ -311,10 +437,13 @@ final class _ProjectAssetLocks {
     } finally {
       timer.cancel();
       try {
-        if (locked) await handle!.unlock(0, 1);
+        if (locked && handle != null) {
+          paths.native.close(handle);
+          handle = null;
+        }
       } finally {
         try {
-          await handle?.close();
+          if (handle != null) paths.native.close(handle);
         } finally {
           if (local != null) {
             held.remove(paths.lockKey);
@@ -330,7 +459,7 @@ String _manifestChecksum(Map<String, dynamic> data) =>
     sha256.convert(utf8.encode(jsonEncode(data))).toString();
 
 Future<Map<String, dynamic>> _readAssetManifest(
-  File file,
+  _NativeAssetFile file,
   _AssetPaths paths,
   String instance,
   String operation,
@@ -423,7 +552,14 @@ Future<Map<String, dynamic>> _readAssetManifest(
       final info = entry.value as Map<String, dynamic>;
       if (info['allowEmpty'] is! bool ||
           info.keys.any(
-            (k) => !{'status', 'size', 'sha256', 'allowEmpty'}.contains(k),
+            (k) => !{
+              'status',
+              'size',
+              'sha256',
+              'allowEmpty',
+              'volume',
+              'fileId',
+            }.contains(k),
           )) {
         throw const FormatException('Invalid file metadata');
       }

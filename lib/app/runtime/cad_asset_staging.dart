@@ -57,51 +57,55 @@ extension CadGeometryStaging on CadRuntime {
         throw StateError('No active project');
       }
       final paths = await _AssetPaths.open(tx.directory!);
-      tx.validate();
-      final operation = CadGeometryStagingOperation._(
-        tx,
-        paths,
-        _assetInstance,
-        _assetId('o1'),
-        _assetStorage,
-        cancellation ?? CadAssetCancellation(),
-        lockTimeout,
-      );
       try {
-        await operation._start();
-        result = await action(operation);
-        operation._accepting = false;
-        await operation._tail;
-        operation._validate();
-      } catch (error, stack) {
-        operation._abort(error, stack);
+        tx.validate();
+        final operation = CadGeometryStagingOperation._(
+          tx,
+          paths,
+          _assetInstance,
+          _assetId('o1'),
+          _assetStorage,
+          cancellation ?? CadAssetCancellation(),
+          lockTimeout,
+        );
         try {
-          await _assetStorage.checkpoint('operation:drainingAfterAbort');
+          await operation._start();
+          result = await action(operation);
+          operation._accepting = false;
+          await operation._tail;
+          operation._validate();
         } catch (error, stack) {
           operation._abort(error, stack);
+          try {
+            await _assetStorage.checkpoint('operation:drainingAfterAbort');
+          } catch (error, stack) {
+            operation._abort(error, stack);
+          }
+          await operation._tail;
         }
-        await operation._tail;
-      }
-      operation._revoke();
-      try {
-        await operation._finish(success: operation._failure == null);
-      } catch (cleanup, stack) {
-        if (operation._failure case final cause?
-            when !identical(cause, cleanup)) {
-          Error.throwWithStackTrace(
-            CadAssetOperationFailure(
-              cause,
-              cleanup,
+        operation._revoke();
+        try {
+          await operation._finish(success: operation._failure == null);
+        } catch (cleanup, stack) {
+          if (operation._failure case final cause?
+              when !identical(cause, cleanup)) {
+            Error.throwWithStackTrace(
+              CadAssetOperationFailure(
+                cause,
+                cleanup,
+                operation._failureStack!,
+                stack,
+              ),
               operation._failureStack!,
-              stack,
-            ),
-            operation._failureStack!,
-          );
+            );
+          }
+          Error.throwWithStackTrace(cleanup, stack);
         }
-        Error.throwWithStackTrace(cleanup, stack);
-      }
-      if (operation._failure case final cause?) {
-        Error.throwWithStackTrace(cause, operation._failureStack!);
+        if (operation._failure case final cause?) {
+          Error.throwWithStackTrace(cause, operation._failureStack!);
+        }
+      } finally {
+        paths.dispose();
       }
     });
     return result;
@@ -345,13 +349,16 @@ final class CadGeometryStagingOperation {
     }
     files[kind.name] = {'status': 'writing', 'allowEmpty': allowEmpty};
     await _update(next, CadAssetStageState.preparing);
-    final target = File(path.join(_assetDirectory(asset), kind.relativePath));
+    final target = _paths.file(
+      path.join(_assetDirectory(asset), kind.relativePath),
+    );
     await _paths.directories(target.parent.path, authorize: _validate);
     await _paths.check(target.path);
     _validate();
     await target.create(exclusive: true);
     _validate();
     final file = await target.open(mode: FileMode.writeOnly);
+    Map<String, dynamic>? sealed;
     try {
       await for (final chunk in _cancellable(bytes)) {
         _validate();
@@ -367,6 +374,7 @@ final class CadGeometryStagingOperation {
       }
       _validate();
       await file.flush();
+      sealed = await _paths.digest(target.path);
     } catch (error, stack) {
       _abort(error, stack);
       rethrow;
@@ -376,7 +384,10 @@ final class CadGeometryStagingOperation {
     await _storage.checkpoint('file:flushed');
     _validate();
     await _paths.check(target.path);
-    final digest = await _storage._digest(target);
+    final digest = await _paths.digest(target.path);
+    if (!_sameAssetIdentity(digest, sealed)) {
+      throw StateError('Payload identity changed after seal');
+    }
     if (digest['size'] == 0 && !allowEmpty) {
       throw StateError('Empty asset payload');
     }
@@ -415,7 +426,9 @@ final class CadGeometryStagingOperation {
         throw StateError('Asset has no files');
       }
       await _verifyFiles(asset, record, finalPath: false, descriptor: false);
-      final descriptor = File(path.join(_assetDirectory(asset), 'asset.json'));
+      final descriptor = _paths.file(
+        path.join(_assetDirectory(asset), 'asset.json'),
+      );
       await _paths.check(descriptor.path);
       _validate();
       await descriptor.create(exclusive: true);
@@ -430,7 +443,8 @@ final class CadGeometryStagingOperation {
         }),
         flush: true,
       );
-      record['descriptor'] = await _storage._digest(descriptor);
+      record['descriptor'] = await _paths.digest(descriptor.path);
+      _paths.release(descriptor.path);
     }
     await _update(next, CadAssetStageState.prepared);
   });
@@ -484,11 +498,13 @@ final class CadGeometryStagingOperation {
           if (await _paths.exists(destination)) {
             throw StateError('Asset destination collision');
           }
+          await _storage.checkpoint('promotion:renameReady');
           _validate();
-          _renameAssetNoReplace(source, destination);
+          _paths.rename(source, destination);
           // The synchronous OS rename succeeded. Record that fact before any
           // await, even if revocation prevents the subsequent journal advance.
           _completedMoves.add(asset.value);
+          await _storage.checkpoint('promotion:renamed');
           await _verifyFiles(asset, _asset(_manifest!, asset), finalPath: true);
           await _storage.checkpoint('promotion:afterMove');
           final next = _copy();
@@ -521,29 +537,25 @@ final class CadGeometryStagingOperation {
       if (info['status'] != 'written') {
         throw StateError('Incomplete acquired payload');
       }
-      final file = File(path.join(directory, kind.relativePath));
+      final file = _paths.file(path.join(directory, kind.relativePath));
       expected.add(path.normalize(file.path));
       await _paths.check(file.path);
-      final digest = await _storage._digest(file);
-      if (digest['size'] != info['size'] ||
-          digest['sha256'] != info['sha256']) {
+      final digest = await _paths.digest(file.path);
+      if (!_sameAssetIdentity(digest, info)) {
         throw StateError('Payload changed after validation');
       }
     }
     if (descriptor) {
-      final file = File(path.join(directory, 'asset.json'));
+      final file = _paths.file(path.join(directory, 'asset.json'));
       expected.add(path.normalize(file.path));
       await _paths.check(file.path);
-      final digest = await _storage._digest(file),
+      final digest = await _paths.digest(file.path),
           info = record['descriptor'] as Map;
-      if (digest['size'] != info['size'] ||
-          digest['sha256'] != info['sha256']) {
+      if (!_sameAssetIdentity(digest, info)) {
         throw StateError('Asset descriptor changed');
       }
     }
-    await for (final entry in Directory(
-      directory,
-    ).list(recursive: true, followLinks: false)) {
+    await for (final entry in _paths.list(directory, recursive: true)) {
       await _paths.check(entry.path);
       if (entry is! Directory &&
           !expected.contains(path.normalize(entry.path))) {
@@ -618,11 +630,11 @@ final class CadGeometryStagingOperation {
     }
 
     authorize();
-    final current = File(path.join(stagingDirectory, 'manifest.json'));
-    final previous = File(
+    final current = _paths.file(path.join(stagingDirectory, 'manifest.json'));
+    final previous = _paths.file(
       path.join(stagingDirectory, 'manifest.previous.json'),
     );
-    final temporary = File(
+    final temporary = _paths.file(
       path.join(stagingDirectory, 'manifest.${_assetId('j1')}.tmp'),
     );
     final bytes = utf8.encode(
@@ -659,7 +671,7 @@ final class CadGeometryStagingOperation {
           _manifestChecksum(valid) != _manifestChecksum(_manifest!)) {
         throw StateError('Manifest changed or last update was not confirmed');
       }
-      final backup = File(
+      final backup = _paths.file(
         path.join(stagingDirectory, 'previous.${_assetId('j1')}.tmp'),
       );
       await _paths.check(backup.path);
@@ -673,12 +685,20 @@ final class CadGeometryStagingOperation {
       await _readAssetManifest(backup, _paths, instanceId, operationId);
       await _paths.check(previous.path);
       authorize();
+      final previousExists = await _paths.exists(previous.path);
+      authorize();
+      if (previousExists) _paths.retire(previous.path);
+      authorize();
       await backup.rename(previous.path);
       await _readAssetManifest(previous, _paths, instanceId, operationId);
     }
     await _storage.checkpoint('manifest:${next['state']}:beforeReplace');
     await _paths.check(current.path);
     await _paths.check(temporary.path);
+    authorize();
+    final currentExists = await _paths.exists(current.path);
+    authorize();
+    if (currentExists) _paths.retire(current.path);
     authorize();
     await temporary.rename(current.path);
     await _storage.checkpoint('manifest:${next['state']}:replaced');
@@ -776,120 +796,153 @@ Future<List<CadAssetRecoveryResult>> inspectCadAssetStaging(
   CadAssetStorage storage = const CadAssetStorage(),
 }) async {
   final paths = await _AssetPaths.open(project);
-  final staging = Directory(paths.location(['.cad-staging']));
-  if (!await paths.exists(staging.path)) return [];
-  final results = <CadAssetRecoveryResult>[];
-  await for (final instance in staging.list(followLinks: false)) {
-    if (instance is! Directory) continue;
-    try {
-      await paths.check(instance.path);
-      _requireId(path.basename(instance.path), 'i1');
-    } catch (_) {
-      results.add(
-        CadAssetRecoveryResult(
-          instance.path,
-          'quarantinedInvalidInstance',
-          false,
-          false,
-        ),
-      );
-      continue;
-    }
-    await for (final operation in instance.list(followLinks: false)) {
-      final i = path.basename(instance.path), o = path.basename(operation.path);
-      var backup = false;
+  try {
+    final staging = Directory(paths.location(['.cad-staging']));
+    if (!await paths.exists(staging.path)) return [];
+    final results = <CadAssetRecoveryResult>[];
+    await for (final instance in paths.list(staging.path)) {
+      if (instance is! Directory && instance is! Link) continue;
       try {
-        await paths.check(operation.path);
-        _requireId(o, 'o1');
-        Map<String, dynamic> data;
-        try {
-          data = await _readAssetManifest(
-            File(path.join(operation.path, 'manifest.json')),
-            paths,
-            i,
-            o,
-          );
-        } catch (_) {
-          backup = true;
-          data = await _readAssetManifest(
-            File(path.join(operation.path, 'manifest.previous.json')),
-            paths,
-            i,
-            o,
-          );
-        }
-        var complete = true;
-        final assets = data['assets'] as List;
-        for (final raw in assets) {
-          final asset = raw as Map<String, dynamic>;
-          final id = GeometryAssetId.fromJson(
-            asset['reference'] as Map<String, dynamic>,
-          );
-          final destination = paths.location(['CAD', 'Assets', 'v1', id.value]);
-          if (!await paths.exists(destination)) {
-            complete = false;
-            continue;
-          }
-          for (final entry
-              in (asset['files'] as Map<String, dynamic>).entries) {
-            final file = File(
-              path.join(
-                destination,
-                CadAssetFile.values.byName(entry.key).relativePath,
-              ),
-            );
-            await paths.check(file.path);
-            final digest = await storage._digest(file),
-                expected = entry.value as Map;
-            if (digest['size'] != expected['size'] ||
-                digest['sha256'] != expected['sha256']) {
-              complete = false;
-            }
-          }
-          final descriptor = File(path.join(destination, 'asset.json'));
-          await paths.check(descriptor.path);
-          final digest = await storage._digest(descriptor),
-              expected = asset['descriptor'] as Map;
-          if (digest['size'] != expected['size'] ||
-              digest['sha256'] != expected['sha256']) {
-            complete = false;
-          }
-        }
-        final classification = backup
-            ? 'quarantinedBackupOnly'
-            : data['state'] == 'quarantined'
-            ? 'quarantinedRecordedFailure'
-            : complete && assets.isNotEmpty
-            ? 'awaitingDocumentReconciliation'
-            : [
-                'commitIntent',
-                'promoting',
-                'committed',
-                'quarantined',
-              ].contains(data['state'])
-            ? 'quarantinedAmbiguousPromotion'
-            : data['state'] == 'rolledBack'
-            ? 'rolledBackRetained'
-            : 'preCommitRetained';
-        results.add(
-          CadAssetRecoveryResult(
-            operation.path,
-            classification,
-            backup,
-            complete && assets.isNotEmpty,
-          ),
-        );
+        if (instance is Link) throw StateError('Reparse in recovery');
+        await paths.check(instance.path);
+        _requireId(path.basename(instance.path), 'i1');
       } catch (_) {
         results.add(
           CadAssetRecoveryResult(
-            operation.path,
-            'quarantinedInvalidManifestOrPath',
-            backup,
+            instance.path,
+            'quarantinedInvalidInstance',
+            false,
             false,
           ),
         );
+        continue;
+      }
+      List<FileSystemEntity> operations;
+      try {
+        operations = await paths.list(instance.path).toList();
+      } on CadAssetNativeError {
+        results.add(
+          CadAssetRecoveryResult(
+            instance.path,
+            'quarantinedInvalidInstance',
+            false,
+            false,
+          ),
+        );
+        continue;
+      }
+      for (final operation in operations) {
+        final i = path.basename(instance.path),
+            o = path.basename(operation.path);
+        var backup = false;
+        try {
+          if (operation is! Directory) {
+            throw StateError('Invalid recovery entry');
+          }
+          await paths.check(operation.path);
+          _requireId(o, 'o1');
+          Map<String, dynamic> data;
+          try {
+            data = await _readAssetManifest(
+              paths.file(path.join(operation.path, 'manifest.json')),
+              paths,
+              i,
+              o,
+            );
+          } catch (_) {
+            backup = true;
+            data = await _readAssetManifest(
+              paths.file(path.join(operation.path, 'manifest.previous.json')),
+              paths,
+              i,
+              o,
+            );
+          }
+          var complete = true;
+          final assets = data['assets'] as List;
+          for (final raw in assets) {
+            final asset = raw as Map<String, dynamic>;
+            final id = GeometryAssetId.fromJson(
+              asset['reference'] as Map<String, dynamic>,
+            );
+            final destination = paths.location([
+              'CAD',
+              'Assets',
+              'v1',
+              id.value,
+            ]);
+            if (!await paths.exists(destination)) {
+              complete = false;
+              continue;
+            }
+            for (final entry
+                in (asset['files'] as Map<String, dynamic>).entries) {
+              final file = paths.file(
+                path.join(
+                  destination,
+                  CadAssetFile.values.byName(entry.key).relativePath,
+                ),
+              );
+              await paths.check(file.path);
+              final digest = await paths.digest(file.path),
+                  expected = entry.value as Map;
+              if (!_sameAssetIdentity(digest, expected)) {
+                complete = false;
+              }
+            }
+            final descriptor = paths.file(path.join(destination, 'asset.json'));
+            await paths.check(descriptor.path);
+            final digest = await paths.digest(descriptor.path),
+                expected = asset['descriptor'] as Map;
+            if (!_sameAssetIdentity(digest, expected)) {
+              complete = false;
+            }
+          }
+          final classification = backup
+              ? 'quarantinedBackupOnly'
+              : data['state'] == 'quarantined'
+              ? 'quarantinedRecordedFailure'
+              : complete && assets.isNotEmpty
+              ? 'awaitingDocumentReconciliation'
+              : [
+                  'commitIntent',
+                  'promoting',
+                  'committed',
+                  'quarantined',
+                ].contains(data['state'])
+              ? 'quarantinedAmbiguousPromotion'
+              : data['state'] == 'rolledBack'
+              ? 'rolledBackRetained'
+              : 'preCommitRetained';
+          results.add(
+            CadAssetRecoveryResult(
+              operation.path,
+              classification,
+              backup,
+              complete && assets.isNotEmpty,
+            ),
+          );
+        } catch (_) {
+          results.add(
+            CadAssetRecoveryResult(
+              operation.path,
+              'quarantinedInvalidManifestOrPath',
+              backup,
+              false,
+            ),
+          );
+        }
       }
     }
+    return results;
+  } finally {
+    paths.dispose();
   }
-  return results;
 }
+
+bool _sameAssetIdentity(Map actual, Map expected) => [
+  'size',
+  'sha256',
+  'volume',
+  'fileId',
+].every((key) => actual[key] == expected[key] && actual[key] != null);

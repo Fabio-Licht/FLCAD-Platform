@@ -51,6 +51,12 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../native/cad_asset_fs" "${CMAKE_CURRENT_BINARY_DIR}/cad_asset_fs")
+add_dependencies(${BINARY_NAME} cad_asset_fs)
+add_custom_target(flcad_copy_cad_asset_fs ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:cad_asset_fs> $<TARGET_FILE_DIR:${BINARY_NAME}>
+  DEPENDS ${BINARY_NAME} cad_asset_fs)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../native/opencascade" "${CMAKE_CURRENT_BINARY_DIR}/opencascade")
 add_dependencies(${BINARY_NAME} flcad_opencascade)
 add_custom_target(flcad_copy_opencascade_runtime ALL
@@ -86,6 +92,8 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
+
+install(TARGETS cad_asset_fs RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
