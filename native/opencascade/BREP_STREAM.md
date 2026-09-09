@@ -165,3 +165,7 @@ commit, managed save/open and integrated tests. Productive restoration still use
 the legacy read-only pathname API; integration must maintain the required input
 identity/confinement guarantees when invoking it. No claim of end-to-end 2B2A
 approval is made, and no producer is migrated by this commit.
+
+Native path-free restoration/import is now available separately through the
+[versioned source ABI](SOURCE_STREAM.md); the legacy pathname API remains unchanged.
+Integration with the capability provider and transactional gateway is still required.
