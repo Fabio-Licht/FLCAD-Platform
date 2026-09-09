@@ -1840,3 +1840,5 @@ size_t flcad_occ_shape_count() {
   return shapes.size();
 }
 }
+
+#include "flcad_occ_mesh_stream.inc"
