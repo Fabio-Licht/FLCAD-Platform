@@ -99,4 +99,21 @@ if(BUILD_TESTING)
   target_link_libraries(flcad_occ_native_smoke PRIVATE flcad_opencascade)
   target_include_directories(flcad_occ_native_smoke PRIVATE include)
   add_test(NAME flcad_occ_native_smoke COMMAND flcad_occ_native_smoke)
+  # Compile the implementation into a separate executable. Test hooks never
+  # enter the production DLL and require no extra exported ABI.
+  add_executable(flcad_occ_atomic_output_test tests/atomic_output_test.cpp)
+  target_compile_definitions(flcad_occ_atomic_output_test PRIVATE FLCAD_OCC_TESTING)
+  target_include_directories(flcad_occ_atomic_output_test PRIVATE include ${OpenCASCADE_INCLUDE_DIR} ${OpenCASCADE_INCLUDE_DIRS})
+  target_link_directories(flcad_occ_atomic_output_test PRIVATE ${OpenCASCADE_LIBRARY_DIR})
+  target_link_libraries(flcad_occ_atomic_output_test PRIVATE
+    ${OpenCASCADE_LIBRARIES}
+    ${_path_TKDE} ${_path_TKXSBase} ${_path_TKDESTEP} ${_path_TKDEIGES}
+    ${_path_TKDESTL})
+  if(WIN32)
+    add_custom_command(TARGET flcad_occ_atomic_output_test POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${_occt_runtime_dlls} $<TARGET_FILE_DIR:flcad_occ_atomic_output_test>
+      COMMAND_EXPAND_LISTS)
+  endif()
+  add_test(NAME flcad_occ_atomic_output_test COMMAND flcad_occ_atomic_output_test)
 endif()

@@ -98,31 +98,135 @@
 #include <unordered_map>
 #include <vector>
 
+#include <cstdint>
+#include <limits>
+#include <stdexcept>
+#include <type_traits>
+
 namespace {
 std::unordered_map<std::string, TopoDS_Shape> shapes;
 std::unordered_map<std::string, Handle(Poly_Triangulation)> meshes;
 std::mutex registry_mutex;
 std::atomic<unsigned long long> sequence{1};
 thread_local std::string response;
-void copy(const std::string &value, char *out, size_t size) {
-  if (!out || size == 0)
-    return;
-  std::strncpy(out, value.c_str(), size - 1);
-  out[size - 1] = '\0';
-}
-int fail(const std::string &message, char *error, size_t size) {
-  copy(message, error, size);
+// Error reporting must itself be allocation-free and non-throwing. Only error
+// messages may be shortened; successful outputs are always copied in full.
+int fail(const char *message, char *error, size_t size) noexcept {
+  if (error && size) {
+    size_t i = 0;
+    if (message) {
+      while (i < size - 1 && message[i]) {
+        const unsigned char c = static_cast<unsigned char>(message[i]);
+        error[i++] = c < 32 || c == 127 ? ' ' : static_cast<char>(c);
+      }
+    }
+    error[i] = '\0';
+  }
   return 0;
 }
-std::string token() { return "occ-shape-" + std::to_string(sequence++); }
-std::string fingerprint(const TopoDS_Shape &shape) {
-  return "occ-" + std::to_string(std::hash<TopoDS_Shape>{}(shape));
+int fail(const std::string &message, char *error, size_t size) noexcept {
+  return fail(message.c_str(), error, size);
 }
-std::string store(const TopoDS_Shape &shape) {
+void preflight(const std::string &value, char *out, size_t size) {
+  if (!out || size <= value.size())
+    throw std::invalid_argument(
+        "Missing or insufficient output buffer (NUL required)");
+}
+void copy_complete(const std::string &value, char *out) noexcept {
+  std::memcpy(out, value.c_str(), value.size() + 1);
+}
+void copy(const std::string &value, char *out, size_t size) {
+  preflight(value, out, size);
+  copy_complete(value, out);
+}
+void separate_outputs(
+    std::initializer_list<std::pair<const void *, size_t>> outputs) {
+  for (auto a = outputs.begin(); a != outputs.end(); ++a) {
+    if (!a->second)
+      continue;
+    const auto start = reinterpret_cast<uintptr_t>(a->first);
+    if (!a->first || a->second > UINTPTR_MAX - start)
+      throw std::invalid_argument("Invalid output range");
+    for (auto b = outputs.begin(); b != a; ++b) {
+      const auto other = reinterpret_cast<uintptr_t>(b->first);
+      if (b->second && start < other + b->second && other < start + a->second)
+        throw std::invalid_argument("Overlapping output buffers");
+    }
+  }
+}
+std::string token(const char *prefix = "occ-shape-") {
+  auto next = sequence.load();
+  for (;;) {
+    if (next == std::numeric_limits<unsigned long long>::max())
+      throw std::overflow_error("Native token sequence exhausted");
+    if (sequence.compare_exchange_weak(next, next + 1))
+      return std::string(prefix) + std::to_string(next);
+  }
+}
+#ifdef FLCAD_OCC_TESTING
+enum class Fault {
+  none,
+  fingerprint,
+  shape_insert,
+  mesh_insert,
+  serialization
+};
+thread_local Fault fault = Fault::none;
+thread_local size_t fault_insertion = 1;
+thread_local int fault_exception = 0;
+thread_local size_t compensated_entries = 0;
+void inject(Fault point, size_t insertion = 1) {
+  if (fault != point || insertion != fault_insertion)
+    return;
+  fault = Fault::none;
+  if (fault_exception == 1)
+    throw Standard_Failure("Injected OCCT failure");
+  if (fault_exception == 2)
+    throw 42;
+  throw std::runtime_error("Injected native failure");
+}
+#endif
+std::string fingerprint(const TopoDS_Shape &shape) {
+  auto result = "occ-" + std::to_string(std::hash<TopoDS_Shape>{}(shape));
+#ifdef FLCAD_OCC_TESTING
+  inject(Fault::fingerprint);
+#endif
+  return result;
+}
+// All allocating preparation/preflight belongs to the caller. Keep the registry
+// locked through publication/compensation, so no observer sees a partial batch.
+// reserve prevents rehash: saved iterators identify only this batch's entries.
+template <typename Registry, typename Entries, typename Publish>
+void publish_batch(Registry &registry, const Entries &entries,
+                   Publish publish) {
+  std::vector<typename Registry::iterator> inserted;
+  inserted.reserve(entries.size());
   std::lock_guard<std::mutex> lock(registry_mutex);
-  auto id = token();
-  shapes[id] = shape;
-  return id;
+  registry.reserve(registry.size() + entries.size());
+  try {
+    for (const auto &entry : entries) {
+      auto result = registry.emplace(entry.first, entry.second);
+      if (!result.second)
+        throw std::runtime_error("Native token collision");
+      inserted.push_back(result.first);
+#ifdef FLCAD_OCC_TESTING
+      inject(std::is_same_v<Registry, decltype(shapes)> ? Fault::shape_insert
+                                                        : Fault::mesh_insert,
+             inserted.size());
+#endif
+    }
+    publish();
+  } catch (...) {
+    // Iterator erase does not hash or allocate; OCCT handle destructors do not
+    // throw. Compensation cannot fail for these concrete registries.
+    for (auto it : inserted) {
+      registry.erase(it);
+#ifdef FLCAD_OCC_TESTING
+      ++compensated_entries;
+#endif
+    }
+    throw;
+  }
 }
 
 TopoDS_Edge first_edge(const TopoDS_Shape &shape) {
@@ -159,17 +263,42 @@ std::vector<std::string> split(const char *value) {
   }
   return result;
 }
+const char *shape_type(const TopoDS_Shape &s);
 int output(const TopoDS_Shape &shape, char *out_token, size_t token_size,
-           char *out_fp, size_t fp_size, char *error, size_t error_size) {
+           char *out_fp, size_t fp_size, char *error, size_t error_size,
+           char *out_type = nullptr, size_t type_size = 0,
+           bool include_type = false) {
   if (shape.IsNull())
     return fail("OCCT produced a null shape", error, error_size);
-  auto id = store(shape);
-  copy(id, out_token, token_size);
-  copy(fingerprint(shape), out_fp, fp_size);
+  const auto fp = fingerprint(shape);
+  const std::string type = include_type ? shape_type(shape) : "";
+  const auto id = token();
+  preflight(id, out_token, token_size);
+  preflight(fp, out_fp, fp_size);
+  if (include_type)
+    preflight(type, out_type, type_size);
+  separate_outputs({{out_token, id.size() + 1},
+                    {out_fp, fp.size() + 1},
+                    {out_type, include_type ? type.size() + 1 : 0}});
+  const std::vector<std::pair<std::string, TopoDS_Shape>> entries{{id, shape}};
+  publish_batch(shapes, entries, [&]() noexcept {
+    copy_complete(id, out_token);
+    copy_complete(fp, out_fp);
+    if (include_type)
+      copy_complete(type, out_type);
+  });
   return 1;
 }
-gp_Pnt point(const double *p) { return gp_Pnt(p[0], p[1], p[2]); }
-gp_Dir direction(const double *p) { return gp_Dir(p[0], p[1], p[2]); }
+gp_Pnt point(const double *p) {
+  if (!p)
+    throw std::invalid_argument("Missing point");
+  return gp_Pnt(p[0], p[1], p[2]);
+}
+gp_Dir direction(const double *p) {
+  if (!p)
+    throw std::invalid_argument("Missing direction");
+  return gp_Dir(p[0], p[1], p[2]);
+}
 const char *shape_type(const TopoDS_Shape &s) {
   switch (s.ShapeType()) {
   case TopAbs_VERTEX:
@@ -224,15 +353,27 @@ int flcad_occ_create_vertex(double x, double y, double z, char *t, size_t ts,
                   es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_destroy_shape(const char *id, char *e, size_t es) {
-  std::lock_guard<std::mutex> lock(registry_mutex);
-  auto it = shapes.find(id ? id : "");
-  if (it == shapes.end())
-    return fail("Unknown native shape token", e, es);
-  shapes.erase(it);
-  return 1;
+  try {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    auto it = shapes.find(id ? id : "");
+    if (it == shapes.end())
+      return fail("Unknown native shape token", e, es);
+    shapes.erase(it);
+    return 1;
+  } catch (const Standard_Failure &x) {
+    return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
+  }
 }
 int flcad_occ_create_edge(const char *a, const char *b, char *t, size_t ts,
                           char *f, size_t fs, char *e, size_t es) {
@@ -242,6 +383,10 @@ int flcad_occ_create_edge(const char *a, const char *b, char *t, size_t ts,
         t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_wire(const char *ids, char *t, size_t ts, char *f,
@@ -255,6 +400,10 @@ int flcad_occ_create_wire(const char *ids, char *t, size_t ts, char *f,
     return output(maker.Wire(), t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_face(const char *id, char *t, size_t ts, char *f,
@@ -266,6 +415,10 @@ int flcad_occ_create_face(const char *id, char *t, size_t ts, char *f,
     return output(maker.Face(), t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_shell(const char *ids, double tolerance, char *t,
@@ -278,6 +431,10 @@ int flcad_occ_create_shell(const char *ids, double tolerance, char *t,
     return output(sewing.SewedShape(), t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_solid(const char *id, char *t, size_t ts, char *f,
@@ -289,6 +446,10 @@ int flcad_occ_create_solid(const char *id, char *t, size_t ts, char *f,
     return output(maker.Solid(), t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_extrude(const char *id, const double *d, int solid_output,
@@ -353,6 +514,10 @@ int flcad_occ_extrude(const char *id, const double *d, int solid_output,
     return output(result, t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_plane(const double *o, const double *n, double l, double u,
@@ -364,6 +529,10 @@ int flcad_occ_create_plane(const double *o, const double *n, double l, double u,
         ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_planar_face(const double *points, size_t point_count,
@@ -384,6 +553,10 @@ int flcad_occ_create_planar_face(const double *points, size_t point_count,
     return output(face.Face(), t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_cylinder(const double *o, const double *d, double r,
@@ -396,6 +569,10 @@ int flcad_occ_create_cylinder(const double *o, const double *d, double r,
         t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_cone(const double *o, const double *d, double a, double l,
@@ -408,6 +585,10 @@ int flcad_occ_create_cone(const double *o, const double *d, double a, double l,
         t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_sphere(const double *o, double r, double l, double u,
@@ -420,6 +601,10 @@ int flcad_occ_create_sphere(const double *o, double r, double l, double u,
         t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_create_torus(const double *o, const double *d, double major_r,
@@ -433,12 +618,18 @@ int flcad_occ_create_torus(const double *o, const double *d, double major_r,
         t, ts, f, fs, e, es);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_import_shape(const char *p, const char *fmt, char *t, size_t ts,
                            char *f, size_t fs, char *ty, size_t tys, char *e,
                            size_t es) {
   try {
+    if (!p || !*p)
+      return fail("Shape path is empty", e, es);
     TopoDS_Shape s;
     std::string format = fmt ? fmt : "";
     if (format == "step") {
@@ -458,10 +649,13 @@ int flcad_occ_import_shape(const char *p, const char *fmt, char *t, size_t ts,
       if (!BRepTools::Read(s, p, b))
         return fail("BREP read failed", e, es);
     }
-    copy(shape_type(s), ty, tys);
-    return output(s, t, ts, f, fs, e, es);
+    return output(s, t, ts, f, fs, e, es, ty, tys, true);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_transform_shape(const char *id, const double *m,
@@ -503,10 +697,13 @@ int flcad_occ_transform_shape(const char *id, const double *m,
         return fail("BRepBuilderAPI_GTransform failed", e, es);
       result = maker.Shape();
     }
-    copy(shape_type(result), ty, tys);
-    return output(result, t, ts, f, fs, e, es);
+    return output(result, t, ts, f, fs, e, es, ty, tys, true);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_import_stl(const char *p, char *t, size_t ts, char *f, size_t fs,
@@ -515,6 +712,8 @@ int flcad_occ_import_stl(const char *p, char *t, size_t ts, char *f, size_t fs,
   try {
     if (!p || !*p)
       return fail("STL path is empty", e, es);
+    if (!t || !ts || !f || !fs || !v || !tr || !deg || !b || !n)
+      return fail("Missing STL output buffer", e, es);
     std::ifstream stream;
     OSD_OpenStream(stream, p, std::ios::in | std::ios::binary);
     if (!stream.good())
@@ -548,37 +747,60 @@ int flcad_occ_import_stl(const char *p, char *t, size_t ts, char *f, size_t fs,
           gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3)).SquareMagnitude() <= 1e-24)
         ++degenerates;
     }
-    auto id = "occ-mesh-" + std::to_string(sequence++);
-    {
-      std::lock_guard<std::mutex> lock(registry_mutex);
-      meshes[id] = mesh;
-    }
-    copy(id, t, ts);
-    copy("stl-" + std::to_string(mesh->NbNodes()) + "-" +
-             std::to_string(mesh->NbTriangles()),
-         f, fs);
-    *v = mesh->NbNodes();
-    *tr = mesh->NbTriangles();
-    *deg = degenerates;
-    b[0] = minx;
-    b[1] = miny;
-    b[2] = minz;
-    b[3] = maxx;
-    b[4] = maxy;
-    b[5] = maxz;
-    *n = mesh->HasNormals() ? 1 : 0;
+    const auto id = token("occ-mesh-");
+    const int vertices = mesh->NbNodes(), triangles = mesh->NbTriangles();
+    const int normals = mesh->HasNormals() ? 1 : 0;
+    const std::string fp =
+        "stl-" + std::to_string(vertices) + "-" + std::to_string(triangles);
+    preflight(id, t, ts);
+    preflight(fp, f, fs);
+    separate_outputs({{t, id.size() + 1},
+                      {f, fp.size() + 1},
+                      {v, sizeof(*v)},
+                      {tr, sizeof(*tr)},
+                      {deg, sizeof(*deg)},
+                      {b, 6 * sizeof(*b)},
+                      {n, sizeof(*n)}});
+    const std::vector<std::pair<std::string, Handle(Poly_Triangulation)>>
+        entries{{id, mesh}};
+    publish_batch(meshes, entries, [&]() noexcept {
+      copy_complete(id, t);
+      copy_complete(fp, f);
+      *v = vertices;
+      *tr = triangles;
+      *deg = degenerates;
+      b[0] = minx;
+      b[1] = miny;
+      b[2] = minz;
+      b[3] = maxx;
+      b[4] = maxy;
+      b[5] = maxz;
+      *n = normals;
+    });
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_destroy_mesh(const char *id, char *e, size_t es) {
-  std::lock_guard<std::mutex> lock(registry_mutex);
-  auto it = meshes.find(id ? id : "");
-  if (it == meshes.end())
-    return fail("Unknown native mesh token", e, es);
-  meshes.erase(it);
-  return 1;
+  try {
+    std::lock_guard<std::mutex> lock(registry_mutex);
+    auto it = meshes.find(id ? id : "");
+    if (it == meshes.end())
+      return fail("Unknown native mesh token", e, es);
+    meshes.erase(it);
+    return 1;
+  } catch (const Standard_Failure &x) {
+    return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
+  }
 }
 int flcad_occ_mesh_geometry(const char *id, double *nodes, size_t nv,
                             int *triangles, size_t tv, char *e, size_t es) {
@@ -623,6 +845,7 @@ int flcad_occ_surface_topology(const char *id, char *out, size_t os, char *e,
     if (s.ShapeType() != TopAbs_FACE)
       return fail("Surface topology requires a TopoDS_Face", e, es);
     std::ostringstream json;
+    json.exceptions(std::ios::badbit | std::ios::failbit);
     json << "{\"boundaries\":[";
     bool first = true;
     int boundary = 0;
@@ -661,6 +884,10 @@ int flcad_occ_surface_topology(const char *id, char *out, size_t os, char *e,
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_intersect_surfaces(const char *a, const char *b, char *out,
@@ -681,17 +908,37 @@ int flcad_occ_intersect_surfaces(const char *a, const char *b, char *out,
       length += props.Mass();
       ++edges;
     }
+    std::vector<std::pair<std::string, TopoDS_Shape>> entries;
     std::ostringstream json;
+    json.exceptions(std::ios::badbit | std::ios::failbit);
+#ifdef FLCAD_OCC_TESTING
+    if (fault == Fault::serialization) {
+      fault = Fault::none;
+      json.setstate(std::ios::badbit);
+    }
+#endif
+
     json << "{\"edgeCount\":" << edges << ",\"length\":" << length;
     if (edges > 0) {
-      const auto id = store(result);
+      // The ABI returns one aggregate section shape, not one token per edge.
+      // Prepare fingerprint even though the legacy JSON does not expose it.
+      fingerprint(result);
+      const auto id = token();
+      entries.emplace_back(id, result);
       json << ",\"token\":\"" << id << "\"";
     }
     json << "}";
-    copy(json.str(), out, os);
+    const auto response_json = json.str();
+    preflight(response_json, out, os);
+    publish_batch(shapes, entries,
+                  [&]() noexcept { copy_complete(response_json, out); });
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_surface_quality(const char *id, const double *d, int samples,
@@ -761,6 +1008,7 @@ int flcad_occ_surface_quality(const char *id, const double *d, int samples,
                  zebraR = std::abs(std::sin(
                      std::sqrt(sumNx * sumNx + sumNy * sumNy) / valid * 12));
     std::ostringstream json;
+    json.exceptions(std::ios::badbit | std::ios::failbit);
     json << "{\"samples\":" << valid << ",\"minimumCurvature\":" << minK
          << ",\"maximumCurvature\":" << maxK
          << ",\"averageMinimumCurvature\":" << sumMin / valid
@@ -782,6 +1030,10 @@ int flcad_occ_surface_quality(const char *id, const double *d, int samples,
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_surface_operation(const char *op, const char *source,
@@ -789,6 +1041,8 @@ int flcad_occ_surface_operation(const char *op, const char *source,
                                 char *t, size_t ts, char *f, size_t fs,
                                 char *ty, size_t tys, char *e, size_t es) {
   try {
+    if (n && !v)
+      return fail("Missing surface values", e, es);
     const std::string operation = op ? op : "";
     const auto ids = split(refs);
     TopoDS_Shape result;
@@ -1438,10 +1692,13 @@ int flcad_occ_surface_operation(const char *op, const char *source,
     }
     if (result.IsNull())
       return fail("OCCT surface operation produced a null shape", e, es);
-    copy(shape_type(result), ty, tys);
-    return output(result, t, ts, f, fs, e, es);
+    return output(result, t, ts, f, fs, e, es, ty, tys, true);
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_export_shape(const char *id, const char *p, const char *fmt,
@@ -1492,6 +1749,7 @@ int flcad_occ_validate(const char *id, char *out, size_t os, char *e,
       maximumTolerance = std::max(
           maximumTolerance, BRep_Tool::Tolerance(TopoDS::Face(ex.Current())));
     std::ostringstream json;
+    json.exceptions(std::ios::badbit | std::ios::failbit);
     json << '[';
     bool first = true;
     auto diagnostic = [&](const char *code, const char *severity,
@@ -1524,6 +1782,10 @@ int flcad_occ_validate(const char *id, char *out, size_t os, char *e,
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_healing_proposals(const char *id, char *out, size_t os, char *e,
@@ -1540,6 +1802,10 @@ int flcad_occ_healing_proposals(const char *id, char *out, size_t os, char *e,
     return 1;
   } catch (const Standard_Failure &x) {
     return fail(x.GetMessageString(), e, es);
+  } catch (const std::exception &x) {
+    return fail(x.what(), e, es);
+  } catch (...) {
+    return fail("Unknown native exception", e, es);
   }
 }
 int flcad_occ_mesh(const char *id, const char *p, double deflection, int *v,
