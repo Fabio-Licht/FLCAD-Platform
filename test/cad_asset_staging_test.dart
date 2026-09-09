@@ -21,6 +21,18 @@ class _Gate {
 
 class _Storage extends CadAssetStorage {
   Future<void> Function(String)? onPhase;
+  String? fixedId;
+  void Function()? expireLock;
+  bool controlledDeadline = false;
+  @override
+  String newAssetId() => fixedId ?? super.newAssetId();
+  @override
+  Timer lockTimer(Duration duration, void Function() expired) {
+    if (!controlledDeadline) return super.lockTimer(duration, expired);
+    expireLock = expired;
+    return Timer(const Duration(days: 1), expired);
+  }
+
   int maxChunk = 0, chunks = 0;
   @override
   Future<void> checkpoint(String phase) async {
@@ -40,6 +52,7 @@ class _Storage extends CadAssetStorage {
 class _NativeLedger implements OpenCascadeNativeBridge {
   int destroys = 0, shutdowns = 0;
   bool failDestroy = false;
+  final destroyError = StateError('SECRET-native-token failed');
   @override
   Future<void> initialize() async {}
   @override
@@ -59,7 +72,7 @@ class _NativeLedger implements OpenCascadeNativeBridge {
   @override
   Future<void> destroyShape(String token) async {
     destroys++;
-    if (failDestroy) throw StateError('SECRET-native-token failed');
+    if (failDestroy) throw destroyError;
   }
 
   @override
@@ -137,22 +150,438 @@ void main() {
   test(
     'IDs use internal entropy and serialize only durable reference',
     () async {
-      await runtime
-          .withGeometryStaging((op) async {
-            final a = await op.planAsset(), b = await op.planAsset();
-            expect(a, isNot(b));
-            expect(a.value, matches(RegExp(r'^ga1_[a-f0-9]{32}$')));
-            expect(GeometryAssetId.fromJson(a.toJson()), a);
-            await expectLater(
-              op.write(
-                GeometryAssetId.fromJson(a.toJson()),
-                CadAssetFile.brep,
-                Stream.value([1]),
+      await runtime.withGeometryStaging((op) async {
+        final a = await op.planAsset(), b = await op.planAsset();
+        expect(a, isNot(b));
+        expect(a.value, matches(RegExp(r'^ga1_[a-f0-9]{32}$')));
+        expect(GeometryAssetId.fromJson(a.toJson()), a);
+      });
+    },
+  );
+  test('deserialized reference cannot write an owned asset', () async {
+    await expectLater(
+      runtime.withGeometryStaging((op) async {
+        final id = await op.planAsset();
+        await op.write(
+          GeometryAssetId.fromJson(id.toJson()),
+          CadAssetFile.brep,
+          Stream.value([1]),
+        );
+      }),
+      throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          'Asset is not owned by this operation',
+        ),
+      ),
+    );
+  });
+  for (final phase in [
+    'promotion:beforeIntent',
+    'manifest:commitIntent:beforeReplace',
+    'promotion:afterIntent',
+    'promotion:afterMove',
+    'manifest:committed:replaced',
+  ]) {
+    test(
+      'producer abort at $phase prevents next advance and retains real moves',
+      () async {
+        final gate = _Gate(), aborted = Completer<void>();
+        final failure = StateError('producer failed'),
+            stack = StackTrace.fromString('producer-origin-stack');
+        var cleanupCount = 0, moves = 0;
+        late String directory;
+        late Future<void> promotionObserved;
+        storage.onPhase = (s) async {
+          if (s == 'cleanup:started') cleanupCount++;
+          if (s == 'promotion:afterMove') moves++;
+          if (s == 'operation:drainingAfterAbort' && !aborted.isCompleted) {
+            aborted.complete();
+          }
+          if (s == phase && !gate.entered.isCompleted) await gate.wait();
+        };
+        final task = runtime.withGeometryStaging((op) async {
+          directory = op.stagingDirectory;
+          await payload(op);
+          await payload(op);
+          await op.prepare();
+          promotionObserved = expectLater(
+            op.promote(),
+            phase == 'manifest:committed:replaced'
+                ? completes
+                : throwsA(isA<CadAssetCancelled>()),
+          );
+          await gate.entered.future;
+          Error.throwWithStackTrace(failure, stack);
+        });
+        final observed = task.then<void>(
+          (_) => fail('producer error lost'),
+          onError: (Object e, StackTrace s) {
+            expect(e, same(failure));
+            expect(s.toString(), stack.toString());
+          },
+        );
+        await aborted.future;
+        gate.release.complete();
+        await observed;
+        await promotionObserved;
+        final data = await _data(directory);
+        expect(data['state'], 'quarantined');
+        final expectedMoves = phase == 'promotion:afterMove'
+            ? 1
+            : phase == 'manifest:committed:replaced'
+            ? 2
+            : 0;
+        expect(moves, expectedMoves);
+        expect(data['promoted'], hasLength(expectedMoves));
+        expect(cleanupCount, 1);
+        final destinations = Directory(
+          p.join(project.path, 'CAD', 'Assets', 'v1'),
+        );
+        expect(
+          await destinations.exists() ? await destinations.list().length : 0,
+          expectedMoves,
+        );
+      },
+    );
+  }
+  test('producer failure after committed preserves assets and cause', () async {
+    final failure = StateError('post-commit failure');
+    var finishes = 0;
+    storage.onPhase = (s) async {
+      if (s == 'cleanup:started') finishes++;
+    };
+    await expectLater(
+      runtime.withGeometryStaging((op) async {
+        await payload(op);
+        await op.prepare();
+        await op.promote();
+        throw failure;
+      }),
+      throwsA(same(failure)),
+    );
+    final recovery = (await inspectCadAssetStaging(project)).single;
+    expect(recovery.classification, 'quarantinedRecordedFailure');
+    expect(recovery.assetsVerified, isTrue);
+    expect(finishes, 1);
+  });
+  test(
+    'producer abort wakes a contended lock without releasing incumbent',
+    () async {
+      final holder = _Gate(), contended = Completer<void>();
+      storage.onPhase = (s) async {
+        if (s == 'lock:acquired') await holder.wait();
+      };
+      final a = promote(runtime);
+      await holder.entered.future;
+      final io = _Storage(), b = await another(io: io);
+      io.onPhase = (s) async {
+        if (s == 'lock:contended' && !contended.isCompleted) {
+          contended.complete();
+        }
+      };
+      final failure = StateError('waiting producer failure');
+      late Future<void> promotionObserved;
+      await expectLater(
+        b.withGeometryStaging((op) async {
+          await payload(op);
+          await op.prepare();
+          promotionObserved = expectLater(
+            op.promote(),
+            throwsA(isA<CadAssetCancelled>()),
+          );
+          await contended.future;
+          throw failure;
+        }),
+        throwsA(same(failure)),
+      );
+      await promotionObserved;
+      expect(holder.release.isCompleted, isFalse);
+      holder.release.complete();
+      await a;
+    },
+  );
+  test('deadline expires while project lock is genuinely contended', () async {
+    final holder = _Gate(), contended = Completer<void>();
+    storage.onPhase = (s) async {
+      if (s == 'lock:acquired') await holder.wait();
+    };
+    final a = promote(runtime);
+    await holder.entered.future;
+    final io = _Storage()..controlledDeadline = true, b = await another(io: io);
+    io.onPhase = (s) async {
+      if (s == 'lock:contended' && !contended.isCompleted) contended.complete();
+    };
+    final observed = expectLater(promote(b), throwsA(isA<TimeoutException>()));
+    await contended.future;
+    io.expireLock!(); // Real contention, controlled deadline; no wall-clock sleep.
+    await observed;
+    expect(holder.release.isCompleted, isFalse);
+    holder.release.complete();
+    await a;
+    io.controlledDeadline = false;
+    expect((await promote(b)).assets, hasLength(1));
+  });
+  for (final changed in ['session', 'revision']) {
+    test('isolated $changed change fails the production origin validator', () {
+      validateCadTransactionOrigin(
+        session: 7,
+        revision: 11,
+        currentSession: 7,
+        currentRevision: 11,
+      );
+      expect(
+        () => validateCadTransactionOrigin(
+          session: 7,
+          revision: 11,
+          currentSession: changed == 'session' ? 8 : 7,
+          currentRevision: changed == 'revision' ? 12 : 11,
+        ),
+        throwsA(isA<StaleCadTransaction>()),
+      );
+    });
+  }
+  for (final afterPromotion in [false, true]) {
+    test(
+      'forced asset ID collision preserves existing asset promoted=$afterPromotion',
+      () async {
+        storage.fixedId = 'ga1_${'b' * 32}';
+        late String directory;
+        if (afterPromotion) await promote(runtime);
+        await expectLater(
+          runtime.withGeometryStaging((op) async {
+            directory = op.stagingDirectory;
+            if (!afterPromotion) await payload(op);
+            await op.planAsset();
+          }),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'message',
+              'Asset ID collision',
+            ),
+          ),
+        );
+        final file = File(
+          afterPromotion
+              ? p.join(
+                  project.path,
+                  'CAD',
+                  'Assets',
+                  'v1',
+                  storage.fixedId!,
+                  'shape.brep',
+                )
+              : p.join(directory, 'files', storage.fixedId!, 'shape.brep'),
+        );
+        expect(await file.readAsString(), 'simulated geometric payload');
+      },
+    );
+  }
+  test('initially empty destination is preserved on collision', () async {
+    late Directory destination;
+    await expectLater(
+      runtime.withGeometryStaging((op) async {
+        final id = await payload(op);
+        await op.prepare();
+        destination = await Directory(
+          p.join(project.path, 'CAD', 'Assets', 'v1', id.value),
+        ).create(recursive: true);
+        expect(await destination.list().length, 0);
+        await op.promote();
+      }),
+      throwsA(
+        isA<StateError>().having(
+          (e) => e.message,
+          'message',
+          'Asset destination exists',
+        ),
+      ),
+    );
+    expect(await destination.exists(), isTrue);
+    expect(await destination.list().length, 0);
+  });
+  for (final shutdown in [false, true]) {
+    test('silent source is cancelled and drained shutdown=$shutdown', () async {
+      final listening = Completer<void>(),
+          cancelled = Completer<void>(),
+          written = Completer<void>();
+      storage.onPhase = (s) async {
+        if (s == 'file:chunkWritten' && !written.isCompleted) {
+          written.complete();
+        }
+      };
+      final source = StreamController<List<int>>(
+        onListen: () => listening.complete(),
+        onCancel: () => cancelled.complete(),
+      );
+      final token = CadAssetCancellation();
+      late String directory;
+      final task = runtime.withGeometryStaging((op) async {
+        directory = op.stagingDirectory;
+        final id = await op.planAsset();
+        await op.write(id, CadAssetFile.brep, source.stream);
+      }, cancellation: token);
+      final observed = expectLater(
+        task,
+        throwsA(
+          shutdown ? isA<StaleCadTransaction>() : isA<CadAssetCancelled>(),
+        ),
+      );
+      await listening.future;
+      source.add([1, 2, 3]);
+      await written.future; // No event is emitted after this confirmed chunk.
+      final close = shutdown ? runtime.shutdown() : null;
+      if (!shutdown) token.cancel();
+      await cancelled.future;
+      await observed;
+      if (close != null) await close;
+      await source.close();
+      expect((await _data(directory))['state'], 'quarantined');
+    });
+  }
+  test(
+    'shutdown waits for transferred owner lease after releasing project lock',
+    () async {
+      final ledger = _NativeLedger(),
+          native = OpenCascadeKernelAdapter(bridge: _NativeLedger());
+      final adapter = OpenCascadeKernelAdapter(bridge: ledger);
+      final owner = await adapter.createOwnedShape(
+        'CREATE VERTEX',
+        {},
+        CADShapeType.vertex,
+      );
+      final lease = owner.borrow(), cleanup = Completer<void>();
+      var finishes = 0, closed = false;
+      storage.onPhase = (s) async {
+        if (s == 'cleanup:started') {
+          finishes++;
+          cleanup.complete();
+        }
+      };
+      final task = runtime.withGeometryStaging((op) async {
+        op.attachOwnedShape(owner);
+        await payload(op);
+        await op.prepare();
+        await op.promote();
+      });
+      await cleanup.future;
+      final close = runtime.shutdown().then((_) {
+        closed = true;
+      });
+      final other = await another();
+      await promote(
+        other,
+      ); // Would block if disposal still owned the project lock.
+      expect(closed, isFalse);
+      expect(ledger.destroys, 0);
+      lease.release();
+      await task;
+      await close;
+      expect(ledger.destroys, 1);
+      expect(finishes, 1);
+      await adapter.unload();
+      await native.unload();
+    },
+  );
+  test(
+    'silent stream with no events is cancelled without waiting for a chunk',
+    () async {
+      final listening = Completer<void>(), cancelled = Completer<void>();
+      final source = StreamController<List<int>>(
+        onListen: () => listening.complete(),
+        onCancel: () => cancelled.complete(),
+      );
+      final token = CadAssetCancellation();
+      final observed = expectLater(
+        runtime.withGeometryStaging((op) async {
+          final id = await op.planAsset();
+          await op.write(id, CadAssetFile.brep, source.stream);
+        }, cancellation: token),
+        throwsA(isA<CadAssetCancelled>()),
+      );
+      await listening.future;
+      token.cancel();
+      await cancelled.future;
+      await observed;
+      await source.close();
+    },
+  );
+  test('failed cleanup checkpoint still disposes owner exactly once', () async {
+    final ledger = _NativeLedger(), failure = StateError('cleanup checkpoint');
+    final adapter = OpenCascadeKernelAdapter(bridge: ledger);
+    final owner = await adapter.createOwnedShape(
+      'CREATE VERTEX',
+      {},
+      CADShapeType.vertex,
+    );
+    var finishes = 0;
+    storage.onPhase = (s) async {
+      if (s == 'cleanup:started') {
+        finishes++;
+        throw failure;
+      }
+    };
+    await expectLater(
+      runtime.withGeometryStaging((op) async {
+        op.attachOwnedShape(owner);
+        await payload(op);
+      }),
+      throwsA(same(failure)),
+    );
+    expect(finishes, 1);
+    expect(ledger.destroys, 1);
+    expect(
+      (await inspectCadAssetStaging(project)).single.classification,
+      'quarantinedRecordedFailure',
+    );
+    await adapter.unload();
+    expect(ledger.destroys, 1);
+  });
+  test(
+    'producer native disposal and journal failures all remain observable',
+    () async {
+      final ledger = _NativeLedger()..failDestroy = true;
+      final adapter = OpenCascadeKernelAdapter(bridge: ledger);
+      final owner = await adapter.createOwnedShape(
+        'CREATE VERTEX',
+        {},
+        CADShapeType.vertex,
+      );
+      final producer = StateError('producer'), journal = StateError('journal');
+      final producerStack = StackTrace.fromString('original producer');
+      var finishes = 0;
+      storage.onPhase = (s) async {
+        if (s == 'cleanup:started') finishes++;
+        if (s == 'manifest:quarantined:beforeReplace') throw journal;
+      };
+      await expectLater(
+        runtime.withGeometryStaging((op) async {
+          op.attachOwnedShape(owner);
+          await payload(op);
+          Error.throwWithStackTrace(producer, producerStack);
+        }),
+        throwsA(
+          isA<CadAssetOperationFailure>()
+              .having((e) => e.cause, 'producer', same(producer))
+              .having(
+                (e) => e.causeStack.toString(),
+                'producer stack',
+                producerStack.toString(),
+              )
+              .having(
+                (e) => e.cleanup,
+                'cleanup',
+                isA<CadAssetOperationFailure>()
+                    .having((e) => e.cause, 'native', same(ledger.destroyError))
+                    .having((e) => e.cleanup, 'journal', same(journal)),
               ),
-              throwsStateError,
-            );
-          })
-          .catchError((Object _) {});
+        ),
+      );
+      expect(finishes, 1);
+      expect(ledger.destroys, 1);
+      await expectLater(adapter.unload(), throwsA(same(ledger.destroyError)));
     },
   );
   for (final bad in [
@@ -324,6 +753,8 @@ void main() {
   );
   for (final phase in ['flushed', 'beforeReplace']) {
     test('journal failure at $phase preserves confirmed version', () async {
+      final failure = StateError('journal fault'),
+          cleanup = StateError('cleanup fault');
       late String directory;
       late Map<String, dynamic> confirmed;
       await expectLater(
@@ -332,14 +763,16 @@ void main() {
           await payload(op);
           confirmed = await _data(directory);
           storage.onPhase = (s) async {
-            if (s == 'manifest:prepared:$phase' ||
-                s.startsWith('manifest:quarantined:')) {
-              throw StateError('journal fault');
-            }
+            if (s == 'manifest:prepared:$phase') throw failure;
+            if (s.startsWith('manifest:quarantined:')) throw cleanup;
           };
           await op.prepare();
         }),
-        throwsA(anything),
+        throwsA(
+          isA<CadAssetOperationFailure>()
+              .having((e) => e.cause, 'cause', same(failure))
+              .having((e) => e.cleanup, 'cleanup', same(cleanup)),
+        ),
       );
       expect(await _data(directory), confirmed);
       final previous = await _data(directory, previous: true);
@@ -720,7 +1153,7 @@ void main() {
           await op.prepare();
           await op.promote();
         }),
-        throwsA(isA<CadAssetOperationFailure>()),
+        throwsA(same(ledger.destroyError)),
       );
       final recovery = (await inspectCadAssetStaging(project)).single;
       expect(recovery.classification, 'quarantinedRecordedFailure');
@@ -730,7 +1163,7 @@ void main() {
         await File(p.join(recovery.directory, 'manifest.json')).readAsString(),
         isNot(contains('SECRET')),
       );
-      await native.unload().catchError((Object _) {});
+      await expectLater(native.unload(), throwsA(same(ledger.destroyError)));
     },
   );
   test(
@@ -751,6 +1184,13 @@ void main() {
       expect(creation.exitCode, 0);
       await expectLater(promote(runtime), throwsStateError);
       expect(await sentinel.readAsString(), 'safe');
+      expect(
+        await outside
+            .list(recursive: true, followLinks: false)
+            .map((entry) => p.relative(entry.path, from: outside.path))
+            .toList(),
+        ['sentinel'],
+      );
     },
     skip: !Platform.isWindows,
   );

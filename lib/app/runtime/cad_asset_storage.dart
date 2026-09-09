@@ -45,6 +45,11 @@ class CadAssetStorage {
   @protected
   Future<void> checkpoint(String phase) async {}
   @protected
+  String newAssetId() => _assetId('ga1');
+  @protected
+  Timer lockTimer(Duration timeout, void Function() expired) =>
+      Timer(timeout, expired);
+  @protected
   Stream<List<int>> read(File source) => source.openRead();
 
   Future<Map<String, dynamic>> _digest(File file) async {
@@ -125,12 +130,16 @@ final class _AssetPaths {
     }
   }
 
-  Future<void> directories(String target) async {
+  Future<void> directories(
+    String target, {
+    required void Function() authorize,
+  }) async {
     await check(target);
     var current = root;
     for (final segment in path.split(path.relative(target, from: root))) {
       current = path.join(current, segment);
       await check(current);
+      authorize();
       await Directory(current).create();
       await check(current);
     }
@@ -218,7 +227,7 @@ final class _ProjectAssetLocks {
     }
     final elapsed = Stopwatch()..start();
     final expired = Completer<void>();
-    final timer = Timer(timeout, () => expired.complete());
+    final timer = storage.lockTimer(timeout, () => expired.complete());
     Future<void> wait(Future<void> available) async {
       final reason = await Future.any<int>([
         available.then((_) => 0),
@@ -253,8 +262,9 @@ final class _ProjectAssetLocks {
         local = Completer<void>();
         held[paths.lockKey] = local;
         final lockPath = paths.location(['.cad-staging', 'project.lock']);
-        await paths.directories(path.dirname(lockPath));
+        await paths.directories(path.dirname(lockPath), authorize: validate);
         await paths.check(lockPath);
+        validate();
         handle = await File(lockPath).open(mode: FileMode.append);
         try {
           await handle.lock(FileLock.exclusive, 0, 1);

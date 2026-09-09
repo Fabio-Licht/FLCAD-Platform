@@ -1,5 +1,48 @@
 # 2B1B — staging de assets geométricos
 
+**Status: não aprovado.** A primeira etapa de remediação corrige revogação e
+testes; o confinamento contra TOCTOU continua dependendo de um helper nativo
+com operações ancoradas em handles. Não há liberação formal para 2B2.
+
+## Remediação: revogação e drenagem
+
+A primeira falha do produtor fecha admissão e revoga a operação sincronamente,
+antes de aguardar trabalho admitido. O sinal privado de revogação acorda espera
+por lock e por próximo chunk. Criações e avanços do journal validam autoridade
+imediatamente antes da chamada de IO; essas validações são de ciclo de vida,
+**não são uma correção de TOCTOU por pathname**.
+
+No sucesso, tarefas admitidas são drenadas antes da revogação. No erro, nenhuma
+nova intenção ou rename é autorizado. Um rename já concluído é registrado em
+memória antes do próximo await e incluído na quarentena. Se a substituição do
+journal já começou, seu resultado é relido antes da finalização; não se simula
+rollback de uma syscall concluída. Assets promovidos permanecem retidos, mesmo
+quando o produtor falha depois de committed.
+
+Finalização ocorre uma única vez. Sua autoridade privada permite somente journal
+de quarentena/rollback e descarte dos owners recebidos. Erro e stack do produtor
+são preservados; falhas de cancelamento, descarte e journal são agregadas em
+memória, sem persistir mensagens nativas. Uma falha no hook de cleanup não pula
+as tentativas de dispose. O lock é liberado antes de aguardar leases.
+
+Streams silenciosos têm a assinatura cancelada antes do fechamento do arquivo.
+Uma escrita já iniciada é aguardada. Callbacks ou onCancel que nunca concluem
+continuam exigindo cooperação do produtor; não se inicia cleanup concorrente
+com escrita ativa para forçar shutdown.
+
+Os testes adicionais cobrem falha do produtor com promoção admitida, fronteiras
+do journal, preservação de movimentos reais, timeout sob contenção com deadline
+controlado, sessão/revisão pelo validador puro usado em produção, colisões
+determinísticas, destino vazio, stream sem eventos/depois de chunk confirmado
+e shutdown aguardando lease. Matchers verificam causas específicas.
+
+Permanece pendente do helper nativo: abertura/criação relativa a diretórios
+validados, retenção da identidade dos ancestrais, IO e rename pelos mesmos
+handles e proteção contra reparse em payloads, descriptors, journal, lock e
+recovery. A integração deve provar que nenhuma entrada, nem arquivo vazio,
+é criada fora da raiz numa troca concorrente de junction. Nenhum helper ou ABI
+OpenCascade foi alterado nesta etapa.
+
 Infraestrutura disponível por `CadRuntime.withGeometryStaging`. O runtime
 captura a transação, sessão, revisão, documento e raiz canônica do projeto.
 Nenhum produtor real foi migrado. A operação não publica documento ou cena.

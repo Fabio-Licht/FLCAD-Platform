@@ -4,6 +4,19 @@ class StaleCadTransaction implements Exception {
   const StaleCadTransaction();
 }
 
+/// Pure origin check; grants no runtime or native authority.
+@visibleForTesting
+void validateCadTransactionOrigin({
+  required int session,
+  required int revision,
+  required int currentSession,
+  required int currentRevision,
+}) {
+  if (session != currentSession || revision != currentRevision) {
+    throw const StaleCadTransaction();
+  }
+}
+
 class CadRuntimeShuttingDown implements Exception {
   const CadRuntimeShuttingDown();
 }
@@ -62,12 +75,16 @@ class _CadTransaction {
     }
     if (owner._closingAdmission ||
         lifecycle != owner._lifecycleGeneration ||
-        revision != owner._runtimeRevision ||
-        session != owner._sessionIdentity ||
         !identical(document, owner._document) ||
         !identical(directory, owner._projectDirectory)) {
       throw const StaleCadTransaction();
     }
+    validateCadTransactionOrigin(
+      session: session,
+      revision: revision,
+      currentSession: owner._sessionIdentity,
+      currentRevision: owner._runtimeRevision,
+    );
   }
 }
 

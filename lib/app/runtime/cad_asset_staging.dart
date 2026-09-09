@@ -33,8 +33,14 @@ final class PreparedGeometryAssets {
 }
 
 final class CadAssetOperationFailure implements Exception {
-  CadAssetOperationFailure(this.cause, this.cleanup);
+  CadAssetOperationFailure(
+    this.cause,
+    this.cleanup,
+    this.causeStack,
+    this.cleanupStack,
+  );
   final Object cause, cleanup;
+  final StackTrace causeStack, cleanupStack;
 }
 
 extension CadGeometryStaging on CadRuntime {
@@ -67,22 +73,35 @@ extension CadGeometryStaging on CadRuntime {
         operation._accepting = false;
         await operation._tail;
         operation._validate();
-        if (operation._failure case final error?) throw error;
-        // Returning from a scope revokes promotion authority even if its project
-        // revision remains unchanged. Unpromoted staging is retained/rolled back.
-        await operation._finish(success: true);
-      } catch (error) {
-        operation._accepting = false;
-        await operation._tail;
+      } catch (error, stack) {
+        operation._abort(error, stack);
         try {
-          await operation._finish(success: false);
-        } catch (cleanup) {
-          throw CadAssetOperationFailure(error, cleanup);
+          await _assetStorage.checkpoint('operation:drainingAfterAbort');
+        } catch (error, stack) {
+          operation._abort(error, stack);
         }
-        rethrow;
-      } finally {
-        operation._accepting = false;
-        operation._active = false;
+        await operation._tail;
+      }
+      operation._revoke();
+      try {
+        await operation._finish(success: operation._failure == null);
+      } catch (cleanup, stack) {
+        if (operation._failure case final cause?
+            when !identical(cause, cleanup)) {
+          Error.throwWithStackTrace(
+            CadAssetOperationFailure(
+              cause,
+              cleanup,
+              operation._failureStack!,
+              stack,
+            ),
+            operation._failureStack!,
+          );
+        }
+        Error.throwWithStackTrace(cleanup, stack);
+      }
+      if (operation._failure case final cause?) {
+        Error.throwWithStackTrace(cause, operation._failureStack!);
       }
     });
     return result;
@@ -113,6 +132,16 @@ final class CadGeometryStagingOperation {
   Future<void> _tail = Future.value();
   Future<void>? _finishing;
   Object? _failure;
+  StackTrace? _failureStack;
+  Object? _resourceCleanupError;
+  StackTrace? _resourceCleanupStack;
+  final _revoked = Completer<void>();
+  final _completedMoves = <String>[];
+  late final _interrupted = Future.any<void>([
+    _revoked.future,
+    _cancellation._done.future,
+    _tx.owner._assetShutdown.future,
+  ]);
   Map<String, dynamic>? _manifest;
   CadAssetStageState get state => CadAssetStageState.values.byName(
     _manifest?['state'] as String? ?? 'preparing',
@@ -127,6 +156,76 @@ final class CadGeometryStagingOperation {
   void _validate() {
     if (!_active || _cancellation.isCancelled) throw const CadAssetCancelled();
     _tx.validate();
+  }
+
+  void _revoke() {
+    _accepting = false;
+    _active = false;
+    if (!_revoked.isCompleted) _revoked.complete();
+  }
+
+  void _abort(Object error, StackTrace stack) {
+    _revoke(); // Synchronous: admitted work loses authority before draining.
+    _failure ??= error;
+    _failureStack ??= stack;
+  }
+
+  Future<void> _closeResource(Future<void> Function() close) async {
+    try {
+      await close();
+    } catch (error, stack) {
+      final previous = _resourceCleanupError;
+      _resourceCleanupError = previous == null
+          ? error
+          : CadAssetOperationFailure(
+              previous,
+              error,
+              _resourceCleanupStack!,
+              stack,
+            );
+      _resourceCleanupStack ??= stack;
+      rethrow;
+    }
+  }
+
+  // One interruption listener per stream, rather than one retained listener per
+  // chunk. Cancel the subscription before closing its destination handle.
+  Stream<List<int>> _cancellable(Stream<List<int>> source) async* {
+    final iterator = StreamIterator(source);
+    Completer<bool>? pending;
+    unawaited(
+      _interrupted.then((_) {
+        final wait = pending;
+        if (wait != null && !wait.isCompleted) wait.complete(false);
+      }),
+    );
+    try {
+      while (true) {
+        _validate();
+        final wait = pending = Completer<bool>();
+        unawaited(
+          iterator.moveNext().then(
+            (value) {
+              if (!wait.isCompleted) wait.complete(value);
+            },
+            onError: (Object error, StackTrace stack) {
+              if (!wait.isCompleted) wait.completeError(error, stack);
+            },
+          ),
+        );
+        final hasNext = await wait.future;
+        pending = null;
+        _validate();
+        if (!hasNext) break;
+        yield iterator.current;
+      }
+    } catch (error, stack) {
+      _abort(error, stack);
+      rethrow;
+    } finally {
+      pending = null;
+      await _closeResource(iterator.cancel);
+    }
   }
 
   void _admission() {
@@ -154,8 +253,8 @@ final class CadGeometryStagingOperation {
         _validate();
         if (_failure != null) throw StateError('Staging already failed');
         return await runZoned(body, zoneValues: {_bodyZone: this});
-      } catch (error) {
-        _failure ??= error;
+      } catch (error, stack) {
+        _abort(error, stack);
         rethrow;
       }
     });
@@ -168,7 +267,10 @@ final class CadGeometryStagingOperation {
     if (await _paths.exists(stagingDirectory)) {
       throw StateError('Operation directory collision');
     }
-    await _paths.directories(path.join(stagingDirectory, 'files'));
+    await _paths.directories(
+      path.join(stagingDirectory, 'files'),
+      authorize: _validate,
+    );
     _validate();
     final now = DateTime.now().toUtc().toIso8601String();
     await _writeManifest({
@@ -195,7 +297,9 @@ final class CadGeometryStagingOperation {
 
   Future<GeometryAssetId> planAsset() => _run(() async {
     _preparing();
-    final asset = GeometryAssetId._(_assetId('ga1'));
+    final value = _storage.newAssetId();
+    _requireId(value, 'ga1');
+    final asset = GeometryAssetId._(value);
     if (await _paths.exists(_assetDirectory(asset)) ||
         await _paths.exists(_assetDirectory(asset, finalPath: true))) {
       throw StateError('Asset ID collision');
@@ -207,7 +311,7 @@ final class CadGeometryStagingOperation {
     });
     await _update(next, CadAssetStageState.preparing);
     _planned.add(asset);
-    await _paths.directories(_assetDirectory(asset));
+    await _paths.directories(_assetDirectory(asset), authorize: _validate);
     return asset;
   });
 
@@ -242,24 +346,32 @@ final class CadGeometryStagingOperation {
     files[kind.name] = {'status': 'writing', 'allowEmpty': allowEmpty};
     await _update(next, CadAssetStageState.preparing);
     final target = File(path.join(_assetDirectory(asset), kind.relativePath));
-    await _paths.directories(target.parent.path);
+    await _paths.directories(target.parent.path, authorize: _validate);
     await _paths.check(target.path);
+    _validate();
     await target.create(exclusive: true);
+    _validate();
     final file = await target.open(mode: FileMode.writeOnly);
     try {
-      await for (final chunk in bytes) {
+      await for (final chunk in _cancellable(bytes)) {
         _validate();
         for (var offset = 0; offset < chunk.length; offset += 65536) {
+          _validate();
           await file.writeFrom(
             chunk,
             offset,
             math.min(offset + 65536, chunk.length),
           );
+          await _storage.checkpoint('file:chunkWritten');
         }
       }
+      _validate();
       await file.flush();
+    } catch (error, stack) {
+      _abort(error, stack);
+      rethrow;
     } finally {
-      await file.close();
+      await _closeResource(file.close);
     }
     await _storage.checkpoint('file:flushed');
     _validate();
@@ -305,7 +417,9 @@ final class CadGeometryStagingOperation {
       await _verifyFiles(asset, record, finalPath: false, descriptor: false);
       final descriptor = File(path.join(_assetDirectory(asset), 'asset.json'));
       await _paths.check(descriptor.path);
+      _validate();
       await descriptor.create(exclusive: true);
+      _validate();
       await descriptor.writeAsString(
         jsonEncode({
           'schema': 'flcad.geometry-asset-record',
@@ -325,16 +439,12 @@ final class CadGeometryStagingOperation {
     if (state != CadAssetStageState.prepared) {
       throw StateError('Only prepared staging may commit');
     }
-    final cancellation = Future.any<void>([
-      _cancellation._done.future,
-      _tx.owner._assetShutdown.future,
-    ]);
     return _ProjectAssetLocks.run(
       _paths,
       instanceId,
       operationId,
       _lockTimeout,
-      cancellation,
+      _interrupted,
       _validate,
       _storage,
       () async {
@@ -358,7 +468,10 @@ final class CadGeometryStagingOperation {
         for (final asset in _planned) {
           final source = _assetDirectory(asset),
               destination = _assetDirectory(asset, finalPath: true);
-          await _paths.directories(path.dirname(destination));
+          await _paths.directories(
+            path.dirname(destination),
+            authorize: _validate,
+          );
           await _storage.checkpoint('promotion:beforeMove');
           _validate();
           await _verifyFiles(
@@ -373,6 +486,9 @@ final class CadGeometryStagingOperation {
           }
           _validate();
           _renameAssetNoReplace(source, destination);
+          // The synchronous OS rename succeeded. Record that fact before any
+          // await, even if revocation prevents the subsequent journal advance.
+          _completedMoves.add(asset.value);
           await _verifyFiles(asset, _asset(_manifest!, asset), finalPath: true);
           await _storage.checkpoint('promotion:afterMove');
           final next = _copy();
@@ -470,18 +586,38 @@ final class CadGeometryStagingOperation {
 
   Future<void> _update(
     Map<String, dynamic> next,
-    CadAssetStageState target,
-  ) async {
+    CadAssetStageState target, {
+    bool cleanup = false,
+  }) async {
     if (!_transitions[state]!.contains(target)) {
       throw StateError('Illegal staging transition');
     }
     next['state'] = target.name;
     next['sequence'] = (_manifest!['sequence'] as int) + 1;
     next['updatedAt'] = DateTime.now().toUtc().toIso8601String();
-    await _writeManifest(next);
+    await _writeManifest(next, cleanup: cleanup);
   }
 
-  Future<void> _writeManifest(Map<String, dynamic> next) async {
+  Future<void> _writeManifest(
+    Map<String, dynamic> next, {
+    bool cleanup = false,
+  }) async {
+    void authorize() {
+      if (!cleanup) {
+        _validate();
+      } else if (_finishing == null ||
+          _active ||
+          _accepting ||
+          ![
+            'quarantined',
+            'rollingBack',
+            'rolledBack',
+          ].contains(next['state'])) {
+        throw StateError('Invalid internal cleanup authority');
+      }
+    }
+
+    authorize();
     final current = File(path.join(stagingDirectory, 'manifest.json'));
     final previous = File(
       path.join(stagingDirectory, 'manifest.previous.json'),
@@ -494,7 +630,9 @@ final class CadGeometryStagingOperation {
     );
     if (bytes.length > 1024 * 1024) throw StateError('Manifest exceeds limit');
     await _paths.check(temporary.path);
+    authorize();
     await temporary.create(exclusive: true);
+    authorize();
     await temporary.writeAsBytes(bytes, flush: true);
     final reread = await _readAssetManifest(
       temporary,
@@ -525,20 +663,25 @@ final class CadGeometryStagingOperation {
         path.join(stagingDirectory, 'previous.${_assetId('j1')}.tmp'),
       );
       await _paths.check(backup.path);
+      authorize();
       await backup.create(exclusive: true);
+      authorize();
       await backup.writeAsString(
         jsonEncode({'data': valid, 'checksum': _manifestChecksum(valid)}),
         flush: true,
       );
       await _readAssetManifest(backup, _paths, instanceId, operationId);
       await _paths.check(previous.path);
+      authorize();
       await backup.rename(previous.path);
       await _readAssetManifest(previous, _paths, instanceId, operationId);
     }
     await _storage.checkpoint('manifest:${next['state']}:beforeReplace');
     await _paths.check(current.path);
     await _paths.check(temporary.path);
+    authorize();
     await temporary.rename(current.path);
+    await _storage.checkpoint('manifest:${next['state']}:replaced');
     final confirmed = await _readAssetManifest(
       current,
       _paths,
@@ -562,31 +705,57 @@ final class CadGeometryStagingOperation {
   }
 
   Future<void> _finishWork(bool success) async {
-    Object? cleanupError;
+    Object? cleanupError = _resourceCleanupError;
+    StackTrace? cleanupStack = _resourceCleanupStack;
+    void recordCleanup(Object error, StackTrace stack) {
+      final previous = cleanupError;
+      cleanupError = previous == null
+          ? error
+          : CadAssetOperationFailure(previous, error, cleanupStack!, stack);
+      cleanupStack ??= stack;
+    }
+
+    try {
+      await _storage.checkpoint('cleanup:started');
+    } catch (error, stack) {
+      recordCleanup(error, stack);
+    }
     // Promotion has released the project lock before native disposal waits.
     for (final owner in [..._shapes, ..._meshes]) {
       try {
         await owner.dispose();
-      } catch (error) {
-        cleanupError = error;
+      } catch (error, stack) {
+        recordCleanup(error, stack);
       }
     }
     if (_manifest == null) {
-      if (cleanupError != null) throw cleanupError;
+      if (cleanupError != null) {
+        Error.throwWithStackTrace(cleanupError!, cleanupStack!);
+      }
       return;
     }
-    if (cleanupError != null || !success || _failure != null) {
-      final next = _copy();
-      (next['failures'] as List).add(
-        cleanupError == null ? 'operationFailed' : 'nativeDisposeFailed',
-      );
-      next['quarantineReason'] = 'unconfirmedOperationOrNativeCleanup';
-      await _update(next, CadAssetStageState.quarantined);
-    } else if (state != CadAssetStageState.committed) {
-      await _update(_copy(), CadAssetStageState.rollingBack);
-      await _update(_copy(), CadAssetStageState.rolledBack);
+    try {
+      if (cleanupError != null || !success || _failure != null) {
+        final next = _copy();
+        next['promoted'] = {
+          ...next['promoted'] as List,
+          ..._completedMoves,
+        }.toList();
+        (next['failures'] as List).add(
+          cleanupError == null ? 'operationFailed' : 'cleanupFailed',
+        );
+        next['quarantineReason'] = 'unconfirmedOperationOrNativeCleanup';
+        await _update(next, CadAssetStageState.quarantined, cleanup: true);
+      } else if (state != CadAssetStageState.committed) {
+        await _update(_copy(), CadAssetStageState.rollingBack, cleanup: true);
+        await _update(_copy(), CadAssetStageState.rolledBack, cleanup: true);
+      }
+    } catch (error, stack) {
+      recordCleanup(error, stack);
     }
-    if (cleanupError != null) throw cleanupError;
+    if (cleanupError != null) {
+      Error.throwWithStackTrace(cleanupError!, cleanupStack!);
+    }
   }
 }
 
