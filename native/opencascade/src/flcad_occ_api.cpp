@@ -1842,3 +1842,5 @@ size_t flcad_occ_shape_count() {
 }
 
 #include "flcad_occ_mesh_stream.inc"
+
+#include "flcad_occ_brep_stream.inc"

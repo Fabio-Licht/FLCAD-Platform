@@ -155,7 +155,8 @@ The native display-stream obstruction is addressed by this API, once validation
 passes. 2B2A still needs a typed FFI sink adapter on the calling isolate, custody
 and lease acquisition, bounded delivery into staging, error/cancellation mapping,
 seal/promotion and documentary/scene/Undo lifecycle. Callback code must not use
-an asynchronous Dart callback or outlive its native call. BREP serialization
-still has its legacy pathname API; preserving imported BREP source via staging
-or adding native BREP streaming remains a separate decision. No producer is
+an asynchronous Dart callback or outlive its native call. BREP durable-state
+serialization is now provided by the separate additive
+BREP stream ABI described in [BREP_STREAM.md](BREP_STREAM.md); STL remains a display
+asset and does not replace durable CAD topology. No producer is
 migrated and no 2B2A/2B2B approval is implied.
