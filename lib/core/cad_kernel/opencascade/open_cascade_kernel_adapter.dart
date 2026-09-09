@@ -1,4 +1,9 @@
 import 'dart:async';
+import 'dart:ffi';
+import 'dart:io';
+import 'dart:isolate';
+import 'package:ffi/ffi.dart';
+import '../../../../app/runtime/cad_asset_fs_native.dart';
 
 import '../analytics/kernel_analytics.dart';
 import '../api/geometry_kernel_api.dart';
@@ -10,6 +15,7 @@ import 'open_cascade_bridge.dart';
 import 'open_cascade_ffi.dart';
 
 part 'native_allocation_custody.dart';
+part 'native_source_bridge.dart';
 
 class OpenCascadeKernelAdapter
     implements
@@ -33,6 +39,9 @@ class OpenCascadeKernelAdapter
        runtime = KernelRuntime(analytics: analytics ?? KernelAnalytics());
   final Object? _libraryKey;
   _NativeParticipant? _participant;
+  final List<NativeSourceEffect> _sourceEffects = [];
+  List<NativeSourceEffect> get sourceEffects =>
+      List.unmodifiable(_sourceEffects);
   Future<void>? _unloading;
   OpenCascadeNativeBridge? _bridge;
   final OpenCascadeNativeBridge Function() _bridgeFactory;

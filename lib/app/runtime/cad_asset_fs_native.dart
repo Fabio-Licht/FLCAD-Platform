@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'package:ffi/ffi.dart';
@@ -77,6 +78,47 @@ final class CadAssetNativeFs {
   late final int root;
   final _owned = <int>{};
   bool _closed = false;
+  bool _closing = false;
+  int _sourcePins = 0;
+  Completer<void>? _sourceIdle;
+  Future<void>? _shutdown;
+  Object? _sourceQuarantine;
+  Object? get sourceQuarantine => _sourceQuarantine;
+  void quarantineSource(Object cause) {
+    _sourceQuarantine = cause;
+    _closing = true;
+  }
+
+  /// Internal native source scope. No bytes cross this callback.
+  Future<T> withSourceCapability<T>(
+    int id,
+    Future<T> Function(int, Pointer<Void>) operation,
+  ) async {
+    _live(id);
+    _sourcePins++;
+    try {
+      return await operation(
+        id,
+        _api.library
+            .lookup<NativeFunction<Uint32 Function()>>('caf_source_version')
+            .cast(),
+      );
+    } finally {
+      if (--_sourcePins == 0) {
+        _sourceIdle?.complete();
+        _sourceIdle = null;
+      }
+    }
+  }
+
+  Future<void> shutdown() => _shutdown ??= _drain();
+  Future<void> _drain() async {
+    _closing = true;
+    if (_sourcePins != 0) await (_sourceIdle ??= Completer<void>()).future;
+    if (_sourceQuarantine case final failure?) throw failure;
+    dispose();
+  }
+
   _Result _accept(_Result r, String action, {bool acquired = false}) {
     if (acquired && r.object != 0) _owned.add(r.object);
     if (r.version != 1 || r.status != 0) {
@@ -109,7 +151,7 @@ final class CadAssetNativeFs {
   }
 
   void _live(int id) {
-    if (_closed || !_owned.contains(id)) {
+    if (_closed || _closing || !_owned.contains(id)) {
       throw StateError('Closed filesystem capability');
     }
   }
@@ -222,6 +264,9 @@ final class CadAssetNativeFs {
 
   void dispose() {
     if (_closed) return;
+    if (_sourcePins != 0) {
+      throw StateError('Native source operations are pending; await shutdown');
+    }
     for (final id in _owned.toList().reversed) {
       close(id);
     }

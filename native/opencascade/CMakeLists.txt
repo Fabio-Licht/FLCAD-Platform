@@ -199,3 +199,8 @@ if(BUILD_TESTING)
     target_link_options(flcad_occ_source_smoke PRIVATE /INCREMENTAL:NO /DEBUG)
   endif()
 endif()
+
+option(FLCAD_OCC_PATH_AUDIT "Test-only pathname importer counters" OFF)
+if(FLCAD_OCC_PATH_AUDIT OR "$ENV{FLCAD_OCC_PATH_AUDIT}" STREQUAL "1")
+  target_compile_definitions(flcad_opencascade PRIVATE FLCAD_OCC_PATH_AUDIT)
+endif()

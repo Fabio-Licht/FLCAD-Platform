@@ -104,6 +104,10 @@
 #include <type_traits>
 
 namespace {
+#ifdef FLCAD_OCC_PATH_AUDIT
+std::atomic<uint64_t> path_imports{0};
+#endif
+
 std::unordered_map<std::string, TopoDS_Shape> shapes;
 std::unordered_map<std::string, Handle(Poly_Triangulation)> meshes;
 std::mutex registry_mutex;
@@ -631,6 +635,10 @@ int flcad_occ_create_torus(const double *o, const double *d, double major_r,
 int flcad_occ_import_shape(const char *p, const char *fmt, char *t, size_t ts,
                            char *f, size_t fs, char *ty, size_t tys, char *e,
                            size_t es) {
+#ifdef FLCAD_OCC_PATH_AUDIT
+  ++path_imports;
+#endif
+
   try {
     if (!p || !*p)
       return fail("Shape path is empty", e, es);
@@ -713,6 +721,10 @@ int flcad_occ_transform_shape(const char *id, const double *m,
 int flcad_occ_import_stl(const char *p, char *t, size_t ts, char *f, size_t fs,
                          int *v, int *tr, int *deg, double *b, int *n, char *e,
                          size_t es) {
+#ifdef FLCAD_OCC_PATH_AUDIT
+  ++path_imports;
+#endif
+
   try {
     if (!p || !*p)
       return fail("STL path is empty", e, es);
@@ -1850,3 +1862,13 @@ size_t flcad_occ_shape_count() {
 #include "flcad_occ_brep_stream.inc"
 
 #include "flcad_occ_source.inc"
+
+#ifdef FLCAD_OCC_PATH_AUDIT
+extern "C" __declspec(dllexport) uint64_t flcad_occ_test_mesh_count(void) {
+  std::lock_guard<std::mutex> lock(registry_mutex);
+  return meshes.size();
+}
+extern "C" __declspec(dllexport) uint64_t flcad_occ_test_path_import_count(void) {
+  return path_imports.load();
+}
+#endif

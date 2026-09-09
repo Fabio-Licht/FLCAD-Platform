@@ -71,6 +71,13 @@ if(FLCAD_OCCT_RUNTIME_DLLS)
 endif()
 
 
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../native/cad_occ_bridge" "${CMAKE_CURRENT_BINARY_DIR}/cad_occ_bridge")
+add_dependencies(${BINARY_NAME} cad_occ_bridge)
+add_custom_target(flcad_copy_cad_occ_bridge ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:cad_occ_bridge> $<TARGET_FILE_DIR:${BINARY_NAME}>
+  DEPENDS ${BINARY_NAME} cad_occ_bridge)
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)
@@ -93,6 +100,7 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
+install(TARGETS cad_occ_bridge RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 install(TARGETS cad_asset_fs RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

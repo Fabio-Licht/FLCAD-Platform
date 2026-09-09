@@ -33,6 +33,8 @@ struct Handle {
 };
 struct Node {
   Handle handle;
+  std::mutex io;
+  uint32_t source_leases = 0;
   FILE_ID_INFO identity{};
   std::shared_ptr<Node> parent;
   FILE_ID_INFO root{};
@@ -250,6 +252,8 @@ caf_result caf_read(uint64_t id, uint64_t offset, uint8_t *data,
                     uint32_t capacity) {
   return boundary([&](caf_result &r) {
     auto n = get(id);
+    if (n->source_leases)
+      fail(CAF_POLICY, ERROR_BUSY);
     if (n->directory || !data || capacity > 65536 || offset > INT64_MAX)
       fail(CAF_ARGUMENT);
     LARGE_INTEGER position{};
@@ -394,6 +398,8 @@ caf_result caf_write(uint64_t id, const uint8_t *data, uint32_t bytes) {
   return boundary([&](caf_result &r) {
     auto n = get(id);
     r.object = id;
+    if (n->source_leases)
+      fail(CAF_POLICY, ERROR_BUSY);
     if (n->directory || !n->created || n->sealed || (!data && bytes) ||
         bytes > 65536)
       fail(CAF_ARGUMENT);
@@ -424,6 +430,8 @@ caf_result caf_seal(uint64_t id, uint64_t expected) {
     r.object = id;
     if (n->directory)
       fail(CAF_ARGUMENT);
+    if (n->source_leases)
+      fail(CAF_POLICY, ERROR_BUSY);
     CAF_CHECKPOINT("before_seal");
     if (n->created)
       os(FlushFileBuffers(n->handle.value) != 0);
@@ -481,6 +489,8 @@ caf_result caf_rename(uint64_t id, uint64_t dest, const uint16_t *name,
   return boundary([&](caf_result &r) {
     auto n = get(id), d = get(dest);
     r.object = id;
+    if (n->source_leases)
+      fail(CAF_POLICY, ERROR_BUSY);
     if (!n->created || !d->directory || (!n->directory && !n->sealed))
       fail(CAF_POLICY);
     if (!caf_policy::same_volume(n->identity, d->identity))
@@ -514,8 +524,13 @@ caf_result caf_rename(uint64_t id, uint64_t dest, const uint16_t *name,
 }
 caf_result caf_close(uint64_t id) {
   return boundary([&](caf_result &) {
+    const auto it = objects.find(id);
+    if (it != objects.end() && it->second->source_leases)
+      fail(CAF_POLICY, ERROR_BUSY);
     if (!objects.erase(id))
       fail(CAF_HANDLE, ERROR_INVALID_HANDLE);
   });
 }
 }
+
+#include "cad_asset_source.inc"

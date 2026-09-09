@@ -74,6 +74,29 @@ CAF_API caf_result caf_info(uint64_t object);
 CAF_API caf_result caf_rename(uint64_t object, uint64_t destination,
                               const uint16_t *name, uint32_t units);
 CAF_API caf_result caf_close(uint64_t object);
+/* Source lease ABI 1. Expected identity/size/hash must come from an earlier
+ * seal. No source callback is invoked while the filesystem registry mutex is
+ * held. Release refuses an in-flight call. All ancestors remain pinned until
+ * release. These functions neither parse geometry nor publish native shapes. */
+CAF_API uint32_t caf_source_version(void);
+CAF_API caf_result caf_source_acquire(uint64_t object,
+                                      const caf_result *expected,
+                                      uint32_t size);
+CAF_API caf_result caf_source_read(uint64_t lease, uint64_t offset,
+                                   uint8_t *data, uint32_t capacity);
+/* Poll is synchronous on the calling thread. Zero continues; nonzero cancels.
+ * Context remains live until return. Must not throw, block, or reenter CAF:
+ * prepare/check retain the per-object IO mutex (not the registry mutex).
+ * source_read: reserved bit 0 means bytes is the confirmed copied prefix,
+ * including on failure. Without this bit, bytes must not be consumed as a count.
+ */
+typedef int32_t (*caf_source_poll_v1)(void *context);
+CAF_API caf_result caf_source_prepare(uint64_t lease, caf_source_poll_v1 poll,
+                                      void *context);
+CAF_API caf_result caf_source_check(uint64_t lease, caf_source_poll_v1 poll,
+                                    void *context);
+CAF_API caf_result caf_source_release(uint64_t lease);
+
 #ifdef __cplusplus
 }
 #endif
