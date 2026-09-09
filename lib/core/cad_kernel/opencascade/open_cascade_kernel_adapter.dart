@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../analytics/kernel_analytics.dart';
 import '../api/geometry_kernel_api.dart';
 import '../ids/persistent_id_service.dart';
@@ -6,6 +8,8 @@ import '../models/kernel_models.dart';
 import '../runtime/kernel_runtime.dart';
 import 'open_cascade_bridge.dart';
 import 'open_cascade_ffi.dart';
+
+part 'native_allocation_custody.dart';
 
 class OpenCascadeKernelAdapter
     implements
@@ -21,10 +25,15 @@ class OpenCascadeKernelAdapter
     OpenCascadeNativeBridge Function()? bridgeFactory,
     KernelAnalytics? analytics,
     PersistentIdService? ids,
-  }) : _bridge = bridge,
+    Object? nativeLibraryKey,
+  }) : _libraryKey = nativeLibraryKey,
+       _bridge = bridge,
        _bridgeFactory = bridgeFactory ?? OpenCascadeFFI.loadOrUnavailable,
        _ids = ids ?? const PersistentIdService(),
        runtime = KernelRuntime(analytics: analytics ?? KernelAnalytics());
+  final Object? _libraryKey;
+  _NativeParticipant? _participant;
+  Future<void>? _unloading;
   OpenCascadeNativeBridge? _bridge;
   final OpenCascadeNativeBridge Function() _bridgeFactory;
   OpenCascadeNativeBridge get _nativeBridge => _bridge ??= _bridgeFactory();
@@ -35,16 +44,62 @@ class OpenCascadeKernelAdapter
   final Map<String, bool> _surfaceHistory = {};
   String _version = 'uninitialized';
   Set<KernelCapability> _capabilities = {};
-  bool _initialized = false;
   Future<void>? _initialization;
 
-  Future<void> initialize() => _initialization ??= _initialize();
+  Future<void> initialize() {
+    if (_unloading != null) {
+      return Future.error(StateError('Adapter is unloading'));
+    }
+    if (_initialization case final existing?) return existing;
+    final completion = Completer<void>();
+    _initialization = completion.future;
+    unawaited(
+      _initialize().then(
+        completion.complete,
+        onError: completion.completeError,
+      ),
+    );
+    return completion.future;
+  }
+
+  NativeCustodyDiagnostics? get custodyDiagnostics => _participant == null
+      ? null
+      : NativeCustodyDiagnostics._(_participant!.session);
+
+  /// Legacy descriptors carry no allocation authority.
+  bool isUnmanaged(ShapeHandle handle) =>
+      handle.kernelId == descriptor.id &&
+      _nativeTokens.containsKey(handle.persistentId);
+
+  bool isUnmanagedMesh(KernelMeshHandle handle) =>
+      handle.kernelId == descriptor.id &&
+      _nativeMeshTokens.containsKey(handle.persistentId);
+
+  Future<T> _legacyOperation<T>(Future<T> Function() operation) async {
+    await initialize();
+    return _participant!.run(operation);
+  }
 
   Future<void> _initialize() async {
-    await _nativeBridge.initialize();
-    _version = await _nativeBridge.version();
-    _capabilities = _mapCapabilities(await _nativeBridge.capabilities());
-    _initialized = true;
+    final participation = _participant = _NativeSessions.join(
+      _nativeBridge,
+      _libraryKey,
+    );
+    try {
+      await participation.run(() async {
+        await participation.session.initialize();
+        _version = await _nativeBridge.version();
+        _capabilities = _mapCapabilities(await _nativeBridge.capabilities());
+        if (participation.closing) throw StateError('Adapter is unloading');
+      });
+    } catch (error) {
+      if (!participation.closing) {
+        participation.session.state = NativeSessionState.quarantined;
+        participation.session.error = error;
+        participation.close().ignore();
+      }
+      rethrow;
+    }
   }
 
   @override
@@ -81,8 +136,7 @@ class OpenCascadeKernelAdapter
   @override
   Future<KernelHealth> healthCheck() async {
     try {
-      if (!_initialized) await initialize();
-      final data = await _nativeBridge.diagnostics();
+      final data = await _legacyOperation(_nativeBridge.diagnostics);
       return KernelHealth(
         data['healthy'] == false
             ? KernelHealthStatus.degraded
@@ -100,6 +154,7 @@ class OpenCascadeKernelAdapter
   }
 
   ShapeHandle _handle(OpenCascadeNativeShape shape, String projectId) {
+    _registerUnmanaged(NativeResourceKind.shape, shape.token);
     final id = _ids.create(projectId, shape.type.name);
     _nativeTokens[id] = shape.token;
     return ShapeHandle.reference(
@@ -109,6 +164,18 @@ class OpenCascadeKernelAdapter
       fingerprint: shape.fingerprint,
       metadata: shape.metadata,
     );
+  }
+
+  void _registerUnmanaged(NativeResourceKind kind, String token) {
+    final session = _participant!.session;
+    if (session.records.containsKey((kind, token))) {
+      session.state = NativeSessionState.quarantined;
+      session.error = StateError(
+        'Legacy allocation aliases a managed allocation',
+      );
+      throw session.error!;
+    }
+    session.unmanaged.add((kind, token));
   }
 
   String _resolve(ShapeHandle handle) {
@@ -132,8 +199,7 @@ class OpenCascadeKernelAdapter
     void Function(KernelProgress progress)? onProgress,
   }) => runtime.run(
     'occ-import-${format.name}',
-    () async {
-      await initialize();
+    () => _legacyOperation(() async {
       return _handle(
         await _nativeBridge.importShape(
           path,
@@ -143,33 +209,33 @@ class OpenCascadeKernelAdapter
         ),
         projectId,
       );
-    },
+    }),
     entityCount: 1,
     runInIsolate: false,
   );
 
   @override
-  Future<void> persistShape(ShapeHandle handle, String payloadPath) async {
-    await initialize();
-    await _nativeBridge.exportShape(
-      _resolve(handle),
-      payloadPath,
-      KernelExchangeFormat.brep,
-      cancellation: const NoKernelCancellation(),
-    );
-  }
+  Future<void> persistShape(ShapeHandle handle, String payloadPath) =>
+      _legacyOperation(() async {
+        await _nativeBridge.exportShape(
+          _resolve(handle),
+          payloadPath,
+          KernelExchangeFormat.brep,
+          cancellation: const NoKernelCancellation(),
+        );
+      });
 
   @override
   Future<ShapeHandle> restoreShape(
     String payloadPath, {
     required String persistentId,
-  }) async {
-    await initialize();
+  }) => _legacyOperation(() async {
     final native = await _nativeBridge.importShape(
       payloadPath,
       KernelExchangeFormat.brep,
       cancellation: const NoKernelCancellation(),
     );
+    _registerUnmanaged(NativeResourceKind.shape, native.token);
     _nativeTokens[persistentId] = native.token;
     return ShapeHandle.reference(
       persistentId: persistentId,
@@ -178,7 +244,7 @@ class OpenCascadeKernelAdapter
       fingerprint: native.fingerprint,
       metadata: {...native.metadata, 'restoredFrom': payloadPath},
     );
-  }
+  });
 
   @override
   Future<ShapeHandle> transformShape(
@@ -188,8 +254,7 @@ class OpenCascadeKernelAdapter
     bool copyGeometry = true,
   }) => runtime.run(
     'occ-transform-shape',
-    () async {
-      await initialize();
+    () => _legacyOperation(() async {
       if (matrix.length != 16 || matrix.any((value) => !value.isFinite)) {
         throw ArgumentError('Shape transform requires a finite 4x4 matrix.');
       }
@@ -199,7 +264,7 @@ class OpenCascadeKernelAdapter
         copyGeometry: copyGeometry,
       );
       return _handle(native, projectId);
-    },
+    }),
     entityCount: 1,
     runInIsolate: false,
   );
@@ -213,8 +278,7 @@ class OpenCascadeKernelAdapter
     void Function(KernelProgress progress)? onProgress,
   }) => runtime.run(
     'occ-import-stl',
-    () async {
-      await initialize();
+    () => _legacyOperation(() async {
       final bridge = _nativeBridge;
       if (bridge is! OpenCascadeMeshNativeBridge) {
         throw StateError('OpenCascade bridge does not support STL mesh import');
@@ -227,6 +291,7 @@ class OpenCascadeKernelAdapter
         onProgress: onProgress,
       );
       final id = _ids.create(projectId, 'mesh');
+      _registerUnmanaged(NativeResourceKind.mesh, native.token);
       _nativeMeshTokens[id] = native.token;
       return KernelMeshHandle(
         persistentId: id,
@@ -244,13 +309,13 @@ class OpenCascadeKernelAdapter
           'nativeType': 'Poly_Triangulation',
         },
       );
-    },
+    }),
     entityCount: 1,
     runInIsolate: false,
   );
 
   @override
-  Future<void> closeMesh(KernelMeshHandle handle) async {
+  Future<void> closeMesh(KernelMeshHandle handle) => _legacyOperation(() async {
     if (handle.kernelId != descriptor.id) {
       throw ArgumentError(
         'Mesh belongs to ${handle.kernelId}, not OpenCascade',
@@ -266,30 +331,33 @@ class OpenCascadeKernelAdapter
       throw StateError('OpenCascade bridge does not support mesh lifetime');
     }
     await (bridge as OpenCascadeMeshNativeBridge).destroyMesh(token);
-  }
+  });
 
   @override
-  Future<KernelMeshGeometry> inspectMesh(KernelMeshHandle handle) async {
-    if (handle.kernelId != descriptor.id) {
-      throw ArgumentError(
-        'Mesh belongs to ${handle.kernelId}, not OpenCascade',
-      );
-    }
-    final token =
-        _nativeMeshTokens[handle.persistentId] ??
-        (throw StateError(
-          'Native mesh is not loaded for ${handle.persistentId}',
-        ));
-    final bridge = _nativeBridge;
-    if (bridge is! OpenCascadeMeshNativeBridge) {
-      throw StateError('OpenCascade bridge does not support mesh inspection');
-    }
-    return (bridge as OpenCascadeMeshNativeBridge).inspectMesh(
-      token,
-      vertexCount: handle.vertexCount,
-      triangleCount: handle.triangleCount,
-    );
-  }
+  Future<KernelMeshGeometry> inspectMesh(KernelMeshHandle handle) =>
+      _legacyOperation(() async {
+        if (handle.kernelId != descriptor.id) {
+          throw ArgumentError(
+            'Mesh belongs to ${handle.kernelId}, not OpenCascade',
+          );
+        }
+        final token =
+            _nativeMeshTokens[handle.persistentId] ??
+            (throw StateError(
+              'Native mesh is not loaded for ${handle.persistentId}',
+            ));
+        final bridge = _nativeBridge;
+        if (bridge is! OpenCascadeMeshNativeBridge) {
+          throw StateError(
+            'OpenCascade bridge does not support mesh inspection',
+          );
+        }
+        return (bridge as OpenCascadeMeshNativeBridge).inspectMesh(
+          token,
+          vertexCount: handle.vertexCount,
+          triangleCount: handle.triangleCount,
+        );
+      });
 
   @override
   Future<void> exportFile(
@@ -298,22 +366,27 @@ class OpenCascadeKernelAdapter
     KernelExchangeFormat format, {
     KernelCancellationToken cancellation = const NoKernelCancellation(),
     void Function(KernelProgress progress)? onProgress,
-  }) => runtime.run('occ-export-${format.name}', () async {
-    await initialize();
-    await _nativeBridge.exportShape(
-      _resolve(handle),
-      path,
-      format,
-      cancellation: cancellation,
-      onProgress: onProgress,
-    );
-  }, runInIsolate: false);
+  }) => runtime.run(
+    'occ-export-${format.name}',
+    () => _legacyOperation(() async {
+      await _nativeBridge.exportShape(
+        _resolve(handle),
+        path,
+        format,
+        cancellation: cancellation,
+        onProgress: onProgress,
+      );
+    }),
+    runInIsolate: false,
+  );
   @override
-  Future<List<GeometryDiagnostic>> diagnose(ShapeHandle handle) =>
-      runtime.run('occ-validate', () async {
-        await initialize();
-        return _nativeBridge.validate(_resolve(handle));
-      }, runInIsolate: false);
+  Future<List<GeometryDiagnostic>> diagnose(ShapeHandle handle) => runtime.run(
+    'occ-validate',
+    () => _legacyOperation(() async {
+      return _nativeBridge.validate(_resolve(handle));
+    }),
+    runInIsolate: false,
+  );
   @override
   Future<List<String>> validate(ShapeHandle handle, Set<String> checks) async =>
       (await diagnose(
@@ -321,10 +394,13 @@ class OpenCascadeKernelAdapter
       )).map((e) => '${e.severity}:${e.code}:${e.message}').toList();
   @override
   Future<List<HealingProposal>> proposeHealing(ShapeHandle handle) =>
-      runtime.run('occ-healing-proposals', () async {
-        await initialize();
-        return _nativeBridge.proposeHealing(_resolve(handle));
-      }, runInIsolate: false);
+      runtime.run(
+        'occ-healing-proposals',
+        () => _legacyOperation(() async {
+          return _nativeBridge.proposeHealing(_resolve(handle));
+        }),
+        runInIsolate: false,
+      );
   @override
   Future<ShapeHandle> sew(
     List<ShapeHandle> faces, {
@@ -332,13 +408,12 @@ class OpenCascadeKernelAdapter
     required double tolerance,
   }) => runtime.run(
     'occ-sewing',
-    () async {
-      await initialize();
+    () => _legacyOperation(() async {
       return _handle(
         await _nativeBridge.sew(faces.map(_resolve).toList(), tolerance),
         projectId,
       );
-    },
+    }),
     entityCount: 1,
     runInIsolate: false,
   );
@@ -347,20 +422,23 @@ class OpenCascadeKernelAdapter
     ShapeHandle handle, {
     required String outputPath,
     required double deflection,
-  }) => runtime.run('occ-meshing', () async {
-    await initialize();
-    final result = await _nativeBridge.mesh(
-      _resolve(handle),
-      outputPath,
-      deflection,
-    );
-    return KernelMeshResult(
-      source: handle,
-      vertexCount: result.vertexCount,
-      triangleCount: result.triangleCount,
-      payloadPath: result.payloadPath,
-    );
-  }, runInIsolate: false);
+  }) => runtime.run(
+    'occ-meshing',
+    () => _legacyOperation(() async {
+      final result = await _nativeBridge.mesh(
+        _resolve(handle),
+        outputPath,
+        deflection,
+      );
+      return KernelMeshResult(
+        source: handle,
+        vertexCount: result.vertexCount,
+        triangleCount: result.triangleCount,
+        payloadPath: result.payloadPath,
+      );
+    }),
+    runInIsolate: false,
+  );
   @override
   Future<ShapeHandle> create(
     String operation,
@@ -370,8 +448,7 @@ class OpenCascadeKernelAdapter
     required KernelTransaction transaction,
   }) => runtime.run(
     'occ-${operation.toLowerCase().replaceAll(' ', '-')}',
-    () async {
-      await initialize();
+    () => _legacyOperation(() async {
       final nativeParameters = Map<String, dynamic>.from(parameters);
       for (final entry in parameters.entries) {
         final value = entry.value;
@@ -392,6 +469,7 @@ class OpenCascadeKernelAdapter
                   values: _surfaceValues(professional, nativeParameters),
                 )
           : await bridge.createShape(operation, nativeParameters, expectedType);
+      _registerUnmanaged(NativeResourceKind.shape, shape.token);
       _nativeTokens[persistentId] = shape.token;
       return ShapeHandle.reference(
         persistentId: persistentId,
@@ -400,7 +478,7 @@ class OpenCascadeKernelAdapter
         fingerprint: shape.fingerprint,
         metadata: shape.metadata,
       );
-    },
+    }),
     entityCount: 1,
     runInIsolate: false,
   );
@@ -410,46 +488,45 @@ class OpenCascadeKernelAdapter
   Future<void> commit(KernelTransaction transaction) async {}
   @override
   Future<void> rollback(KernelTransaction transaction) async {}
-  Future<void> destroy(ShapeHandle handle) async {
+  Future<void> destroy(ShapeHandle handle) => _legacyOperation(() async {
     final token = _resolve(handle);
-    await initialize();
+
     await _nativeBridge.destroyShape(token);
     _nativeTokens.remove(handle.persistentId);
-  }
+  });
 
   @override
-  Future<KernelSurfaceTopology> inspectSurfaceTopology(
-    ShapeHandle surface,
-  ) async {
-    await initialize();
-    final value = await _nativeBridge.inspectSurfaceTopology(_resolve(surface));
-    return KernelSurfaceTopology(
-      boundaries: [
-        for (final item in (value['boundaries'] as List))
-          KernelBoundaryData(
-            index: item['index'] as int,
-            length: (item['length'] as num).toDouble(),
-            closed: item['closed'] as bool,
-          ),
-      ],
-      loops: [
-        for (final item in (value['loops'] as List))
-          KernelLoopData(
-            index: item['index'] as int,
-            closed: item['closed'] as bool,
-            boundaryIndices: (item['boundaries'] as List).cast<int>(),
-          ),
-      ],
-    );
-  }
+  Future<KernelSurfaceTopology> inspectSurfaceTopology(ShapeHandle surface) =>
+      _legacyOperation(() async {
+        final value = await _nativeBridge.inspectSurfaceTopology(
+          _resolve(surface),
+        );
+        return KernelSurfaceTopology(
+          boundaries: [
+            for (final item in (value['boundaries'] as List))
+              KernelBoundaryData(
+                index: item['index'] as int,
+                length: (item['length'] as num).toDouble(),
+                closed: item['closed'] as bool,
+              ),
+          ],
+          loops: [
+            for (final item in (value['loops'] as List))
+              KernelLoopData(
+                index: item['index'] as int,
+                closed: item['closed'] as bool,
+                boundaryIndices: (item['boundaries'] as List).cast<int>(),
+              ),
+          ],
+        );
+      });
 
   @override
   Future<KernelSurfaceIntersection> intersectSurfaces(
     ShapeHandle first,
     ShapeHandle second, {
     required String projectId,
-  }) async {
-    await initialize();
+  }) => _legacyOperation(() async {
     final value = await _nativeBridge.intersectSurfaces(
       _resolve(first),
       _resolve(second),
@@ -458,6 +535,7 @@ class OpenCascadeKernelAdapter
     final token = value['token'] as String?;
     if (token != null) {
       final id = _ids.create(projectId, 'intersection');
+      _registerUnmanaged(NativeResourceKind.shape, token);
       _nativeTokens[id] = token;
       handle = ShapeHandle.reference(
         persistentId: id,
@@ -471,21 +549,20 @@ class OpenCascadeKernelAdapter
       length: (value['length'] as num).toDouble(),
       handle: handle,
     );
-  }
+  });
 
   @override
   Future<Map<String, dynamic>> inspectSurfaceQuality(
     ShapeHandle surface, {
     required List<double> draftDirection,
     int samples = 100,
-  }) async {
-    await initialize();
+  }) => _legacyOperation(() async {
     return _nativeBridge.inspectSurfaceQuality(
       _resolve(surface),
       draftDirection: draftDirection,
       samples: samples,
     );
-  }
+  });
 
   @override
   Future<KernelSurfaceOperationResult> executeSurfaceOperation(
@@ -493,8 +570,7 @@ class OpenCascadeKernelAdapter
     String operation,
     Map<String, dynamic> parameters, {
     required String projectId,
-  }) async {
-    await initialize();
+  }) => _legacyOperation(() async {
     final nativeOperation = _professionalOperation(operation);
     if (nativeOperation == null) {
       return KernelSurfaceOperationResult(
@@ -540,7 +616,7 @@ class OpenCascadeKernelAdapter
       undoToken: undo,
       redoToken: redo,
     );
-  }
+  });
 
   @override
   Future<void> rollbackSurfaceOperation(String undoToken) async {
@@ -567,13 +643,96 @@ class OpenCascadeKernelAdapter
   }
 
   @override
-  Future<void> unload() async {
-    if (_bridge != null) await _nativeBridge.shutdown();
-    _nativeTokens.clear();
-    _nativeMeshTokens.clear();
-    _surfaceHistory.clear();
-    _initialized = false;
-    _initialization = null;
+  Future<void> unload() {
+    if (_unloading case final existing?) return existing;
+    final completion = Completer<void>();
+    _unloading = completion.future;
+    final closure = _participant?.close() ?? Future<void>.value();
+    unawaited(_finishUnload(closure, completion));
+    return completion.future;
+  }
+
+  Future<void> _finishUnload(
+    Future<void> closure,
+    Completer<void> completion,
+  ) async {
+    try {
+      await closure;
+      _nativeTokens.clear();
+      _nativeMeshTokens.clear();
+      _surfaceHistory.clear();
+      _initialization = null;
+      _participant = null;
+      _unloading = null;
+      completion.complete();
+    } catch (error, stack) {
+      completion.completeError(error, stack);
+    }
+  }
+
+  /// Foundation only: no existing producer calls this API.
+  Future<OwnedNativeShape> createOwnedShape(
+    String operation,
+    Map<String, dynamic> parameters,
+    CADShapeType expectedType,
+  ) async {
+    await initialize();
+    final participant = _participant!;
+    return participant.run(() async {
+      final shape = await _nativeBridge.createShape(
+        operation,
+        parameters,
+        expectedType,
+      );
+      final record = participant.session.register(
+        NativeResourceKind.shape,
+        shape.token,
+        _nativeBridge.destroyShape,
+      );
+      return OwnedNativeShape._(record);
+    });
+  }
+
+  /// Optional trusted backend seam; no production mesh migration in 2B1A.
+  Future<OwnedNativeMesh> createOwnedMesh() async {
+    await initialize();
+    final participant = _participant!;
+    final bridge = _nativeBridge;
+    if (bridge is! OpenCascadeManagedMeshNativeBridge) {
+      throw UnsupportedError(
+        'Managed mesh allocation is not available on this backend',
+      );
+    }
+    return participant.run(() async {
+      final mesh = await (bridge as OpenCascadeManagedMeshNativeBridge)
+          .createManagedMesh();
+      final record = participant.session.register(
+        NativeResourceKind.mesh,
+        mesh.token,
+        (bridge as OpenCascadeManagedMeshNativeBridge).destroyMesh,
+      );
+      return OwnedNativeMesh._(record);
+    });
+  }
+
+  /// Pins the allocation independently while the operation is in flight.
+  Future<List<GeometryDiagnostic>> diagnoseOwned(NativeShapeLease lease) async {
+    await initialize();
+    final participant = _participant!;
+    lease._check(participant.session);
+    final record = lease._record;
+    record.leases++;
+    try {
+      return await participant.run(
+        () => _nativeBridge.validate(record.identity._token),
+      );
+    } finally {
+      record.leases--;
+      if (record.leases == 0) {
+        record.drained?.complete();
+        record.drained = null;
+      }
+    }
   }
 
   static List<String> _stringList(Object? value) =>

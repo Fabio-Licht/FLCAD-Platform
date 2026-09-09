@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:ui' show RootIsolateToken;
 import 'package:ffi/ffi.dart';
 import '../io/kernel_io_models.dart';
 import '../models/kernel_models.dart';
@@ -504,6 +505,11 @@ class OpenCascadeFFI
       ? 'libflcad_opencascade.dylib'
       : 'libflcad_opencascade.so';
   static OpenCascadeFFI load({String? path}) {
+    if (RootIsolateToken.instance == null) {
+      throw StateError(
+        'OpenCascade must be hosted by the root isolate coordinator',
+      );
+    }
     final resolved = path ?? defaultLibraryName();
     try {
       return OpenCascadeFFI._(DynamicLibrary.open(resolved));

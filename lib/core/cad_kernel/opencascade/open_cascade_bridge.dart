@@ -70,6 +70,13 @@ abstract interface class OpenCascadeMeshNativeBridge {
   });
 }
 
+/// Trusted allocation seam for custody tests and future managed mesh producers.
+/// No existing STL/import or display producer is migrated by 2B1A.
+abstract interface class OpenCascadeManagedMeshNativeBridge {
+  Future<OpenCascadeNativeMesh> createManagedMesh();
+  Future<void> destroyMesh(String nativeToken);
+}
+
 /// Optional OCCT bridge extension for professional surface operators.
 abstract interface class OpenCascadeSurfaceNativeBridge {
   Future<OpenCascadeNativeShape> executeSurfaceOperation(
