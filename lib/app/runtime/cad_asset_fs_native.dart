@@ -406,15 +406,15 @@ final class _Api {
     final gateway = library.lookupFunction<Uint32 Function(), int Function()>(
       'caf_gateway_version',
     );
+    // Reject the base ABI before touching additive entry points. An older or
+    // deliberately incompatible helper need not export writer v1 symbols.
+    if (abi() != 1 || gateway() != 1 || sizeOf<_Result>() != 96) {
+      throw StateError('Incompatible CAD filesystem ABI');
+    }
     final writer = library.lookupFunction<Uint32 Function(), int Function()>(
       'caf_writer_version',
     );
-    if (abi() != 1 ||
-        gateway() != 1 ||
-        writer() != 1 ||
-        sizeOf<_Result>() != 96) {
-      throw StateError('Incompatible CAD filesystem ABI');
-    }
+    if (writer() != 1) throw StateError('Incompatible CAD filesystem ABI');
     root = library
         .lookupFunction<
           _Result Function(Pointer<Uint16>, Uint32),

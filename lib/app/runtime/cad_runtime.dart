@@ -228,7 +228,26 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       try {
         await _saveInTransaction(tx);
         tx.validate();
-        _install(tx, null, null, const [], const [], const [], boundary: true);
+        final managed = Map<String, ManagedEntityGeometry>.of(_managedGeometry);
+        _managedGeometry.clear();
+        try {
+          // Scene and document disappear in the same synchronous section as
+          // native residency. Native destruction happens only afterwards and
+          // therefore cannot leave a visible entity backed by a dead owner.
+          _install(
+            tx,
+            null,
+            null,
+            const [],
+            const [],
+            const [],
+            boundary: true,
+          );
+        } catch (_) {
+          _managedGeometry.addAll(managed);
+          rethrow;
+        }
+        await _disposeManagedGeometry(managed.values);
       } catch (_) {
         if (!_closingAdmission && _lifecycleGeneration == generation) {
           _sessionIdentity++;

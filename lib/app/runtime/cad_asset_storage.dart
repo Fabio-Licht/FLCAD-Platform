@@ -283,6 +283,128 @@ final class _AssetPaths {
       throw StateError('Cannot replace unowned journal');
     }
   }
+
+  Future<_VerifiedManagedAsset> openManagedAsset({
+    required String projectId,
+    required GeometryAssetId asset,
+    required CadAssetFile kind,
+    required String expectedSha256,
+  }) async {
+    _requireId(asset.value, 'ga1');
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedSha256)) {
+      throw const FormatException('Invalid expected managed asset hash');
+    }
+    final assetDirectory = location(['CAD', 'Assets', 'v1', asset.value]);
+    final descriptorPath = path.join(assetDirectory, 'asset.json');
+    final payloadPath = path.join(assetDirectory, kind.relativePath);
+
+    final descriptorId = openFile(descriptorPath);
+    final descriptorBefore = native.info(descriptorId, digest: true);
+    final decoded = jsonDecode(await file(descriptorPath).readAsString());
+    final descriptorAfter = native.info(descriptorId, digest: true);
+    if (!_sameAssetIdentity(descriptorAfter, descriptorBefore)) {
+      throw StateError('Managed asset descriptor changed while opening');
+    }
+    if (decoded is! Map) {
+      throw const FormatException('Invalid managed asset descriptor');
+    }
+    final descriptor = Map<String, dynamic>.from(decoded);
+    if (descriptor.keys.toSet().difference({
+          'schema',
+          'version',
+          'reference',
+          'project',
+          'files',
+        }).isNotEmpty ||
+        descriptor['schema'] != 'flcad.geometry-asset-record' ||
+        descriptor['version'] != 1 ||
+        descriptor['project'] != projectId ||
+        descriptor['reference'] is! Map ||
+        descriptor['files'] is! Map) {
+      throw const FormatException('Invalid managed asset descriptor');
+    }
+    final reference = GeometryAssetId.fromJson(
+      Map<String, dynamic>.from(descriptor['reference'] as Map),
+    );
+    if (reference != asset) {
+      throw const FormatException('Managed asset reference mismatch');
+    }
+    final files = Map<String, dynamic>.from(descriptor['files'] as Map);
+    if (files.length != 1 || files[kind.name] is! Map) {
+      throw const FormatException('Managed asset payload contract mismatch');
+    }
+    final expected = Map<String, dynamic>.from(files[kind.name] as Map);
+    if (expected.keys.toSet().difference({
+          'status',
+          'size',
+          'sha256',
+          'allowEmpty',
+          'volume',
+          'fileId',
+        }).isNotEmpty ||
+        expected['status'] != 'written' ||
+        expected['allowEmpty'] != false ||
+        expected['size'] is! int ||
+        (expected['size'] as int) <= 0 ||
+        expected['sha256'] != expectedSha256 ||
+        expected['volume'] is! String ||
+        !RegExp(
+          r'^[0-9a-fA-F]{1,16}$',
+        ).hasMatch(expected['volume'] as String) ||
+        expected['fileId'] is! String ||
+        !RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(expected['fileId'] as String)) {
+      throw const FormatException('Invalid managed asset payload metadata');
+    }
+
+    final entries = await list(assetDirectory, recursive: true).toList();
+    final expectedPaths = {
+      path.normalize(descriptorPath),
+      path.normalize(payloadPath),
+    };
+    if (entries.length != expectedPaths.length ||
+        entries.any(
+          (entry) =>
+              entry is! File ||
+              !expectedPaths.contains(path.normalize(entry.path)),
+        )) {
+      throw StateError('Managed asset contains unexpected entries');
+    }
+    final payloadId = openFile(payloadPath);
+    final actual = native.info(payloadId, digest: true);
+    if (!_sameAssetIdentity(actual, expected)) {
+      throw StateError('Managed asset identity, size or hash diverged');
+    }
+    return _VerifiedManagedAsset(
+      native: native,
+      file: payloadId,
+      descriptorFile: descriptorId,
+      expected: Map<String, dynamic>.unmodifiable(expected),
+      descriptorExpected: Map<String, dynamic>.unmodifiable(descriptorBefore),
+    );
+  }
+}
+
+final class _VerifiedManagedAsset {
+  const _VerifiedManagedAsset({
+    required this.native,
+    required this.file,
+    required this.descriptorFile,
+    required this.expected,
+    required this.descriptorExpected,
+  });
+  final CadAssetNativeFs native;
+  final int file, descriptorFile;
+  final Map<String, dynamic> expected, descriptorExpected;
+
+  void revalidate() {
+    if (!_sameAssetIdentity(native.info(file, digest: true), expected) ||
+        !_sameAssetIdentity(
+          native.info(descriptorFile, digest: true),
+          descriptorExpected,
+        )) {
+      throw StateError('Managed asset changed before document publication');
+    }
+  }
 }
 
 final class _NativeAssetFile {

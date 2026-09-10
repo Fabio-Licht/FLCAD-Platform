@@ -644,6 +644,7 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
     }
     final path =
         bridgePath ??
+        Platform.environment['FLCAD_SOURCE_BRIDGE_DLL'] ??
         '${File(Platform.resolvedExecutable).parent.path}\\cad_occ_bridge.dll';
     final api = _SourceBridgeApi(path);
     return participant.run(

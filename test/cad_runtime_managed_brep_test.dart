@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flcad_mobile/app/runtime/cad_asset_fs_native.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document_repository.dart';
@@ -15,9 +17,11 @@ import 'package:path/path.dart' as p;
 
 final class _ManagedImportStorage extends CadAssetStorage {
   String? failAt;
+  Future<void> Function(String phase)? onPhase;
 
   @override
   Future<void> checkpoint(String phase) async {
+    await onPhase?.call(phase);
     if (phase == failAt) throw StateError('injected:$phase');
   }
 }
@@ -49,6 +53,69 @@ void main() {
   late OpenCascadeKernelAdapter adapter;
   late CadRuntime runtime;
   late int Function() pathImports;
+
+  Future<CadDocumentEntity> importOne({String? name}) =>
+      runtime.importManagedBrep(
+        p.join(sourceDirectory.path, 'shape.brep'),
+        name: name,
+        nativeBridgePath: bridge,
+      );
+
+  ManagedBrepAssets managedAssets(CadDocumentEntity entity) =>
+      ManagedBrepAssets.fromJson(
+        Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
+      );
+
+  File assetFile(GeometryAssetId id, CadAssetFile kind) => File(
+    p.join(project.path, 'CAD', 'Assets', 'v1', id.value, kind.relativePath),
+  );
+
+  Future<List<int>> damageOneByte(File file) async {
+    final original = await file.readAsBytes();
+    final changed = List<int>.of(original)..[0] ^= 0xff;
+    await file.writeAsBytes(changed, flush: true);
+    return original;
+  }
+
+  Future<void> restoreOneByte(File file, List<int> value) =>
+      file.writeAsBytes(value, flush: true);
+
+  Future<void> makeInvalidButConsistent(
+    CadDocumentEntity entity,
+    GeometryAssetId id,
+    CadAssetFile kind,
+  ) async {
+    final payload = assetFile(id, kind);
+    final length = await payload.length();
+    await payload.writeAsBytes(List<int>.filled(length, 0), flush: true);
+    final hash = (await sha256.bind(payload.openRead()).first).toString();
+    final descriptorFile = File(p.join(payload.parent.path, 'asset.json'));
+    final descriptor =
+        jsonDecode(await descriptorFile.readAsString()) as Map<String, dynamic>;
+    (descriptor['files'] as Map<String, dynamic>)[kind.name]['sha256'] = hash;
+    await descriptorFile.writeAsString(jsonEncode(descriptor), flush: true);
+    final documentFile = File(p.join(project.path, 'cad-document.json'));
+    final document =
+        jsonDecode(await documentFile.readAsString()) as Map<String, dynamic>;
+    final encodedEntity = (document['entities'] as List)
+        .cast<Map>()
+        .singleWhere((entry) => entry['id'] == entity.id);
+    final managed =
+        ((encodedEntity['data'] as Map)['managedBrepAssets'] as Map);
+    managed[kind == CadAssetFile.brep ? 'shapeSha256' : 'displayMeshSha256'] =
+        hash;
+    await documentFile.writeAsString(jsonEncode(document), flush: true);
+  }
+
+  void expectNoManagedPublication(Iterable<String> ids) {
+    expect(runtime.document, isNull);
+    expect(runtime.scene.entities, isEmpty);
+    for (final id in ids) {
+      expect(runtime.hasManagedGeometry(id), isFalse);
+    }
+    expect(adapter.custodyDiagnostics?.allocations ?? 0, 0);
+    expect(pathImports(), 0);
+  }
 
   setUp(() async {
     root = await Directory.systemTemp.createTemp('managed-brep-runtime-');
@@ -354,4 +421,289 @@ void main() {
       }
     },
   );
+
+  test(
+    'managed BREP save close open restores document scene and custody',
+    () async {
+      final first = await importOne(name: 'first');
+      final second = await importOne(name: 'second');
+      final beforeDocument = jsonEncode(runtime.document!.toJson());
+      final firstAssets = managedAssets(first);
+      final secondAssets = managedAssets(second);
+      final durable = <File>[
+        assetFile(firstAssets.shape, CadAssetFile.brep),
+        assetFile(firstAssets.display, CadAssetFile.display),
+        assetFile(secondAssets.shape, CadAssetFile.brep),
+        assetFile(secondAssets.display, CadAssetFile.display),
+      ];
+      durable.addAll([
+        for (final payload in List<File>.of(durable))
+          File(p.join(payload.parent.path, 'asset.json')),
+      ]);
+      final beforeFiles = <String, (int, String, DateTime)>{};
+      for (final file in durable) {
+        beforeFiles[file.path] = (
+          await file.length(),
+          (await sha256.bind(file.openRead()).first).toString(),
+          await file.lastModified(),
+        );
+      }
+
+      await runtime.close();
+      expect(runtime.document, isNull);
+      expect(runtime.scene.entities, isEmpty);
+      expect(runtime.hasManagedGeometry(first.id), isFalse);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+
+      await runtime.open('managed-brep-project', project);
+
+      expect(jsonEncode(runtime.document!.toJson()), beforeDocument);
+      expect(runtime.scene.find(first.id)?.geometry['nodes'], isNotEmpty);
+      expect(runtime.scene.find(second.id)?.geometry['triangles'], isNotEmpty);
+      expect(runtime.hasManagedGeometry(first.id), isTrue);
+      expect(runtime.hasManagedGeometry(second.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 4);
+      expect(pathImports(), 0);
+      for (final file in durable) {
+        final before = beforeFiles[file.path]!;
+        expect(await file.length(), before.$1);
+        expect(
+          (await sha256.bind(file.openRead()).first).toString(),
+          before.$2,
+        );
+        expect(await file.lastModified(), before.$3);
+      }
+    },
+  );
+
+  test('missing shape and display assets reject the whole open', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+
+    for (final value in [
+      (assetFile(assets.shape, CadAssetFile.brep), 'shape'),
+      (assetFile(assets.display, CadAssetFile.display), 'display'),
+    ]) {
+      final originalDirectory = value.$1.parent;
+      final missing = Directory('${originalDirectory.path}.missing');
+      await originalDirectory.rename(missing.path);
+      await expectLater(
+        runtime.open('managed-brep-project', project),
+        throwsA(
+          isA<CadAssetNativeError>().having(
+            (error) => error.notFound,
+            '${value.$2} asset not found',
+            isTrue,
+          ),
+        ),
+      );
+      expectNoManagedPublication([entity.id]);
+      await missing.rename(originalDirectory.path);
+    }
+  });
+
+  test('shape and display hash divergence reject the whole open', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+
+    for (final file in [
+      assetFile(assets.shape, CadAssetFile.brep),
+      assetFile(assets.display, CadAssetFile.display),
+    ]) {
+      final original = await damageOneByte(file);
+      await expectLater(
+        runtime.open('managed-brep-project', project),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'identity check',
+            'Managed asset identity, size or hash diverged',
+          ),
+        ),
+      );
+      expectNoManagedPublication([entity.id]);
+      await restoreOneByte(file, original);
+    }
+  });
+
+  test('payload size divergence rejects the whole open', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+    final payload = assetFile(assets.display, CadAssetFile.display);
+    await payload.writeAsBytes([0], mode: FileMode.append, flush: true);
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'identity check',
+          'Managed asset identity, size or hash diverged',
+        ),
+      ),
+    );
+    expectNoManagedPublication([entity.id]);
+  });
+
+  test('invalid durable asset schema rejects the whole open', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+    final descriptorFile = File(
+      p.join(
+        assetFile(assets.shape, CadAssetFile.brep).parent.path,
+        'asset.json',
+      ),
+    );
+    final descriptor =
+        jsonDecode(await descriptorFile.readAsString()) as Map<String, dynamic>;
+    descriptor['version'] = 999;
+    await descriptorFile.writeAsString(jsonEncode(descriptor), flush: true);
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(
+        isA<FormatException>().having(
+          (error) => error.message,
+          'schema check',
+          'Invalid managed asset descriptor',
+        ),
+      ),
+    );
+    expectNoManagedPublication([entity.id]);
+  });
+
+  test('valid BREP with invalid consistent STL is rejected natively', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+    await makeInvalidButConsistent(
+      entity,
+      assets.display,
+      CadAssetFile.display,
+    );
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(isA<NativeSourceFailure>()),
+    );
+    expectNoManagedPublication([entity.id]);
+  });
+
+  test('valid STL with invalid consistent BREP is rejected natively', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    await runtime.close();
+    await makeInvalidButConsistent(entity, assets.shape, CadAssetFile.brep);
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(isA<NativeSourceFailure>()),
+    );
+    expectNoManagedPublication([entity.id]);
+  });
+
+  test('failure preparing second managed entity publishes neither', () async {
+    final first = await importOne(name: 'first');
+    final second = await importOne(name: 'second');
+    final secondAssets = managedAssets(second);
+    await runtime.close();
+    await damageOneByte(assetFile(secondAssets.display, CadAssetFile.display));
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'identity check',
+          'Managed asset identity, size or hash diverged',
+        ),
+      ),
+    );
+    expectNoManagedPublication([first.id, second.id]);
+    final probe = Directory('${project.path}.closed-handle-probe');
+    await project.rename(probe.path);
+    await probe.rename(project.path);
+  });
+
+  test(
+    'a superseding open revokes managed restoration without leaks',
+    () async {
+      final entity = await importOne();
+      await runtime.close();
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      storage.onPhase = (phase) async {
+        if (phase == 'managedOpen:afterShape' && !entered.isCompleted) {
+          entered.complete();
+          await release.future;
+        }
+      };
+      final revoked = runtime.open('managed-brep-project', project);
+      await entered.future;
+      storage.onPhase = null;
+      final replacement = runtime.open('managed-brep-project', project);
+      release.complete();
+
+      await expectLater(revoked, throwsA(isA<StaleCadTransaction>()));
+      await replacement;
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(pathImports(), 0);
+    },
+  );
+
+  test('shutdown revokes restoration and waits for native cleanup', () async {
+    final entity = await importOne();
+    await runtime.close();
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    storage.onPhase = (phase) async {
+      if (phase == 'managedOpen:afterShape') {
+        if (!entered.isCompleted) entered.complete();
+        await release.future;
+      }
+    };
+    final opening = runtime.open('managed-brep-project', project);
+    await entered.future;
+    var shutdownFinished = false;
+    final stopping = runtime.shutdown().then((_) => shutdownFinished = true);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(shutdownFinished, isFalse);
+    release.complete();
+
+    await expectLater(opening, throwsA(isA<StaleCadTransaction>()));
+    await stopping;
+    expect(runtime.hasManagedGeometry(entity.id), isFalse);
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    expect(pathImports(), 0);
+  });
+
+  test('legacy-only document keeps the existing open behavior', () async {
+    const id = 'legacy-point';
+    await runtime.mutate(
+      command: 'test.legacy',
+      upsert: const [
+        CadDocumentEntity(
+          id: id,
+          kind: CadDocumentEntityKind.vertex,
+          data: {
+            'sceneKind': 'point',
+            'sceneGeometry': {
+              'position': [1, 2, 3],
+            },
+          },
+        ),
+      ],
+    );
+    await runtime.close();
+    await runtime.open('managed-brep-project', project);
+
+    expect(runtime.document!.entities[id], isNotNull);
+    expect(runtime.hasManagedGeometry(id), isFalse);
+    expect(adapter.custodyDiagnostics?.allocations ?? 0, 0);
+  });
 }

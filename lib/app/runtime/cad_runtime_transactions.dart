@@ -122,6 +122,24 @@ final class _PreparedManagedCadCommit {
   ManagedEntityGeometry? transferredGeometry;
 }
 
+/// Fully materialized native residency for an open operation. Nothing in this
+/// object is published until every managed entity, scene entry and durable
+/// asset has been validated.
+final class _PreparedManagedOpen {
+  _PreparedManagedOpen({
+    required this.geometry,
+    required this.scene,
+    required this.assets,
+  });
+  final Map<String, ManagedEntityGeometry> geometry;
+  final Map<String, CadSceneEntity> scene;
+  final List<_VerifiedManagedAsset> assets;
+  final Map<String, ManagedEntityGeometry> transferred = {};
+  _AssetPaths? _paths;
+  Map<String, ManagedEntityGeometry>? replaced;
+  bool installed = false;
+}
+
 extension _CadTransactions on CadRuntime {
   _CadTransaction? get _callingTransaction {
     final inherited = Zone.current[_transactionZone];
@@ -221,18 +239,21 @@ extension _CadTransactions on CadRuntime {
     CadDocument candidate,
     Directory directory, {
     bool incremental = false,
+    bool useDisplayPipeline = true,
   }) async {
     final staging = CadSceneGraph();
     try {
       if (incremental) {
         staging.replaceAll(projection.permanentEntities, notify: false);
       }
-      final meshes = KernelDisplayMeshPipeline(
-        kernel: kernels.active,
-        projectId: candidate.projectId,
-        projectDirectory: directory,
-        scene: staging,
-      );
+      final meshes = useDisplayPipeline
+          ? KernelDisplayMeshPipeline(
+              kernel: kernels.active,
+              projectId: candidate.projectId,
+              projectDirectory: directory,
+              scene: staging,
+            )
+          : null;
       final stagedProjection = CadDocumentSceneProjection(staging);
       if (incremental) {
         final previous = tx.document!;
@@ -525,9 +546,9 @@ extension _CadTransactions on CadRuntime {
     if (tx.selectionChanged) {
       projection.installPrepared(prepared, boundary ? const {} : selection);
     }
-    if (candidate == null) {
+    if (candidate == null || !refreshDisplayPipeline) {
       _displayMeshes = null;
-    } else if (refreshDisplayPipeline) {
+    } else {
       _displayMeshes = KernelDisplayMeshPipeline(
         kernel: kernels.active,
         projectId: candidate.projectId,
@@ -567,39 +588,510 @@ extension _CadTransactions on CadRuntime {
       history.redo.where((d) => d.projectId == projectId),
     );
     final imported = _readImport(candidate);
-    final prepared = await _prepareScene(tx, candidate, directory);
-    final bounds = _recalculateWorkspaceBounds(entities: prepared);
-    final diagnostics = _legacyIntegrityDiagnostics(candidate);
-    void publish() {
+    final managedEntities = candidate.entities.values
+        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .toList(growable: false);
+    _PreparedManagedOpen? managed;
+    Map<String, ManagedEntityGeometry>? replacedByLegacyOpen;
+    try {
+      if (managedEntities.isNotEmpty) {
+        managed = await _prepareManagedOpen(
+          tx,
+          candidate,
+          directory,
+          managedEntities,
+        );
+      }
+      final needsLegacyDisplayPipeline = candidate.entities.values.any(
+        (entity) =>
+            entity.data['managedBrepAssets'] == null &&
+            entity.shape != null &&
+            entity.data['sceneGeometry'] is Map,
+      );
+      final baseScene = await _prepareScene(
+        tx,
+        candidate,
+        directory,
+        // Managed documents are reconstructed from captured native meshes.
+        // The projection still handles ordinary serialized scene geometry,
+        // but no pathname-oriented mesh pipeline is instantiated.
+        useDisplayPipeline: managed == null || needsLegacyDisplayPipeline,
+      );
+      final prepared = managed == null
+          ? baseScene
+          : [
+              for (final entity in baseScene)
+                if (!managed.scene.containsKey(entity.id)) entity,
+              ...managed.scene.values,
+            ];
+      if (prepared.map((entity) => entity.id).toSet().length !=
+          prepared.length) {
+        throw StateError('Prepared open scene contains duplicate IDs');
+      }
+      final bounds = _recalculateWorkspaceBounds(entities: prepared);
+      final diagnostics = _legacyIntegrityDiagnostics(candidate);
+      if (managed != null) {
+        await _assetStorage.checkpoint('managedOpen:beforePublish');
+        tx.validate();
+      }
+      void publish() {
+        if (managed != null) {
+          _publishManagedOpen(
+            tx,
+            managed,
+            candidate: candidate,
+            directory: directory,
+            undo: undo,
+            redo: redo,
+            scene: prepared,
+            imported: imported,
+            bounds: bounds,
+            refreshDisplayPipeline: needsLegacyDisplayPipeline,
+          );
+        } else {
+          replacedByLegacyOpen = Map<String, ManagedEntityGeometry>.of(
+            _managedGeometry,
+          );
+          _managedGeometry.clear();
+          _install(
+            tx,
+            candidate,
+            directory,
+            undo,
+            redo,
+            prepared,
+            boundary: true,
+            imported: imported,
+            bounds: bounds,
+          );
+        }
+        // Existing runtime state/notification channel; an opening diagnostic,
+        // not a repair or a strict writer validation. Prepared before publish.
+        write('document.integrityDiagnostics', diagnostics);
+      }
+
+      if (jsonEncode(candidate.toJson()) != jsonEncode(loaded.toJson())) {
+        await _persistSnapshot(
+          tx,
+          candidate,
+          directory,
+          undo,
+          redo,
+          publish: publish,
+        );
+      } else {
+        tx.validate();
+        publish();
+      }
+      final replaced =
+          managed?.replaced?.values.toList() ??
+          replacedByLegacyOpen?.values.toList() ??
+          const [];
+      managed?.replaced = null;
+      replacedByLegacyOpen = null;
+      Object? cleanupFailure;
+      StackTrace? cleanupStack;
+      try {
+        managed?._paths?.dispose();
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure = cleanup;
+        cleanupStack = cleanupTrace;
+      }
+      if (managed != null) managed._paths = null;
+      try {
+        await _disposeManagedGeometry(replaced);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure ??= cleanup;
+        cleanupStack ??= cleanupTrace;
+      }
+      if (cleanupFailure != null) {
+        Error.throwWithStackTrace(cleanupFailure, cleanupStack!);
+      }
+    } catch (error, stack) {
+      final detachedOld = <ManagedEntityGeometry>[
+        ...?managed?.replaced?.values,
+        if (tx.committed) ...?replacedByLegacyOpen?.values,
+      ];
+      managed?.replaced = null;
+      if (replacedByLegacyOpen != null && !tx.committed) {
+        _managedGeometry
+          ..clear()
+          ..addAll(replacedByLegacyOpen!);
+      }
+      replacedByLegacyOpen = null;
+      Object? cleanupFailure;
+      StackTrace? cleanupStack;
+      try {
+        await _disposePreparedManagedOpen(managed);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure = cleanup;
+        cleanupStack = cleanupTrace;
+      }
+      try {
+        await _disposeManagedGeometry(detachedOld);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure ??= cleanup;
+        cleanupStack ??= cleanupTrace;
+      }
+      if (cleanupFailure != null) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(error, cleanupFailure, stack, cleanupStack!),
+          stack,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
+
+  Future<_PreparedManagedOpen> _prepareManagedOpen(
+    _CadTransaction tx,
+    CadDocument candidate,
+    Directory directory,
+    List<CadDocumentEntity> entities,
+  ) async {
+    final kernel = kernels.active;
+    if (kernel is! OpenCascadeKernelAdapter) {
+      throw UnsupportedError(
+        'Managed BREP restoration requires the OpenCascade kernel',
+      );
+    }
+    final paths = await _AssetPaths.open(directory);
+    final geometry = <String, ManagedEntityGeometry>{};
+    final scenes = <String, CadSceneEntity>{};
+    final verified = <_VerifiedManagedAsset>[];
+    try {
+      for (final entity in entities) {
+        await _assetStorage.checkpoint('managedOpen:beforeEntity');
+        tx.validate();
+        if (entity.kind != CadDocumentEntityKind.import ||
+            entity.shape != null ||
+            entity.mesh != null ||
+            entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
+            geometry.containsKey(entity.id)) {
+          throw const FormatException('Invalid managed BREP document entity');
+        }
+        final assets = ManagedBrepAssets.fromJson(
+          Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
+        );
+        final shapeAsset = await paths.openManagedAsset(
+          projectId: candidate.projectId,
+          asset: assets.shape,
+          kind: CadAssetFile.brep,
+          expectedSha256: assets.shapeSha256,
+        );
+        verified.add(shapeAsset);
+        final shape = await _restoreManagedShape(tx, kernel, shapeAsset);
+        ManagedNativeDisplayMesh? display;
+        try {
+          await _assetStorage.checkpoint('managedOpen:afterShape');
+          tx.validate();
+          final displayAsset = await paths.openManagedAsset(
+            projectId: candidate.projectId,
+            asset: assets.display,
+            kind: CadAssetFile.display,
+            expectedSha256: assets.displaySha256,
+          );
+          verified.add(displayAsset);
+          display = await _restoreManagedMesh(tx, kernel, displayAsset);
+          await _assetStorage.checkpoint('managedOpen:afterMesh');
+          tx.validate();
+          _validateManagedDescriptor(
+            entity.data['shapeDescriptor'],
+            shape.descriptor,
+          );
+          _validateManagedDescriptor(
+            entity.data['displayMeshDescriptor'],
+            display.descriptor,
+          );
+          final sceneGeometry = await display.prepareSceneGeometry(kernel);
+          tx.validate();
+          final collection = candidate.entities[entity.data['collectionId']];
+          scenes[entity.id] = CadSceneEntity(
+            id: entity.id,
+            kind: CadSceneEntityKind.mesh,
+            geometry: sceneGeometry,
+            visible:
+                entity.data['deleted'] != true &&
+                (entity.data['sceneVisible'] as bool? ?? true) &&
+                collection?.data['visible'] != false &&
+                collection?.data['deleted'] != true,
+            transparent: entity.data['sceneTransparent'] as bool? ?? false,
+          );
+          geometry[entity.id] = ManagedEntityGeometry(shape, display);
+          display = null;
+        } catch (error, stack) {
+          Object? cleanupFailure;
+          StackTrace? cleanupStack;
+          for (final cleanup in [
+            shape.dispose,
+            if (display != null) display.dispose,
+          ]) {
+            try {
+              await cleanup();
+            } catch (cleanupError, cleanupTrace) {
+              cleanupFailure ??= cleanupError;
+              cleanupStack ??= cleanupTrace;
+            }
+          }
+          if (cleanupFailure != null) {
+            Error.throwWithStackTrace(
+              CadAssetOperationFailure(
+                error,
+                cleanupFailure,
+                stack,
+                cleanupStack!,
+              ),
+              stack,
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
+      }
+      if (geometry.length != entities.length ||
+          scenes.length != entities.length) {
+        throw StateError('Managed open preparation is incomplete');
+      }
+      return _PreparedManagedOpen(
+        geometry: geometry,
+        scene: scenes,
+        assets: verified,
+      ).._paths = paths;
+    } catch (error, stack) {
+      Object? cleanupFailure;
+      StackTrace? cleanupStack;
+      try {
+        paths.dispose();
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure = cleanup;
+        cleanupStack = cleanupTrace;
+      }
+      try {
+        await _disposeManagedGeometry(geometry.values);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure ??= cleanup;
+        cleanupStack ??= cleanupTrace;
+      }
+      if (cleanupFailure != null) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(error, cleanupFailure, stack, cleanupStack!),
+          stack,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
+  }
+
+  Future<ManagedNativeShape> _restoreManagedShape(
+    _CadTransaction tx,
+    OpenCascadeKernelAdapter kernel,
+    _VerifiedManagedAsset asset,
+  ) => _restoreManagedResource(
+    tx,
+    kernel,
+    asset,
+    NativeResourceKind.shape,
+  ).then((resource) => resource as ManagedNativeShape);
+
+  Future<ManagedNativeDisplayMesh> _restoreManagedMesh(
+    _CadTransaction tx,
+    OpenCascadeKernelAdapter kernel,
+    _VerifiedManagedAsset asset,
+  ) => _restoreManagedResource(
+    tx,
+    kernel,
+    asset,
+    NativeResourceKind.mesh,
+  ).then((resource) => resource as ManagedNativeDisplayMesh);
+
+  Future<Object> _restoreManagedResource(
+    _CadTransaction tx,
+    OpenCascadeKernelAdapter kernel,
+    _VerifiedManagedAsset asset,
+    NativeResourceKind kind,
+  ) async {
+    final cancellation = NativeSourceCancellation();
+    unawaited(
+      Future.any<void>([
+        tx.revocation.future,
+        _assetShutdown.future,
+      ]).then((_) => cancellation.revoke()),
+    );
+    NativeSourceResource resource;
+    try {
+      resource = await kernel.readOwnedAsset(
+        filesystem: asset.native,
+        file: asset.file,
+        expected: asset.expected,
+        kind: kind,
+        cancellation: cancellation,
+      );
+    } on NativeSourcePublicationFailure catch (error, stack) {
+      try {
+        await error.resource.dispose();
+      } catch (cleanup, cleanupStack) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(error.failure, cleanup, stack, cleanupStack),
+          stack,
+        );
+      }
+      Error.throwWithStackTrace(error.failure, stack);
+    }
+    try {
+      return kind == NativeResourceKind.shape
+          ? resource.claimShape()
+          : resource.claimMesh();
+    } finally {
+      await resource.dispose();
+    }
+  }
+
+  void _validateManagedDescriptor(
+    Object? encoded,
+    NativeGeometryDescriptor actual,
+  ) {
+    if (encoded is! Map) {
+      throw const FormatException('Missing managed native descriptor');
+    }
+    final expected = Map<String, dynamic>.from(encoded);
+    final current = actual.toManagedMetadata();
+    const stableFields = {
+      'schema',
+      'version',
+      'kind',
+      'type',
+      'vertices',
+      'triangles',
+      'bounds',
+      'hasNormals',
+    };
+    // Source ABI v1 derives a shape fingerprint from std::hash<TopoDS_Shape>;
+    // it identifies one native residence and is expected to change after a
+    // BREP round trip. Durable identity is the CAF-verified payload SHA-256.
+    // Keep the original fingerprint as document metadata, but do not pretend
+    // that it is a cross-session content fingerprint.
+    if (expected.keys.toSet().difference({
+          ...stableFields,
+          'fingerprint',
+        }).isNotEmpty ||
+        expected['fingerprint'] is! String ||
+        (expected['fingerprint'] as String).isEmpty ||
+        stableFields.any((key) => !_sameJson(expected[key], current[key]))) {
+      throw StateError('Restored native descriptor does not match document');
+    }
+  }
+
+  void _publishManagedOpen(
+    _CadTransaction tx,
+    _PreparedManagedOpen prepared, {
+    required CadDocument candidate,
+    required Directory directory,
+    required List<CadDocument> undo,
+    required List<CadDocument> redo,
+    required List<CadSceneEntity> scene,
+    required (ImportedCadDocument?, KernelMeshGeometry?) imported,
+    required KernelBounds? bounds,
+    required bool refreshDisplayPipeline,
+  }) {
+    tx.validate();
+    if (prepared.installed ||
+        prepared.geometry.keys.any((id) => candidate.entities[id] == null)) {
+      throw StateError('Managed open is no longer installable');
+    }
+    for (final asset in prepared.assets) {
+      asset.revalidate();
+    }
+    for (final geometry in prepared.geometry.values) {
+      geometry.validateTransfer();
+    }
+    for (final entry in prepared.geometry.entries) {
+      // Record custody immediately; if a later entity cannot transfer, the
+      // cleanup path still owns every already-transferred resource.
+      prepared.transferred[entry.key] = entry.value.transfer();
+    }
+    prepared.replaced = Map<String, ManagedEntityGeometry>.of(_managedGeometry);
+    _managedGeometry
+      ..clear()
+      ..addAll(prepared.transferred);
+    try {
       _install(
         tx,
         candidate,
         directory,
         undo,
         redo,
-        prepared,
+        scene,
         boundary: true,
         imported: imported,
         bounds: bounds,
+        refreshDisplayPipeline: refreshDisplayPipeline,
       );
-      // Existing runtime state/notification channel; an opening diagnostic, not
-      // a repair or a strict writer validation. Prepared before publication.
-      write('document.integrityDiagnostics', diagnostics);
+      prepared.installed = true;
+      prepared.transferred.clear();
+    } catch (_) {
+      _managedGeometry
+        ..clear()
+        ..addAll(prepared.replaced!);
+      prepared.replaced = null;
+      rethrow;
     }
+  }
 
-    if (jsonEncode(candidate.toJson()) != jsonEncode(loaded.toJson())) {
-      await _persistSnapshot(
-        tx,
-        candidate,
-        directory,
-        undo,
-        redo,
-        publish: publish,
-      );
-    } else {
-      tx.validate();
-      publish();
+  Future<void> _disposePreparedManagedOpen(
+    _PreparedManagedOpen? prepared,
+  ) async {
+    if (prepared == null) return;
+    Object? pathsFailure;
+    StackTrace? pathsStack;
+    try {
+      prepared._paths?.dispose();
+    } catch (error, stack) {
+      pathsFailure = error;
+      pathsStack = stack;
     }
+    prepared._paths = null;
+    Object? geometryFailure;
+    StackTrace? geometryStack;
+    try {
+      if (!prepared.installed) {
+        await _disposeManagedGeometry([
+          ...prepared.geometry.values,
+          ...prepared.transferred.values,
+        ]);
+      }
+    } catch (error, stack) {
+      geometryFailure = error;
+      geometryStack = stack;
+    }
+    if (pathsFailure != null && geometryFailure != null) {
+      throw CadAssetOperationFailure(
+        pathsFailure,
+        geometryFailure,
+        pathsStack!,
+        geometryStack!,
+      );
+    }
+    if (pathsFailure != null) {
+      Error.throwWithStackTrace(pathsFailure, pathsStack!);
+    }
+    if (geometryFailure != null) {
+      Error.throwWithStackTrace(geometryFailure, geometryStack!);
+    }
+  }
+
+  Future<void> _disposeManagedGeometry(
+    Iterable<ManagedEntityGeometry> values,
+  ) async {
+    Object? first;
+    StackTrace? firstStack;
+    for (final value in values.toSet()) {
+      try {
+        await value.dispose();
+      } catch (error, stack) {
+        first ??= error;
+        firstStack ??= stack;
+      }
+    }
+    if (first != null) Error.throwWithStackTrace(first, firstStack!);
   }
 }
 
