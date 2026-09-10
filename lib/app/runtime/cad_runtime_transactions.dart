@@ -111,6 +111,7 @@ final class _PreparedManagedCadCommit {
     required this.entityId,
     required this.geometry,
     required this.bounds,
+    required this.phasePrefix,
   });
   final CadDocument candidate;
   final List<CadDocument> undo, redo;
@@ -118,6 +119,7 @@ final class _PreparedManagedCadCommit {
   final String entityId;
   final ManagedEntityGeometry geometry;
   final KernelBounds? bounds;
+  final String phasePrefix;
   bool installed = false;
   ManagedEntityGeometry? transferredGeometry;
 }
@@ -359,11 +361,15 @@ extension _CadTransactions on CadRuntime {
     redo = _snapshots.history(redo);
     final currentHasManaged =
         tx.document?.entities.values.any(
-          (entity) => entity.data['managedBrepAssets'] != null,
+          (entity) =>
+              entity.data['managedBrepAssets'] != null ||
+              entity.data['managedStlAssets'] != null,
         ) ??
         false;
     final candidateHasManaged = candidate.entities.values.any(
-      (entity) => entity.data['managedBrepAssets'] != null,
+      (entity) =>
+          entity.data['managedBrepAssets'] != null ||
+          entity.data['managedStlAssets'] != null,
     );
     if (currentHasManaged || candidateHasManaged) {
       await _commitManagedSnapshot(tx, candidate, undo, redo);
@@ -407,16 +413,36 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> redo,
   ) async {
     final directory = tx.directory!;
+    _validateManagedStlTransition(tx.document, candidate);
     final targetEntities = candidate.entities.values
-        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .where(
+          (entity) =>
+              entity.data['managedBrepAssets'] != null ||
+              entity.data['managedStlAssets'] != null,
+        )
         .toList(growable: false);
     final retained = <String, ManagedEntityGeometry>{};
     final restore = <CadDocumentEntity>[];
     for (final entity in targetEntities) {
-      final targetAssets = _managedAssetsForEntity(entity);
       final currentEntity = tx.document?.entities[entity.id];
       final currentGeometry = _managedGeometry[entity.id];
+      if (entity.data['managedStlAssets'] is Map) {
+        final targetAssets = _managedStlAssetsForEntity(entity);
+        if (currentGeometry is! ManagedMeshEntityGeometry ||
+            currentEntity?.data['managedStlAssets'] is! Map ||
+            !_sameJson(
+              currentEntity!.data['managedStlAssets'],
+              targetAssets.toJson(),
+            )) {
+          throw UnsupportedError('Managed STL restoration belongs to STL-2');
+        }
+        currentGeometry.validateTransfer();
+        retained[entity.id] = currentGeometry;
+        continue;
+      }
+      final targetAssets = _managedAssetsForEntity(entity);
       if (currentGeometry != null &&
+          currentGeometry is ManagedBrepEntityGeometry &&
           currentEntity?.data['managedBrepAssets'] is Map &&
           _sameJson(
             currentEntity!.data['managedBrepAssets'],
@@ -451,18 +477,26 @@ extension _CadTransactions on CadRuntime {
       if (kernel is OpenCascadeKernelAdapter) {
         for (final entry in retained.entries) {
           final entity = candidate.entities[entry.key]!;
-          prepared.scene[entry.key] = await _prepareManagedSceneEntity(
-            candidate,
-            entity,
-            entry.value,
-            kernel,
-          );
+          prepared.scene[entry.key] = entity.data['managedStlAssets'] is Map
+              ? await _prepareRetainedStlSceneEntity(
+                  candidate,
+                  entity,
+                  entry.value,
+                  kernel,
+                )
+              : await _prepareManagedSceneEntity(
+                  candidate,
+                  entity,
+                  entry.value,
+                  kernel,
+                );
           tx.validate();
         }
       }
       final needsLegacyDisplayPipeline = candidate.entities.values.any(
         (entity) =>
             entity.data['managedBrepAssets'] == null &&
+            entity.data['managedStlAssets'] == null &&
             entity.shape != null &&
             entity.data['sceneGeometry'] is Map,
       );
@@ -569,6 +603,7 @@ extension _CadTransactions on CadRuntime {
     required List<CadDocument> redo,
     required CadSceneEntity managedScene,
     required ManagedEntityGeometry geometry,
+    required String phasePrefix,
   }) {
     tx.validate();
     final normalized = _snapshots.document(candidate, normalized: true);
@@ -579,13 +614,24 @@ extension _CadTransactions on CadRuntime {
         entity.kind != CadDocumentEntityKind.import ||
         entity.shape != null ||
         entity.mesh != null ||
-        entity.data['managedBrepAssets'] is! Map ||
+        ((entity.data['managedBrepAssets'] is! Map) ==
+            (entity.data['managedStlAssets'] is! Map)) ||
         managedScene.kind != CadSceneEntityKind.mesh) {
       throw StateError('Managed scene does not match its document entity');
     }
-    ManagedBrepAssets.fromJson(
-      Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
-    );
+    final meshOnly = entity.data['managedStlAssets'] is Map;
+    if (meshOnly) {
+      ManagedStlAssets.fromJson(
+        Map<String, dynamic>.from(entity.data['managedStlAssets'] as Map),
+      );
+    } else {
+      ManagedBrepAssets.fromJson(
+        Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
+      );
+    }
+    if (geometry.meshOnly != meshOnly) {
+      throw StateError('Managed geometry kind does not match document assets');
+    }
     if (_managedGeometry.containsKey(entity.id)) {
       throw StateError('Managed geometry already installed for entity');
     }
@@ -616,6 +662,7 @@ extension _CadTransactions on CadRuntime {
       entityId: entity.id,
       geometry: geometry,
       bounds: _recalculateWorkspaceBounds(entities: preparedScene),
+      phasePrefix: phasePrefix,
     );
   }
 
@@ -630,7 +677,7 @@ extension _CadTransactions on CadRuntime {
       throw StateError('Managed commit is no longer installable');
     }
     prepared.geometry.validateTransfer();
-    await _assetStorage.checkpoint('managedBrep:beforePersistence');
+    await _assetStorage.checkpoint('${prepared.phasePrefix}:beforePersistence');
     tx.validate();
     try {
       await _persistSnapshot(
@@ -764,12 +811,21 @@ extension _CadTransactions on CadRuntime {
     );
     final imported = _readImport(candidate);
     final managedEntities = candidate.entities.values
-        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .where(
+          (entity) =>
+              entity.data['managedBrepAssets'] != null ||
+              entity.data['managedStlAssets'] != null,
+        )
         .toList(growable: false);
     _PreparedManagedOpen? managed;
     Map<String, ManagedEntityGeometry>? replacedByLegacyOpen;
     try {
       if (managedEntities.isNotEmpty) {
+        if (managedEntities.any(
+          (entity) => entity.data['managedStlAssets'] != null,
+        )) {
+          throw UnsupportedError('Managed STL open belongs to STL-2');
+        }
         managed = await _prepareManagedOpen(
           tx,
           candidate,
@@ -780,6 +836,7 @@ extension _CadTransactions on CadRuntime {
       final needsLegacyDisplayPipeline = candidate.entities.values.any(
         (entity) =>
             entity.data['managedBrepAssets'] == null &&
+            entity.data['managedStlAssets'] == null &&
             entity.shape != null &&
             entity.data['sceneGeometry'] is Map,
       );
@@ -968,7 +1025,7 @@ extension _CadTransactions on CadRuntime {
           display = await _restoreManagedMesh(tx, kernel, displayAsset);
           await _assetStorage.checkpoint('managedOpen:afterMesh');
           tx.validate();
-          final managed = ManagedEntityGeometry(shape, display);
+          final managed = ManagedBrepEntityGeometry(shape, display);
           final managedScene = await _prepareManagedSceneEntity(
             candidate,
             entity,
@@ -1060,12 +1117,71 @@ extension _CadTransactions on CadRuntime {
     );
   }
 
+  ManagedStlAssets _managedStlAssetsForEntity(CadDocumentEntity entity) {
+    if (entity.kind != CadDocumentEntityKind.import ||
+        entity.shape != null ||
+        entity.mesh != null ||
+        entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
+        entity.data['managedBrepAssets'] != null ||
+        entity.data['managedStlAssets'] is! Map) {
+      throw const FormatException('Invalid managed STL document entity');
+    }
+    return ManagedStlAssets.fromJson(
+      Map<String, dynamic>.from(entity.data['managedStlAssets'] as Map),
+    );
+  }
+
+  void _validateManagedStlTransition(
+    CadDocument? current,
+    CadDocument candidate,
+  ) {
+    Map<String, Object?> references(CadDocument? document) => {
+      for (final entity
+          in document?.entities.values ?? const <CadDocumentEntity>[])
+        if (entity.data['managedStlAssets'] != null)
+          entity.id: _orderedJson(entity.data['managedStlAssets']),
+    };
+    if (!_sameJson(references(current), references(candidate))) {
+      throw UnsupportedError('Changing managed STL residency belongs to STL-2');
+    }
+  }
+
+  Future<CadSceneEntity> _prepareRetainedStlSceneEntity(
+    CadDocument candidate,
+    CadDocumentEntity entity,
+    ManagedEntityGeometry geometry,
+    OpenCascadeKernelAdapter kernel,
+  ) async {
+    _managedStlAssetsForEntity(entity);
+    if (geometry is! ManagedMeshEntityGeometry) {
+      throw const FormatException('Managed STL geometry must be mesh-only');
+    }
+    final sceneGeometry = await geometry.displayMesh.prepareSceneGeometry(
+      kernel,
+    );
+    final collection = candidate.entities[entity.data['collectionId']];
+    return CadSceneEntity(
+      id: entity.id,
+      kind: CadSceneEntityKind.mesh,
+      geometry: sceneGeometry,
+      visible:
+          entity.data['deleted'] != true &&
+          (entity.data['sceneVisible'] as bool? ?? true) &&
+          collection?.data['visible'] != false &&
+          collection?.data['deleted'] != true,
+      transparent: entity.data['sceneTransparent'] as bool? ?? false,
+    );
+  }
+
   Future<CadSceneEntity> _prepareManagedSceneEntity(
     CadDocument candidate,
     CadDocumentEntity entity,
     ManagedEntityGeometry geometry,
     OpenCascadeKernelAdapter kernel,
   ) async {
+    if (geometry is! ManagedBrepEntityGeometry) {
+      throw const FormatException('Managed BREP geometry requires a shape');
+    }
     _managedAssetsForEntity(entity);
     _validateManagedDescriptor(
       entity.data['shapeDescriptor'],
@@ -1234,7 +1350,11 @@ extension _CadTransactions on CadRuntime {
       ...prepared.transferred,
     };
     final expected = candidate.entities.values
-        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .where(
+          (entity) =>
+              entity.data['managedBrepAssets'] != null ||
+              entity.data['managedStlAssets'] != null,
+        )
         .map((entity) => entity.id)
         .toSet();
     if (next.keys.toSet().difference(expected).isNotEmpty ||

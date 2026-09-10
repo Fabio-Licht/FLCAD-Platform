@@ -64,7 +64,8 @@ COB_API int32_t cob_close_v1(uint64_t operation, cob_result_v1 *out,
 /* Synchronous C-to-C output. `token` remains process-local and is borrowed
  * only for this call. Writer is an already-acquired opaque CAF writer lease;
  * Dart owns its acquire/seal/release lifetime. kind 1 emits BREP, kind 2 emits
- * binary STL from a shape. */
+ * binary STL from a shape, and additive kind 3 emits binary STL from a
+ * custody-owned Poly_Triangulation token. */
 COB_API uint32_t cob_stream_result_size_v1(void);
 COB_API int32_t cob_shape_write_v1(const void *caf_anchor,
                                    const void *occ_anchor, uint64_t writer,

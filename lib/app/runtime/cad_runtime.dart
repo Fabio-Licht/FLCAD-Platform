@@ -117,8 +117,10 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     final value = _managedGeometry[entityId];
     if (value == null) return null;
     return {
-      'shape': value.shape.descriptor.toManagedMetadata(),
+      if (value is ManagedBrepEntityGeometry)
+        'shape': value.shape.descriptor.toManagedMetadata(),
       'displayMesh': value.displayMesh.descriptor.toManagedMetadata(),
+      'meshOnly': value.meshOnly,
     };
   }
 
@@ -568,7 +570,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               await meshResource.dispose();
             }
             final managedDisplayMesh = displayMesh!;
-            operationGeometry = ManagedEntityGeometry(
+            operationGeometry = ManagedBrepEntityGeometry(
               managedShape,
               managedDisplayMesh,
             );
@@ -624,6 +626,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               redo: const [],
               managedScene: managedScene,
               geometry: operationGeometry!,
+              phasePrefix: 'managedBrep',
             );
 
             // Descendant file capabilities must be closed before the anchored
@@ -650,6 +653,175 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               if (displayMesh != null) displayMesh!.dispose(),
               if (shape != null) shape.dispose(),
             ]);
+          }
+        }
+      });
+    } catch (error, stack) {
+      primaryFailure = error;
+      primaryStack = stack;
+    }
+    if (!sourceDisposeAttempted) {
+      try {
+        openedSource.dispose();
+      } catch (cleanup, cleanupStack) {
+        if (primaryFailure != null) {
+          Error.throwWithStackTrace(
+            CadAssetOperationFailure(
+              primaryFailure,
+              cleanup,
+              primaryStack!,
+              cleanupStack,
+            ),
+            primaryStack,
+          );
+        }
+        Error.throwWithStackTrace(cleanup, cleanupStack);
+      }
+    }
+    if (primaryFailure != null) {
+      Error.throwWithStackTrace(primaryFailure, primaryStack!);
+    }
+    return committedEntity;
+  }
+
+  /// Imports an STL through CAF and retains it as one managed mesh-only entity.
+  /// The locator is consumed once at admission and never reaches OpenCascade.
+  Future<CadDocumentEntity> importManagedStl(
+    String locator, {
+    String? name,
+    @visibleForTesting String? nativeBridgePath,
+  }) async {
+    final rejection = _admissionError;
+    if (rejection != null) return Future<CadDocumentEntity>.error(rejection);
+    final openedSource = CadAssetNativeFs.openExternal(locator);
+    final openedDisplayName = openedSource.displayName;
+    final openedIdentity = Map<String, dynamic>.unmodifiable({
+      ...openedSource.identity,
+    });
+    late CadDocumentEntity committedEntity;
+    var sourceDisposeAttempted = false;
+    Object? primaryFailure;
+    StackTrace? primaryStack;
+    try {
+      await _enqueue((tx) async {
+        tx.validate();
+        final kernel = kernels.active;
+        if (kernel is! OpenCascadeKernelAdapter) {
+          throw UnsupportedError(
+            'Managed STL import requires the OpenCascade kernel',
+          );
+        }
+        ManagedNativeDisplayMesh? displayMesh;
+        ManagedEntityGeometry? operationGeometry;
+        try {
+          final cancellation = NativeSourceCancellation();
+          unawaited(
+            Future.any<void>([
+              tx.revocation.future,
+              _assetShutdown.future,
+            ]).then((_) => cancellation.revoke()),
+          );
+          NativeSourceResource sourceResource;
+          try {
+            sourceResource = await kernel.readOwnedAsset(
+              filesystem: openedSource.filesystem,
+              file: openedSource.file,
+              expected: openedIdentity,
+              kind: NativeResourceKind.mesh,
+              cancellation: cancellation,
+              bridgePath: nativeBridgePath,
+            );
+          } on NativeSourcePublicationFailure catch (error, stack) {
+            displayMesh = error.resource.claimMesh();
+            Error.throwWithStackTrace(error.failure, stack);
+          }
+          try {
+            displayMesh = sourceResource.claimMesh();
+          } finally {
+            await sourceResource.dispose();
+          }
+          tx.validate();
+          sourceDisposeAttempted = true;
+          openedSource.dispose();
+          final managedDisplayMesh = displayMesh;
+
+          committedEntity = await _withGeometryStagingTransaction(tx, (
+            operation,
+          ) async {
+            final displayAssetId = await operation.planAsset();
+            final displayAsset = await operation._writeManagedMesh(
+              displayAssetId,
+              kernel,
+              managedDisplayMesh,
+              bridgePath: nativeBridgePath,
+            );
+            operationGeometry = ManagedMeshEntityGeometry(managedDisplayMesh);
+            final sceneGeometry = await managedDisplayMesh.prepareSceneGeometry(
+              kernel,
+            );
+            await operation.prepare();
+
+            final current = _snapshots.document(_requireDocument());
+            var entityId = _assetId('e1');
+            while (current.entities.containsKey(entityId) ||
+                _managedGeometry.containsKey(entityId)) {
+              entityId = _assetId('e1');
+            }
+            final assets = ManagedStlAssets(
+              display: displayAssetId,
+              displaySha256: displayAsset.metadata['sha256'] as String,
+            );
+            final entity = CadDocumentEntity(
+              id: entityId,
+              kind: CadDocumentEntityKind.import,
+              data: {
+                'name': name?.trim().isNotEmpty == true
+                    ? name!.trim()
+                    : openedDisplayName,
+                'format': 'stl',
+                'collectionId': 'collection:original',
+                'sceneKind': CadSceneEntityKind.mesh.name,
+                'managedStlAssets': assets.toJson(),
+              },
+            );
+            final candidate = FeatureLifecycleProjector.normalize(
+              current.mutate(command: 'import.stl.managed', upsert: [entity]),
+              command: 'import.stl.managed',
+              previousDocument: current,
+              touchedIds: {entityId},
+            );
+            final prepared = _prepareManagedCommit(
+              tx,
+              candidate: candidate,
+              undo: [..._undo, current],
+              redo: const [],
+              managedScene: CadSceneEntity(
+                id: entityId,
+                kind: CadSceneEntityKind.mesh,
+                geometry: sceneGeometry,
+              ),
+              geometry: operationGeometry!,
+              phasePrefix: 'managedStl',
+            );
+
+            await displayAsset.release();
+            tx.validate();
+            await _assetStorage.checkpoint('managedStl:beforePromotion');
+            tx.validate();
+            await operation.promote();
+            await _assetStorage.checkpoint('managedStl:afterPromotion');
+            tx.validate();
+            await _commitPreparedManaged(tx, prepared);
+            await operation._confirmDocumentPublished();
+            committedEntity = prepared.candidate.entities[entityId]!;
+            return committedEntity;
+          });
+        } finally {
+          final geometry = operationGeometry;
+          if (geometry != null) {
+            await geometry.dispose();
+          } else if (displayMesh != null) {
+            await displayMesh.dispose();
           }
         }
       });
@@ -1797,7 +1969,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         .where(
           (entity) =>
               entity.kind == CadDocumentEntityKind.import &&
-              entity.data['managedBrepAssets'] == null,
+              entity.data['managedBrepAssets'] == null &&
+              entity.data['managedStlAssets'] == null,
         )
         .toList();
     if (imports.isEmpty) return (null, null);

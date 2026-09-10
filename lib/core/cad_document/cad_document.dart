@@ -48,10 +48,17 @@ class CadDocumentEntity {
   static CadDocumentEntity _fromJson(Map<String, dynamic> json) {
     final data = Map<String, dynamic>.from(json['data'] as Map? ?? const {});
     final managed = data['managedBrepAssets'];
+    final managedStl = data['managedStlAssets'];
+    if (managed != null && managedStl != null) {
+      throw const FormatException('Ambiguous managed geometry asset reference');
+    }
     if (managed != null) {
       // The asset object is a strict durable-document contract. Import here
       // avoids defaults during open/snapshot/Undo reconstruction.
       _validateManagedBrepAssets(Map<String, dynamic>.from(managed as Map));
+    }
+    if (managedStl != null) {
+      _validateManagedStlAssets(Map<String, dynamic>.from(managedStl as Map));
     }
     return CadDocumentEntity(
       id: json['id'] as String,
@@ -69,7 +76,17 @@ class CadDocumentEntity {
   }
 
   static void _validateManagedBrepAssets(Map<String, dynamic> value) {
-    if (value['schema'] != 'flcad.managed-brep-assets' ||
+    if (value.keys.toSet().difference(const {
+          'schema',
+          'version',
+          'shapeAssetId',
+          'displayMeshAssetId',
+          'shapeSha256',
+          'displayMeshSha256',
+          'meshOnly',
+        }).isNotEmpty ||
+        value.length != 7 ||
+        value['schema'] != 'flcad.managed-brep-assets' ||
         value['version'] != 1 ||
         value['meshOnly'] != false ||
         value['shapeAssetId'] is! Map ||
@@ -77,8 +94,9 @@ class CadDocumentEntity {
         value['shapeSha256'] is! String ||
         value['displayMeshSha256'] is! String ||
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(value['shapeSha256'] as String) ||
-        !RegExp(r'^[0-9a-f]{64}$')
-            .hasMatch(value['displayMeshSha256'] as String)) {
+        !RegExp(
+          r'^[0-9a-f]{64}$',
+        ).hasMatch(value['displayMeshSha256'] as String)) {
       throw const FormatException('Invalid managed BREP asset reference');
     }
     // Keep this core model independent of the runtime asset implementation,
@@ -91,6 +109,35 @@ class CadDocumentEntity {
           !RegExp(r'^ga1_[0-9a-f]{32}$').hasMatch(id['id'] as String)) {
         throw const FormatException('Invalid managed BREP asset ID');
       }
+    }
+  }
+
+  static void _validateManagedStlAssets(Map<String, dynamic> value) {
+    if (value.keys.toSet().difference(const {
+          'schema',
+          'version',
+          'displayMeshAssetId',
+          'displayMeshSha256',
+          'meshOnly',
+        }).isNotEmpty ||
+        value.length != 5 ||
+        value['schema'] != 'flcad.managed-stl-assets' ||
+        value['version'] != 1 ||
+        value['meshOnly'] != true ||
+        value['displayMeshAssetId'] is! Map ||
+        value['displayMeshSha256'] is! String ||
+        !RegExp(
+          r'^[0-9a-f]{64}$',
+        ).hasMatch(value['displayMeshSha256'] as String)) {
+      throw const FormatException('Invalid managed STL asset reference');
+    }
+    final id = Map<String, dynamic>.from(value['displayMeshAssetId'] as Map);
+    if (id.length != 3 ||
+        id['schema'] != 'flcad.geometry-asset' ||
+        id['version'] != 1 ||
+        id['id'] is! String ||
+        !RegExp(r'^ga1_[0-9a-f]{32}$').hasMatch(id['id'] as String)) {
+      throw const FormatException('Invalid managed STL asset ID');
     }
   }
 

@@ -557,6 +557,67 @@ final class CadGeometryStagingOperation {
     return retained;
   });
 
+  /// Writes the one durable STL payload from a custody-owned display mesh.
+  Future<NativeSealedStagedAsset> _writeManagedMesh(
+    GeometryAssetId asset,
+    OpenCascadeKernelAdapter kernel,
+    ManagedNativeDisplayMesh mesh, {
+    String? bridgePath,
+  }) => _run(() async {
+    _preparing();
+    final next = _copy();
+    final files = _asset(next, asset)['files'] as Map<String, dynamic>;
+    if (files.containsKey(CadAssetFile.display.name)) {
+      throw StateError('Asset file already acquired');
+    }
+    files[CadAssetFile.display.name] = {
+      'status': 'writing',
+      'allowEmpty': false,
+    };
+    await _update(next, CadAssetStageState.preparing);
+    final target = _paths.file(
+      path.join(_assetDirectory(asset), CadAssetFile.display.relativePath),
+    );
+    await _paths.directories(target.parent.path, authorize: _validate);
+    await _paths.check(target.path);
+    _validate();
+    await target.create(exclusive: true);
+    Map<String, dynamic>? sealed;
+    NativeSealedStagedAsset? retained;
+    try {
+      _validate();
+      final produced = await mesh.withLease(
+        (lease) => kernel.streamMeshIntoStaging(
+          filesystem: _paths.native,
+          file: _paths.openFile(target.path),
+          mesh: lease,
+          bridgePath: bridgePath,
+        ),
+      );
+      sealed = produced;
+      _validate();
+      if (produced['size'] == 0) {
+        throw StateError('Empty native geometry payload');
+      }
+      retained = NativeSealedStagedAsset._(this, target.path, {...produced});
+      _sealedNativeAssets.add(retained);
+    } catch (error, stack) {
+      _abort(error, stack);
+      rethrow;
+    } finally {
+      if (retained == null) _paths.release(target.path);
+    }
+    final fileMetadata = Map<String, dynamic>.of(sealed)..remove('state');
+    final complete = _copy();
+    (_asset(complete, asset)['files'] as Map)[CadAssetFile.display.name] = {
+      ...fileMetadata,
+      'status': 'written',
+      'allowEmpty': false,
+    };
+    await _update(complete, CadAssetStageState.preparing);
+    return retained;
+  });
+
   /// External source is borrowed: only its byte stream enters the owned stage.
   Future<void> copySource(GeometryAssetId asset, File source) =>
       write(asset, CadAssetFile.source, _storage.read(source));

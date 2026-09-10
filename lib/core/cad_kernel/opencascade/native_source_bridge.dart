@@ -418,41 +418,77 @@ final class ManagedNativeDisplayMesh {
   });
 }
 
-final class ManagedEntityGeometry {
-  ManagedEntityGeometry(this.shape, this.displayMesh);
-  final ManagedNativeShape shape;
+sealed class ManagedEntityGeometry {
+  ManagedEntityGeometry(this.displayMesh);
   final ManagedNativeDisplayMesh displayMesh;
   bool _transferred = false;
   Future<void>? _disposal;
 
+  Iterable<Future<void> Function()> get _componentDisposals;
+  bool get _componentsTransferable;
+  bool get meshOnly;
+
   void validateTransfer() {
     if (_transferred ||
         _disposal != null ||
-        !shape._canTransfer ||
+        !_componentsTransferable ||
         !displayMesh._canTransfer) {
       throw StateError('Managed geometry has an unavailable component');
     }
-    if (shape.descriptor.kind != NativeResourceKind.shape ||
-        displayMesh.descriptor.kind != NativeResourceKind.mesh ||
-        shape.descriptor.fingerprint.isEmpty ||
+    if (displayMesh.descriptor.kind != NativeResourceKind.mesh ||
         displayMesh.descriptor.fingerprint.isEmpty) {
       throw StateError('Managed geometry descriptor is invalid');
     }
   }
 
-  ManagedEntityGeometry transfer() {
-    // Both checks occur before either authority is revoked. The two transfer
-    // calls are synchronous and contain no callback, await or native effect.
+  ManagedEntityGeometry transfer();
+
+  Future<void> dispose() {
+    if (_transferred) return Future<void>.value();
+    return _disposal ??= Future.wait([
+      ..._componentDisposals.map((dispose) => dispose()),
+      displayMesh.dispose(),
+    ]);
+  }
+}
+
+final class ManagedBrepEntityGeometry extends ManagedEntityGeometry {
+  ManagedBrepEntityGeometry(this.shape, ManagedNativeDisplayMesh displayMesh)
+    : super(displayMesh);
+  final ManagedNativeShape shape;
+  @override
+  bool get meshOnly => false;
+  @override
+  bool get _componentsTransferable =>
+      shape._canTransfer &&
+      shape.descriptor.kind == NativeResourceKind.shape &&
+      shape.descriptor.fingerprint.isNotEmpty;
+  @override
+  Iterable<Future<void> Function()> get _componentDisposals => [shape.dispose];
+  @override
+  ManagedBrepEntityGeometry transfer() {
     validateTransfer();
     final nextShape = shape.transfer();
     final nextMesh = displayMesh.transfer();
     _transferred = true;
-    return ManagedEntityGeometry(nextShape, nextMesh);
+    return ManagedBrepEntityGeometry(nextShape, nextMesh);
   }
+}
 
-  Future<void> dispose() {
-    if (_transferred) return Future<void>.value();
-    return _disposal ??= Future.wait([shape.dispose(), displayMesh.dispose()]);
+final class ManagedMeshEntityGeometry extends ManagedEntityGeometry {
+  ManagedMeshEntityGeometry(super.displayMesh);
+  @override
+  bool get meshOnly => true;
+  @override
+  bool get _componentsTransferable => true;
+  @override
+  Iterable<Future<void> Function()> get _componentDisposals => const [];
+  @override
+  ManagedMeshEntityGeometry transfer() {
+    validateTransfer();
+    final nextMesh = displayMesh.transfer();
+    _transferred = true;
+    return ManagedMeshEntityGeometry(nextMesh);
   }
 }
 
@@ -601,6 +637,64 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
             writer,
             token,
             displayStl ? 2 : 1,
+            out,
+            sizeOf<_StreamBridgeResult>(),
+          );
+          if (status != 0 || out.ref.native.status != 0) {
+            throw NativeSourceFailure(
+              status,
+              out.ref.native.status,
+              out.ref.phase,
+              0x434146,
+              out.ref.filesystem.status,
+              (out.ref.filesystem.win32 << 32) | out.ref.filesystem.nt,
+              out.ref.native.bytesAccepted,
+              _sourceText(out.ref.native.message, 256),
+            );
+          }
+        } finally {
+          calloc.free(token);
+          calloc.free(out);
+        }
+      }),
+    );
+  }
+
+  /// Serializes a captured native mesh directly into a CAF-owned STL asset.
+  /// Neither a pathname nor native ownership crosses this boundary.
+  Future<Map<String, dynamic>> streamMeshIntoStaging({
+    required CadAssetNativeFs filesystem,
+    required int file,
+    required NativeMeshLease mesh,
+    String? bridgePath,
+  }) async {
+    await initialize();
+    final participant = _participant!;
+    final occ = _nativeBridge;
+    if (occ is! OpenCascadeFFI || !Platform.isWindows) {
+      throw UnsupportedError('Native staging stream requires Windows OCCT FFI');
+    }
+    mesh._check(participant.session);
+    final api = _SourceBridgeApi(
+      bridgePath ??
+          '${File(Platform.resolvedExecutable).parent.path}\\cad_occ_bridge.dll',
+    );
+    return participant.run(
+      () => filesystem.withWriterCapability(file, (writer, cafAnchor) async {
+        mesh._check(participant.session);
+        final token = mesh._record.identity._token.toNativeUtf8();
+        final out = calloc<_StreamBridgeResult>();
+        try {
+          final status = api.shapeWrite(
+            cafAnchor,
+            occ.library
+                .lookup<NativeFunction<Uint32 Function()>>(
+                  'flcad_occ_mesh_stream_version',
+                )
+                .cast(),
+            writer,
+            token,
+            3,
             out,
             sizeOf<_StreamBridgeResult>(),
           );

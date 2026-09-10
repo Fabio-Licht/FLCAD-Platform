@@ -118,6 +118,11 @@ int main() {
         r.published && r.resource_kind == 2);
   CHECK(r.triangles > 0 && r.triangles <= triangles && r.vertices > 0 &&
         stl.final == 1 && !stl.after_final);
+  Bytes mesh_roundtrip;
+  target.context = &mesh_roundtrip;
+  CHECK(flcad_occ_triangulation_stream_v1(
+            r.token, 2000000, &target, &output, sizeof(output)) == 0 &&
+        output.triangles == r.triangles && mesh_roundtrip.data.size() > 84);
   CHECK(flcad_occ_destroy_mesh(r.token, error, sizeof(error)) == 1);
   CHECK(flcad_occ_destroy_mesh(r.token, error, sizeof(error)) == 0);
   Bytes changed;

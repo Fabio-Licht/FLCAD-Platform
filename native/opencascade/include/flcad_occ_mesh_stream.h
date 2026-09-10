@@ -63,6 +63,12 @@ OCC_STREAM_API int32_t OCC_STREAM_CALL flcad_occ_mesh_stream_v1(
     const char *shape_token, double deflection, double angular_deflection,
     uint64_t max_triangles, const occ_stream_sink_v1 *sink,
     occ_stream_result_v1 *result, uint32_t result_size);
+/* Additive mesh-residence variant. It serializes an existing
+   Poly_Triangulation registry token without creating or requiring a shape. */
+OCC_STREAM_API int32_t OCC_STREAM_CALL flcad_occ_triangulation_stream_v1(
+    const char *mesh_token, uint64_t max_triangles,
+    const occ_stream_sink_v1 *sink, occ_stream_result_v1 *result,
+    uint32_t result_size);
 #ifdef __cplusplus
 }
 #endif

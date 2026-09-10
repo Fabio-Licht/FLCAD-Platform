@@ -23,6 +23,46 @@ struct Memory {
   std::thread::id thread = std::this_thread::get_id();
   uint64_t provided = 0;
 };
+struct MeshOutput {
+  std::string bytes;
+  int mode = 0;
+  size_t fail_call = 1;
+  size_t calls = 0;
+  bool failed = false, after_failure = false;
+};
+int32_t OCC_STREAM_CALL mesh_sink(void *p, const uint8_t *bytes, uint32_t n,
+                                  uint32_t *accepted) {
+  auto &out = *static_cast<MeshOutput *>(p);
+  ++out.calls;
+  out.after_failure |= out.failed;
+  if (out.failed) {
+    *accepted = 0;
+    return 1;
+  }
+  if (out.mode != 0 && out.calls == out.fail_call) {
+    if (out.mode == 1) {
+      *accepted = n - 1;
+      out.failed = true;
+      return 0;
+    }
+    if (out.mode == 2) {
+      *accepted = 0;
+      out.failed = true;
+      return -1;
+    }
+    if (out.mode == 3) {
+      *accepted = n + 1;
+      out.failed = true;
+      return 0;
+    }
+    *accepted = n - 1;
+    out.failed = true;
+    return 17;
+  }
+  out.bytes.append(reinterpret_cast<const char *>(bytes), n);
+  *accepted = n;
+  return 0;
+}
 occ_read_limits_v1 defaults() {
   occ_read_limits_v1 l{};
   flcad_occ_source_default_limits_v1(&l, sizeof(l));
@@ -221,8 +261,62 @@ int main() {
     Memory m{data};
     CHECK(run(m) == 0 && r.published && r.resource_kind == 2 &&
           r.bytes_provided == m.provided);
+    for (int mode : {0, 1, 2}) {
+      MeshOutput output;
+      output.mode = mode;
+      occ_stream_sink_v1 sink{sizeof(sink), 1, &output, mesh_sink};
+      occ_stream_result_v1 streamed{};
+      const auto status = flcad_occ_triangulation_stream_v1(
+          r.token, UINT32_MAX, &sink, &streamed, sizeof(streamed));
+      CHECK(status == (mode == 0   ? OCC_STREAM_OK
+                       : mode == 2 ? OCC_STREAM_CANCELLED
+                                   : OCC_STREAM_SINK));
+      CHECK(!output.after_failure && output.calls == 1);
+      if (mode == 0)
+        CHECK(output.bytes.size() == 84 + streamed.triangles * 50);
+    }
+    MeshOutput rejected;
+    occ_stream_sink_v1 sink{sizeof(sink), 1, &rejected, mesh_sink};
+    occ_stream_result_v1 streamed{};
+    CHECK(flcad_occ_triangulation_stream_v1(
+              "missing", UINT32_MAX, &sink, &streamed, sizeof(streamed)) ==
+              OCC_STREAM_SHAPE &&
+          rejected.calls == 0);
+    CHECK(flcad_occ_triangulation_stream_v1(
+              r.token, 1, &sink, &streamed, sizeof(streamed)) ==
+              (r.triangles > 1 ? OCC_STREAM_LIMIT : OCC_STREAM_OK));
     CHECK(clean() == 1);
     CHECK(clean() == 0);
+  }
+  {
+    Memory large{binary_stl(2000)};
+    CHECK(run(large) == 0 && r.triangles == 2000);
+    MeshOutput full;
+    occ_stream_sink_v1 sink{sizeof(sink), 1, &full, mesh_sink};
+    occ_stream_result_v1 streamed{};
+    CHECK(flcad_occ_triangulation_stream_v1(
+              r.token, UINT32_MAX, &sink, &streamed, sizeof(streamed)) == 0 &&
+          full.calls > 1 && full.bytes.size() == 84 + 2000 * 50);
+    for (int mode : {1, 2, 3, 4}) {
+      MeshOutput failed;
+      failed.mode = mode;
+      failed.fail_call = 2;
+      sink.context = &failed;
+      CHECK(flcad_occ_triangulation_stream_v1(
+                r.token, UINT32_MAX, &sink, &streamed, sizeof(streamed)) ==
+                (mode == 2 ? OCC_STREAM_CANCELLED : OCC_STREAM_SINK) &&
+            failed.calls == 2 && !failed.after_failure);
+    }
+    MeshOutput untouched;
+    occ_stream_sink_v1 invalid{sizeof(invalid), 2, &untouched, mesh_sink};
+    CHECK(flcad_occ_triangulation_stream_v1(
+              r.token, UINT32_MAX, &invalid, &streamed, sizeof(streamed)) ==
+              OCC_STREAM_INVALID &&
+          untouched.calls == 0);
+    CHECK(flcad_occ_triangulation_stream_v1(
+              r.token, UINT32_MAX, nullptr, &streamed, sizeof(streamed)) ==
+          OCC_STREAM_INVALID);
+    CHECK(clean() == 1);
   }
   auto whitespace = ascii;
   for (size_t pos = 0; (pos = whitespace.find('\n', pos)) != std::string::npos;

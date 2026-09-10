@@ -194,3 +194,127 @@ extern "C" int32_t OCC_STREAM_CALL flcad_occ_mesh_stream_v1(
     return error(phase, "Unknown stream exception");
   }
 }
+
+extern "C" int32_t OCC_STREAM_CALL flcad_occ_triangulation_stream_v1(
+    const char *mesh_token, uint64_t limit, const occ_stream_sink_v1 *input,
+    occ_stream_result_v1 *out, uint32_t out_size) {
+  if (!out || out_size != sizeof(*out))
+    return OCC_STREAM_INVALID;
+  *out = {};
+  out->version = 1;
+  out->accepted_count_valid = 1;
+  uint32_t phase = OCC_STREAM_INVALID;
+  auto error = [&](uint32_t status, const char *message) {
+    out->status = status;
+    fail(message, out->message, sizeof(out->message));
+    return static_cast<int32_t>(status);
+  };
+  try {
+    if (!input || input->size != sizeof(*input) || input->version != 1 ||
+        !input->write || !mesh_token || !*mesh_token || !limit ||
+        limit > UINT32_MAX)
+      return error(OCC_STREAM_INVALID,
+                   "Invalid stream arguments/version/budget");
+    const auto sink = *input;
+    phase = OCC_STREAM_SHAPE;
+    Handle(Poly_Triangulation) mesh;
+    {
+      std::lock_guard<std::mutex> lock(registry_mutex);
+      const auto found = meshes.find(mesh_token);
+      if (found == meshes.end())
+        return error(phase, "Unknown native mesh token");
+      mesh = found->second;
+    }
+    phase = OCC_STREAM_SERIALIZATION;
+    const auto count = static_cast<uint64_t>(mesh->NbTriangles());
+    if (!count)
+      return error(OCC_STREAM_TESSELLATION, "Mesh has no triangles");
+    if (count > limit)
+      return error(OCC_STREAM_LIMIT, "STL triangle limit exceeded");
+    out->triangles = count;
+    std::array<uint8_t, 64000> buffer{};
+    size_t used = 84;
+    const char header[] = "FLCAD binary STL triangulation stream v1";
+    std::memcpy(buffer.data(), header, sizeof(header) - 1);
+    stream_u32(buffer.data() + 80, static_cast<uint32_t>(count));
+    auto flush = [&]() {
+      if (!used)
+        return;
+      phase = OCC_STREAM_SINK;
+      uint32_t accepted = 0;
+      int32_t code = 0;
+      try {
+        code = sink.write(sink.context, buffer.data(),
+                          static_cast<uint32_t>(used), &accepted);
+      } catch (const Standard_Failure &e) {
+        out->accepted_count_valid = 0;
+        error(OCC_STREAM_SINK, e.GetMessageString());
+        throw StreamStop{};
+      } catch (const std::exception &e) {
+        out->accepted_count_valid = 0;
+        error(OCC_STREAM_SINK, e.what());
+        throw StreamStop{};
+      } catch (...) {
+        out->accepted_count_valid = 0;
+        error(OCC_STREAM_SINK, "Unknown consumer exception");
+        throw StreamStop{};
+      }
+      out->consumer_code = code;
+      if (accepted > used) {
+        out->accepted_count_valid = 0;
+        error(OCC_STREAM_SINK, "Sink returned invalid accepted count");
+        throw StreamStop{};
+      }
+      out->bytes_accepted += accepted;
+      if (code != 0 || accepted != used) {
+        error(code == -1 ? OCC_STREAM_CANCELLED : OCC_STREAM_SINK,
+              "Sink stopped stream; accepted prefix retained");
+        throw StreamStop{};
+      }
+      used = 0;
+      phase = OCC_STREAM_SERIALIZATION;
+    };
+    for (int i = 1; i <= mesh->NbTriangles(); ++i) {
+      if (used + 50 > buffer.size())
+        flush();
+      int a, b, c;
+      mesh->Triangle(i).Get(a, b, c);
+      const auto p1 = mesh->Node(a);
+      const auto p2 = mesh->Node(b);
+      const auto p3 = mesh->Node(c);
+      gp_Vec normal = gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3));
+      const double length = normal.Magnitude();
+      if (!std::isfinite(length))
+        throw std::overflow_error("STL normal out of range");
+      if (length > gp::Resolution())
+        normal /= length;
+      else
+        normal = gp_Vec(0, 0, 0);
+      auto p = buffer.data() + used;
+      stream_float(p, normal.X());
+      stream_float(p + 4, normal.Y());
+      stream_float(p + 8, normal.Z());
+      for (const auto &point : {p1, p2, p3}) {
+        p += 12;
+        stream_float(p, point.X());
+        stream_float(p + 4, point.Y());
+        stream_float(p + 8, point.Z());
+      }
+      p[12] = p[13] = 0;
+      used += 50;
+    }
+    flush();
+    out->status = OCC_STREAM_OK;
+    return OCC_STREAM_OK;
+  } catch (const StreamStop &) {
+    return static_cast<int32_t>(out->status);
+  } catch (const std::overflow_error &e) {
+    return error(OCC_STREAM_LIMIT, e.what());
+  } catch (const Standard_Failure &e) {
+    return error(phase, e.GetMessageString());
+  } catch (const std::exception &e) {
+    return error(phase, e.what());
+  } catch (...) {
+    return error(phase, "Unknown stream exception");
+  }
+}

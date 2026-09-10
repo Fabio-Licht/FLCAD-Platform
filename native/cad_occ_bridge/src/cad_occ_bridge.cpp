@@ -178,7 +178,7 @@ extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
                                        uint32_t kind, cob_stream_result_v1 *out,
                                        uint32_t size) {
   if (!out || size != sizeof(*out) || !token || !*token ||
-      (kind != 1 && kind != 2))
+      (kind < 1 || kind > 3))
     return COB_ARGUMENT;
   *out = {};
   out->size = sizeof(*out);
@@ -205,8 +205,13 @@ extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
         ? occ.fn<decltype(&flcad_occ_brep_stream_v1)>("flcad_occ_brep_stream_v1")(
               token, 268435456, &sink, &out->native_result,
               sizeof(out->native_result))
-        : occ.fn<decltype(&flcad_occ_mesh_stream_v1)>("flcad_occ_mesh_stream_v1")(
+        : kind == 2
+        ? occ.fn<decltype(&flcad_occ_mesh_stream_v1)>("flcad_occ_mesh_stream_v1")(
               token, 0.1, 0.35, 32000000, &sink, &out->native_result,
+              sizeof(out->native_result))
+        : occ.fn<decltype(&flcad_occ_triangulation_stream_v1)>(
+              "flcad_occ_triangulation_stream_v1")(
+              token, 32000000, &sink, &out->native_result,
               sizeof(out->native_result));
     if (status || stream.failed) {
       out->filesystem = stream.last;

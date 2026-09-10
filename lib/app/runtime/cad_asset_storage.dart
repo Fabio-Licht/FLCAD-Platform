@@ -15,7 +15,13 @@ void _requireId(String value, String prefix) {
 final class GeometryAssetId {
   GeometryAssetId._(this.value);
   factory GeometryAssetId.fromJson(Map<String, dynamic> json) {
-    if (json['schema'] != 'flcad.geometry-asset' ||
+    if (json.length != 3 ||
+        json.keys.toSet().difference(const {
+          'schema',
+          'version',
+          'id',
+        }).isNotEmpty ||
+        json['schema'] != 'flcad.geometry-asset' ||
         json['version'] != 1 ||
         json['id'] is! String) {
       throw const FormatException('Invalid asset reference schema');
@@ -43,12 +49,15 @@ final class GeometryAssetId {
 /// in CadDocumentEntity.data: it contains neither native tokens nor CAF
 /// capabilities. Each referenced payload has the seal produced by CAF.
 final class ManagedBrepAssets {
-  const ManagedBrepAssets({
+  ManagedBrepAssets({
     required this.shape,
     required this.display,
     required this.shapeSha256,
     required this.displaySha256,
-  });
+  }) {
+    _requireSha256(shapeSha256, 'managed BREP shape');
+    _requireSha256(displaySha256, 'managed BREP display mesh');
+  }
   final GeometryAssetId shape, display;
   final String shapeSha256, displaySha256;
   Map<String, dynamic> toJson() => {
@@ -61,7 +70,17 @@ final class ManagedBrepAssets {
     'meshOnly': false,
   };
   factory ManagedBrepAssets.fromJson(Map<String, dynamic> json) {
-    if (json['schema'] != 'flcad.managed-brep-assets' ||
+    if (json.keys.toSet().difference(const {
+          'schema',
+          'version',
+          'shapeAssetId',
+          'displayMeshAssetId',
+          'shapeSha256',
+          'displayMeshSha256',
+          'meshOnly',
+        }).isNotEmpty ||
+        json.length != 7 ||
+        json['schema'] != 'flcad.managed-brep-assets' ||
         json['version'] != 1 ||
         json['meshOnly'] != false ||
         json['shapeAssetId'] is! Map ||
@@ -85,6 +104,56 @@ final class ManagedBrepAssets {
       ),
       shapeSha256: shapeHash,
       displaySha256: displayHash,
+    );
+  }
+}
+
+void _requireSha256(String value, String label) {
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(value)) {
+    throw FormatException('Invalid $label asset hash');
+  }
+}
+
+/// Durable-only representation for a managed STL import. The single payload
+/// is both the source-of-truth asset and the display mesh; native residence is
+/// deliberately absent from this document contract.
+final class ManagedStlAssets {
+  ManagedStlAssets({required this.display, required this.displaySha256}) {
+    _requireSha256(displaySha256, 'managed STL display mesh');
+  }
+
+  final GeometryAssetId display;
+  final String displaySha256;
+
+  Map<String, dynamic> toJson() => {
+    'schema': 'flcad.managed-stl-assets',
+    'version': 1,
+    'displayMeshAssetId': display.toJson(),
+    'displayMeshSha256': displaySha256,
+    'meshOnly': true,
+  };
+
+  factory ManagedStlAssets.fromJson(Map<String, dynamic> json) {
+    if (json.keys.toSet().difference(const {
+          'schema',
+          'version',
+          'displayMeshAssetId',
+          'displayMeshSha256',
+          'meshOnly',
+        }).isNotEmpty ||
+        json.length != 5 ||
+        json['schema'] != 'flcad.managed-stl-assets' ||
+        json['version'] != 1 ||
+        json['meshOnly'] != true ||
+        json['displayMeshAssetId'] is! Map ||
+        json['displayMeshSha256'] is! String) {
+      throw const FormatException('Invalid managed STL asset reference');
+    }
+    return ManagedStlAssets(
+      display: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['displayMeshAssetId'] as Map),
+      ),
+      displaySha256: json['displayMeshSha256'] as String,
     );
   }
 }
