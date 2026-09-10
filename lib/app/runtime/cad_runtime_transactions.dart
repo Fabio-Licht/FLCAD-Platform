@@ -136,6 +136,7 @@ final class _PreparedManagedOpen {
   final List<_VerifiedManagedAsset> assets;
   final Map<String, ManagedEntityGeometry> transferred = {};
   _AssetPaths? _paths;
+  Map<String, ManagedEntityGeometry>? previous;
   Map<String, ManagedEntityGeometry>? replaced;
   bool installed = false;
 }
@@ -356,6 +357,18 @@ extension _CadTransactions on CadRuntime {
     candidate = _snapshots.document(candidate, normalized: true);
     undo = _snapshots.history(undo);
     redo = _snapshots.history(redo);
+    final currentHasManaged =
+        tx.document?.entities.values.any(
+          (entity) => entity.data['managedBrepAssets'] != null,
+        ) ??
+        false;
+    final candidateHasManaged = candidate.entities.values.any(
+      (entity) => entity.data['managedBrepAssets'] != null,
+    );
+    if (currentHasManaged || candidateHasManaged) {
+      await _commitManagedSnapshot(tx, candidate, undo, redo);
+      return;
+    }
     final directory = tx.directory!;
     // Validate derived import data before persistence or active publication.
     final imported = _readImport(candidate);
@@ -385,6 +398,164 @@ extension _CadTransactions on CadRuntime {
         );
       },
     );
+  }
+
+  Future<void> _commitManagedSnapshot(
+    _CadTransaction tx,
+    CadDocument candidate,
+    List<CadDocument> undo,
+    List<CadDocument> redo,
+  ) async {
+    final directory = tx.directory!;
+    final targetEntities = candidate.entities.values
+        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .toList(growable: false);
+    final retained = <String, ManagedEntityGeometry>{};
+    final restore = <CadDocumentEntity>[];
+    for (final entity in targetEntities) {
+      final targetAssets = _managedAssetsForEntity(entity);
+      final currentEntity = tx.document?.entities[entity.id];
+      final currentGeometry = _managedGeometry[entity.id];
+      if (currentGeometry != null &&
+          currentEntity?.data['managedBrepAssets'] is Map &&
+          _sameJson(
+            currentEntity!.data['managedBrepAssets'],
+            targetAssets.toJson(),
+          )) {
+        currentGeometry.validateTransfer();
+        _validateManagedDescriptor(
+          entity.data['shapeDescriptor'],
+          currentGeometry.shape.descriptor,
+        );
+        _validateManagedDescriptor(
+          entity.data['displayMeshDescriptor'],
+          currentGeometry.displayMesh.descriptor,
+        );
+        retained[entity.id] = currentGeometry;
+      } else {
+        restore.add(entity);
+      }
+    }
+
+    _PreparedManagedOpen? prepared;
+    try {
+      prepared = restore.isEmpty
+          ? _PreparedManagedOpen(geometry: {}, scene: {}, assets: [])
+          : await _prepareManagedOpen(tx, candidate, directory, restore);
+      final kernel = kernels.active;
+      if (retained.isNotEmpty && kernel is! OpenCascadeKernelAdapter) {
+        throw UnsupportedError(
+          'Managed BREP history requires the OpenCascade kernel',
+        );
+      }
+      if (kernel is OpenCascadeKernelAdapter) {
+        for (final entry in retained.entries) {
+          final entity = candidate.entities[entry.key]!;
+          prepared.scene[entry.key] = await _prepareManagedSceneEntity(
+            candidate,
+            entity,
+            entry.value,
+            kernel,
+          );
+          tx.validate();
+        }
+      }
+      final needsLegacyDisplayPipeline = candidate.entities.values.any(
+        (entity) =>
+            entity.data['managedBrepAssets'] == null &&
+            entity.shape != null &&
+            entity.data['sceneGeometry'] is Map,
+      );
+      final baseScene = await _prepareScene(
+        tx,
+        candidate,
+        directory,
+        incremental: true,
+        useDisplayPipeline: needsLegacyDisplayPipeline,
+      );
+      final scene = <CadSceneEntity>[
+        for (final entity in baseScene)
+          if (!prepared.scene.containsKey(entity.id)) entity,
+        ...prepared.scene.values,
+      ];
+      if (scene.map((entity) => entity.id).toSet().length != scene.length ||
+          targetEntities.any(
+            (entity) =>
+                !prepared!.scene.containsKey(entity.id) ||
+                scene.where((visual) => visual.id == entity.id).length != 1,
+          )) {
+        throw StateError('Prepared managed history scene is incomplete');
+      }
+      final imported = _readImport(candidate);
+      final bounds = _recalculateWorkspaceBounds(entities: scene);
+      await _assetStorage.checkpoint('managedHistory:beforePublish');
+      tx.validate();
+      await _persistSnapshot(
+        tx,
+        candidate,
+        directory,
+        undo,
+        redo,
+        publish: () => _publishManagedOpen(
+          tx,
+          prepared!,
+          candidate: candidate,
+          directory: directory,
+          undo: undo,
+          redo: redo,
+          scene: scene,
+          imported: imported,
+          bounds: bounds,
+          refreshDisplayPipeline: needsLegacyDisplayPipeline,
+          boundary: false,
+          retained: retained,
+        ),
+      );
+      final removed = prepared.replaced?.values.toList() ?? const [];
+      prepared.replaced = null;
+      Object? cleanupFailure;
+      StackTrace? cleanupStack;
+      try {
+        prepared._paths?.dispose();
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure = cleanup;
+        cleanupStack = cleanupTrace;
+      }
+      prepared._paths = null;
+      try {
+        await _disposeManagedGeometry(removed);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure ??= cleanup;
+        cleanupStack ??= cleanupTrace;
+      }
+      if (cleanupFailure != null) {
+        _reportCommittedManagedCleanupFailure(cleanupFailure, cleanupStack!);
+      }
+    } catch (error, stack) {
+      final removed = prepared?.replaced?.values.toList() ?? const [];
+      if (prepared != null) prepared.replaced = null;
+      Object? cleanupFailure;
+      StackTrace? cleanupStack;
+      try {
+        await _disposePreparedManagedOpen(prepared);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure = cleanup;
+        cleanupStack = cleanupTrace;
+      }
+      try {
+        await _disposeManagedGeometry(removed);
+      } catch (cleanup, cleanupTrace) {
+        cleanupFailure ??= cleanup;
+        cleanupStack ??= cleanupTrace;
+      }
+      if (cleanupFailure != null) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(error, cleanupFailure, stack, cleanupStack!),
+          stack,
+        );
+      }
+      Error.throwWithStackTrace(error, stack);
+    }
   }
 
   _PreparedManagedCadCommit _prepareManagedCommit(
@@ -763,16 +934,10 @@ extension _CadTransactions on CadRuntime {
       for (final entity in entities) {
         await _assetStorage.checkpoint('managedOpen:beforeEntity');
         tx.validate();
-        if (entity.kind != CadDocumentEntityKind.import ||
-            entity.shape != null ||
-            entity.mesh != null ||
-            entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
-            geometry.containsKey(entity.id)) {
-          throw const FormatException('Invalid managed BREP document entity');
+        if (geometry.containsKey(entity.id)) {
+          throw const FormatException('Duplicate managed BREP document entity');
         }
-        final assets = ManagedBrepAssets.fromJson(
-          Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
-        );
+        final assets = _managedAssetsForEntity(entity);
         final shapeAsset = await paths.openManagedAsset(
           projectId: candidate.projectId,
           asset: assets.shape,
@@ -795,29 +960,16 @@ extension _CadTransactions on CadRuntime {
           display = await _restoreManagedMesh(tx, kernel, displayAsset);
           await _assetStorage.checkpoint('managedOpen:afterMesh');
           tx.validate();
-          _validateManagedDescriptor(
-            entity.data['shapeDescriptor'],
-            shape.descriptor,
+          final managed = ManagedEntityGeometry(shape, display);
+          final managedScene = await _prepareManagedSceneEntity(
+            candidate,
+            entity,
+            managed,
+            kernel,
           );
-          _validateManagedDescriptor(
-            entity.data['displayMeshDescriptor'],
-            display.descriptor,
-          );
-          final sceneGeometry = await display.prepareSceneGeometry(kernel);
           tx.validate();
-          final collection = candidate.entities[entity.data['collectionId']];
-          scenes[entity.id] = CadSceneEntity(
-            id: entity.id,
-            kind: CadSceneEntityKind.mesh,
-            geometry: sceneGeometry,
-            visible:
-                entity.data['deleted'] != true &&
-                (entity.data['sceneVisible'] as bool? ?? true) &&
-                collection?.data['visible'] != false &&
-                collection?.data['deleted'] != true,
-            transparent: entity.data['sceneTransparent'] as bool? ?? false,
-          );
-          geometry[entity.id] = ManagedEntityGeometry(shape, display);
+          scenes[entity.id] = managedScene;
+          geometry[entity.id] = managed;
           display = null;
         } catch (error, stack) {
           Object? cleanupFailure;
@@ -879,6 +1031,51 @@ extension _CadTransactions on CadRuntime {
       }
       Error.throwWithStackTrace(error, stack);
     }
+  }
+
+  ManagedBrepAssets _managedAssetsForEntity(CadDocumentEntity entity) {
+    if (entity.kind != CadDocumentEntityKind.import ||
+        entity.shape != null ||
+        entity.mesh != null ||
+        entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
+        entity.data['managedBrepAssets'] is! Map) {
+      throw const FormatException('Invalid managed BREP document entity');
+    }
+    return ManagedBrepAssets.fromJson(
+      Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
+    );
+  }
+
+  Future<CadSceneEntity> _prepareManagedSceneEntity(
+    CadDocument candidate,
+    CadDocumentEntity entity,
+    ManagedEntityGeometry geometry,
+    OpenCascadeKernelAdapter kernel,
+  ) async {
+    _managedAssetsForEntity(entity);
+    _validateManagedDescriptor(
+      entity.data['shapeDescriptor'],
+      geometry.shape.descriptor,
+    );
+    _validateManagedDescriptor(
+      entity.data['displayMeshDescriptor'],
+      geometry.displayMesh.descriptor,
+    );
+    final sceneGeometry = await geometry.displayMesh.prepareSceneGeometry(
+      kernel,
+    );
+    final collection = candidate.entities[entity.data['collectionId']];
+    return CadSceneEntity(
+      id: entity.id,
+      kind: CadSceneEntityKind.mesh,
+      geometry: sceneGeometry,
+      visible:
+          entity.data['deleted'] != true &&
+          (entity.data['sceneVisible'] as bool? ?? true) &&
+          collection?.data['visible'] != false &&
+          collection?.data['deleted'] != true,
+      transparent: entity.data['sceneTransparent'] as bool? ?? false,
+    );
   }
 
   Future<ManagedNativeShape> _restoreManagedShape(
@@ -991,6 +1188,8 @@ extension _CadTransactions on CadRuntime {
     required (ImportedCadDocument?, KernelMeshGeometry?) imported,
     required KernelBounds? bounds,
     required bool refreshDisplayPipeline,
+    bool boundary = true,
+    Map<String, ManagedEntityGeometry> retained = const {},
   }) {
     tx.validate();
     if (prepared.installed ||
@@ -1003,16 +1202,40 @@ extension _CadTransactions on CadRuntime {
     for (final geometry in prepared.geometry.values) {
       geometry.validateTransfer();
     }
+    if (retained.keys.any(prepared.geometry.containsKey) ||
+        retained.entries.any(
+          (entry) =>
+              !identical(_managedGeometry[entry.key], entry.value) ||
+              candidate.entities[entry.key] == null,
+        )) {
+      throw StateError('Managed retained geometry is no longer valid');
+    }
     for (final entry in prepared.geometry.entries) {
       // Record custody immediately; if a later entity cannot transfer, the
       // cleanup path still owns every already-transferred resource.
       prepared.transferred[entry.key] = entry.value.transfer();
     }
-    prepared.replaced = Map<String, ManagedEntityGeometry>.of(_managedGeometry);
-    _managedGeometry
-      ..clear()
-      ..addAll(prepared.transferred);
+    final next = <String, ManagedEntityGeometry>{
+      ...retained,
+      ...prepared.transferred,
+    };
+    final expected = candidate.entities.values
+        .where((entity) => entity.data['managedBrepAssets'] != null)
+        .map((entity) => entity.id)
+        .toSet();
+    if (next.keys.toSet().difference(expected).isNotEmpty ||
+        expected.difference(next.keys.toSet()).isNotEmpty) {
+      throw StateError('Managed runtime retention does not match document');
+    }
+    prepared.previous = Map<String, ManagedEntityGeometry>.of(_managedGeometry);
+    prepared.replaced = {
+      for (final entry in _managedGeometry.entries)
+        if (!identical(next[entry.key], entry.value)) entry.key: entry.value,
+    };
     try {
+      _managedGeometry
+        ..clear()
+        ..addAll(next);
       _install(
         tx,
         candidate,
@@ -1020,17 +1243,19 @@ extension _CadTransactions on CadRuntime {
         undo,
         redo,
         scene,
-        boundary: true,
+        boundary: boundary,
         imported: imported,
         bounds: bounds,
         refreshDisplayPipeline: refreshDisplayPipeline,
       );
       prepared.installed = true;
       prepared.transferred.clear();
+      prepared.previous = null;
     } catch (_) {
       _managedGeometry
         ..clear()
-        ..addAll(prepared.replaced!);
+        ..addAll(prepared.previous!);
+      prepared.previous = null;
       prepared.replaced = null;
       rethrow;
     }
@@ -1092,6 +1317,24 @@ extension _CadTransactions on CadRuntime {
       }
     }
     if (first != null) Error.throwWithStackTrace(first, firstStack!);
+  }
+
+  void _reportCommittedManagedCleanupFailure(Object error, StackTrace stack) {
+    // Document, history, scene, selection, and runtime ownership have already
+    // moved together. A failed native destroy is quarantined by custody and is
+    // observable as a recovery requirement, but cannot turn the confirmed
+    // Undo/Redo into an apparent pre-commit failure.
+    _recoveryRequired = true;
+    scheduleMicrotask(
+      () => FlutterError.reportError(
+        FlutterErrorDetails(
+          exception: error,
+          stack: stack,
+          library: 'CAD managed geometry cleanup',
+          context: ErrorDescription('after confirmed Undo/Redo commit'),
+        ),
+      ),
+    );
   }
 }
 

@@ -706,4 +706,319 @@ void main() {
     expect(runtime.hasManagedGeometry(id), isFalse);
     expect(adapter.custodyDiagnostics?.allocations ?? 0, 0);
   });
+
+  test(
+    'managed Undo removes scene before disposal and Redo restores assets',
+    () async {
+      final entity = await importOne();
+      final assets = managedAssets(entity);
+      final payloads = [
+        assetFile(assets.shape, CadAssetFile.brep),
+        assetFile(assets.display, CadAssetFile.display),
+      ];
+      payloads.addAll([
+        for (final payload in List<File>.of(payloads))
+          File(p.join(payload.parent.path, 'asset.json')),
+      ]);
+      final durableBefore = <String, (int, String, DateTime)>{};
+      for (final file in payloads) {
+        durableBefore[file.path] = (
+          await file.length(),
+          (await sha256.bind(file.openRead()).first).toString(),
+          await file.lastModified(),
+        );
+      }
+      runtime.select({entity.id});
+      final observed = <(bool, bool, int)>[];
+      runtime.addListener(() {
+        observed.add((
+          runtime.document?.entities.containsKey(entity.id) ?? false,
+          runtime.scene.find(entity.id) != null,
+          adapter.custodyDiagnostics?.allocations ?? 0,
+        ));
+      });
+
+      await runtime.undoDocument();
+
+      expect(runtime.document!.entities[entity.id], isNull);
+      expect(runtime.scene.find(entity.id), isNull);
+      expect(runtime.selection, isEmpty);
+      expect(runtime.hasManagedGeometry(entity.id), isFalse);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      expect(runtime.canRedo, isTrue);
+      expect(observed.last, (false, false, 0));
+      for (final file in payloads) {
+        final before = durableBefore[file.path]!;
+        expect(await file.length(), before.$1);
+        expect(
+          (await sha256.bind(file.openRead()).first).toString(),
+          before.$2,
+        );
+        expect(await file.lastModified(), before.$3);
+      }
+
+      await runtime.redoDocument();
+
+      final restored = runtime.document!.entities[entity.id]!;
+      expect(managedAssets(restored).toJson(), assets.toJson());
+      expect(runtime.scene.find(entity.id)?.geometry['nodes'], isNotEmpty);
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(pathImports(), 0);
+    },
+  );
+
+  test(
+    'repeated managed Undo Redo has no duplicates and survives reopen',
+    () async {
+      final entity = await importOne();
+      final assets = managedAssets(entity);
+      for (var cycle = 0; cycle < 3; cycle++) {
+        await runtime.undoDocument();
+        expect(runtime.document!.entities[entity.id], isNull);
+        expect(
+          runtime.scene.entities.where((item) => item.id == entity.id),
+          isEmpty,
+        );
+        expect(runtime.hasManagedGeometry(entity.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 0);
+        await runtime.redoDocument();
+        expect(
+          runtime.document!.entities.values.where(
+            (item) => item.id == entity.id,
+          ),
+          hasLength(1),
+        );
+        expect(
+          runtime.scene.entities.where((item) => item.id == entity.id),
+          hasLength(1),
+        );
+        expect(runtime.hasManagedGeometry(entity.id), isTrue);
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+      }
+      await runtime.save();
+      await runtime.close();
+      await runtime.open('managed-brep-project', project);
+      expect(
+        managedAssets(runtime.document!.entities[entity.id]!).toJson(),
+        assets.toJson(),
+      );
+      expect(runtime.scene.find(entity.id), isNotNull);
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(pathImports(), 0);
+    },
+  );
+
+  test(
+    'Undo of last managed entity preserves first and Redo restores only last',
+    () async {
+      final first = await importOne(name: 'first');
+      final second = await importOne(name: 'second');
+      final firstDiagnostics = runtime.managedGeometryDiagnostics(first.id);
+
+      await runtime.undoDocument();
+
+      expect(runtime.document!.entities[first.id], isNotNull);
+      expect(runtime.document!.entities[second.id], isNull);
+      expect(runtime.scene.find(first.id), isNotNull);
+      expect(runtime.scene.find(second.id), isNull);
+      expect(runtime.hasManagedGeometry(first.id), isTrue);
+      expect(runtime.hasManagedGeometry(second.id), isFalse);
+      expect(runtime.managedGeometryDiagnostics(first.id), firstDiagnostics);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+
+      await runtime.redoDocument();
+
+      expect(runtime.document!.entities[first.id], isNotNull);
+      expect(runtime.document!.entities[second.id], isNotNull);
+      expect(
+        runtime.scene.entities.where((item) => item.id == first.id),
+        hasLength(1),
+      );
+      expect(
+        runtime.scene.entities.where((item) => item.id == second.id),
+        hasLength(1),
+      );
+      expect(runtime.managedGeometryDiagnostics(first.id), firstDiagnostics);
+      expect(runtime.hasManagedGeometry(second.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 4);
+      expect(pathImports(), 0);
+    },
+  );
+
+  test('managed history preserves an unchanged legacy entity', () async {
+    const legacyId = 'legacy-point';
+    await runtime.mutate(
+      command: 'test.add-legacy-point',
+      upsert: const [
+        CadDocumentEntity(
+          id: legacyId,
+          kind: CadDocumentEntityKind.vertex,
+          data: {
+            'sceneKind': 'point',
+            'sceneGeometry': {
+              'position': [4, 5, 6],
+            },
+          },
+        ),
+      ],
+    );
+    final legacyScene = runtime.scene.find(legacyId)!.geometry;
+    final managed = await importOne();
+
+    await runtime.undoDocument();
+
+    expect(runtime.document!.entities[legacyId], isNotNull);
+    expect(runtime.document!.entities[managed.id], isNull);
+    expect(runtime.scene.find(legacyId)?.geometry, legacyScene);
+    expect(runtime.scene.find(managed.id), isNull);
+    expect(runtime.hasManagedGeometry(managed.id), isFalse);
+
+    await runtime.redoDocument();
+
+    expect(runtime.document!.entities[legacyId], isNotNull);
+    expect(runtime.document!.entities[managed.id], isNotNull);
+    expect(runtime.scene.find(legacyId)?.geometry, legacyScene);
+    expect(runtime.scene.find(managed.id), isNotNull);
+    expect(runtime.hasManagedGeometry(managed.id), isTrue);
+    expect(adapter.custodyDiagnostics!.allocations, 2);
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'failed managed Redo preserves document history scene selection and owners',
+    () async {
+      final first = await importOne(name: 'first');
+      final second = await importOne(name: 'second');
+      final secondAssets = managedAssets(second);
+      await runtime.undoDocument();
+      runtime.select({first.id});
+      final documentBefore = jsonEncode(runtime.document!.toJson());
+      final sceneBefore = runtime.scene.entities
+          .map((item) => item.id)
+          .toList();
+      final ownerBefore = runtime.managedGeometryDiagnostics(first.id);
+      final historyBefore = (
+        runtime.canUndo,
+        runtime.canRedo,
+        runtime.runtimeRevision,
+      );
+
+      Future<void> verifyFailure(
+        Future<void> Function() damage,
+        Future<void> Function() restore,
+        Matcher expected,
+      ) async {
+        await damage();
+        await expectLater(runtime.redoDocument(), throwsA(expected));
+        expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+        expect(
+          runtime.scene.entities.map((item) => item.id).toList(),
+          sceneBefore,
+        );
+        expect(runtime.selection, {first.id});
+        expect(runtime.managedGeometryDiagnostics(first.id), ownerBefore);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+        expect(runtime.canRedo, isTrue);
+        expect((
+          runtime.canUndo,
+          runtime.canRedo,
+          runtime.runtimeRevision,
+        ), historyBefore);
+        expect(pathImports(), 0);
+        await restore();
+      }
+
+      for (final payload in [
+        assetFile(secondAssets.shape, CadAssetFile.brep),
+        assetFile(secondAssets.display, CadAssetFile.display),
+      ]) {
+        final original = payload.parent;
+        final missing = Directory('${original.path}.missing');
+        await verifyFailure(
+          () async {
+            await original.rename(missing.path);
+          },
+          () async {
+            await missing.rename(original.path);
+          },
+          isA<CadAssetNativeError>().having(
+            (error) => error.notFound,
+            'asset absent',
+            isTrue,
+          ),
+        );
+      }
+      for (final payload in [
+        assetFile(secondAssets.shape, CadAssetFile.brep),
+        assetFile(secondAssets.display, CadAssetFile.display),
+      ]) {
+        late List<int> originalBytes;
+        await verifyFailure(
+          () async => originalBytes = await damageOneByte(payload),
+          () => restoreOneByte(payload, originalBytes),
+          isA<StateError>().having(
+            (error) => error.message,
+            'hash divergence',
+            'Managed asset identity, size or hash diverged',
+          ),
+        );
+      }
+    },
+  );
+
+  test('superseding open revokes a suspended managed Redo', () async {
+    final entity = await importOne();
+    await runtime.undoDocument();
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    storage.onPhase = (phase) async {
+      if (phase == 'managedOpen:afterShape' && !entered.isCompleted) {
+        entered.complete();
+        await release.future;
+      }
+    };
+    final redo = runtime.redoDocument();
+    await entered.future;
+    storage.onPhase = null;
+    final replacement = runtime.open('managed-brep-project', project);
+    release.complete();
+
+    await expectLater(redo, throwsA(isA<StaleCadTransaction>()));
+    await replacement;
+    expect(runtime.document!.entities[entity.id], isNull);
+    expect(runtime.scene.find(entity.id), isNull);
+    expect(runtime.hasManagedGeometry(entity.id), isFalse);
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    expect(runtime.canRedo, isTrue);
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'shutdown revokes a suspended managed Redo and drains custody',
+    () async {
+      final entity = await importOne();
+      await runtime.undoDocument();
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      storage.onPhase = (phase) async {
+        if (phase == 'managedOpen:afterShape' && !entered.isCompleted) {
+          entered.complete();
+          await release.future;
+        }
+      };
+      final redo = runtime.redoDocument();
+      await entered.future;
+      final stopping = runtime.shutdown();
+      release.complete();
+
+      await expectLater(redo, throwsA(isA<StaleCadTransaction>()));
+      await stopping;
+      expect(runtime.hasManagedGeometry(entity.id), isFalse);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      expect(pathImports(), 0);
+    },
+  );
 }
