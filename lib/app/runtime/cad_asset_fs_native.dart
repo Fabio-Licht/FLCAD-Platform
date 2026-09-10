@@ -353,12 +353,36 @@ final class NativeOpenedSource {
   final String locator;
   final Map<String, dynamic> identity;
   bool _closed = false;
+  Object? _closeError;
+  StackTrace? _closeStack;
   String get displayName => p.basename(locator);
   void dispose() {
-    if (_closed) return;
+    if (_closed) {
+      if (_closeError case final error?) {
+        Error.throwWithStackTrace(error, _closeStack!);
+      }
+      return;
+    }
     _closed = true;
-    filesystem.close(file);
-    filesystem.dispose();
+    Object? failure;
+    StackTrace? failureStack;
+    try {
+      filesystem.close(file);
+    } catch (error, stack) {
+      failure = error;
+      failureStack = stack;
+    }
+    try {
+      filesystem.dispose();
+    } catch (error, stack) {
+      failure ??= error;
+      failureStack ??= stack;
+    }
+    if (failure != null) {
+      _closeError = failure;
+      _closeStack = failureStack;
+      Error.throwWithStackTrace(failure, failureStack!);
+    }
   }
 }
 

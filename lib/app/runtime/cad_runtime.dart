@@ -108,9 +108,22 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   bool get canRedo => _redo.isNotEmpty;
   Set<String> get selection => geometrySelection.selectedIds;
 
+  @visibleForTesting
+  bool hasManagedGeometry(String entityId) =>
+      _managedGeometry.containsKey(entityId);
+
+  @visibleForTesting
+  Map<String, dynamic>? managedGeometryDiagnostics(String entityId) {
+    final value = _managedGeometry[entityId];
+    if (value == null) return null;
+    return {
+      'shape': value.shape.descriptor.toManagedMetadata(),
+      'displayMesh': value.displayMesh.descriptor.toManagedMetadata(),
+    };
+  }
+
   /// Managed imports install this only after their documentary commit. It is
   /// process-local and therefore deliberately has no document representation.
-  // ignore: unused_element
   void _installManagedGeometry(String entityId, ManagedEntityGeometry value) {
     if (_managedGeometry.containsKey(entityId)) {
       throw StateError('Managed geometry already installed for entity');
@@ -196,6 +209,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     if (_callingTransaction != null) {
       return Future.error(StateError('Reentrant runtime transaction.'));
     }
+    _transaction?.requestRevocation();
     final generation = ++_lifecycleGeneration;
     return _enqueue(
       (tx) => _openInTransaction(tx, projectId, directory),
@@ -208,6 +222,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     if (_callingTransaction != null) {
       return Future.error(StateError('Reentrant runtime transaction.'));
     }
+    _transaction?.requestRevocation();
     final generation = ++_lifecycleGeneration;
     return _enqueue((tx) async {
       try {
@@ -426,6 +441,225 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     _activeMeshGeometry = geometry;
     _workspaceBounds = _recalculateWorkspaceBounds();
     notifyListeners();
+  }
+
+  /// Imports one BREP through the managed transactional path. The picker path
+  /// is only an initial locator: after CAF opens it, every read is anchored to
+  /// that object and no pathname reaches OpenCascade.
+  Future<CadDocumentEntity> importManagedBrep(
+    String locator, {
+    String? name,
+    @visibleForTesting String? nativeBridgePath,
+  }) async {
+    final rejection = _admissionError;
+    if (rejection != null) return Future<CadDocumentEntity>.error(rejection);
+    // The locator loses authority here, before this operation waits behind any
+    // previously admitted transaction. A later directory-entry replacement
+    // cannot redirect the already-open CAF object.
+    final openedSource = CadAssetNativeFs.openExternal(locator);
+    final openedDisplayName = openedSource.displayName;
+    final openedIdentity = Map<String, dynamic>.unmodifiable({
+      ...openedSource.identity,
+    });
+    late CadDocumentEntity committedEntity;
+    var sourceDisposeAttempted = false;
+    Object? primaryFailure;
+    StackTrace? primaryStack;
+    try {
+      await _enqueue((tx) async {
+        tx.validate();
+        final kernel = kernels.active;
+        if (kernel is! OpenCascadeKernelAdapter) {
+          throw UnsupportedError(
+            'Managed BREP import requires the OpenCascade kernel',
+          );
+        }
+        ManagedNativeShape? shape;
+        ManagedNativeDisplayMesh? displayMesh;
+        ManagedEntityGeometry? operationGeometry;
+        try {
+          final sourceCancellation = NativeSourceCancellation();
+          unawaited(
+            Future.any<void>([
+              tx.revocation.future,
+              _assetShutdown.future,
+            ]).then((_) => sourceCancellation.revoke()),
+          );
+          NativeSourceResource sourceResource;
+          try {
+            sourceResource = await kernel.readOwnedAsset(
+              filesystem: openedSource.filesystem,
+              file: openedSource.file,
+              expected: openedIdentity,
+              kind: NativeResourceKind.shape,
+              cancellation: sourceCancellation,
+              bridgePath: nativeBridgePath,
+            );
+          } on NativeSourcePublicationFailure catch (error, stack) {
+            shape = error.resource.claimShape();
+            Error.throwWithStackTrace(error.failure, stack);
+          }
+          try {
+            shape = sourceResource.claimShape();
+          } finally {
+            await sourceResource.dispose();
+          }
+          tx.validate();
+          // The source capability has served its only purpose. Closing it here
+          // keeps source cleanup on the pre-promotion side of the transaction.
+          sourceDisposeAttempted = true;
+          openedSource.dispose();
+          final managedShape = shape;
+
+          committedEntity = await _withGeometryStagingTransaction(tx, (
+            operation,
+          ) async {
+            final shapeAssetId = await operation.planAsset();
+            final displayAssetId = await operation.planAsset();
+            final shapeAsset = await operation._writeManagedShape(
+              shapeAssetId,
+              CadAssetFile.brep,
+              kernel,
+              managedShape,
+              bridgePath: nativeBridgePath,
+            );
+            final displayAsset = await operation._writeManagedShape(
+              displayAssetId,
+              CadAssetFile.display,
+              kernel,
+              managedShape,
+              bridgePath: nativeBridgePath,
+            );
+            final meshCancellation = NativeSourceCancellation();
+            unawaited(
+              Future.any<void>([
+                tx.revocation.future,
+                _assetShutdown.future,
+              ]).then((_) => meshCancellation.revoke()),
+            );
+            final meshResource = await displayAsset.readAs(
+              kernel,
+              kind: NativeResourceKind.mesh,
+              cancellation: meshCancellation,
+              bridgePath: nativeBridgePath,
+            );
+            try {
+              displayMesh = meshResource.claimMesh();
+            } finally {
+              await meshResource.dispose();
+            }
+            final managedDisplayMesh = displayMesh!;
+            operationGeometry = ManagedEntityGeometry(
+              managedShape,
+              managedDisplayMesh,
+            );
+            final sceneGeometry = await managedDisplayMesh.prepareSceneGeometry(
+              kernel,
+            );
+            await operation.prepare();
+
+            final current = _snapshots.document(_requireDocument());
+            var entityId = _assetId('e1');
+            while (current.entities.containsKey(entityId) ||
+                _managedGeometry.containsKey(entityId)) {
+              entityId = _assetId('e1');
+            }
+            final assets = ManagedBrepAssets(
+              shape: shapeAssetId,
+              display: displayAssetId,
+              shapeSha256: shapeAsset.metadata['sha256'] as String,
+              displaySha256: displayAsset.metadata['sha256'] as String,
+            );
+            final entity = CadDocumentEntity(
+              id: entityId,
+              kind: CadDocumentEntityKind.import,
+              data: {
+                'name': name?.trim().isNotEmpty == true
+                    ? name!.trim()
+                    : openedDisplayName,
+                'format': 'brep',
+                'collectionId': 'collection:original',
+                'sceneKind': CadSceneEntityKind.mesh.name,
+                'managedBrepAssets': assets.toJson(),
+                'sourceIdentity': openedIdentity,
+                'shapeDescriptor': managedShape.descriptor.toManagedMetadata(),
+                'displayMeshDescriptor': managedDisplayMesh.descriptor
+                    .toManagedMetadata(),
+              },
+            );
+            final candidate = FeatureLifecycleProjector.normalize(
+              current.mutate(command: 'import.brep.managed', upsert: [entity]),
+              command: 'import.brep.managed',
+              previousDocument: current,
+              touchedIds: {entityId},
+            );
+            final managedScene = CadSceneEntity(
+              id: entityId,
+              kind: CadSceneEntityKind.mesh,
+              geometry: sceneGeometry,
+            );
+            final prepared = _prepareManagedCommit(
+              tx,
+              candidate: candidate,
+              undo: [..._undo, current],
+              redo: const [],
+              managedScene: managedScene,
+              geometry: operationGeometry!,
+            );
+
+            // Descendant file capabilities must be closed before the anchored
+            // directory rename used by promotion.
+            await shapeAsset.release();
+            await displayAsset.release();
+            tx.validate();
+            await _assetStorage.checkpoint('managedBrep:beforePromotion');
+            tx.validate();
+            await operation.promote();
+            await _assetStorage.checkpoint('managedBrep:afterPromotion');
+            tx.validate();
+            await _commitPreparedManaged(tx, prepared);
+            await operation._confirmDocumentPublished();
+            committedEntity = prepared.candidate.entities[entityId]!;
+            return committedEntity;
+          });
+        } finally {
+          final geometry = operationGeometry;
+          if (geometry != null) {
+            await geometry.dispose();
+          } else {
+            await Future.wait([
+              if (displayMesh != null) displayMesh!.dispose(),
+              if (shape != null) shape.dispose(),
+            ]);
+          }
+        }
+      });
+    } catch (error, stack) {
+      primaryFailure = error;
+      primaryStack = stack;
+    }
+    if (!sourceDisposeAttempted) {
+      try {
+        openedSource.dispose();
+      } catch (cleanup, cleanupStack) {
+        if (primaryFailure != null) {
+          Error.throwWithStackTrace(
+            CadAssetOperationFailure(
+              primaryFailure,
+              cleanup,
+              primaryStack!,
+              cleanupStack,
+            ),
+            primaryStack,
+          );
+        }
+        Error.throwWithStackTrace(cleanup, cleanupStack);
+      }
+    }
+    if (primaryFailure != null) {
+      Error.throwWithStackTrace(primaryFailure, primaryStack!);
+    }
+    return committedEntity;
   }
 
   Future<void> mutate({
@@ -1541,7 +1775,11 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     ImportedCadDocument? imported;
     KernelMeshGeometry? geometry;
     final imports = document.entities.values
-        .where((entity) => entity.kind == CadDocumentEntityKind.import)
+        .where(
+          (entity) =>
+              entity.kind == CadDocumentEntityKind.import &&
+              entity.data['managedBrepAssets'] == null,
+        )
         .toList();
     if (imports.isEmpty) return (null, null);
     final value = imports.last, data = value.data;
@@ -1591,6 +1829,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   void _requestShutdown() {
     if (_shutdownFuture != null) return;
     _closingAdmission = true;
+    _transaction?.requestRevocation();
     if (!_assetShutdown.isCompleted) _assetShutdown.complete();
     _lifecycleGeneration++;
     _sessionActive = false;
@@ -1598,7 +1837,10 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     _shutdownFuture = done.future;
     unawaited(
       _transactionTail
-          .then((_) {
+          .then((_) async {
+            final managed = _managedGeometry.values.toList();
+            _managedGeometry.clear();
+            await Future.wait(managed.map((value) => value.dispose()));
             operationalSelection.dispose();
             operationalEntities.dispose();
             geometrySelection.dispose();

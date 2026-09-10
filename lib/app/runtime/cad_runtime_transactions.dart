@@ -58,6 +58,16 @@ class _CadTransaction {
   final CadDocument? document;
   final Directory? directory;
   final _CadCapability capability;
+  final revocation = Completer<void>();
+  void requestRevocation() {
+    if (!revocation.isCompleted) revocation.complete();
+  }
+
+  void finish() {
+    requestRevocation();
+    capability._revoke();
+  }
+
   bool isActiveFor(CadRuntime runtime) =>
       capability.active &&
       identical(capability.runtimeIdentity, runtime._runtimeIdentity) &&
@@ -73,7 +83,8 @@ class _CadTransaction {
     if (!isActiveFor(owner)) {
       throw StateError('Transaction is not owned by this runtime execution.');
     }
-    if (owner._closingAdmission ||
+    if (revocation.isCompleted ||
+        owner._closingAdmission ||
         lifecycle != owner._lifecycleGeneration ||
         !identical(document, owner._document) ||
         !identical(directory, owner._projectDirectory)) {
@@ -86,6 +97,29 @@ class _CadTransaction {
       currentRevision: owner._runtimeRevision,
     );
   }
+}
+
+/// Fully materialized managed commit. It contains no producer callback and no
+/// operation capable of awaiting: persistence is the final asynchronous
+/// boundary, followed by one controlled synchronous installation section.
+final class _PreparedManagedCadCommit {
+  _PreparedManagedCadCommit({
+    required this.candidate,
+    required this.undo,
+    required this.redo,
+    required this.scene,
+    required this.entityId,
+    required this.geometry,
+    required this.bounds,
+  });
+  final CadDocument candidate;
+  final List<CadDocument> undo, redo;
+  final List<CadSceneEntity> scene;
+  final String entityId;
+  final ManagedEntityGeometry geometry;
+  final KernelBounds? bounds;
+  bool installed = false;
+  ManagedEntityGeometry? transferredGeometry;
 }
 
 extension _CadTransactions on CadRuntime {
@@ -134,7 +168,7 @@ extension _CadTransactions on CadRuntime {
           zoneValues: {_transactionZone: tx.capability},
         );
       } finally {
-        tx.capability._revoke();
+        tx.finish();
         _transaction = null;
         // No listener runs while the document/scene/history are being installed.
         // This continuation is outside the transaction Zone: listeners enqueue.
@@ -332,6 +366,124 @@ extension _CadTransactions on CadRuntime {
     );
   }
 
+  _PreparedManagedCadCommit _prepareManagedCommit(
+    _CadTransaction tx, {
+    required CadDocument candidate,
+    required List<CadDocument> undo,
+    required List<CadDocument> redo,
+    required CadSceneEntity managedScene,
+    required ManagedEntityGeometry geometry,
+  }) {
+    tx.validate();
+    final normalized = _snapshots.document(candidate, normalized: true);
+    final preparedUndo = _snapshots.history(undo);
+    final preparedRedo = _snapshots.history(redo);
+    final entity = normalized.entities[managedScene.id];
+    if (entity == null ||
+        entity.kind != CadDocumentEntityKind.import ||
+        entity.shape != null ||
+        entity.mesh != null ||
+        entity.data['managedBrepAssets'] is! Map ||
+        managedScene.kind != CadSceneEntityKind.mesh) {
+      throw StateError('Managed scene does not match its document entity');
+    }
+    ManagedBrepAssets.fromJson(
+      Map<String, dynamic>.from(entity.data['managedBrepAssets'] as Map),
+    );
+    if (_managedGeometry.containsKey(entity.id)) {
+      throw StateError('Managed geometry already installed for entity');
+    }
+    geometry.validateTransfer();
+    final nodes = managedScene.geometry['nodes'];
+    final triangles = managedScene.geometry['triangles'];
+    if (nodes is! List ||
+        triangles is! List ||
+        nodes.length != geometry.displayMesh.descriptor.vertices * 3 ||
+        triangles.length != geometry.displayMesh.descriptor.triangles * 3) {
+      throw StateError('Prepared managed scene has invalid geometry');
+    }
+    final preparedScene = <CadSceneEntity>[
+      for (final existing in projection.permanentEntities)
+        if (existing.id != entity.id) existing,
+      managedScene,
+    ];
+    if (preparedScene.map((item) => item.id).toSet().length !=
+        preparedScene.length) {
+      throw StateError('Prepared scene contains duplicate entity IDs');
+    }
+    tx.validate();
+    return _PreparedManagedCadCommit(
+      candidate: normalized,
+      undo: preparedUndo,
+      redo: preparedRedo,
+      scene: List.unmodifiable(preparedScene),
+      entityId: entity.id,
+      geometry: geometry,
+      bounds: _recalculateWorkspaceBounds(entities: preparedScene),
+    );
+  }
+
+  Future<void> _commitPreparedManaged(
+    _CadTransaction tx,
+    _PreparedManagedCadCommit prepared,
+  ) async {
+    tx.validate();
+    if (prepared.installed ||
+        _managedGeometry.containsKey(prepared.entityId) ||
+        prepared.candidate.entities[prepared.entityId] == null) {
+      throw StateError('Managed commit is no longer installable');
+    }
+    prepared.geometry.validateTransfer();
+    await _assetStorage.checkpoint('managedBrep:beforePersistence');
+    tx.validate();
+    try {
+      await _persistSnapshot(
+        tx,
+        prepared.candidate,
+        tx.directory!,
+        prepared.undo,
+        prepared.redo,
+        publish: () {
+          // All parsing, projection, collision and ownership checks completed
+          // before persistence. These operations are synchronous and invoke no
+          // producer, renderer or listener callback.
+          prepared.geometry.validateTransfer();
+          final runtimeGeometry = prepared.geometry.transfer();
+          prepared.transferredGeometry = runtimeGeometry;
+          try {
+            _installManagedGeometry(prepared.entityId, runtimeGeometry);
+            _install(
+              tx,
+              prepared.candidate,
+              tx.directory!,
+              prepared.undo,
+              prepared.redo,
+              prepared.scene,
+              imported: (_activeImport, _activeMeshGeometry),
+              bounds: prepared.bounds,
+              refreshDisplayPipeline: false,
+            );
+            prepared.installed = true;
+            prepared.transferredGeometry = null;
+          } catch (_) {
+            if (identical(
+              _managedGeometry[prepared.entityId],
+              runtimeGeometry,
+            )) {
+              _managedGeometry.remove(prepared.entityId);
+            }
+            rethrow;
+          }
+        },
+      );
+    } catch (_) {
+      final detached = prepared.transferredGeometry;
+      prepared.transferredGeometry = null;
+      if (detached != null) await detached.dispose();
+      rethrow;
+    }
+  }
+
   void _install(
     _CadTransaction tx,
     CadDocument? candidate,
@@ -342,6 +494,7 @@ extension _CadTransactions on CadRuntime {
     bool boundary = false,
     (ImportedCadDocument?, KernelMeshGeometry?)? imported,
     KernelBounds? bounds,
+    bool refreshDisplayPipeline = true,
   }) {
     tx.validate();
     // Everything that can await/parse/mesh has already completed.
@@ -372,14 +525,16 @@ extension _CadTransactions on CadRuntime {
     if (tx.selectionChanged) {
       projection.installPrepared(prepared, boundary ? const {} : selection);
     }
-    _displayMeshes = candidate == null
-        ? null
-        : KernelDisplayMeshPipeline(
-            kernel: kernels.active,
-            projectId: candidate.projectId,
-            projectDirectory: directory!,
-            scene: scene,
-          );
+    if (candidate == null) {
+      _displayMeshes = null;
+    } else if (refreshDisplayPipeline) {
+      _displayMeshes = KernelDisplayMeshPipeline(
+        kernel: kernels.active,
+        projectId: candidate.projectId,
+        projectDirectory: directory!,
+        scene: scene,
+      );
+    }
     _workspaceBounds = bounds;
     _runtimeRevision++;
     tx.committed = true;

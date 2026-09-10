@@ -561,7 +561,8 @@ Future<Map<String, dynamic>> _readAssetManifest(
     'documentPublished',
   };
   if (data.keys.any((k) => !fields.contains(k)) ||
-      data['documentPublished'] != false ||
+      data['documentPublished'] is! bool ||
+      (data['documentPublished'] == true && data['state'] != 'committed') ||
       DateTime.tryParse(data['createdAt'] as String? ?? '') == null ||
       DateTime.tryParse(data['updatedAt'] as String? ?? '') == null ||
       (data['sequence'] as int) < 0) {

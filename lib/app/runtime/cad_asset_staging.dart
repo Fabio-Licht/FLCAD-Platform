@@ -52,63 +52,89 @@ extension CadGeometryStaging on CadRuntime {
   }) async {
     late T result;
     await _enqueue((tx) async {
-      tx.validate();
-      if (tx.directory == null || tx.document == null) {
-        throw StateError('No active project');
-      }
-      final paths = await _AssetPaths.open(tx.directory!);
-      try {
-        tx.validate();
-        final operation = CadGeometryStagingOperation._(
-          tx,
-          paths,
-          _assetInstance,
-          _assetId('o1'),
-          _assetStorage,
-          cancellation ?? CadAssetCancellation(),
-          lockTimeout,
-        );
-        try {
-          await operation._start();
-          result = await action(operation);
-          operation._accepting = false;
-          await operation._tail;
-          operation._validate();
-        } catch (error, stack) {
-          operation._abort(error, stack);
-          try {
-            await _assetStorage.checkpoint('operation:drainingAfterAbort');
-          } catch (error, stack) {
-            operation._abort(error, stack);
-          }
-          await operation._tail;
-        }
-        operation._revoke();
-        try {
-          await operation._finish(success: operation._failure == null);
-        } catch (cleanup, stack) {
-          if (operation._failure case final cause?
-              when !identical(cause, cleanup)) {
-            Error.throwWithStackTrace(
-              CadAssetOperationFailure(
-                cause,
-                cleanup,
-                operation._failureStack!,
-                stack,
-              ),
-              operation._failureStack!,
-            );
-          }
-          Error.throwWithStackTrace(cleanup, stack);
-        }
-        if (operation._failure case final cause?) {
-          Error.throwWithStackTrace(cause, operation._failureStack!);
-        }
-      } finally {
-        paths.dispose();
-      }
+      result = await _withGeometryStagingTransaction(
+        tx,
+        action,
+        cancellation: cancellation,
+        lockTimeout: lockTimeout,
+      );
     });
     return result;
+  }
+}
+
+/// Runtime-only composition for a producer already admitted by [_enqueue].
+Future<T> _withGeometryStagingTransaction<T>(
+  _CadTransaction tx,
+  Future<T> Function(CadGeometryStagingOperation) action, {
+  CadAssetCancellation? cancellation,
+  Duration lockTimeout = const Duration(seconds: 10),
+}) async {
+  tx.validate();
+  if (tx.directory == null || tx.document == null) {
+    throw StateError('No active project');
+  }
+  final paths = await _AssetPaths.open(tx.directory!);
+  try {
+    tx.validate();
+    final operation = CadGeometryStagingOperation._(
+      tx,
+      paths,
+      tx.owner._assetInstance,
+      _assetId('o1'),
+      tx.owner._assetStorage,
+      cancellation ?? CadAssetCancellation(),
+      lockTimeout,
+    );
+    T? result;
+    var hasResult = false;
+    try {
+      await operation._start();
+      result = await action(operation);
+      hasResult = true;
+      operation._accepting = false;
+      await operation._tail;
+      if (tx.committed) {
+        if (operation.state != CadAssetStageState.committed) {
+          throw StateError('Document committed before asset promotion');
+        }
+      } else {
+        operation._validate();
+      }
+    } catch (error, stack) {
+      operation._abort(error, stack);
+      try {
+        await tx.owner._assetStorage.checkpoint('operation:drainingAfterAbort');
+      } catch (error, stack) {
+        operation._abort(error, stack);
+      }
+      await operation._tail;
+    }
+    operation._revoke();
+    try {
+      await operation._finish(success: operation._failure == null);
+    } catch (cleanup, stack) {
+      if (operation._failure case final cause?
+          when !identical(cause, cleanup)) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(
+            cause,
+            cleanup,
+            operation._failureStack!,
+            stack,
+          ),
+          operation._failureStack!,
+        );
+      }
+      Error.throwWithStackTrace(cleanup, stack);
+    }
+    if (operation._failure case final cause?) {
+      Error.throwWithStackTrace(cause, operation._failureStack!);
+    }
+    if (!hasResult) throw StateError('Staging completed without a result');
+    return result as T;
+  } finally {
+    paths.dispose();
   }
 }
 
@@ -145,6 +171,7 @@ final class CadGeometryStagingOperation {
   late final _interrupted = Future.any<void>([
     _revoked.future,
     _cancellation._done.future,
+    _tx.revocation.future,
     _tx.owner._assetShutdown.future,
   ]);
   Map<String, dynamic>? _manifest;
@@ -456,9 +483,74 @@ final class CadGeometryStagingOperation {
       lease.release();
       if (retained == null) _paths.release(target.path);
     }
+    final fileMetadata = Map<String, dynamic>.of(sealed)..remove('state');
     final complete = _copy();
     (_asset(complete, asset)['files'] as Map)[kind.name] = {
-      ...sealed,
+      ...fileMetadata,
+      'status': 'written',
+      'allowEmpty': false,
+    };
+    await _update(complete, CadAssetStageState.preparing);
+    return retained;
+  });
+
+  /// Runtime-only managed producer. The shape owner remains private and only a
+  /// borrowed custody lease reaches the C-to-C writer bridge.
+  Future<NativeSealedStagedAsset> _writeManagedShape(
+    GeometryAssetId asset,
+    CadAssetFile kind,
+    OpenCascadeKernelAdapter kernel,
+    ManagedNativeShape shape, {
+    String? bridgePath,
+  }) => _run(() async {
+    _preparing();
+    if (kind != CadAssetFile.brep && kind != CadAssetFile.display) {
+      throw ArgumentError.value(kind, 'kind', 'Native shape payload required');
+    }
+    final next = _copy();
+    final files = _asset(next, asset)['files'] as Map<String, dynamic>;
+    if (files.containsKey(kind.name)) {
+      throw StateError('Asset file already acquired');
+    }
+    files[kind.name] = {'status': 'writing', 'allowEmpty': false};
+    await _update(next, CadAssetStageState.preparing);
+    final target = _paths.file(
+      path.join(_assetDirectory(asset), kind.relativePath),
+    );
+    await _paths.directories(target.parent.path, authorize: _validate);
+    await _paths.check(target.path);
+    _validate();
+    await target.create(exclusive: true);
+    Map<String, dynamic>? sealed;
+    NativeSealedStagedAsset? retained;
+    try {
+      _validate();
+      final produced = await shape.withLease(
+        (lease) => kernel.streamShapeIntoStaging(
+          filesystem: _paths.native,
+          file: _paths.openFile(target.path),
+          shape: lease,
+          displayStl: kind == CadAssetFile.display,
+          bridgePath: bridgePath,
+        ),
+      );
+      sealed = produced;
+      _validate();
+      if (produced['size'] == 0) {
+        throw StateError('Empty native geometry payload');
+      }
+      retained = NativeSealedStagedAsset._(this, target.path, {...produced});
+      _sealedNativeAssets.add(retained);
+    } catch (error, stack) {
+      _abort(error, stack);
+      rethrow;
+    } finally {
+      if (retained == null) _paths.release(target.path);
+    }
+    final fileMetadata = Map<String, dynamic>.of(sealed)..remove('state');
+    final complete = _copy();
+    (_asset(complete, asset)['files'] as Map)[kind.name] = {
+      ...fileMetadata,
       'status': 'written',
       'allowEmpty': false,
     };
@@ -672,6 +764,7 @@ final class CadGeometryStagingOperation {
     Map<String, dynamic> next,
     CadAssetStageState target, {
     bool cleanup = false,
+    bool documentConfirmation = false,
   }) async {
     if (!_transitions[state]!.contains(target)) {
       throw StateError('Illegal staging transition');
@@ -679,15 +772,46 @@ final class CadGeometryStagingOperation {
     next['state'] = target.name;
     next['sequence'] = (_manifest!['sequence'] as int) + 1;
     next['updatedAt'] = DateTime.now().toUtc().toIso8601String();
-    await _writeManifest(next, cleanup: cleanup);
+    await _writeManifest(
+      next,
+      cleanup: cleanup,
+      documentConfirmation: documentConfirmation,
+    );
+  }
+
+  Future<void> _confirmDocumentPublished() async {
+    if (!_tx.committed ||
+        state != CadAssetStageState.committed ||
+        _failure != null ||
+        !_active ||
+        !_accepting) {
+      throw StateError('Document publication cannot be confirmed');
+    }
+    final next = _copy()..['documentPublished'] = true;
+    await _update(
+      next,
+      CadAssetStageState.committed,
+      documentConfirmation: true,
+    );
   }
 
   Future<void> _writeManifest(
     Map<String, dynamic> next, {
     bool cleanup = false,
+    bool documentConfirmation = false,
   }) async {
     void authorize() {
-      if (!cleanup) {
+      if (documentConfirmation) {
+        if (cleanup ||
+            !_tx.committed ||
+            state != CadAssetStageState.committed ||
+            next['state'] != CadAssetStageState.committed.name ||
+            next['documentPublished'] != true ||
+            !_active ||
+            !_accepting) {
+          throw StateError('Invalid documentary confirmation authority');
+        }
+      } else if (!cleanup) {
         _validate();
       } else if (_finishing == null ||
           _active ||
@@ -896,8 +1020,9 @@ final class NativeSealedStagedAsset {
     _ensureLive();
     if (_sourceLeaseActive) throw StateError('Source lease already active');
     _sourceLeaseActive = true;
+    NativeSourceResource? captured;
     try {
-      final captured = await kernel.readOwnedAsset(
+      captured = await kernel.readOwnedAsset(
         filesystem: _operation._paths.native,
         file: _operation._paths.openFile(_path),
         expected: metadata,
@@ -907,6 +1032,28 @@ final class NativeSealedStagedAsset {
       );
       _operation._validate();
       return captured;
+    } on NativeSourcePublicationFailure catch (error, stack) {
+      try {
+        await error.resource.dispose();
+      } catch (cleanup, cleanupStack) {
+        Error.throwWithStackTrace(
+          CadAssetOperationFailure(error.failure, cleanup, stack, cleanupStack),
+          stack,
+        );
+      }
+      Error.throwWithStackTrace(error.failure, stack);
+    } catch (error, stack) {
+      if (captured != null) {
+        try {
+          await captured.dispose();
+        } catch (cleanup, cleanupStack) {
+          Error.throwWithStackTrace(
+            CadAssetOperationFailure(error, cleanup, stack, cleanupStack),
+            stack,
+          );
+        }
+      }
+      Error.throwWithStackTrace(error, stack);
     } finally {
       _sourceLeaseActive = false;
     }
@@ -1054,6 +1201,8 @@ Future<List<CadAssetRecoveryResult>> inspectCadAssetStaging(
               ? 'quarantinedBackupOnly'
               : data['state'] == 'quarantined'
               ? 'quarantinedRecordedFailure'
+              : data['documentPublished'] == true && complete
+              ? 'documentPublished'
               : complete && assets.isNotEmpty
               ? 'awaitingDocumentReconciliation'
               : [

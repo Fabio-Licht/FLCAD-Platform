@@ -319,8 +319,11 @@ final class ManagedNativeShape {
   final OwnedNativeShape _owner;
   final NativeGeometryDescriptor descriptor;
   bool _transferred = false;
+  Future<void>? _disposal;
   Future<T> withLease<T>(Future<T> Function(NativeShapeLease) body) async {
-    if (_transferred) throw StateError('Managed shape was transferred');
+    if (_transferred || _disposal != null) {
+      throw StateError('Managed shape is unavailable');
+    }
     final lease = _owner.borrow();
     try {
       return await body(lease);
@@ -330,17 +333,19 @@ final class ManagedNativeShape {
   }
 
   ManagedNativeShape transfer() {
-    if (_transferred) throw StateError('Managed shape was transferred');
+    if (_transferred || _disposal != null) {
+      throw StateError('Managed shape is unavailable');
+    }
+    final next = ManagedNativeShape._(_owner.transfer(), descriptor);
     _transferred = true;
-    return ManagedNativeShape._(_owner.transfer(), descriptor);
+    return next;
   }
 
-  bool get _canTransfer => !_transferred;
+  bool get _canTransfer => !_transferred && _disposal == null;
 
-  Future<void> dispose() async {
-    if (_transferred) return;
-    _transferred = true;
-    await _owner.dispose();
+  Future<void> dispose() {
+    if (_transferred) return Future<void>.value();
+    return _disposal ??= _owner.dispose();
   }
 }
 
@@ -349,8 +354,11 @@ final class ManagedNativeDisplayMesh {
   final OwnedNativeMesh _owner;
   final NativeGeometryDescriptor descriptor;
   bool _transferred = false;
+  Future<void>? _disposal;
   Future<T> withLease<T>(Future<T> Function(NativeMeshLease) body) async {
-    if (_transferred) throw StateError('Managed display mesh was transferred');
+    if (_transferred || _disposal != null) {
+      throw StateError('Managed display mesh is unavailable');
+    }
     final lease = _owner.borrow();
     try {
       return await body(lease);
@@ -360,17 +368,19 @@ final class ManagedNativeDisplayMesh {
   }
 
   ManagedNativeDisplayMesh transfer() {
-    if (_transferred) throw StateError('Managed display mesh was transferred');
+    if (_transferred || _disposal != null) {
+      throw StateError('Managed display mesh is unavailable');
+    }
+    final next = ManagedNativeDisplayMesh._(_owner.transfer(), descriptor);
     _transferred = true;
-    return ManagedNativeDisplayMesh._(_owner.transfer(), descriptor);
+    return next;
   }
 
-  bool get _canTransfer => !_transferred;
+  bool get _canTransfer => !_transferred && _disposal == null;
 
-  Future<void> dispose() async {
-    if (_transferred) return;
-    _transferred = true;
-    await _owner.dispose();
+  Future<void> dispose() {
+    if (_transferred) return Future<void>.value();
+    return _disposal ??= _owner.dispose();
   }
 
   /// Copies render data while the custody lease is live. The scene receives no
@@ -413,23 +423,36 @@ final class ManagedEntityGeometry {
   final ManagedNativeShape shape;
   final ManagedNativeDisplayMesh displayMesh;
   bool _transferred = false;
-  ManagedEntityGeometry transfer() {
-    if (_transferred) throw StateError('Managed geometry was transferred');
-    // Both checks occur before either authority is revoked. The two transfer
-    // calls are synchronous and contain no callback, await or native effect.
-    if (!shape._canTransfer || !displayMesh._canTransfer) {
+  Future<void>? _disposal;
+
+  void validateTransfer() {
+    if (_transferred ||
+        _disposal != null ||
+        !shape._canTransfer ||
+        !displayMesh._canTransfer) {
       throw StateError('Managed geometry has an unavailable component');
     }
+    if (shape.descriptor.kind != NativeResourceKind.shape ||
+        displayMesh.descriptor.kind != NativeResourceKind.mesh ||
+        shape.descriptor.fingerprint.isEmpty ||
+        displayMesh.descriptor.fingerprint.isEmpty) {
+      throw StateError('Managed geometry descriptor is invalid');
+    }
+  }
+
+  ManagedEntityGeometry transfer() {
+    // Both checks occur before either authority is revoked. The two transfer
+    // calls are synchronous and contain no callback, await or native effect.
+    validateTransfer();
     final nextShape = shape.transfer();
     final nextMesh = displayMesh.transfer();
     _transferred = true;
     return ManagedEntityGeometry(nextShape, nextMesh);
   }
 
-  Future<void> dispose() async {
-    if (_transferred) return;
-    _transferred = true;
-    await Future.wait([shape.dispose(), displayMesh.dispose()]);
+  Future<void> dispose() {
+    if (_transferred) return Future<void>.value();
+    return _disposal ??= Future.wait([shape.dispose(), displayMesh.dispose()]);
   }
 }
 
@@ -439,23 +462,29 @@ final class NativeSourceResource {
   final OwnedNativeMesh? mesh;
   final NativeGeometryDescriptor descriptor;
   bool _claimed = false;
+  Future<void>? _disposal;
   ManagedNativeShape claimShape() {
     if (_claimed || shape == null) {
       throw StateError('Shape resource unavailable');
     }
+    final managed = ManagedNativeShape._(shape!.transfer(), descriptor);
     _claimed = true;
-    return ManagedNativeShape._(shape!.transfer(), descriptor);
+    return managed;
   }
 
   ManagedNativeDisplayMesh claimMesh() {
     if (_claimed || mesh == null) {
       throw StateError('Mesh resource unavailable');
     }
+    final managed = ManagedNativeDisplayMesh._(mesh!.transfer(), descriptor);
     _claimed = true;
-    return ManagedNativeDisplayMesh._(mesh!.transfer(), descriptor);
+    return managed;
   }
 
-  Future<void> dispose() => shape?.dispose() ?? mesh!.dispose();
+  Future<void> dispose() {
+    if (_claimed) return Future<void>.value();
+    return _disposal ??= (shape?.dispose() ?? mesh!.dispose());
+  }
 }
 
 final class NativeSourcePublicationFailure implements Exception {
