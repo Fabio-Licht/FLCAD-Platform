@@ -906,6 +906,45 @@ void main() {
     expect((await _data(directory))['promoted'], isEmpty);
   });
   test(
+    'replacement after directory rename is quarantined before publication',
+    () async {
+      late String directory;
+      GeometryAssetId? id;
+      storage.onPhase = (phase) async {
+        if (phase == 'promotion:renamed') {
+          await File(
+            p.join(
+              project.path,
+              'CAD',
+              'Assets',
+              'v1',
+              id!.value,
+              'display.stl',
+            ),
+          ).writeAsString('replacement after rename');
+        }
+      };
+      await expectLater(
+        runtime.withGeometryStaging((op) async {
+          directory = op.stagingDirectory;
+          id = await payload(op, kind: CadAssetFile.display);
+          await op.prepare();
+          await op.promote();
+        }),
+        throwsStateError,
+      );
+      final manifest = await _data(directory);
+      expect(manifest['state'], 'quarantined');
+      expect(manifest['promoted'], contains(id!.value));
+      expect(
+        await File(
+          p.join(project.path, 'CAD', 'Assets', 'v1', id!.value, 'display.stl'),
+        ).exists(),
+        isTrue,
+      );
+    },
+  );
+  test(
     'borrowed source streams in bounded chunks and remains unchanged',
     () async {
       final source = File(p.join(root.path, 'borrowed.bin'));

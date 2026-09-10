@@ -139,9 +139,85 @@ int32_t OCC_STREAM_CALL check(void *p, uint32_t phase, occ_source_io_v1 *io) {
   }
   return cancelled(op);
 }
+struct StreamWrite {
+  decltype(&caf_writer_write) write = nullptr;
+  uint64_t lease = 0;
+  caf_result last{};
+  bool failed = false;
+};
+int32_t OCC_STREAM_CALL write_sink(void *context, const uint8_t *bytes,
+                                   uint32_t count, uint32_t *accepted) {
+  if (!context || !accepted)
+    return 1;
+  auto &stream = *static_cast<StreamWrite *>(context);
+  if (stream.failed)
+    return 1;
+  *accepted = 0;
+  while (*accepted < count) {
+    const auto part = std::min<uint32_t>(65536, count - *accepted);
+    const auto result = stream.write(stream.lease, bytes + *accepted, part);
+    stream.last = result;
+    if (result.version != 1 || result.status || result.bytes > part) {
+      if (result.version == 1 && result.bytes <= part)
+        *accepted += static_cast<uint32_t>(result.bytes);
+      stream.failed = true;
+      return result.win32_error == ERROR_OPERATION_ABORTED ? -1 : 1;
+    }
+    *accepted += part;
+  }
+  return 0;
+}
 } // namespace
 extern "C" uint32_t cob_version(void) { return 1; }
 extern "C" uint32_t cob_result_size_v1(void) { return sizeof(cob_result_v1); }
+extern "C" uint32_t cob_stream_result_size_v1(void) {
+  return sizeof(cob_stream_result_v1);
+}
+extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
+                                       uint64_t writer, const char *token,
+                                       uint32_t kind, cob_stream_result_v1 *out,
+                                       uint32_t size) {
+  if (!out || size != sizeof(*out) || !token || !*token ||
+      (kind != 1 && kind != 2))
+    return COB_ARGUMENT;
+  *out = {};
+  out->size = sizeof(*out);
+  out->version = 1;
+  try {
+    Module caf, occ;
+    caf.retain(ca);
+    occ.retain(oc);
+    if (caf.fn<decltype(&caf_writer_version)>("caf_writer_version")() != 1 ||
+        (kind == 1
+             ? occ.fn<decltype(&flcad_occ_brep_stream_version)>(
+                       "flcad_occ_brep_stream_version")()
+             : occ.fn<decltype(&flcad_occ_mesh_stream_version)>(
+                       "flcad_occ_mesh_stream_version")()) != 1)
+      throw std::runtime_error("ABI");
+    // The caller owns writer acquire/seal/release. Resolve only write so this
+    // adapter cannot silently promote, seal or release another operation's
+    // staging object.
+    StreamWrite stream{caf.fn<decltype(&caf_writer_write)>("caf_writer_write")};
+    stream.lease = writer;
+    out->phase = COB_READ;
+    occ_stream_sink_v1 sink{sizeof(sink), 1, &stream, write_sink};
+    const auto status = kind == 1
+        ? occ.fn<decltype(&flcad_occ_brep_stream_v1)>("flcad_occ_brep_stream_v1")(
+              token, 268435456, &sink, &out->native_result,
+              sizeof(out->native_result))
+        : occ.fn<decltype(&flcad_occ_mesh_stream_v1)>("flcad_occ_mesh_stream_v1")(
+              token, 0.1, 0.35, 32000000, &sink, &out->native_result,
+              sizeof(out->native_result));
+    if (status || stream.failed) {
+      out->filesystem = stream.last;
+      out->status = stream.failed ? COB_FILESYSTEM : COB_INTERNAL;
+    }
+    return static_cast<int32_t>(out->status);
+  } catch (...) {
+    out->status = COB_ABI;
+    return COB_ABI;
+  }
+}
 extern "C" int32_t cob_begin_v1(const void *ca, const void *oc, uint64_t file,
                                 const caf_result *expected, uint32_t es,
                                 uint32_t kind, cob_result_v1 *out,

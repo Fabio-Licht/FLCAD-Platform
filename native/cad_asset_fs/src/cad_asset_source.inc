@@ -14,10 +14,28 @@ struct SourceLease {
   }
 };
 std::unordered_map<uint64_t, std::shared_ptr<SourceLease>> sources;
+struct WriterLease {
+  std::shared_ptr<Node> node;
+  bool pinned = false, sealed = false;
+  ~WriterLease() {
+    if (!pinned)
+      return;
+    std::lock_guard<std::mutex> guard(mutex);
+    --node->writer_leases;
+  }
+};
+std::unordered_map<uint64_t, std::shared_ptr<WriterLease>> writers;
 std::shared_ptr<SourceLease> source_get(uint64_t id) {
   std::lock_guard<std::mutex> guard(mutex);
   const auto it = sources.find(id);
   if (it == sources.end())
+    fail(CAF_HANDLE, ERROR_INVALID_HANDLE);
+  return it->second;
+}
+std::shared_ptr<WriterLease> writer_get(uint64_t id) {
+  std::lock_guard<std::mutex> guard(mutex);
+  const auto it = writers.find(id);
+  if (it == writers.end())
     fail(CAF_HANDLE, ERROR_INVALID_HANDLE);
   return it->second;
 }
@@ -218,6 +236,106 @@ extern "C" caf_result caf_source_release(uint64_t id) {
         fail(CAF_POLICY, ERROR_BUSY);
       lease = std::move(it->second);
       sources.erase(it);
+    }
+  });
+}
+
+extern "C" uint32_t caf_writer_version(void) { return 1; }
+extern "C" caf_result caf_writer_acquire(uint64_t id) {
+  return source_boundary([&](caf_result &r) {
+    auto lease = std::make_shared<WriterLease>();
+    {
+      std::lock_guard<std::mutex> guard(mutex);
+      lease->node = get(id);
+      if (lease->node->directory || !lease->node->created ||
+          lease->node->sealed || lease->node->source_leases ||
+          lease->node->writer_leases)
+        fail(CAF_POLICY, ERROR_BUSY);
+      ++lease->node->writer_leases;
+      lease->pinned = true;
+      if (sequence == UINT64_MAX)
+        fail(CAF_INTERNAL);
+      const auto key = ++sequence;
+      writers.emplace(key, lease);
+      r.object = key;
+    }
+  });
+}
+extern "C" caf_result caf_writer_write(uint64_t id, const uint8_t *data,
+                                        uint32_t bytes) {
+  return source_boundary([&](caf_result &r) {
+    auto lease = writer_get(id);
+    std::lock_guard<std::mutex> io(lease->node->io);
+    if (lease->sealed || (!data && bytes) || bytes > 65536)
+      fail(CAF_ARGUMENT);
+    LARGE_INTEGER end{};
+    os(SetFilePointerEx(lease->node->handle.value, end, nullptr, FILE_END) !=
+       0);
+    DWORD written = 0;
+    const auto ok = WriteFile(lease->node->handle.value, data, bytes, &written,
+                              nullptr);
+    const auto error = ok ? 0 : GetLastError();
+    r.bytes = written;
+    if (written)
+      r.effect = CAF_WRITTEN;
+    if (!ok || written != bytes)
+      fail(CAF_OS, ok ? ERROR_WRITE_FAULT : error);
+  });
+}
+extern "C" caf_result caf_writer_seal(uint64_t id) {
+  return source_boundary([&](caf_result &r) {
+    auto lease = writer_get(id);
+    std::lock_guard<std::mutex> io(lease->node->io);
+    if (lease->sealed)
+      fail(CAF_POLICY, ERROR_ALREADY_INITIALIZED);
+    os(FlushFileBuffers(lease->node->handle.value) != 0);
+    LARGE_INTEGER size{};
+    os(GetFileSizeEx(lease->node->handle.value, &size) != 0);
+    r.bytes = static_cast<uint64_t>(size.QuadPart);
+    Algorithm a;
+    crypto(BCryptOpenAlgorithmProvider(&a.h, BCRYPT_SHA256_ALGORITHM, nullptr,
+                                       0));
+    DWORD length = 0, used = 0;
+    crypto(BCryptGetProperty(a.h, BCRYPT_OBJECT_LENGTH,
+                             reinterpret_cast<PUCHAR>(&length), sizeof(length),
+                             &used, 0));
+    std::vector<uint8_t> storage(length), buffer(65536);
+    Hash hash;
+    crypto(BCryptCreateHash(a.h, &hash.h, storage.data(), length, nullptr, 0,
+                            0));
+    LARGE_INTEGER zero{};
+    os(SetFilePointerEx(lease->node->handle.value, zero, nullptr, FILE_BEGIN) !=
+       0);
+    uint64_t total = 0;
+    for (;;) {
+      DWORD read = 0;
+      os(ReadFile(lease->node->handle.value, buffer.data(),
+                  static_cast<DWORD>(buffer.size()), &read, nullptr) != 0);
+      if (!read)
+        break;
+      total += read;
+      crypto(BCryptHashData(hash.h, buffer.data(), read, 0));
+    }
+    if (total != r.bytes)
+      fail(CAF_POLICY, ERROR_FILE_INVALID);
+    crypto(BCryptFinishHash(hash.h, r.sha256, 32, 0));
+    std::memcpy(lease->node->digest.data(), r.sha256, 32);
+    lease->node->sealed = lease->sealed = true;
+    fill(r, *lease->node);
+  });
+}
+extern "C" caf_result caf_writer_release(uint64_t id) {
+  return source_boundary([&](caf_result &) {
+    std::shared_ptr<WriterLease> lease;
+    {
+      std::lock_guard<std::mutex> guard(mutex);
+      auto it = writers.find(id);
+      if (it == writers.end())
+        fail(CAF_HANDLE, ERROR_INVALID_HANDLE);
+      if (it->second.use_count() != 1)
+        fail(CAF_POLICY, ERROR_BUSY);
+      lease = std::move(it->second);
+      writers.erase(it);
     }
   });
 }

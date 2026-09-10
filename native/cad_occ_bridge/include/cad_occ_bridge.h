@@ -1,6 +1,7 @@
 #pragma once
 #include "cad_asset_fs.h"
 #include "flcad_occ_source.h"
+#include "flcad_occ_brep_stream.h"
 #ifdef COB_BUILD
 #define COB_API __declspec(dllexport)
 #else
@@ -37,6 +38,11 @@ typedef struct cob_result_v1 {
   int32_t cleanup_code;
   char cleanup_message[256];
 } cob_result_v1;
+typedef struct cob_stream_result_v1 {
+  uint32_t size, version, status, phase;
+  caf_result filesystem;
+  occ_stream_result_v1 native_result;
+} cob_stream_result_v1;
 /* Module anchors are addresses of exported version functions, not OS handles.
  * Library references and filesystem lease remain owned by the operation until
  * close succeeds. Native token stays in escrow until adopt. Nothing serialized.
@@ -55,6 +61,15 @@ COB_API int32_t cob_cancel_v1(uint64_t operation);
 COB_API int32_t cob_adopt_v1(uint64_t operation);
 COB_API int32_t cob_close_v1(uint64_t operation, cob_result_v1 *out,
                              uint32_t size);
+/* Synchronous C-to-C output. `token` remains process-local and is borrowed
+ * only for this call. Writer is an already-acquired opaque CAF writer lease;
+ * Dart owns its acquire/seal/release lifetime. kind 1 emits BREP, kind 2 emits
+ * binary STL from a shape. */
+COB_API uint32_t cob_stream_result_size_v1(void);
+COB_API int32_t cob_shape_write_v1(const void *caf_anchor,
+                                   const void *occ_anchor, uint64_t writer,
+                                   const char *token, uint32_t kind,
+                                   cob_stream_result_v1 *out, uint32_t size);
 #ifdef __cplusplus
 }
 #endif

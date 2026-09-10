@@ -79,6 +79,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   CommandManager? _commands;
   Object? recognitionSession, sketchSession, surfaceSession;
   final Map<String, Object?> _state = {};
+  final Map<String, ManagedEntityGeometry> _managedGeometry = {};
 
   // Native producers remain outside this documentary transaction protocol.
   final Object _runtimeIdentity = Object();
@@ -106,6 +107,23 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   bool get canUndo => _undo.isNotEmpty;
   bool get canRedo => _redo.isNotEmpty;
   Set<String> get selection => geometrySelection.selectedIds;
+
+  /// Managed imports install this only after their documentary commit. It is
+  /// process-local and therefore deliberately has no document representation.
+  // ignore: unused_element
+  void _installManagedGeometry(String entityId, ManagedEntityGeometry value) {
+    if (_managedGeometry.containsKey(entityId)) {
+      throw StateError('Managed geometry already installed for entity');
+    }
+    _managedGeometry[entityId] = value;
+  }
+
+  // ignore: unused_element
+  Future<void> _removeManagedGeometry(String entityId) async {
+    // Scene removal is performed by the caller before releasing native state.
+    final value = _managedGeometry.remove(entityId);
+    if (value != null) await value.dispose();
+  }
 
   void attachCommands(CommandManager value) {
     final current = _commands;

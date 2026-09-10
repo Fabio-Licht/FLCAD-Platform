@@ -96,6 +96,16 @@ CAF_API caf_result caf_source_prepare(uint64_t lease, caf_source_poll_v1 poll,
 CAF_API caf_result caf_source_check(uint64_t lease, caf_source_poll_v1 poll,
                                     void *context);
 CAF_API caf_result caf_source_release(uint64_t lease);
+/* Writer lease ABI 1. A writer is restricted to a newly-created, unsealed
+ * regular file. It pins the object and is the only mutable authority until it
+ * seals or releases it. This is intended for synchronous native stream sinks;
+ * it does not expose a pathname or a Win32 handle. */
+CAF_API uint32_t caf_writer_version(void);
+CAF_API caf_result caf_writer_acquire(uint64_t object);
+CAF_API caf_result caf_writer_write(uint64_t lease, const uint8_t *data,
+                                    uint32_t bytes);
+CAF_API caf_result caf_writer_seal(uint64_t lease);
+CAF_API caf_result caf_writer_release(uint64_t lease);
 
 #ifdef __cplusplus
 }

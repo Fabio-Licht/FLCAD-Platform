@@ -34,11 +34,12 @@ struct Handle {
 struct Node {
   Handle handle;
   std::mutex io;
-  uint32_t source_leases = 0;
+  uint32_t source_leases = 0, writer_leases = 0;
   FILE_ID_INFO identity{};
   std::shared_ptr<Node> parent;
   FILE_ID_INFO root{};
   bool directory = false, created = false, sealed = false, verified = false;
+  std::array<uint8_t, 32> digest{};
 };
 std::mutex mutex;
 std::unordered_map<uint64_t, std::shared_ptr<Node>> objects;
@@ -252,7 +253,7 @@ caf_result caf_read(uint64_t id, uint64_t offset, uint8_t *data,
                     uint32_t capacity) {
   return boundary([&](caf_result &r) {
     auto n = get(id);
-    if (n->source_leases)
+    if (n->source_leases || n->writer_leases)
       fail(CAF_POLICY, ERROR_BUSY);
     if (n->directory || !data || capacity > 65536 || offset > INT64_MAX)
       fail(CAF_ARGUMENT);
@@ -398,7 +399,7 @@ caf_result caf_write(uint64_t id, const uint8_t *data, uint32_t bytes) {
   return boundary([&](caf_result &r) {
     auto n = get(id);
     r.object = id;
-    if (n->source_leases)
+    if (n->source_leases || n->writer_leases)
       fail(CAF_POLICY, ERROR_BUSY);
     if (n->directory || !n->created || n->sealed || (!data && bytes) ||
         bytes > 65536)
@@ -430,7 +431,7 @@ caf_result caf_seal(uint64_t id, uint64_t expected) {
     r.object = id;
     if (n->directory)
       fail(CAF_ARGUMENT);
-    if (n->source_leases)
+    if (n->source_leases || n->writer_leases)
       fail(CAF_POLICY, ERROR_BUSY);
     CAF_CHECKPOINT("before_seal");
     if (n->created)
@@ -467,8 +468,11 @@ caf_result caf_seal(uint64_t id, uint64_t expected) {
     if (total != expected)
       fail(CAF_POLICY, ERROR_FILE_INVALID);
     crypto(BCryptFinishHash(hash.h, r.sha256, 32, 0));
+    std::memcpy(n->digest.data(), r.sha256, 32);
     n->sealed = true;
     fill(r, *n);
+    if (n->sealed)
+      std::memcpy(r.sha256, n->digest.data(), 32);
     CAF_CHECKPOINT("after_seal");
   });
 }
@@ -481,6 +485,8 @@ caf_result caf_info(uint64_t id) {
       LARGE_INTEGER size{};
       os(GetFileSizeEx(n->handle.value, &size) != 0);
       r.bytes = static_cast<uint64_t>(size.QuadPart);
+      if (n->sealed)
+        std::memcpy(r.sha256, n->digest.data(), 32);
     }
   });
 }
@@ -489,7 +495,7 @@ caf_result caf_rename(uint64_t id, uint64_t dest, const uint16_t *name,
   return boundary([&](caf_result &r) {
     auto n = get(id), d = get(dest);
     r.object = id;
-    if (n->source_leases)
+    if (n->source_leases || n->writer_leases)
       fail(CAF_POLICY, ERROR_BUSY);
     if (!n->created || !d->directory || (!n->directory && !n->sealed))
       fail(CAF_POLICY);
@@ -525,7 +531,8 @@ caf_result caf_rename(uint64_t id, uint64_t dest, const uint16_t *name,
 caf_result caf_close(uint64_t id) {
   return boundary([&](caf_result &) {
     const auto it = objects.find(id);
-    if (it != objects.end() && it->second->source_leases)
+    if (it != objects.end() &&
+        (it->second->source_leases || it->second->writer_leases))
       fail(CAF_POLICY, ERROR_BUSY);
     if (!objects.erase(id))
       fail(CAF_HANDLE, ERROR_INVALID_HANDLE);

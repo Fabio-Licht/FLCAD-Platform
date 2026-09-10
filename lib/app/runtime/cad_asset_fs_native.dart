@@ -111,6 +111,43 @@ final class CadAssetNativeFs {
     }
   }
 
+  /// Internal sink scope for a newly-created staging file. The callback gets
+  /// only an opaque writer lease and the CAF ABI anchor. It must not retain
+  /// either value. On success CAF seals the same object and returns its durable
+  /// identity; otherwise the unsealed staging file remains for the journal.
+  Future<Map<String, dynamic>> withWriterCapability(
+    int file,
+    Future<void> Function(int writer, Pointer<Void> anchor) operation,
+  ) async {
+    _live(file);
+    final acquired = _accept(_api.writerAcquire(file), 'acquire writer');
+    final writer = acquired.object;
+    try {
+      await operation(
+        writer,
+        _api.library
+            .lookup<NativeFunction<Uint32 Function()>>('caf_writer_version')
+            .cast(),
+      );
+      final result = _accept(_api.writerSeal(writer), 'seal writer');
+      String hex(Array<Uint8> a, int count) => List.generate(
+        count,
+        (i) => a[i].toRadixString(16).padLeft(2, '0'),
+      ).join();
+      return {
+        'size': result.bytes,
+        'volume': result.volume.toRadixString(16),
+        'fileId': hex(result.fileId, 16),
+        'sha256': hex(result.hash, 32),
+        'state': 'sealed',
+      };
+    } finally {
+      try {
+        _accept(_api.writerRelease(writer), 'release writer');
+      } finally {}
+    }
+  }
+
   Future<void> shutdown() => _shutdown ??= _drain();
   Future<void> _drain() async {
     _closing = true;
@@ -184,7 +221,11 @@ final class CadAssetNativeFs {
   Map<String, dynamic> info(int id, {bool digest = false}) {
     _live(id);
     var r = _accept(_api.info(id), 'info');
-    if (digest) r = _accept(_api.seal(id, r.bytes), 'seal');
+    final hasDigest = List<bool>.generate(
+      32,
+      (index) => r.hash[index] != 0,
+    ).contains(true);
+    if (digest && !hasDigest) r = _accept(_api.seal(id, r.bytes), 'seal');
     String hex(Array<Uint8> a, int size) => List.generate(
       size,
       (i) => a[i].toRadixString(16).padLeft(2, '0'),
@@ -272,6 +313,53 @@ final class CadAssetNativeFs {
     }
     _closed = true;
   }
+
+  /// Opens a locator once through CAF. The locator is presentation-only after
+  /// this returns: callers must use [NativeOpenedSource.file] and [identity].
+  /// No Dart IO, hash, format inspection or reopen occurs here.
+  static NativeOpenedSource openExternal(String locator) {
+    if (!p.isAbsolute(locator)) {
+      throw ArgumentError.value(
+        locator,
+        'locator',
+        'Absolute locator required',
+      );
+    }
+    final parent = p.dirname(locator);
+    final leaf = p.basename(locator);
+    if (leaf.isEmpty || leaf == '.' || leaf == '..') {
+      throw ArgumentError.value(locator, 'locator', 'File locator required');
+    }
+    final filesystem = CadAssetNativeFs(parent);
+    try {
+      final file = filesystem.child(filesystem.root, leaf);
+      // CAF seals and hashes the same live object before it becomes a source.
+      final identity = filesystem.info(file, digest: true);
+      return NativeOpenedSource._(filesystem, file, locator, identity);
+    } catch (_) {
+      filesystem.dispose();
+      rethrow;
+    }
+  }
+}
+
+/// Borrowed external object opened once by CAF at transaction admission.
+/// It is deliberately non-serializable and must be disposed after the source
+/// operation. `locator` has no authority after construction.
+final class NativeOpenedSource {
+  NativeOpenedSource._(this.filesystem, this.file, this.locator, this.identity);
+  final CadAssetNativeFs filesystem;
+  final int file;
+  final String locator;
+  final Map<String, dynamic> identity;
+  bool _closed = false;
+  String get displayName => p.basename(locator);
+  void dispose() {
+    if (_closed) return;
+    _closed = true;
+    filesystem.close(file);
+    filesystem.dispose();
+  }
 }
 
 final class _Api {
@@ -294,7 +382,13 @@ final class _Api {
     final gateway = library.lookupFunction<Uint32 Function(), int Function()>(
       'caf_gateway_version',
     );
-    if (abi() != 1 || gateway() != 1 || sizeOf<_Result>() != 96) {
+    final writer = library.lookupFunction<Uint32 Function(), int Function()>(
+      'caf_writer_version',
+    );
+    if (abi() != 1 ||
+        gateway() != 1 ||
+        writer() != 1 ||
+        sizeOf<_Result>() != 96) {
       throw StateError('Incompatible CAD filesystem ABI');
     }
     root = library
@@ -311,6 +405,13 @@ final class _Api {
     createFile = library.lookupFunction<_ChildN, _ChildD>('caf_create_file');
     info = library.lookupFunction<_UnaryN, _UnaryD>('caf_info');
     close = library.lookupFunction<_UnaryN, _UnaryD>('caf_close');
+    writerAcquire = library.lookupFunction<_UnaryN, _UnaryD>(
+      'caf_writer_acquire',
+    );
+    writerSeal = library.lookupFunction<_UnaryN, _UnaryD>('caf_writer_seal');
+    writerRelease = library.lookupFunction<_UnaryN, _UnaryD>(
+      'caf_writer_release',
+    );
     lock = library.lookupFunction<_UnaryN, _UnaryD>('caf_lock');
     seal = library
         .lookupFunction<
@@ -342,6 +443,7 @@ final class _Api {
   late final _Result Function(Pointer<Uint16>, int) root;
   late final _ChildD openDir, createDir, createPinnedDir, openFile, createFile;
   late final _UnaryD info, close, lock;
+  late final _UnaryD writerAcquire, writerSeal, writerRelease;
   late final _Result Function(int, int) seal;
   late final _Result Function(int, Pointer<Uint8>, int) write;
   late final _Result Function(int, int, Pointer<Uint8>, int) read;

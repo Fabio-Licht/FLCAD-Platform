@@ -19,6 +19,24 @@ class Gate {
   }
 }
 
+Map<String, dynamic> managedBrepData() => {
+  'schema': 'flcad.managed-brep-assets',
+  'version': 1,
+  'shapeAssetId': {
+    'schema': 'flcad.geometry-asset',
+    'version': 1,
+    'id': 'ga1_00000000000000000000000000000001',
+  },
+  'displayMeshAssetId': {
+    'schema': 'flcad.geometry-asset',
+    'version': 1,
+    'id': 'ga1_00000000000000000000000000000002',
+  },
+  'shapeSha256': 'a' * 64,
+  'displayMeshSha256': 'b' * 64,
+  'meshOnly': false,
+};
+
 class Repository extends CadDocumentRepository {
   Future<void> Function(CadDocument)? onSave;
   Future<void> Function(String)? onLoad;

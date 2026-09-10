@@ -132,6 +132,7 @@ final class CadGeometryStagingOperation {
   final _planned = <GeometryAssetId>[];
   final _shapes = <OwnedNativeShape>[];
   final _meshes = <OwnedNativeMesh>[];
+  final _sealedNativeAssets = <NativeSealedStagedAsset>{};
   bool _active = true, _accepting = true;
   Future<void> _tail = Future.value();
   Future<void>? _finishing;
@@ -400,6 +401,71 @@ final class CadGeometryStagingOperation {
     await _update(complete, CadAssetStageState.preparing);
   });
 
+  /// 2B2A2-only native payload path. OCCT writes directly to a CAF writer
+  /// lease; Dart receives only the sealed metadata. This deliberately lives on
+  /// the transaction-scoped staging operation rather than on a public export
+  /// API.
+  /// Produces a sealed, operation-owned capability. Its CAF object ID remains
+  /// private; callers can only consume the same object through a source lease
+  /// and must release it before the existing directory promotion.
+  Future<NativeSealedStagedAsset> writeNativeShape(
+    GeometryAssetId asset,
+    CadAssetFile kind,
+    OpenCascadeKernelAdapter kernel,
+    OwnedNativeShape owner,
+  ) => _run(() async {
+    _preparing();
+    if (kind != CadAssetFile.brep && kind != CadAssetFile.display) {
+      throw ArgumentError.value(kind, 'kind', 'Native shape payload required');
+    }
+    final next = _copy();
+    final files = _asset(next, asset)['files'] as Map<String, dynamic>;
+    if (files.containsKey(kind.name)) {
+      throw StateError('Asset file already acquired');
+    }
+    files[kind.name] = {'status': 'writing', 'allowEmpty': false};
+    await _update(next, CadAssetStageState.preparing);
+    final target = _paths.file(
+      path.join(_assetDirectory(asset), kind.relativePath),
+    );
+    await _paths.directories(target.parent.path, authorize: _validate);
+    await _paths.check(target.path);
+    _validate();
+    await target.create(exclusive: true);
+    final lease = owner.borrow();
+    Map<String, dynamic>? sealed;
+    NativeSealedStagedAsset? retained;
+    try {
+      _validate();
+      sealed = await kernel.streamShapeIntoStaging(
+        filesystem: _paths.native,
+        file: _paths.openFile(target.path),
+        shape: lease,
+        displayStl: kind == CadAssetFile.display,
+      );
+      _validate();
+      if (sealed['size'] == 0) {
+        throw StateError('Empty native geometry payload');
+      }
+      retained = NativeSealedStagedAsset._(this, target.path, {...sealed});
+      _sealedNativeAssets.add(retained);
+    } catch (error, stack) {
+      _abort(error, stack);
+      rethrow;
+    } finally {
+      lease.release();
+      if (retained == null) _paths.release(target.path);
+    }
+    final complete = _copy();
+    (_asset(complete, asset)['files'] as Map)[kind.name] = {
+      ...sealed,
+      'status': 'written',
+      'allowEmpty': false,
+    };
+    await _update(complete, CadAssetStageState.preparing);
+    return retained;
+  });
+
   /// External source is borrowed: only its byte stream enters the owned stage.
   Future<void> copySource(GeometryAssetId asset, File source) =>
       write(asset, CadAssetFile.source, _storage.read(source));
@@ -452,6 +518,9 @@ final class CadGeometryStagingOperation {
   Future<PreparedGeometryAssets> promote() => _run(() async {
     if (state != CadAssetStageState.prepared) {
       throw StateError('Only prepared staging may commit');
+    }
+    if (_sealedNativeAssets.any((asset) => !asset.isReleased)) {
+      throw StateError('Sealed native capability must close before promotion');
     }
     return _ProjectAssetLocks.run(
       _paths,
@@ -587,7 +656,10 @@ final class CadGeometryStagingOperation {
       CadAssetStageState.committed,
       CadAssetStageState.quarantined,
     },
-    CadAssetStageState.committed: {CadAssetStageState.quarantined},
+    CadAssetStageState.committed: {
+      CadAssetStageState.committed,
+      CadAssetStageState.quarantined,
+    },
     CadAssetStageState.rollingBack: {
       CadAssetStageState.rolledBack,
       CadAssetStageState.quarantined,
@@ -741,6 +813,13 @@ final class CadGeometryStagingOperation {
       recordCleanup(error, stack);
     }
     // Promotion has released the project lock before native disposal waits.
+    for (final asset in _sealedNativeAssets.toList()) {
+      try {
+        await asset._releaseAfterDrain();
+      } catch (error, stack) {
+        recordCleanup(error, stack);
+      }
+    }
     for (final owner in [..._shapes, ..._meshes]) {
       try {
         await owner.dispose();
@@ -776,6 +855,79 @@ final class CadGeometryStagingOperation {
     if (cleanupError != null) {
       Error.throwWithStackTrace(cleanupError!, cleanupStack!);
     }
+  }
+}
+
+/// A sealed CAF payload retained exclusively by its staging operation.
+///
+/// The native capability is deliberately private. [metadata] is the immutable
+/// identity recorded by the operation: size, SHA-256, volume and file ID. The
+/// capability survives only until the C-to-C source call returns and custody
+/// has captured the imported resource; directory promotion then reopens by
+/// anchored relative components and compares against this same metadata.
+final class NativeSealedStagedAsset {
+  NativeSealedStagedAsset._(
+    this._operation,
+    this._path,
+    Map<String, dynamic> sealed,
+  ) : metadata = Map.unmodifiable(sealed);
+
+  final CadGeometryStagingOperation _operation;
+  final String _path;
+  final Map<String, dynamic> metadata;
+  bool _released = false;
+  bool _sourceLeaseActive = false;
+
+  bool get isReleased => _released;
+
+  void _ensureLive() {
+    if (_released) throw StateError('Sealed staged capability is released');
+  }
+
+  /// Reads exactly the sealed CAF object through the native source bridge.
+  /// This method never supplies a pathname and no payload bytes enter Dart.
+  Future<NativeSourceResource> readAs(
+    OpenCascadeKernelAdapter kernel, {
+    required NativeResourceKind kind,
+    required NativeSourceCancellation cancellation,
+    String? bridgePath,
+  }) => _operation._run(() async {
+    _operation._validate();
+    _ensureLive();
+    if (_sourceLeaseActive) throw StateError('Source lease already active');
+    _sourceLeaseActive = true;
+    try {
+      final captured = await kernel.readOwnedAsset(
+        filesystem: _operation._paths.native,
+        file: _operation._paths.openFile(_path),
+        expected: metadata,
+        kind: kind,
+        cancellation: cancellation,
+        bridgePath: bridgePath,
+      );
+      _operation._validate();
+      return captured;
+    } finally {
+      _sourceLeaseActive = false;
+    }
+  });
+
+  /// Idempotent. A release requested during source consumption waits for the
+  /// admitted operation tail, then closes only this operation's capability.
+  /// It never deletes or otherwise mutates the retained staging evidence.
+  Future<void> release() async {
+    if (_released) return;
+    await _operation._tail;
+    await _releaseAfterDrain();
+  }
+
+  Future<void> _releaseAfterDrain() async {
+    if (_released) return;
+    if (_sourceLeaseActive) {
+      throw StateError('Cannot close sealed capability during source lease');
+    }
+    _released = true;
+    _operation._paths.release(_path);
   }
 }
 

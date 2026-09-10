@@ -73,7 +73,10 @@ class CadDocumentSceneProjection {
           transparent: entity.data['sceneTransparent'] as bool? ?? false,
         ),
       );
-      if (entity.shape != null && meshes != null && meshes.supported) {
+      if (entity.shape != null &&
+          entity.data['managedBrepAssets'] == null &&
+          meshes != null &&
+          meshes.supported) {
         await meshes.upsert(entityId: entity.id, shape: entity.shape!);
       }
     }
@@ -113,6 +116,7 @@ class CadDocumentSceneProjection {
         ),
       );
       if (entity.shape != null &&
+          entity.data['managedBrepAssets'] == null &&
           displayMeshes != null &&
           displayMeshes.supported) {
         await displayMeshes.upsert(entityId: entity.id, shape: entity.shape!);

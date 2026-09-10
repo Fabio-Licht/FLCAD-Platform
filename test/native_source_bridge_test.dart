@@ -74,6 +74,13 @@ void main() {
       () async {
         final result = await read(brep: brep);
         expect(adapter.custodyDiagnostics!.allocations, 1);
+        expect(
+          result.descriptor.kind,
+          brep ? NativeResourceKind.shape : NativeResourceKind.mesh,
+        );
+        expect(result.descriptor.fingerprint, isNotEmpty);
+        expect(result.descriptor.bounds, hasLength(6));
+        expect(result.descriptor.hasNormals, isFalse);
         if (brep) {
           final lease = result.shape!.borrow();
           expect(await adapter.diagnoseOwned(lease), isA<List>());
@@ -235,6 +242,55 @@ void main() {
     expect(both[0].shape!.identity, isNot(both[1].mesh!.identity));
     await Future.wait(both.map((r) => r.dispose()));
   });
+  test(
+    'BREP sink writes through CAF writer without Dart byte transport',
+    () async {
+      final resource = await read();
+      final target = fs.child(fs.root, 'native-output.brep', create: true);
+      final lease = resource.shape!.borrow();
+      try {
+        final sealed = await adapter.streamShapeIntoStaging(
+          filesystem: fs,
+          file: target,
+          shape: lease,
+          displayStl: false,
+          bridgePath: bridge,
+        );
+        expect(sealed['state'], 'sealed');
+        expect(sealed['size'], greaterThan(0));
+        expect(sealed['sha256'], isNotEmpty);
+        expect(fs.info(target, digest: true)['sha256'], sealed['sha256']);
+      } finally {
+        lease.release();
+        fs.close(target);
+        await resource.dispose();
+      }
+    },
+  );
+  test(
+    'STL display sink writes through CAF writer without Dart byte transport',
+    () async {
+      final resource = await read();
+      final target = fs.child(fs.root, 'native-display.stl', create: true);
+      final lease = resource.shape!.borrow();
+      try {
+        final sealed = await adapter.streamShapeIntoStaging(
+          filesystem: fs,
+          file: target,
+          shape: lease,
+          displayStl: true,
+          bridgePath: bridge,
+        );
+        expect(sealed['state'], 'sealed');
+        expect(sealed['size'], greaterThan(84));
+        expect(fs.info(target, digest: true)['sha256'], sealed['sha256']);
+      } finally {
+        lease.release();
+        fs.close(target);
+        await resource.dispose();
+      }
+    },
+  );
   test('missing bridge fails explicitly before filesystem effect', () async {
     await expectLater(
       read(library: p.join(root.path, 'missing.dll')),

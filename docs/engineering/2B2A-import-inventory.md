@@ -1,3 +1,85 @@
+# 2B2A2 inventory refresh at 9e60182
+
+Initial checkout verified clean on `fix/cad-runtime-transaction-coordinator`,
+HEAD `9e601824e83fd87b2cc646410975449ce6f316a8`. The historical inventory below
+is retained as history, not as a description of the present native APIs.
+
+The old native source/sink blocker has changed: OCCT now has BREP/STL sources
+and BREP/STL sinks. `cad_occ_bridge` connects CAF sources to OCCT and captures
+resources in custody. Its present API does not yet connect OCCT sinks to CAF
+writer leases. This is required integration work, not evidence that native
+serialization remains pathname-only.
+
+## Current consumer map, before migration
+
+| Consumer | Current authority/effects | 2B2A2 disposition |
+|---|---|---|
+| DesktopCadController.pickAndImport -> ImportEngine.execute | STL path import before runtime queue; source copy and import history writes | To migrate BREP/STL; not migrated yet |
+| CadImportFormat / desktop picker | No BREP enum/entry; STL returns path-only XFile | Add explicit BREP entry and resolve source-capability contract |
+| ImportEngine STEP/IGES | Native shape path import | Outside BREP/STL scope |
+| DesktopCadController.restoreProjectGeometry | history.jsonl fallback reimports registered STL pathname | Explicit compatibility for old documents only |
+| CadRuntime.registerImport | Selection/transient changes before mutate admission | Do not reuse for managed producers |
+| CadRuntime._loadedShape / officialExportShape | Restores BREP from NativeShapes | Managed asset branch required; retain legacy branch for old entities |
+| CadRuntime._persistNativeShape / persistShape | Writes NativeShapes BREP | New BREP/STL must never enter this branch |
+| CadDocumentSceneProjection.synchronize / synchronizeChanges | Calls display pipeline whenever shape exists | Managed projection required for import, open and Redo |
+| KernelDisplayMeshPipeline.upsert | BREP persist/restore, STL generation to DisplayMeshes, STL path reimport | New managed entities must bypass this whole pipeline |
+| MeshApi / MeshEngine.importStl,reload | Independent mesh path import, checksum reopening and repository writes | Separate API consumer; must not be silently advertised as migrated |
+| FEL mesh OPEN/IMPORT STL | MeshApi delegation | Default native_commands wiring injects UnavailableGeometryKernel; independently injected kernels still use legacy MeshEngine |
+| FEL kernel STEP/IGES import | Native path interchange, state.current | Outside current scope |
+| ExportEngine STL | Shape tessellation to export pathname | Export, outside import migration |
+| OperationalReverseEngineeringController persistShape callers | Persistent shapes from other producers | Pending other producer sub-blocks; unchanged |
+| OpenCascadeRuntimeRepository | Legacy NativeShapes directories and JSON metadata | Unmanaged legacy utility |
+| ProjectRepository directory list | Creates legacy NativeShapes folder | Directory provisioning is not an import consumer; unchanged |
+| OpenCascadeKernelAdapter / OpenCascadeFFI legacy methods | importFile, restoreShape, persistShape, importStl, mesh | Preserve ABI for legacy consumers; instrument zero usage in new managed flows |
+| native flcad_occ_import_shape/import_stl/export_shape/mesh | Legacy C pathname APIs | Retain; new producers must use stream APIs instead |
+| Native and Dart tests calling legacy APIs | Legacy regression and stream-equivalence tests | Test, not a productive migration escape |
+
+## Representation and composition confirmed in current code
+
+STL does not require shape: CadDocumentEntity and ImportedCadDocument have
+independent optional shape/mesh fields. A managed STL must remain mesh-only and
+must not claim a BREP. BREP needs its actual kernel BREP plus display STL assets.
+The document can carry durable asset IDs; native owners/tokens belong exclusively
+to the runtime custody table, outside JSON/history snapshots.
+
+One internal transaction must compose staging, candidate/history/projection,
+promotion and document installation. Public withGeometryStaging/mutate/
+registerImport cannot be nested. Existing staging attachment transfers ownership
+and disposes attached resources even after asset promotion: it is not an owner
+handoff to the document. Transfer must occur after confirmed document commit.
+The wrapper also validates the old runtime revision after callback return;
+composition must recognize an actual committed document, not mislabel it stale.
+
+Undo/open/Redo require managed asset reads and candidate owners before install.
+Only after installation may old nonreferenced owners be released. A failure
+following a real document commit must retain possibly referenced resources.
+
+## Source selection contract selected for 2B2A2
+
+The installed Windows picker returns a pathname, not a held object identity.
+The selected design opens it exactly once through CAF when the runtime admits
+the import. No Dart pre-read, validation, hash, format detection or later reopen
+is permitted. CAF's file capability, identity, size and source C-to-C ABI are
+then the only read authority; the locator is retained only for presentation.
+
+**Guarantee:** “A importação corresponde ao objeto aberto pelo CAF no momento
+da admissão. O picker atual não fornece identidade/handle, portanto não existe
+garantia de identidade entre a exibição do picker e a abertura inicial.”
+
+If a locator is replaced before CAF opens it, the operation either imports or
+rejects the object actually opened and makes no claim about the picker object.
+If replacement happens after CAF opens it, the anchored handle remains in use;
+CAF identity/page hash/final SHA checks reject material change rather than
+following the new directory entry. A future Windows picker may return a handle
+or CAF capability at confirmation time to harden the pre-open interval. That
+picker is explicitly outside 2B2A2.
+
+Three independent readonly preliminary reviews confirmed this consumer map,
+mesh-only STL support, required staging composition and ownership boundaries.
+They are architecture reviews, not approval of a completed migration.
+
+---
+
 # 2B2A — inventário prévio de importação e impedimento de contrato
 
 Base inspecionada: `f275adfeec142223bd31d376ebcc9407c97ad2c7`, branch

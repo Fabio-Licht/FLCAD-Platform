@@ -39,6 +39,56 @@ final class GeometryAssetId {
   String toString() => value;
 }
 
+/// Durable-only representation for a managed BREP import. This is safe to put
+/// in CadDocumentEntity.data: it contains neither native tokens nor CAF
+/// capabilities. Each referenced payload has the seal produced by CAF.
+final class ManagedBrepAssets {
+  const ManagedBrepAssets({
+    required this.shape,
+    required this.display,
+    required this.shapeSha256,
+    required this.displaySha256,
+  });
+  final GeometryAssetId shape, display;
+  final String shapeSha256, displaySha256;
+  Map<String, dynamic> toJson() => {
+    'schema': 'flcad.managed-brep-assets',
+    'version': 1,
+    'shapeAssetId': shape.toJson(),
+    'displayMeshAssetId': display.toJson(),
+    'shapeSha256': shapeSha256,
+    'displayMeshSha256': displaySha256,
+    'meshOnly': false,
+  };
+  factory ManagedBrepAssets.fromJson(Map<String, dynamic> json) {
+    if (json['schema'] != 'flcad.managed-brep-assets' ||
+        json['version'] != 1 ||
+        json['meshOnly'] != false ||
+        json['shapeAssetId'] is! Map ||
+        json['displayMeshAssetId'] is! Map ||
+        json['shapeSha256'] is! String ||
+        json['displayMeshSha256'] is! String) {
+      throw const FormatException('Invalid managed BREP asset reference');
+    }
+    final shapeHash = json['shapeSha256'] as String;
+    final displayHash = json['displayMeshSha256'] as String;
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(shapeHash) ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(displayHash)) {
+      throw const FormatException('Invalid managed BREP asset hash');
+    }
+    return ManagedBrepAssets(
+      shape: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['shapeAssetId'] as Map),
+      ),
+      display: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['displayMeshAssetId'] as Map),
+      ),
+      shapeSha256: shapeHash,
+      displaySha256: displayHash,
+    );
+  }
+}
+
 /// Trusted IO seam for deterministic fault injection and streaming instrumentation.
 class CadAssetStorage {
   const CadAssetStorage();

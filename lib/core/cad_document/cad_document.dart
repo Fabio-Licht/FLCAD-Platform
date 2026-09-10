@@ -43,19 +43,56 @@ class CadDocumentEntity {
   };
 
   factory CadDocumentEntity.fromJson(Map<String, dynamic> json) =>
-      CadDocumentEntity(
-        id: json['id'] as String,
-        kind: CadDocumentEntityKind.values.byName(json['kind'] as String),
-        data: Map<String, dynamic>.from(json['data'] as Map? ?? const {}),
-        shape: json['shape'] == null
-            ? null
-            : ShapeHandle.fromJson(
-                Map<String, dynamic>.from(json['shape'] as Map),
-              ),
-        mesh: json['mesh'] == null
-            ? null
-            : _meshFromJson(Map<String, dynamic>.from(json['mesh'] as Map)),
-      );
+      _fromJson(json);
+
+  static CadDocumentEntity _fromJson(Map<String, dynamic> json) {
+    final data = Map<String, dynamic>.from(json['data'] as Map? ?? const {});
+    final managed = data['managedBrepAssets'];
+    if (managed != null) {
+      // The asset object is a strict durable-document contract. Import here
+      // avoids defaults during open/snapshot/Undo reconstruction.
+      _validateManagedBrepAssets(Map<String, dynamic>.from(managed as Map));
+    }
+    return CadDocumentEntity(
+      id: json['id'] as String,
+      kind: CadDocumentEntityKind.values.byName(json['kind'] as String),
+      data: data,
+      shape: json['shape'] == null
+          ? null
+          : ShapeHandle.fromJson(
+              Map<String, dynamic>.from(json['shape'] as Map),
+            ),
+      mesh: json['mesh'] == null
+          ? null
+          : _meshFromJson(Map<String, dynamic>.from(json['mesh'] as Map)),
+    );
+  }
+
+  static void _validateManagedBrepAssets(Map<String, dynamic> value) {
+    if (value['schema'] != 'flcad.managed-brep-assets' ||
+        value['version'] != 1 ||
+        value['meshOnly'] != false ||
+        value['shapeAssetId'] is! Map ||
+        value['displayMeshAssetId'] is! Map ||
+        value['shapeSha256'] is! String ||
+        value['displayMeshSha256'] is! String ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(value['shapeSha256'] as String) ||
+        !RegExp(r'^[0-9a-f]{64}$')
+            .hasMatch(value['displayMeshSha256'] as String)) {
+      throw const FormatException('Invalid managed BREP asset reference');
+    }
+    // Keep this core model independent of the runtime asset implementation,
+    // while enforcing its serializable identity schema exactly.
+    for (final key in ['shapeAssetId', 'displayMeshAssetId']) {
+      final id = Map<String, dynamic>.from(value[key] as Map);
+      if (id['schema'] != 'flcad.geometry-asset' ||
+          id['version'] != 1 ||
+          id['id'] is! String ||
+          !RegExp(r'^ga1_[0-9a-f]{32}$').hasMatch(id['id'] as String)) {
+        throw const FormatException('Invalid managed BREP asset ID');
+      }
+    }
+  }
 
   static Map<String, dynamic> _meshJson(KernelMeshHandle value) => {
     'persistentId': value.persistentId,

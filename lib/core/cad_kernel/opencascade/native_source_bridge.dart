@@ -89,9 +89,59 @@ final class _SourceBridgeResult extends Struct {
   external Array<Uint8> cleanupMessage;
 }
 
+final class _StreamOccResult extends Struct {
+  @Uint32()
+  external int version;
+  @Uint32()
+  external int status;
+  @Int32()
+  external int consumerCode;
+  @Uint32()
+  external int acceptedCountValid;
+  @Uint64()
+  external int bytesAccepted;
+  @Uint64()
+  external int triangles;
+  @Array(256)
+  external Array<Uint8> message;
+}
+
+final class _StreamBridgeResult extends Struct {
+  @Uint32()
+  external int size;
+  @Uint32()
+  external int version;
+  @Uint32()
+  external int status;
+  @Uint32()
+  external int phase;
+  external _SourceFsResult filesystem;
+  external _StreamOccResult native;
+}
+
 typedef _SourceActionN =
     Int32 Function(Uint64, Pointer<_SourceBridgeResult>, Uint32);
 typedef _SourceActionD = int Function(int, Pointer<_SourceBridgeResult>, int);
+typedef _ShapeWriteN =
+    Int32 Function(
+      Pointer<Void>,
+      Pointer<Void>,
+      Uint64,
+      Pointer<Utf8>,
+      Uint32,
+      Pointer<_StreamBridgeResult>,
+      Uint32,
+    );
+typedef _ShapeWriteD =
+    int Function(
+      Pointer<Void>,
+      Pointer<Void>,
+      int,
+      Pointer<Utf8>,
+      int,
+      Pointer<_StreamBridgeResult>,
+      int,
+    );
 
 final class _SourceBridgeApi {
   static final _instances = <String, _SourceBridgeApi>{};
@@ -146,6 +196,15 @@ final class _SourceBridgeApi {
     adopt = library.lookupFunction<Int32 Function(Uint64), int Function(int)>(
       'cob_adopt_v1',
     );
+    if (library.lookupFunction<Uint32 Function(), int Function()>(
+          'cob_stream_result_size_v1',
+        )() !=
+        sizeOf<_StreamBridgeResult>()) {
+      throw StateError('Incompatible native stream result layout');
+    }
+    shapeWrite = library.lookupFunction<_ShapeWriteN, _ShapeWriteD>(
+      'cob_shape_write_v1',
+    );
   }
   final String path;
   // Process resident. Operations also retain independent native CAF/OCCT refs.
@@ -163,6 +222,7 @@ final class _SourceBridgeApi {
   begin;
   late final _SourceActionD run, snapshot, close;
   late final int Function(int) cancel, adopt;
+  late final _ShapeWriteD shapeWrite;
 }
 
 Future<int> _sourceWorker(int address, int operation) => Isolate.run(() {
@@ -223,10 +283,178 @@ final class NativeSourceFailure implements Exception {
       'Native source failure: bridge=$bridgeStatus native=$nativeStatus phase=$phase domain=$domain code=$code: $message';
 }
 
+final class NativeGeometryDescriptor {
+  NativeGeometryDescriptor._({
+    required this.kind,
+    required this.resourceType,
+    required this.fingerprint,
+    required this.vertices,
+    required this.triangles,
+    required List<double> bounds,
+    required this.hasNormals,
+  }) : bounds = List.unmodifiable(bounds);
+  final NativeResourceKind kind;
+  final String resourceType, fingerprint;
+  final int vertices, triangles;
+  final List<double> bounds;
+  final bool hasNormals;
+  Map<String, dynamic> toManagedMetadata() => {
+    'schema': 'flcad.native-geometry-descriptor',
+    'version': 1,
+    'kind': kind.name,
+    'type': resourceType,
+    'fingerprint': fingerprint,
+    'vertices': vertices,
+    'triangles': triangles,
+    'bounds': bounds,
+    'hasNormals': hasNormals,
+  };
+}
+
+/// Private-token ownership plus immutable native facts. A callback receives a
+/// custody lease only for its synchronous work; neither the token nor a lease
+/// is serializable or retained by the renderer.
+final class ManagedNativeShape {
+  ManagedNativeShape._(this._owner, this.descriptor);
+  final OwnedNativeShape _owner;
+  final NativeGeometryDescriptor descriptor;
+  bool _transferred = false;
+  Future<T> withLease<T>(Future<T> Function(NativeShapeLease) body) async {
+    if (_transferred) throw StateError('Managed shape was transferred');
+    final lease = _owner.borrow();
+    try {
+      return await body(lease);
+    } finally {
+      lease.release();
+    }
+  }
+
+  ManagedNativeShape transfer() {
+    if (_transferred) throw StateError('Managed shape was transferred');
+    _transferred = true;
+    return ManagedNativeShape._(_owner.transfer(), descriptor);
+  }
+
+  bool get _canTransfer => !_transferred;
+
+  Future<void> dispose() async {
+    if (_transferred) return;
+    _transferred = true;
+    await _owner.dispose();
+  }
+}
+
+final class ManagedNativeDisplayMesh {
+  ManagedNativeDisplayMesh._(this._owner, this.descriptor);
+  final OwnedNativeMesh _owner;
+  final NativeGeometryDescriptor descriptor;
+  bool _transferred = false;
+  Future<T> withLease<T>(Future<T> Function(NativeMeshLease) body) async {
+    if (_transferred) throw StateError('Managed display mesh was transferred');
+    final lease = _owner.borrow();
+    try {
+      return await body(lease);
+    } finally {
+      lease.release();
+    }
+  }
+
+  ManagedNativeDisplayMesh transfer() {
+    if (_transferred) throw StateError('Managed display mesh was transferred');
+    _transferred = true;
+    return ManagedNativeDisplayMesh._(_owner.transfer(), descriptor);
+  }
+
+  bool get _canTransfer => !_transferred;
+
+  Future<void> dispose() async {
+    if (_transferred) return;
+    _transferred = true;
+    await _owner.dispose();
+  }
+
+  /// Copies render data while the custody lease is live. The scene receives no
+  /// token or handle; normals are reconstructed deterministically by the
+  /// existing canvas normal pipeline from nodes and triangle indices.
+  Future<Map<String, dynamic>> prepareSceneGeometry(
+    OpenCascadeKernelAdapter kernel,
+  ) => withLease((lease) async {
+    final bridge = kernel._nativeBridge;
+    if (bridge is! OpenCascadeFFI) {
+      throw UnsupportedError(
+        'Managed mesh projection requires OpenCascade FFI',
+      );
+    }
+    final geometry = await bridge.inspectMesh(
+      lease._record.identity._token,
+      vertexCount: descriptor.vertices,
+      triangleCount: descriptor.triangles,
+    );
+    if (geometry.nodes.length != descriptor.vertices * 3 ||
+        geometry.triangles.length != descriptor.triangles * 3 ||
+        geometry.nodes.any((value) => !value.isFinite) ||
+        geometry.triangles.any(
+          (value) => value < 0 || value >= descriptor.vertices,
+        )) {
+      throw StateError('Native mesh does not match its published descriptor');
+    }
+    return {
+      'nodes': List<double>.unmodifiable(geometry.nodes),
+      'triangles': List<int>.unmodifiable(geometry.triangles),
+      'bounds': descriptor.bounds,
+      'normalsOrigin': 'calculatedByAdapter',
+      'hasNativeVertexNormals': false,
+    };
+  });
+}
+
+final class ManagedEntityGeometry {
+  ManagedEntityGeometry(this.shape, this.displayMesh);
+  final ManagedNativeShape shape;
+  final ManagedNativeDisplayMesh displayMesh;
+  bool _transferred = false;
+  ManagedEntityGeometry transfer() {
+    if (_transferred) throw StateError('Managed geometry was transferred');
+    // Both checks occur before either authority is revoked. The two transfer
+    // calls are synchronous and contain no callback, await or native effect.
+    if (!shape._canTransfer || !displayMesh._canTransfer) {
+      throw StateError('Managed geometry has an unavailable component');
+    }
+    final nextShape = shape.transfer();
+    final nextMesh = displayMesh.transfer();
+    _transferred = true;
+    return ManagedEntityGeometry(nextShape, nextMesh);
+  }
+
+  Future<void> dispose() async {
+    if (_transferred) return;
+    _transferred = true;
+    await Future.wait([shape.dispose(), displayMesh.dispose()]);
+  }
+}
+
 final class NativeSourceResource {
-  NativeSourceResource._(this.shape, this.mesh);
+  NativeSourceResource._(this.shape, this.mesh, this.descriptor);
   final OwnedNativeShape? shape;
   final OwnedNativeMesh? mesh;
+  final NativeGeometryDescriptor descriptor;
+  bool _claimed = false;
+  ManagedNativeShape claimShape() {
+    if (_claimed || shape == null) {
+      throw StateError('Shape resource unavailable');
+    }
+    _claimed = true;
+    return ManagedNativeShape._(shape!.transfer(), descriptor);
+  }
+
+  ManagedNativeDisplayMesh claimMesh() {
+    if (_claimed || mesh == null) {
+      throw StateError('Mesh resource unavailable');
+    }
+    _claimed = true;
+    return ManagedNativeDisplayMesh._(mesh!.transfer(), descriptor);
+  }
+
   Future<void> dispose() => shape?.dispose() ?? mesh!.dispose();
 }
 
@@ -306,6 +534,67 @@ final class NativeSourceEffect {
 }
 
 extension NativeSourceBridge on OpenCascadeKernelAdapter {
+  /// Internal 2B2A2 staging primitive. It accepts only a live custody lease and
+  /// a CAF writer lease; no pathname or byte callback crosses Dart.
+  Future<Map<String, dynamic>> streamShapeIntoStaging({
+    required CadAssetNativeFs filesystem,
+    required int file,
+    required NativeShapeLease shape,
+    required bool displayStl,
+    String? bridgePath,
+  }) async {
+    await initialize();
+    final participant = _participant!;
+    final occ = _nativeBridge;
+    if (occ is! OpenCascadeFFI || !Platform.isWindows) {
+      throw UnsupportedError('Native staging stream requires Windows OCCT FFI');
+    }
+    shape._check(participant.session);
+    final api = _SourceBridgeApi(
+      bridgePath ??
+          '${File(Platform.resolvedExecutable).parent.path}\\cad_occ_bridge.dll',
+    );
+    return participant.run(
+      () => filesystem.withWriterCapability(file, (writer, cafAnchor) async {
+        shape._check(participant.session);
+        final token = shape._record.identity._token.toNativeUtf8();
+        final out = calloc<_StreamBridgeResult>();
+        try {
+          final status = api.shapeWrite(
+            cafAnchor,
+            occ.library
+                .lookup<NativeFunction<Uint32 Function()>>(
+                  displayStl
+                      ? 'flcad_occ_mesh_stream_version'
+                      : 'flcad_occ_brep_stream_version',
+                )
+                .cast(),
+            writer,
+            token,
+            displayStl ? 2 : 1,
+            out,
+            sizeOf<_StreamBridgeResult>(),
+          );
+          if (status != 0 || out.ref.native.status != 0) {
+            throw NativeSourceFailure(
+              status,
+              out.ref.native.status,
+              out.ref.phase,
+              0x434146,
+              out.ref.filesystem.status,
+              (out.ref.filesystem.win32 << 32) | out.ref.filesystem.nt,
+              out.ref.native.bytesAccepted,
+              _sourceText(out.ref.native.message, 256),
+            );
+          }
+        } finally {
+          calloc.free(token);
+          calloc.free(out);
+        }
+      }),
+    );
+  }
+
   /// Foundation entry only. No existing import command calls this method.
   Future<NativeSourceResource> readOwnedAsset({
     required CadAssetNativeFs filesystem,
@@ -395,6 +684,27 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
           if (out.ref.native.published == 0) {
             throw _sourceError(result, out.ref);
           }
+          final native = out.ref.native;
+          final descriptor = NativeGeometryDescriptor._(
+            kind: kind,
+            resourceType: _sourceText(native.type, 32),
+            fingerprint: _sourceText(native.fingerprint, 64),
+            vertices: native.vertices,
+            triangles: native.triangles,
+            bounds: List<double>.generate(6, (i) => native.bounds[i]),
+            // ABI v1 does not define a normals-validity flag. Do not infer it
+            // from countValid; a v2 descriptor must add that fact explicitly.
+            hasNormals: false,
+          );
+          if (descriptor.resourceType.isEmpty ||
+              descriptor.fingerprint.isEmpty ||
+              descriptor.vertices < 0 ||
+              descriptor.triangles < 0 ||
+              descriptor.bounds.any((value) => !value.isFinite)) {
+            throw StateError(
+              'Native publication returned an invalid descriptor',
+            );
+          }
           // No notification/await between token decode, registration and adoption.
           final token = _sourceText(out.ref.native.token, 64);
           assert(() {
@@ -411,8 +721,16 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
                 : occ.destroyMesh,
           );
           final resource = kind == NativeResourceKind.shape
-              ? NativeSourceResource._(OwnedNativeShape._(registered), null)
-              : NativeSourceResource._(null, OwnedNativeMesh._(registered));
+              ? NativeSourceResource._(
+                  OwnedNativeShape._(registered),
+                  null,
+                  descriptor,
+                )
+              : NativeSourceResource._(
+                  null,
+                  OwnedNativeMesh._(registered),
+                  descriptor,
+                );
           if (api.adopt(operation) != 0) {
             throw StateError('Native escrow adoption failed');
           }
