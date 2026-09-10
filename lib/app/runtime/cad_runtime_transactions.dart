@@ -529,7 +529,11 @@ extension _CadTransactions on CadRuntime {
         cleanupStack ??= cleanupTrace;
       }
       if (cleanupFailure != null) {
-        _reportCommittedManagedCleanupFailure(cleanupFailure, cleanupStack!);
+        _reportCommittedManagedCleanupFailure(
+          cleanupFailure,
+          cleanupStack!,
+          operation: 'Undo/Redo',
+        );
       }
     } catch (error, stack) {
       final removed = prepared?.replaced?.values.toList() ?? const [];
@@ -876,7 +880,11 @@ extension _CadTransactions on CadRuntime {
         cleanupStack ??= cleanupTrace;
       }
       if (cleanupFailure != null) {
-        Error.throwWithStackTrace(cleanupFailure, cleanupStack!);
+        _reportCommittedManagedCleanupFailure(
+          cleanupFailure,
+          cleanupStack!,
+          operation: 'open',
+        );
       }
     } catch (error, stack) {
       final detachedOld = <ManagedEntityGeometry>[
@@ -974,6 +982,12 @@ extension _CadTransactions on CadRuntime {
         } catch (error, stack) {
           Object? cleanupFailure;
           StackTrace? cleanupStack;
+          try {
+            await _assetStorage.checkpoint('managedOpen:beforeEntityCleanup');
+          } catch (cleanupError, cleanupTrace) {
+            cleanupFailure = cleanupError;
+            cleanupStack = cleanupTrace;
+          }
           for (final cleanup in [
             shape.dispose,
             if (display != null) display.dispose,
@@ -1310,6 +1324,12 @@ extension _CadTransactions on CadRuntime {
     StackTrace? firstStack;
     for (final value in values.toSet()) {
       try {
+        await _assetStorage.checkpoint('managedGeometry:beforeDispose');
+      } catch (error, stack) {
+        first ??= error;
+        firstStack ??= stack;
+      }
+      try {
         await value.dispose();
       } catch (error, stack) {
         first ??= error;
@@ -1319,7 +1339,11 @@ extension _CadTransactions on CadRuntime {
     if (first != null) Error.throwWithStackTrace(first, firstStack!);
   }
 
-  void _reportCommittedManagedCleanupFailure(Object error, StackTrace stack) {
+  void _reportCommittedManagedCleanupFailure(
+    Object error,
+    StackTrace stack, {
+    required String operation,
+  }) {
     // Document, history, scene, selection, and runtime ownership have already
     // moved together. A failed native destroy is quarantined by custody and is
     // observable as a recovery requirement, but cannot turn the confirmed
@@ -1331,7 +1355,7 @@ extension _CadTransactions on CadRuntime {
           exception: error,
           stack: stack,
           library: 'CAD managed geometry cleanup',
-          context: ErrorDescription('after confirmed Undo/Redo commit'),
+          context: ErrorDescription('after confirmed $operation commit'),
         ),
       ),
     );

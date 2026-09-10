@@ -151,6 +151,7 @@ void main() {
 
   tearDown(() async {
     await runtime.shutdown();
+    expect(adapter.custodyDiagnostics?.leases ?? 0, 0);
     await adapter.unload();
     await root.delete(recursive: true);
     await sourceDirectory.delete(recursive: true);
@@ -277,6 +278,18 @@ void main() {
         ),
         isTrue,
       );
+      final journal = jsonEncode(manifests);
+      for (final forbidden in [
+        source,
+        project.path,
+        'ShapeHandle',
+        'KernelMeshHandle',
+        'token',
+        'pointer',
+        'capability',
+      ]) {
+        expect(journal, isNot(contains(forbidden)));
+      }
     },
   );
 
@@ -313,6 +326,23 @@ void main() {
             : const <Directory>[],
         isEmpty,
       );
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      final manifests = Directory(p.join(project.path, '.cad-staging'))
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((file) => p.basename(file.path) == 'manifest.json')
+          .map((file) => jsonDecode(file.readAsStringSync()) as Map)
+          .toList();
+      expect(manifests, hasLength(1));
+      expect(
+        manifests.every(
+          (manifest) =>
+              (manifest['data'] as Map)['state'] == 'quarantined' &&
+              (manifest['data'] as Map)['documentPublished'] == false &&
+              ((manifest['data'] as Map)['assets'] as List).length == 2,
+        ),
+        isTrue,
+      );
       expect(pathImports(), 0);
     },
   );
@@ -348,6 +378,16 @@ void main() {
         p.join(project.path, 'CAD', 'Assets', 'v1'),
       ).listSync().whereType<Directory>().toList();
       expect(promoted, hasLength(2));
+      expect(
+        promoted.every(
+          (directory) => directory
+              .listSync(recursive: true)
+              .whereType<File>()
+              .any((file) => file.lengthSync() > 0),
+        ),
+        isTrue,
+      );
+      expect(adapter.custodyDiagnostics!.allocations, 0);
       final manifests = Directory(p.join(project.path, '.cad-staging'))
           .listSync(recursive: true)
           .whereType<File>()
@@ -396,6 +436,65 @@ void main() {
   );
 
   test(
+    'persistence failure preserves prior managed state and history',
+    () async {
+      final first = await importOne(name: 'first');
+      runtime.select({first.id});
+      final documentBefore = jsonEncode(runtime.document!.toJson());
+      final sceneBefore = runtime.scene.entities
+          .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+          .toList();
+      final ownerBefore = runtime.managedGeometryDiagnostics(first.id);
+      final historyBefore = (
+        runtime.canUndo,
+        runtime.canRedo,
+        runtime.runtimeRevision,
+      );
+      final assetsDirectory = Directory(
+        p.join(project.path, 'CAD', 'Assets', 'v1'),
+      );
+      final assetsBefore = assetsDirectory
+          .listSync()
+          .map((entry) => entry.path)
+          .toSet();
+      repository.rejectManagedSave = true;
+
+      await expectLater(
+        importOne(name: 'second'),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'phase',
+            'injected:managedBrep:persistence',
+          ),
+        ),
+      );
+
+      expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+      expect(
+        runtime.scene.entities
+            .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+            .toList(),
+        sceneBefore,
+      );
+      expect(runtime.selection, {first.id});
+      expect(runtime.managedGeometryDiagnostics(first.id), ownerBefore);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect((
+        runtime.canUndo,
+        runtime.canRedo,
+        runtime.runtimeRevision,
+      ), historyBefore);
+      final assetsAfter = assetsDirectory
+          .listSync()
+          .map((entry) => entry.path)
+          .toSet();
+      expect(assetsAfter.difference(assetsBefore), hasLength(2));
+      expect(pathImports(), 0);
+    },
+  );
+
+  test(
     'observer failure after commit does not roll back managed import',
     () async {
       final previous = FlutterError.onError;
@@ -407,7 +506,7 @@ void main() {
           p.join(sourceDirectory.path, 'shape.brep'),
           nativeBridgePath: bridge,
         );
-        await Future<void>.delayed(Duration.zero);
+        await Future<void>.value();
         expect(runtime.document!.entities[entity.id], isNotNull);
         expect(runtime.scene.find(entity.id), isNotNull);
         expect(runtime.hasManagedGeometry(entity.id), isTrue);
@@ -476,6 +575,40 @@ void main() {
     },
   );
 
+  test('post-commit open cleanup failure requires recovery', () async {
+    final entity = await importOne();
+    final documentBefore = jsonEncode(runtime.document!.toJson());
+    final previousError = FlutterError.onError;
+    final observed = <FlutterErrorDetails>[];
+    FlutterError.onError = observed.add;
+    storage.failAt = 'managedGeometry:beforeDispose';
+    try {
+      await runtime.open('managed-brep-project', project);
+      await Future<void>.value();
+      expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+      expect(runtime.scene.find(entity.id), isNotNull);
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(adapter.custodyDiagnostics!.leases, 0);
+      expect(runtime.recoveryRequired, isTrue);
+      expect(observed, hasLength(1));
+      expect(observed.single.library, 'CAD managed geometry cleanup');
+      expect(observed.single.context.toString(), contains('confirmed open'));
+      await expectLater(
+        runtime.open('managed-brep-project', project),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'recovery gate',
+            'CAD runtime requires verified recovery.',
+          ),
+        ),
+      );
+    } finally {
+      FlutterError.onError = previousError;
+    }
+  });
+
   test('missing shape and display assets reject the whole open', () async {
     final entity = await importOne();
     final assets = managedAssets(entity);
@@ -526,6 +659,37 @@ void main() {
       expectNoManagedPublication([entity.id]);
       await restoreOneByte(file, original);
     }
+  });
+
+  test('anchored open rejects mutation after preparation', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    final payload = assetFile(assets.display, CadAssetFile.display);
+    await runtime.close();
+    final originalHash = (await sha256.bind(payload.openRead()).first)
+        .toString();
+    storage.onPhase = (phase) async {
+      if (phase == 'managedOpen:beforePublish') {
+        await damageOneByte(payload);
+      }
+    };
+
+    await expectLater(
+      runtime.open('managed-brep-project', project),
+      throwsA(
+        isA<PathAccessException>().having(
+          (error) => error.osError?.errorCode,
+          'sharing violation',
+          32,
+        ),
+      ),
+    );
+
+    expectNoManagedPublication([entity.id]);
+    expect(
+      (await sha256.bind(payload.openRead()).first).toString(),
+      originalHash,
+    );
   });
 
   test('payload size divergence rejects the whole open', () async {
@@ -661,19 +825,25 @@ void main() {
     await runtime.close();
     final entered = Completer<void>();
     final release = Completer<void>();
+    final cleanupEntered = Completer<void>();
+    final cleanupRelease = Completer<void>();
     storage.onPhase = (phase) async {
       if (phase == 'managedOpen:afterShape') {
         if (!entered.isCompleted) entered.complete();
         await release.future;
+      } else if (phase == 'managedOpen:beforeEntityCleanup') {
+        if (!cleanupEntered.isCompleted) cleanupEntered.complete();
+        await cleanupRelease.future;
       }
     };
     final opening = runtime.open('managed-brep-project', project);
     await entered.future;
     var shutdownFinished = false;
     final stopping = runtime.shutdown().then((_) => shutdownFinished = true);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    expect(shutdownFinished, isFalse);
     release.complete();
+    await cleanupEntered.future;
+    expect(shutdownFinished, isFalse);
+    cleanupRelease.complete();
 
     await expectLater(opening, throwsA(isA<StaleCadTransaction>()));
     await stopping;
@@ -809,6 +979,56 @@ void main() {
       expect(pathImports(), 0);
     },
   );
+
+  test('complete managed BREP lifecycle preserves durable identity', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    final files = [
+      assetFile(assets.shape, CadAssetFile.brep),
+      assetFile(assets.display, CadAssetFile.display),
+    ];
+    final before = <String, (int, String, DateTime)>{
+      for (final file in files)
+        file.path: (
+          await file.length(),
+          (await sha256.bind(file.openRead()).first).toString(),
+          await file.lastModified(),
+        ),
+    };
+
+    await runtime.save();
+    await runtime.close();
+    await runtime.open('managed-brep-project', project);
+    await runtime.undoDocument();
+    await runtime.redoDocument();
+
+    final restored = runtime.document!.entities[entity.id]!;
+    expect(managedAssets(restored).toJson(), assets.toJson());
+    expect(runtime.scene.find(entity.id), isNotNull);
+    expect(runtime.hasManagedGeometry(entity.id), isTrue);
+    expect(adapter.custodyDiagnostics!.allocations, 2);
+    for (final file in files) {
+      final expected = before[file.path]!;
+      expect(await file.length(), expected.$1);
+      expect(
+        (await sha256.bind(file.openRead()).first).toString(),
+        expected.$2,
+      );
+      expect(await file.lastModified(), expected.$3);
+    }
+    await runtime.close();
+    expect(runtime.document, isNull);
+    expect(runtime.scene.entities, isEmpty);
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    for (final legacyFolder in ['NativeShapes', 'DisplayMeshes']) {
+      expect(
+        Directory(p.join(project.path, legacyFolder)).existsSync(),
+        isFalse,
+        reason: 'Managed lifecycle must not create $legacyFolder',
+      );
+    }
+    expect(pathImports(), 0);
+  });
 
   test(
     'Undo of last managed entity preserves first and Redo restores only last',
@@ -966,6 +1186,197 @@ void main() {
           ),
         );
       }
+      final descriptorFile = File(
+        p.join(
+          assetFile(secondAssets.shape, CadAssetFile.brep).parent.path,
+          'asset.json',
+        ),
+      );
+      late String descriptorBefore;
+      await verifyFailure(
+        () async {
+          descriptorBefore = await descriptorFile.readAsString();
+          final descriptor =
+              jsonDecode(descriptorBefore) as Map<String, dynamic>;
+          descriptor['version'] = 999;
+          await descriptorFile.writeAsString(
+            jsonEncode(descriptor),
+            flush: true,
+          );
+        },
+        () => descriptorFile.writeAsString(descriptorBefore, flush: true),
+        isA<FormatException>().having(
+          (error) => error.message,
+          'schema check',
+          'Invalid managed asset descriptor',
+        ),
+      );
+    },
+  );
+
+  test('anchored Redo rejects late mutation and preserves state', () async {
+    final entity = await importOne();
+    final assets = managedAssets(entity);
+    final payload = assetFile(assets.shape, CadAssetFile.brep);
+    await runtime.undoDocument();
+    final documentBefore = jsonEncode(runtime.document!.toJson());
+    final sceneBefore = runtime.scene.entities
+        .map((item) => (item.id, jsonEncode(item.geometry)))
+        .toList();
+    final historyBefore = (
+      runtime.canUndo,
+      runtime.canRedo,
+      runtime.runtimeRevision,
+    );
+    final originalHash = (await sha256.bind(payload.openRead()).first)
+        .toString();
+    storage.onPhase = (phase) async {
+      if (phase == 'managedHistory:beforePublish') {
+        await damageOneByte(payload);
+      }
+    };
+
+    await expectLater(
+      runtime.redoDocument(),
+      throwsA(
+        isA<PathAccessException>().having(
+          (error) => error.osError?.errorCode,
+          'sharing violation',
+          32,
+        ),
+      ),
+    );
+
+    expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+    expect(
+      runtime.scene.entities
+          .map((item) => (item.id, jsonEncode(item.geometry)))
+          .toList(),
+      sceneBefore,
+    );
+    expect((
+      runtime.canUndo,
+      runtime.canRedo,
+      runtime.runtimeRevision,
+    ), historyBefore);
+    expect(runtime.hasManagedGeometry(entity.id), isFalse);
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    expect(
+      (await sha256.bind(payload.openRead()).first).toString(),
+      originalHash,
+    );
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'post-commit cleanup failure is observable without undoing Undo',
+    () async {
+      final entity = await importOne();
+      final previousError = FlutterError.onError;
+      final observed = <FlutterErrorDetails>[];
+      FlutterError.onError = observed.add;
+      storage.failAt = 'managedGeometry:beforeDispose';
+      try {
+        await runtime.undoDocument();
+        await Future<void>.value();
+        expect(runtime.document!.entities[entity.id], isNull);
+        expect(runtime.scene.find(entity.id), isNull);
+        expect(runtime.hasManagedGeometry(entity.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 0);
+        expect(runtime.canRedo, isTrue);
+        expect(runtime.recoveryRequired, isTrue);
+        expect(observed, hasLength(1));
+        expect(observed.single.library, 'CAD managed geometry cleanup');
+        expect(
+          observed.single.context.toString(),
+          contains('confirmed Undo/Redo'),
+        );
+        await expectLater(
+          runtime.redoDocument(),
+          throwsA(
+            isA<StateError>().having(
+              (error) => error.message,
+              'recovery gate',
+              'CAD runtime requires verified recovery.',
+            ),
+          ),
+        );
+      } finally {
+        FlutterError.onError = previousError;
+      }
+    },
+  );
+
+  test('superseding open revokes managed import before promotion', () async {
+    final sceneBefore = runtime.scene.entities
+        .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+        .toList();
+    final entered = Completer<void>();
+    final release = Completer<void>();
+    storage.onPhase = (phase) async {
+      if (phase == 'managedBrep:beforePromotion' && !entered.isCompleted) {
+        entered.complete();
+        await release.future;
+      }
+    };
+    final importing = importOne();
+    await entered.future;
+    storage.onPhase = null;
+    final replacement = runtime.open('managed-brep-project', project);
+    release.complete();
+
+    await expectLater(importing, throwsA(isA<StaleCadTransaction>()));
+    await replacement;
+    expect(
+      runtime.document!.entities.values.where(
+        (entity) => entity.data['managedBrepAssets'] != null,
+      ),
+      isEmpty,
+    );
+    expect(
+      runtime.scene.entities
+          .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+          .toList(),
+      sceneBefore,
+    );
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    final assetRoot = Directory(p.join(project.path, 'CAD', 'Assets', 'v1'));
+    expect(assetRoot.existsSync() ? assetRoot.listSync() : const [], isEmpty);
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'shutdown revokes managed import before promotion and drains it',
+    () async {
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final cleanupEntered = Completer<void>();
+      final cleanupRelease = Completer<void>();
+      storage.onPhase = (phase) async {
+        if (phase == 'managedBrep:beforePromotion' && !entered.isCompleted) {
+          entered.complete();
+          await release.future;
+        } else if (phase == 'cleanup:started') {
+          if (!cleanupEntered.isCompleted) cleanupEntered.complete();
+          await cleanupRelease.future;
+        }
+      };
+      final importing = importOne();
+      await entered.future;
+      final stopping = runtime.shutdown();
+      var shutdownFinished = false;
+      unawaited(stopping.then((_) => shutdownFinished = true));
+      release.complete();
+      await cleanupEntered.future;
+      expect(shutdownFinished, isFalse);
+      cleanupRelease.complete();
+
+      await expectLater(importing, throwsA(isA<StaleCadTransaction>()));
+      await stopping;
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      final assetRoot = Directory(p.join(project.path, 'CAD', 'Assets', 'v1'));
+      expect(assetRoot.existsSync() ? assetRoot.listSync() : const [], isEmpty);
+      expect(pathImports(), 0);
     },
   );
 
@@ -1003,16 +1414,23 @@ void main() {
       await runtime.undoDocument();
       final entered = Completer<void>();
       final release = Completer<void>();
+      final cleanupEntered = Completer<void>();
+      final cleanupRelease = Completer<void>();
       storage.onPhase = (phase) async {
         if (phase == 'managedOpen:afterShape' && !entered.isCompleted) {
           entered.complete();
           await release.future;
+        } else if (phase == 'managedOpen:beforeEntityCleanup') {
+          if (!cleanupEntered.isCompleted) cleanupEntered.complete();
+          await cleanupRelease.future;
         }
       };
       final redo = runtime.redoDocument();
       await entered.future;
       final stopping = runtime.shutdown();
       release.complete();
+      await cleanupEntered.future;
+      cleanupRelease.complete();
 
       await expectLater(redo, throwsA(isA<StaleCadTransaction>()));
       await stopping;

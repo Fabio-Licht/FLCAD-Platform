@@ -311,7 +311,6 @@ final class CadGeometryStagingOperation {
       'instance': instanceId,
       'operation': operationId,
       'project': _tx.document!.projectId,
-      'root': _paths.root,
       'session': _tx.session,
       'revision': _tx.revision,
       'transaction': _tx.id,

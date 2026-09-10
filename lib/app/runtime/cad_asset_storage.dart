@@ -648,7 +648,7 @@ Future<Map<String, dynamic>> _readAssetManifest(
       data['version'] != 1 ||
       data['instance'] != instance ||
       data['operation'] != operation ||
-      data['root'] != paths.root ||
+      (data.containsKey('root') && data['root'] != paths.root) ||
       data['project'] is! String ||
       data['session'] is! int ||
       data['revision'] is! int ||

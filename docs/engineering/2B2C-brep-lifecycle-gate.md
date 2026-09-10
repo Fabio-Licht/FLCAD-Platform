@@ -1,0 +1,24 @@
+# BREP-2C lifecycle gate
+
+This matrix records the smallest existing or directed test that proves each
+managed BREP lifecycle boundary. The gate uses the packaged Debug CAF,
+OpenCascade, and C-to-C bridge DLLs for integrated BREP tests.
+
+| Boundary | Test evidence | Guarantee |
+| --- | --- | --- |
+| Before promotion | `failure before promotion publishes no entity or runtime owner` | No managed document/scene/owner or durable asset is published; both staged assets remain recorded in one quarantined, unpublished journal. |
+| After promotion, before document commit | `failure after promotion quarantines assets without publication`; staging tests `failure at promotion:* remains recoverable and never removes files` | Completed moves remain present and quarantined; no destructive rollback or documentary publication occurs. |
+| Persistence | `persistence failure installs neither entity nor native ownership`; `persistence failure preserves prior managed state and history`; transaction test `history failure restores disk without moving document or stacks` | The prior document, history, scene, selection, and managed owner remain unchanged; newly promoted assets are retained. |
+| Post-commit observation/cleanup | `observer failure after commit does not roll back managed import`; `post-commit cleanup failure is observable without undoing Undo`; `post-commit open cleanup failure requires recovery`; custody test `destroy failure remains observable in quarantine without retry` | Notification or cleanup failure cannot undo import, open, Undo, or Redo. Runtime recovery is required after failed cleanup, and native destroy failure remains individually quarantined. |
+| Open/Redo validation | `missing shape and display assets reject the whole open`; `shape and display hash divergence reject the whole open`; `invalid durable asset schema rejects the whole open`; the two invalid-content tests; `anchored open rejects mutation after preparation`; `anchored Redo rejects late mutation and preserves state` | Missing, divergent, malformed, or natively invalid assets publish no partial state. Live anchored handles reject concurrent mutation before the final identity/hash revalidation. |
+| Multi-entity open | `failure preparing second managed entity publishes neither` | A failure after preparing the first entity releases both preparations and publishes neither. |
+| Redo validation | `failed managed Redo preserves document history scene selection and owners` | Missing BREP/STL, divergent hashes, and incompatible descriptors preserve the complete previous state and prior owners. |
+| Revoked import | `superseding open revokes managed import before promotion`; `shutdown revokes managed import before promotion and drains it`; source-bridge cancellation tests | Revocation drains source/staging custody and prevents promotion or publication. |
+| Revoked open/Redo | `a superseding open revokes managed restoration without leaks`; `shutdown revokes restoration and waits for native cleanup`; `superseding open revokes a suspended managed Redo`; `shutdown revokes a suspended managed Redo and drains custody` | Deterministic gates prove stale work cannot resume publication and shutdown waits for native cleanup. |
+| Ownership and leases | Custody tests `one lease blocks destroy; last release completes disposal`, `release cannot race in-flight native usage protected by child pin`, and `destroy failure remains observable in quarantine without retry`; staging test `producer native disposal and journal failures all remain observable` | Dispose waits for leases, all cleanup attempts run, and individual failures remain quarantined and observable. |
+| Repeated lifecycle | `repeated managed Undo Redo has no duplicates and survives reopen`; `complete managed BREP lifecycle preserves durable identity` | Import/save/close/open/Undo/Redo/close preserves IDs and hashes without duplicate entities, scene entries, or owners. |
+| Durable assets and serialized authority | `real BREP commits document, scene, durable assets and custody`; `managed Undo removes scene before disposal and Redo restores assets`; `managed BREP save close open restores document scene and custody` | Undo/open/Redo do not modify payloads or descriptors. Document and journal contain no pathname, token, pointer, handle, or capability. |
+| Compatibility | `legacy-only document keeps the existing open behavior`; `managed history preserves an unchanged legacy entity`; `Undo of last managed entity preserves first and Redo restores only last` | Legacy-only, managed-only, mixed, and multi-managed documents keep independent scene and owner state. Managed resources use CAF/source streaming; the native pathname-import counter remains zero. |
+
+The real two-volume NTFS test remains outside this gate and is not represented
+by a mock. STL mesh-only, GC, surface editing, and 2B2B are also outside scope.
