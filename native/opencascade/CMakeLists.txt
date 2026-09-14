@@ -204,3 +204,50 @@ option(FLCAD_OCC_PATH_AUDIT "Test-only pathname importer counters" OFF)
 if(FLCAD_OCC_PATH_AUDIT OR "$ENV{FLCAD_OCC_PATH_AUDIT}" STREQUAL "1")
   target_compile_definitions(flcad_opencascade PRIVATE FLCAD_OCC_PATH_AUDIT)
 endif()
+
+# XDE is required by the additive STEP source reader, including implementation
+# compiled into fault-test executables. Existing public signatures stay intact.
+if(BUILD_TESTING)
+  add_executable(flcad_occ_step_source_test tests/step_source_test.cpp)
+  add_executable(flcad_occ_step_source_c_abi tests/step_source_c_abi.c)
+  target_link_libraries(flcad_occ_step_source_c_abi PRIVATE flcad_opencascade)
+  add_test(NAME flcad_occ_step_source_c_abi COMMAND flcad_occ_step_source_c_abi)
+  target_compile_definitions(flcad_occ_step_source_test PRIVATE FLCAD_OCC_TESTING)
+  target_compile_options(flcad_occ_step_source_test PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+  target_include_directories(flcad_occ_step_source_test PRIVATE include ${OpenCASCADE_INCLUDE_DIR})
+  target_link_directories(flcad_occ_step_source_test PRIVATE ${OpenCASCADE_LIBRARY_DIR})
+  target_link_libraries(flcad_occ_step_source_test PRIVATE ${OpenCASCADE_LIBRARIES}
+    ${_path_TKDE} ${_path_TKXSBase} ${_path_TKDESTEP} ${_path_TKDEIGES} ${_path_TKDESTL})
+  add_dependencies(flcad_occ_step_source_test flcad_opencascade)
+  add_test(NAME flcad_occ_step_source_test COMMAND flcad_occ_step_source_test)
+  add_executable(flcad_occ_step_bridge_smoke tests/step_bridge_smoke.cpp)
+  target_compile_options(flcad_occ_step_bridge_smoke PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+  target_include_directories(flcad_occ_step_bridge_smoke PRIVATE
+    include ../cad_asset_fs/include ${OpenCASCADE_INCLUDE_DIR})
+  target_link_directories(flcad_occ_step_bridge_smoke PRIVATE ${OpenCASCADE_LIBRARY_DIR})
+  target_link_libraries(flcad_occ_step_bridge_smoke PRIVATE flcad_opencascade
+    ${OpenCASCADE_LIBRARIES} ${_path_TKDESTEP} ${_path_TKXSBase} ${_path_TKDE})
+  set(FLCAD_STEP_CAF_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/../../build/cad_asset_fs" CACHE PATH "CAF build for STEP smoke")
+  set(FLCAD_STEP_BRIDGE_BUILD "${CMAKE_CURRENT_SOURCE_DIR}/../../build/cad_occ_bridge" CACHE PATH "C-to-C bridge build for STEP smoke")
+  set(FLCAD_STEP_DEPENDENCY_CONFIG "$<CONFIG>" CACHE STRING "CAF/bridge configuration for STEP smoke")
+  add_test(NAME flcad_occ_step_bridge_smoke COMMAND flcad_occ_step_bridge_smoke
+    "${FLCAD_STEP_CAF_BUILD}/${FLCAD_STEP_DEPENDENCY_CONFIG}/cad_asset_fs.dll"
+    "${FLCAD_STEP_BRIDGE_BUILD}/${FLCAD_STEP_DEPENDENCY_CONFIG}/cad_occ_bridge.dll")
+  if(FLCAD_OCC_ADDRESS_SANITIZER AND MSVC)
+    target_compile_options(flcad_occ_step_source_test PRIVATE /fsanitize=address /Zi)
+    target_link_options(flcad_occ_step_source_test PRIVATE /INCREMENTAL:NO /DEBUG)
+    target_compile_options(flcad_occ_step_bridge_smoke PRIVATE /fsanitize=address /Zi)
+    target_link_options(flcad_occ_step_bridge_smoke PRIVATE /INCREMENTAL:NO /DEBUG)
+  endif()
+endif()
+foreach(_library TKCDF TKLCAF TKCAF TKXCAF)
+  find_library(_path_${_library} NAMES ${_library}
+    PATHS "${OpenCASCADE_LIBRARY_DIR}" NO_DEFAULT_PATH REQUIRED)
+  foreach(_target flcad_opencascade flcad_occ_atomic_output_test
+      flcad_occ_mesh_stream_test flcad_occ_brep_stream_test flcad_occ_source_test
+      flcad_occ_step_source_test flcad_occ_step_bridge_smoke)
+    if(TARGET ${_target})
+      target_link_libraries(${_target} PRIVATE ${_path_${_library}})
+    endif()
+  endforeach()
+endforeach()

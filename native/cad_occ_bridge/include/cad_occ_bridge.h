@@ -1,7 +1,8 @@
 #pragma once
 #include "cad_asset_fs.h"
-#include "flcad_occ_source.h"
 #include "flcad_occ_brep_stream.h"
+#include "flcad_occ_source.h"
+#include "flcad_occ_step_source.h"
 #ifdef COB_BUILD
 #define COB_API __declspec(dllexport)
 #else
@@ -43,6 +44,20 @@ typedef struct cob_stream_result_v1 {
   caf_result filesystem;
   occ_stream_result_v1 native_result;
 } cob_stream_result_v1;
+typedef struct cob_step_result_v1 {
+  uint32_t size, version;
+  cob_result_v1 bridge_result;
+  occ_step_metadata_v1 metadata;
+} cob_step_result_v1;
+// Source kind 3 in cob_begin_v1 creates STEP; use cob_step_run_v1.
+// Metadata buffers are synchronous and caller-owned. Run leaves the shape
+// borrowed in escrow until custody adopts; close compensates. Existing
+// signatures and kinds 1/2 are unchanged.
+COB_API uint32_t cob_step_version(void);
+COB_API uint32_t cob_step_result_size_v1(void);
+COB_API int32_t cob_step_run_v1(uint64_t operation,
+                                const occ_step_buffers_v1 *buffers,
+                                cob_step_result_v1 *out, uint32_t size);
 /* Module anchors are addresses of exported version functions, not OS handles.
  * Library references and filesystem lease remain owned by the operation until
  * close succeeds. Native token stays in escrow until adopt. Nothing serialized.
@@ -61,11 +76,10 @@ COB_API int32_t cob_cancel_v1(uint64_t operation);
 COB_API int32_t cob_adopt_v1(uint64_t operation);
 COB_API int32_t cob_close_v1(uint64_t operation, cob_result_v1 *out,
                              uint32_t size);
-/* Synchronous C-to-C output. `token` remains process-local and is borrowed
- * only for this call. Writer is an already-acquired opaque CAF writer lease;
- * Dart owns its acquire/seal/release lifetime. kind 1 emits BREP, kind 2 emits
- * binary STL from a shape, and additive kind 3 emits binary STL from a
- * custody-owned Poly_Triangulation token. */
+/* Synchronous C-to-C output. Token is process-local and borrowed for this call.
+ * Writer is an acquired CAF writer lease; caller owns acquire/seal/release.
+ * Kind 1 emits BREP; kind 2 emits binary STL from shape; kind 3 emits binary
+ * STL from a custody-owned Poly_Triangulation token. */
 COB_API uint32_t cob_stream_result_size_v1(void);
 COB_API int32_t cob_shape_write_v1(const void *caf_anchor,
                                    const void *occ_anchor, uint64_t writer,

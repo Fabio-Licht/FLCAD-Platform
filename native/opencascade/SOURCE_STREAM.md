@@ -1,5 +1,9 @@
 # Native source ABI v1 (BREP and STL)
 
+The additive STEP-1A0 XDE source boundary is documented separately in
+[STEP_SOURCE_STREAM.md](STEP_SOURCE_STREAM.md). Existing BREP/STL layouts,
+signatures and ownership rules below are unchanged.
+
 `flcad_occ_source.h` adds `flcad_occ_source_version`,
 `flcad_occ_source_default_limits_v1`, `flcad_occ_brep_read_v1` and
 `flcad_occ_stl_read_v1`. Existing pathname entry points and sink ABIs are unchanged.

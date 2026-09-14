@@ -42,6 +42,7 @@ struct Operation {
   decltype(&caf_source_prepare) prepare = nullptr;
   decltype(&caf_source_release) release = nullptr;
   decltype(&flcad_occ_brep_read_v1) parse = nullptr;
+  decltype(&flcad_occ_step_read_v1) step_parse = nullptr;
   using Destroy = int (*)(const char *, char *, size_t);
   Destroy destroy = nullptr;
   uint64_t lease = 0, length = 0;
@@ -51,6 +52,7 @@ struct Operation {
        held = false, adopted = false;
   std::mutex state;
   cob_result_v1 result{};
+  occ_step_metadata_v1 step_metadata{};
 };
 std::mutex registry_mutex;
 std::unordered_map<uint64_t, std::shared_ptr<Operation>> operations;
@@ -174,9 +176,9 @@ extern "C" uint32_t cob_stream_result_size_v1(void) {
   return sizeof(cob_stream_result_v1);
 }
 extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
-                                       uint64_t writer, const char *token,
-                                       uint32_t kind, cob_stream_result_v1 *out,
-                                       uint32_t size) {
+                                      uint64_t writer, const char *token,
+                                      uint32_t kind, cob_stream_result_v1 *out,
+                                      uint32_t size) {
   if (!out || size != sizeof(*out) || !token || !*token ||
       (kind < 1 || kind > 3))
     return COB_ARGUMENT;
@@ -188,11 +190,10 @@ extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
     caf.retain(ca);
     occ.retain(oc);
     if (caf.fn<decltype(&caf_writer_version)>("caf_writer_version")() != 1 ||
-        (kind == 1
-             ? occ.fn<decltype(&flcad_occ_brep_stream_version)>(
-                       "flcad_occ_brep_stream_version")()
-             : occ.fn<decltype(&flcad_occ_mesh_stream_version)>(
-                       "flcad_occ_mesh_stream_version")()) != 1)
+        (kind == 1 ? occ.fn<decltype(&flcad_occ_brep_stream_version)>(
+                         "flcad_occ_brep_stream_version")()
+                   : occ.fn<decltype(&flcad_occ_mesh_stream_version)>(
+                         "flcad_occ_mesh_stream_version")()) != 1)
       throw std::runtime_error("ABI");
     // The caller owns writer acquire/seal/release. Resolve only write so this
     // adapter cannot silently promote, seal or release another operation's
@@ -201,18 +202,20 @@ extern "C" int32_t cob_shape_write_v1(const void *ca, const void *oc,
     stream.lease = writer;
     out->phase = COB_READ;
     occ_stream_sink_v1 sink{sizeof(sink), 1, &stream, write_sink};
-    const auto status = kind == 1
-        ? occ.fn<decltype(&flcad_occ_brep_stream_v1)>("flcad_occ_brep_stream_v1")(
-              token, 268435456, &sink, &out->native_result,
-              sizeof(out->native_result))
+    const auto status =
+        kind == 1 ? occ.fn<decltype(&flcad_occ_brep_stream_v1)>(
+                        "flcad_occ_brep_stream_v1")(token, 268435456, &sink,
+                                                    &out->native_result,
+                                                    sizeof(out->native_result))
         : kind == 2
-        ? occ.fn<decltype(&flcad_occ_mesh_stream_v1)>("flcad_occ_mesh_stream_v1")(
-              token, 0.1, 0.35, 32000000, &sink, &out->native_result,
-              sizeof(out->native_result))
-        : occ.fn<decltype(&flcad_occ_triangulation_stream_v1)>(
-              "flcad_occ_triangulation_stream_v1")(
-              token, 32000000, &sink, &out->native_result,
-              sizeof(out->native_result));
+            ? occ.fn<decltype(&flcad_occ_mesh_stream_v1)>(
+                  "flcad_occ_mesh_stream_v1")(token, 0.1, 0.35, 32000000, &sink,
+                                              &out->native_result,
+                                              sizeof(out->native_result))
+            : occ.fn<decltype(&flcad_occ_triangulation_stream_v1)>(
+                  "flcad_occ_triangulation_stream_v1")(
+                  token, 32000000, &sink, &out->native_result,
+                  sizeof(out->native_result));
     if (status || stream.failed) {
       out->filesystem = stream.last;
       out->status = stream.failed ? COB_FILESYSTEM : COB_INTERNAL;
@@ -232,7 +235,7 @@ extern "C" int32_t cob_begin_v1(const void *ca, const void *oc, uint64_t file,
   init(*out);
   if (!expected || es != sizeof(*expected) || expected->version != 1 ||
       expected->status || expected->bytes > 268435456 ||
-      (kind != 1 && kind != 2)) {
+      (kind < 1 || kind > 3)) {
     out->status = COB_ARGUMENT;
     return COB_ARGUMENT;
   }
@@ -252,10 +255,17 @@ extern "C" int32_t cob_begin_v1(const void *ca, const void *oc, uint64_t file,
     op->check = op->caf.fn<decltype(op->check)>("caf_source_check");
     op->prepare = op->caf.fn<decltype(op->prepare)>("caf_source_prepare");
     op->release = op->caf.fn<decltype(op->release)>("caf_source_release");
-    op->parse = op->occ.fn<decltype(op->parse)>(
-        kind == 1 ? "flcad_occ_brep_read_v1" : "flcad_occ_stl_read_v1");
+    if (kind == 3) {
+      if (op->occ.fn<decltype(&flcad_occ_step_source_version)>(
+              "flcad_occ_step_source_version")() != 1)
+        throw std::runtime_error("STEP ABI");
+      op->step_parse =
+          op->occ.fn<decltype(op->step_parse)>("flcad_occ_step_read_v1");
+    } else
+      op->parse = op->occ.fn<decltype(op->parse)>(
+          kind == 1 ? "flcad_occ_brep_read_v1" : "flcad_occ_stl_read_v1");
     op->destroy = op->occ.fn<Operation::Destroy>(
-        kind == 1 ? "flcad_occ_destroy_shape" : "flcad_occ_destroy_mesh");
+        kind == 2 ? "flcad_occ_destroy_mesh" : "flcad_occ_destroy_shape");
     // Register allocation before acquiring a filesystem lease; failure is
     // effect-free.
     uint64_t id = 0;
@@ -289,7 +299,9 @@ extern "C" int32_t cob_begin_v1(const void *ca, const void *oc, uint64_t file,
     return COB_ABI;
   }
 }
-extern "C" int32_t cob_run_v1(uint64_t id, cob_result_v1 *out, uint32_t size) {
+static int32_t run_operation(uint64_t id, cob_result_v1 *out, uint32_t size,
+                             const occ_step_buffers_v1 *buffers = nullptr,
+                             occ_step_metadata_v1 *metadata = nullptr) {
   if (!output(out, size))
     return COB_ARGUMENT;
   init(*out);
@@ -297,7 +309,8 @@ extern "C" int32_t cob_run_v1(uint64_t id, cob_result_v1 *out, uint32_t size) {
     auto op = get(id);
     {
       std::lock_guard<std::mutex> guard(op->state);
-      if (op->running || op->finished || op->closed)
+      if (op->running || op->finished || op->closed ||
+          ((op->kind == 3) != (buffers != nullptr)))
         return COB_STATE;
       op->running = true;
     }
@@ -322,8 +335,14 @@ extern "C" int32_t cob_run_v1(uint64_t id, cob_result_v1 *out, uint32_t size) {
         n.detail = (uint64_t(prepared.win32_error) << 32) | prepared.nt_status;
       } else {
         COB_POINT("before_parse", id);
-        op->parse(&source, &limits, &op->result.native_result,
-                  sizeof(occ_read_result_v1));
+        if (op->kind == 3) {
+          occ_step_read_result_v1 step{};
+          op->step_parse(&source, &limits, buffers, &step, sizeof(step));
+          op->result.native_result = step.native_result;
+          op->step_metadata = step.metadata;
+        } else
+          op->parse(&source, &limits, &op->result.native_result,
+                    sizeof(occ_read_result_v1));
         if (op->result.native_result.published)
           op->result.phase = COB_PUBLICATION;
         COB_POINT("after_publish", id);
@@ -343,12 +362,48 @@ extern "C" int32_t cob_run_v1(uint64_t id, cob_result_v1 *out, uint32_t size) {
       op->running = false;
       op->finished = true;
       *out = op->result;
+      if (metadata)
+        *metadata = op->step_metadata;
     }
     return static_cast<int32_t>(out->status);
   } catch (...) {
     out->status = COB_INTERNAL;
     return COB_INTERNAL;
   }
+}
+extern "C" int32_t cob_run_v1(uint64_t id, cob_result_v1 *out, uint32_t size) {
+  return run_operation(id, out, size);
+}
+extern "C" uint32_t cob_step_version(void) { return 1; }
+extern "C" uint32_t cob_step_result_size_v1(void) {
+  return sizeof(cob_step_result_v1);
+}
+extern "C" int32_t cob_step_run_v1(uint64_t id, const occ_step_buffers_v1 *b,
+                                   cob_step_result_v1 *out, uint32_t size) {
+  if (!out || size != sizeof(*out) || !b || b->size != sizeof(*b) ||
+      b->version != 1 || !b->name_utf8 || !b->name_capacity || !b->unit_utf8 ||
+      !b->unit_capacity)
+    return COB_ARGUMENT;
+  const std::pair<const void *, size_t> regions[] = {
+      {out, sizeof(*out)},
+      {b, sizeof(*b)},
+      {b->name_utf8, b->name_capacity},
+      {b->unit_utf8, b->unit_capacity}};
+  for (size_t i = 0; i < std::size(regions); ++i)
+    for (size_t j = i + 1; j < std::size(regions); ++j) {
+      const auto x = reinterpret_cast<uintptr_t>(regions[i].first);
+      const auto y = reinterpret_cast<uintptr_t>(regions[j].first);
+      if (regions[i].second > UINTPTR_MAX - x ||
+          regions[j].second > UINTPTR_MAX - y ||
+          (x < y + regions[j].second && y < x + regions[i].second))
+        return COB_ARGUMENT;
+    }
+  *out = {};
+  out->size = sizeof(*out);
+  out->version = 1;
+  b->name_utf8[0] = b->unit_utf8[0] = 0;
+  return run_operation(id, &out->bridge_result, sizeof(out->bridge_result), b,
+                       &out->metadata);
 }
 extern "C" int32_t cob_cancel_v1(uint64_t id) {
   try {

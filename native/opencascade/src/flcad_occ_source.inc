@@ -1,9 +1,31 @@
 #include "flcad_occ_source.h"
+#include "flcad_occ_step_source.h"
+#include <Interface_Check.hxx>
+#include <Interface_CheckIterator.hxx>
 #include <Message_ProgressIndicator.hxx>
+#include <Quantity_ColorRGBA.hxx>
+#include <STEPCAFControl_Reader.hxx>
+#include <STEPConstruct_ExternRefs.hxx>
+#include <STEPConstruct_UnitContext.hxx>
+#include <StepBasic_Product.hxx>
+#include <StepBasic_ProductDefinition.hxx>
+#include <StepBasic_ProductDefinitionRelationship.hxx>
+#include <StepData_StepModel.hxx>
+#include <StepGeom_GeomRepContextAndGlobUnitAssCtxAndGlobUncertaintyAssCtx.hxx>
+#include <StepGeom_GeometricRepresentationContextAndGlobalUnitAssignedContext.hxx>
+#include <StepRepr_GlobalUnitAssignedContext.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDocStd_Document.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <XSControl_TransferReader.hxx>
+#include <XSControl_WorkSession.hxx>
 #include <atomic>
 #include <charconv>
 #include <map>
 #include <thread>
+#include <unordered_set>
 namespace {
 thread_local bool source_active = false;
 #ifdef FLCAD_OCC_TESTING
@@ -521,9 +543,12 @@ occ::handle<Poly_Triangulation> read_stl(std::istream &s, SourceInput &input,
     throw SourceFailure{};
   return collector.finish();
 }
+#include "flcad_occ_step_source.inc"
 int32_t source_read(bool brep, const occ_source_v1 *src,
                     const occ_read_limits_v1 *lim, occ_read_result_v1 *out,
-                    uint32_t size) {
+                    uint32_t size,
+                    const occ_step_buffers_v1 *step_buffers = nullptr,
+                    occ_step_metadata_v1 *step_metadata = nullptr) {
   if (!out || size != sizeof(*out))
     return OCC_READ_INVALID;
   if ((src && overlaps(out, sizeof(*out), src, sizeof(*src))) ||
@@ -564,7 +589,10 @@ int32_t source_read(bool brep, const occ_source_v1 *src,
     source_inject(1);
     TopoDS_Shape shape;
     occ::handle<Poly_Triangulation> mesh;
-    if (brep)
+    StepPrepared step;
+    if (step_buffers)
+      shape = read_step(stream, input, limits, step);
+    else if (brep)
       shape = read_brep(stream, input, limits);
     else
       mesh = read_stl(stream, input, limits);
@@ -604,6 +632,23 @@ int32_t source_read(bool brep, const occ_source_v1 *src,
     }
     out->phase = OCC_READ_VERIFY;
     input.finish();
+    if (step_buffers) {
+      if (step.name.size() >= step_buffers->name_capacity ||
+          step.unit.size() >= step_buffers->unit_capacity) {
+        out->status = OCC_READ_INVALID;
+        fail("Insufficient STEP metadata buffer", out->message,
+             sizeof(out->message));
+        return out->status;
+      }
+      preflight(step.name, step_buffers->name_utf8,
+                step_buffers->name_capacity);
+      preflight(step.unit, step_buffers->unit_utf8,
+                step_buffers->unit_capacity);
+      source_inject(4); // after metadata preparation, before any copy
+      copy_complete(step.name, step_buffers->name_utf8);
+      source_inject(5); // between copies, before registry publication
+      copy_complete(step.unit, step_buffers->unit_utf8);
+    }
     out->phase = OCC_READ_PUBLISH;
     source_inject(3);
     auto publish = [&]() noexcept {
@@ -614,6 +659,8 @@ int32_t source_read(bool brep, const occ_source_v1 *src,
       prepared.bytes_provided = out->bytes_provided;
       prepared.published = 1;
       *out = prepared;
+      if (step_metadata)
+        *step_metadata = step.metadata;
     };
     if (brep) {
       const std::vector<std::pair<std::string, TopoDS_Shape>> entries{
@@ -670,4 +717,40 @@ extern "C" int32_t OCC_STREAM_CALL
 flcad_occ_stl_read_v1(const occ_source_v1 *s, const occ_read_limits_v1 *l,
                       occ_read_result_v1 *r, uint32_t n) {
   return source_read(false, s, l, r, n);
+}
+extern "C" uint32_t OCC_STREAM_CALL flcad_occ_step_source_version(void) {
+  return 1;
+}
+extern "C" int32_t OCC_STREAM_CALL flcad_occ_step_read_v1(
+    const occ_source_v1 *s, const occ_read_limits_v1 *l,
+    const occ_step_buffers_v1 *b, occ_step_read_result_v1 *r, uint32_t n) {
+  if (!r || n != sizeof(*r))
+    return OCC_READ_INVALID;
+  const std::pair<const void *, size_t> regions[] = {
+      {r, sizeof(*r)},
+      {s, s ? sizeof(*s) : 0},
+      {l, l ? sizeof(*l) : 0},
+      {b, b ? sizeof(*b) : 0},
+      {b ? b->name_utf8 : nullptr, b ? b->name_capacity : 0},
+      {b ? b->unit_utf8 : nullptr, b ? b->unit_capacity : 0}};
+  for (size_t i = 0; i < std::size(regions); ++i)
+    for (size_t j = i + 1; j < std::size(regions); ++j)
+      if (regions[i].first && regions[j].first &&
+          overlaps(regions[i].first, regions[i].second, regions[j].first,
+                   regions[j].second))
+        return OCC_READ_INVALID;
+  *r = {};
+  r->size = sizeof(*r);
+  r->version = 1;
+  if (!b || b->size != sizeof(*b) || b->version != 1 || !b->name_utf8 ||
+      !b->name_capacity || !b->unit_utf8 || !b->unit_capacity) {
+    r->native_result.status = OCC_READ_INVALID;
+    return OCC_READ_INVALID;
+  }
+  b->name_utf8[0] = b->unit_utf8[0] = 0;
+  const auto status = source_read(true, s, l, &r->native_result,
+                                  sizeof(r->native_result), b, &r->metadata);
+  if (status)
+    b->name_utf8[0] = b->unit_utf8[0] = 0;
+  return status;
 }
