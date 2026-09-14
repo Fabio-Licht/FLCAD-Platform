@@ -402,6 +402,7 @@ final class _AssetPaths {
     required GeometryAssetId asset,
     required CadAssetFile kind,
     required String expectedSha256,
+    int? maxPayloadBytes,
   }) async {
     _requireId(asset.value, 'ga1');
     if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedSha256)) {
@@ -483,6 +484,11 @@ final class _AssetPaths {
       throw StateError('Managed asset contains unexpected entries');
     }
     final payloadId = openFile(payloadPath);
+    if (maxPayloadBytes != null &&
+        ((expected['size'] as int) > maxPayloadBytes ||
+            (native.info(payloadId)['size'] as int) > maxPayloadBytes)) {
+      throw const FormatException('Managed asset payload exceeds size limit');
+    }
     final actual = native.info(payloadId, digest: true);
     if (!_sameAssetIdentity(actual, expected)) {
       throw StateError('Managed asset identity, size or hash diverged');
@@ -508,6 +514,34 @@ final class _VerifiedManagedAsset {
   final CadAssetNativeFs native;
   final int file, descriptorFile;
   final Map<String, dynamic> expected, descriptorExpected;
+
+  /// Only bounded metadata payloads may cross Dart. Uses the already-open CAF
+  /// object under a pin; never resolves the descriptor's name again.
+  Future<List<int>> readBoundedMetadata(int maxBytes) =>
+      native.withSourceCapability(file, (id, _) async {
+        revalidate();
+        final size = expected['size'] as int;
+        if (size <= 0 || size > maxBytes) {
+          throw const FormatException('Managed metadata exceeds size limit');
+        }
+        final bytes = <int>[];
+        while (bytes.length < size) {
+          final chunk = native.read(
+            id,
+            bytes.length,
+            math.min(65536, size - bytes.length),
+          );
+          if (chunk.isEmpty) {
+            throw const FormatException('Truncated managed metadata');
+          }
+          bytes.addAll(chunk);
+        }
+        revalidate();
+        if (sha256.convert(bytes).toString() != expected['sha256']) {
+          throw StateError('Managed metadata hash diverged while reading');
+        }
+        return bytes;
+      });
 
   void revalidate() {
     if (!_sameAssetIdentity(native.info(file, digest: true), expected) ||

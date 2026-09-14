@@ -818,11 +818,6 @@ extension _CadTransactions on CadRuntime {
   ) async {
     final loaded = await _repository.load(projectId, directory);
     tx.validate();
-    if (loaded.entities.values.any(
-      (e) => e.data['managedStepAssets'] != null,
-    )) {
-      throw UnsupportedError('Managed STEP restoration requires STEP-2');
-    }
     final candidate = _snapshots.document(
       FeatureLifecycleProjector.normalize(
         _ensureProfessionalCollections(
@@ -845,7 +840,8 @@ extension _CadTransactions on CadRuntime {
         .where(
           (entity) =>
               entity.data['managedBrepAssets'] != null ||
-              entity.data['managedStlAssets'] != null,
+              entity.data['managedStlAssets'] != null ||
+              entity.data['managedStepAssets'] != null,
         )
         .toList(growable: false);
     _PreparedManagedOpen? managed;
@@ -863,6 +859,7 @@ extension _CadTransactions on CadRuntime {
         (entity) =>
             entity.data['managedBrepAssets'] == null &&
             entity.data['managedStlAssets'] == null &&
+            entity.data['managedStepAssets'] == null &&
             entity.shape != null &&
             entity.data['sceneGeometry'] is Map,
       );
@@ -1033,19 +1030,57 @@ extension _CadTransactions on CadRuntime {
         try {
           final GeometryAssetId displayId;
           final String displaySha256;
+          GeometryAssetId? shapeId;
+          String? shapeSha256;
+          StepAppearanceManifest? stepAppearance;
           if (entity.data['managedStlAssets'] != null) {
             final assets = _managedStlAssetsForEntity(entity);
             displayId = assets.display;
             displaySha256 = assets.displaySha256;
+          } else if (entity.data['managedStepAssets'] != null) {
+            final assets = _managedStepAssetsForEntity(entity);
+            shapeId = assets.shape;
+            shapeSha256 = assets.shapeSha256;
+            displayId = assets.display;
+            displaySha256 = assets.displaySha256;
+            final appearanceAsset = await paths.openManagedAsset(
+              projectId: candidate.projectId,
+              asset: assets.appearance,
+              kind: CadAssetFile.appearance,
+              expectedSha256: assets.appearanceSha256,
+              maxPayloadBytes: 16 * 1024,
+            );
+            verified.add(appearanceAsset);
+            final bytes = await appearanceAsset.readBoundedMetadata(16 * 1024);
+            tx.validate();
+            final json = jsonDecode(utf8.decode(bytes));
+            if (json is! Map<String, dynamic>) {
+              throw const FormatException(
+                'Invalid STEP appearance JSON object',
+              );
+            }
+            stepAppearance = StepAppearanceManifest.fromJson(json);
+            if (!listEquals(bytes, stepAppearance.encode()) ||
+                entity.data['name'] != stepAppearance.name) {
+              throw const FormatException(
+                'STEP appearance is noncanonical or contradicts document',
+              );
+            }
+            await _assetStorage.checkpoint('managedOpen:afterAppearance');
+            tx.validate();
           } else {
             final assets = _managedAssetsForEntity(entity);
             displayId = assets.display;
             displaySha256 = assets.displaySha256;
+            shapeId = assets.shape;
+            shapeSha256 = assets.shapeSha256;
+          }
+          if (shapeId != null) {
             final shapeAsset = await paths.openManagedAsset(
               projectId: candidate.projectId,
-              asset: assets.shape,
+              asset: shapeId,
               kind: CadAssetFile.brep,
-              expectedSha256: assets.shapeSha256,
+              expectedSha256: shapeSha256!,
             );
             verified.add(shapeAsset);
             shape = await _restoreManagedShape(tx, kernel, shapeAsset);
@@ -1070,6 +1105,7 @@ extension _CadTransactions on CadRuntime {
             entity,
             managed,
             kernel,
+            stepAppearance: stepAppearance,
           );
           tx.validate();
           scenes[entity.id] = managedScene;
@@ -1159,6 +1195,18 @@ extension _CadTransactions on CadRuntime {
     );
   }
 
+  ManagedStepAssets _managedStepAssetsForEntity(CadDocumentEntity entity) {
+    // Core decoder checks entity kind, allowed fields, ambiguity and transient
+    // data as well as the STEP-specific durable-reference schema.
+    CadDocumentEntity.fromJson(entity.toJson());
+    if (entity.data['managedStepAssets'] is! Map) {
+      throw const FormatException('Missing managed STEP asset reference');
+    }
+    return ManagedStepAssets.fromJson(
+      Map<String, dynamic>.from(entity.data['managedStepAssets'] as Map),
+    );
+  }
+
   ManagedStlAssets _managedStlAssetsForEntity(CadDocumentEntity entity) {
     if (entity.kind != CadDocumentEntityKind.import ||
         entity.shape != null ||
@@ -1227,8 +1275,9 @@ extension _CadTransactions on CadRuntime {
     CadDocument candidate,
     CadDocumentEntity entity,
     ManagedEntityGeometry geometry,
-    OpenCascadeKernelAdapter kernel,
-  ) async {
+    OpenCascadeKernelAdapter kernel, {
+    StepAppearanceManifest? stepAppearance,
+  }) async {
     if (entity.data['managedStlAssets'] != null) {
       return _prepareRetainedStlSceneEntity(
         candidate,
@@ -1240,15 +1289,26 @@ extension _CadTransactions on CadRuntime {
     if (geometry is! ManagedBrepEntityGeometry) {
       throw const FormatException('Managed BREP geometry requires a shape');
     }
-    _managedAssetsForEntity(entity);
-    _validateManagedDescriptor(
-      entity.data['shapeDescriptor'],
-      geometry.shape.descriptor,
-    );
-    _validateManagedDescriptor(
-      entity.data['displayMeshDescriptor'],
-      geometry.displayMesh.descriptor,
-    );
+    if (entity.data['managedStepAssets'] != null) {
+      _managedStepAssetsForEntity(entity);
+      if (stepAppearance == null ||
+          stepAppearance.name != entity.data['name'] ||
+          geometry.shape.descriptor.resourceType != 'solid') {
+        throw const FormatException(
+          'Restored STEP geometry or appearance is incompatible',
+        );
+      }
+    } else {
+      _managedAssetsForEntity(entity);
+      _validateManagedDescriptor(
+        entity.data['shapeDescriptor'],
+        geometry.shape.descriptor,
+      );
+      _validateManagedDescriptor(
+        entity.data['displayMeshDescriptor'],
+        geometry.displayMesh.descriptor,
+      );
+    }
     final sceneGeometry = await geometry.displayMesh.prepareSceneGeometry(
       kernel,
     );
@@ -1256,7 +1316,9 @@ extension _CadTransactions on CadRuntime {
     return CadSceneEntity(
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
-      geometry: sceneGeometry,
+      geometry: stepAppearance?.hasColor == true
+          ? {...sceneGeometry, 'rootLinearRgb': stepAppearance!.linearRgb}
+          : sceneGeometry,
       visible:
           entity.data['deleted'] != true &&
           (entity.data['sceneVisible'] as bool? ?? true) &&
@@ -1411,7 +1473,8 @@ extension _CadTransactions on CadRuntime {
         .where(
           (entity) =>
               entity.data['managedBrepAssets'] != null ||
-              entity.data['managedStlAssets'] != null,
+              entity.data['managedStlAssets'] != null ||
+              entity.data['managedStepAssets'] != null,
         )
         .map((entity) => entity.id)
         .toSet();

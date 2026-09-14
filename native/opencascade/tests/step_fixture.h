@@ -13,7 +13,8 @@
 #include <sstream>
 #include <stdexcept>
 inline std::string step_fixture(bool color = true, int mode = 0,
-                                bool meter = false, bool transparent = false) {
+                                bool meter = false, bool transparent = false,
+                                bool alternate_color = false) {
   occ::handle<TDocStd_Document> doc = new TDocStd_Document("BinXCAF");
   XCAFDoc_DocumentTool::SetLengthUnit(doc, 0.001);
   auto tool = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
@@ -23,7 +24,9 @@ inline std::string step_fixture(bool color = true, int mode = 0,
     XCAFDoc_DocumentTool::ColorTool(doc->Main())
         ->SetColor(root,
                    Quantity_ColorRGBA(
-                       Quantity_Color(0.125, 0.5, 0.75, Quantity_TOC_RGB),
+                       alternate_color
+                           ? Quantity_Color(0.75, 0.125, 0.5, Quantity_TOC_RGB)
+                           : Quantity_Color(0.125, 0.5, 0.75, Quantity_TOC_RGB),
                        transparent ? 0.5f : 1.0f),
                    XCAFDoc_ColorGen);
   if (mode == 1) {

@@ -44,13 +44,13 @@ int wmain(int argc, wchar_t **argv) {
           reinterpret_cast<const uint16_t *>(directory.c_str()),
           static_cast<uint32_t>(directory.native().size()));
       CHECK(!root.status);
-      for (int mode = 0; mode < 6; ++mode) {
+      for (int mode = 0; mode < 7; ++mode) {
         auto bytes = mode == 5 ? std::string("invalid STEP")
                                : step_fixture(mode != 1,
                                               mode == 3   ? 1
                                               : mode == 4 ? 3
                                                           : 0,
-                                              mode == 2);
+                                              mode == 2, false, mode == 6);
         const auto leaf = L"part-" + std::to_wstring(mode) + L".step";
         auto file = FN(caf, caf_create_file)(
             root.object, reinterpret_cast<const uint16_t *>(leaf.data()),

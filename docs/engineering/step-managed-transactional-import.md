@@ -117,6 +117,11 @@ valida a transação antes de promover/publicar. Não há aquisição recursiva 
 
 ## Limites deliberados
 
+Este documento registra STEP-1A1. A reabertura implementada posteriormente em
+STEP-2A está descrita em [STEP managed open lifecycle](step-managed-open-lifecycle.md).
+O bloqueio de open mencionado abaixo é histórico; Undo/Redo STEP continua fora
+do escopo aprovado.
+
 Esta fase importa e persiste, sem implementar restauração STEP. `save` e `close`
 genéricos preservam os três assets e drenam a residência. Open de documento STEP
 e alterações documentais/histórico enquanto há STEP são recusados explicitamente

@@ -91,6 +91,63 @@ void main() {
     expect(pathImports(), 0);
   }
 
+  ManagedStepAssets references(CadDocumentEntity entity) =>
+      ManagedStepAssets.fromJson(
+        Map<String, dynamic>.from(entity.data['managedStepAssets'] as Map),
+      );
+
+  Future<void> corruptManifest(
+    CadDocumentEntity entity,
+    List<int> bytes,
+  ) async {
+    final refs = references(entity);
+    final file = asset(refs.appearance, CadAssetFile.appearance);
+    await file.writeAsBytes(bytes, flush: true);
+    final hash = sha256.convert(bytes).toString();
+    final descriptor = File(p.join(file.parent.path, 'asset.json'));
+    final metadata = jsonDecode(descriptor.readAsStringSync()) as Map;
+    final record =
+        (metadata['files'] as Map)[CadAssetFile.appearance.name] as Map;
+    record['size'] = bytes.length;
+    record['sha256'] = hash;
+    descriptor.writeAsStringSync(jsonEncode(metadata));
+    final document = File(p.join(project.path, 'cad-document.json'));
+    final json = jsonDecode(document.readAsStringSync()) as Map;
+    final entities = json['entities'] as List;
+    final data =
+        (entities.singleWhere((e) => e['id'] == entity.id) as Map)['data']
+            as Map;
+    (data['managedStepAssets'] as Map)['appearanceManifestSha256'] = hash;
+    document.writeAsStringSync(jsonEncode(json));
+  }
+
+  Future<CadDocumentEntity> establishPrevious(CadDocumentEntity target) async {
+    await runtime.open(
+      'previous',
+      await Directory(p.join(root.path, 'previous')).create(),
+    );
+    final prior = await runtime.importManagedStl(
+      asset(references(target).display, CadAssetFile.display).path,
+      nativeBridgePath: bridge,
+    );
+    runtime.select({prior.id});
+    return prior;
+  }
+
+  void capabilitiesReleased(CadDocumentEntity entity) {
+    final refs = references(entity);
+    for (final pair in [
+      (refs.shape, CadAssetFile.brep),
+      (refs.display, CadAssetFile.display),
+      (refs.appearance, CadAssetFile.appearance),
+    ]) {
+      final file = asset(pair.$1, pair.$2);
+      if (file.existsSync()) {
+        file.renameSync('${file.path}.probe').renameSync(file.path);
+      }
+    }
+  }
+
   setUp(() async {
     root = await Directory.systemTemp.createTemp('managed-step-');
     source = await Directory(p.join(root.path, 'source')).create();
@@ -229,19 +286,26 @@ void main() {
           Directory(p.join(source.path, 'must-not-open.step')).existsSync(),
           isFalse,
         );
-        expect(source.listSync().whereType<File>().length, 6);
-        await expectLater(
-          runtime.open('step-project', project),
-          throwsA(
-            isA<UnsupportedError>().having(
-              (e) => e.message,
-              'phase',
-              contains('STEP-2'),
-            ),
-          ),
+        expect(source.listSync().whereType<File>().length, 7);
+        await runtime.open('step-project', project);
+        final reopened = runtime.document!.entities[entity.id]!;
+        expect(reopened.data['managedStepAssets'], refs.toJson());
+        expect(reopened.data['name'], manifest.name);
+        expect(runtime.hasManagedGeometry(entity.id), isTrue);
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+        expect(
+          runtime.scene.find(entity.id)!.geometry['rootLinearRgb'],
+          manifest.linearRgb,
         );
-        expect(runtime.document, isNull);
-        expect(runtime.scene.entities, isEmpty);
+        expect(
+          cadRootSrgb(runtime.scene.find(entity.id)!.geometry),
+          cadRootSrgb(scene.geometry),
+        );
+        expect(
+          await inventory(Directory(p.join(project.path, 'CAD', 'Assets'))),
+          durable,
+        );
+        expect(pathImports(), 0);
       },
     );
   }
@@ -463,4 +527,391 @@ void main() {
       expect(journals().single['documentPublished'], isFalse);
     },
   );
+
+  test('two STEP colors survive repeated atomic open and close', () async {
+    final first = await import(0);
+    final second = await import(6);
+    final before = await inventory(Directory(p.join(project.path, 'CAD')));
+    for (var cycle = 0; cycle < 3; cycle++) {
+      await runtime.close();
+      noOwners();
+      final observations = <bool>[];
+      void observe() {
+        observations.add(
+          runtime.hasManagedGeometry(first.id) &&
+              runtime.hasManagedGeometry(second.id) &&
+              runtime.scene.find(first.id)?.geometry['rootLinearRgb'] != null &&
+              runtime.scene.find(second.id)?.geometry['rootLinearRgb'] !=
+                  null &&
+              adapter.custodyDiagnostics!.allocations == 4,
+        );
+      }
+
+      runtime.addListener(observe);
+      runtime.scene.addListener(observe);
+      await runtime.open('step-project', project);
+      runtime.removeListener(observe);
+      runtime.scene.removeListener(observe);
+      expect(observations, isNotEmpty);
+      expect(observations, everyElement(isTrue));
+      expect(adapter.custodyDiagnostics!.allocations, 4);
+      expect(runtime.hasManagedGeometry(first.id), isTrue);
+      expect(runtime.hasManagedGeometry(second.id), isTrue);
+      expect(runtime.scene.find(first.id)!.geometry['rootLinearRgb'], [
+        .125,
+        .5,
+        .75,
+      ]);
+      expect(runtime.scene.find(second.id)!.geometry['rootLinearRgb'], [
+        .75,
+        .125,
+        .5,
+      ]);
+      final encoded = CadSceneDisplayAdapter().initial(runtime.scene).entities;
+      expect(
+        encoded.singleWhere((e) => e['id'] == first.id)['rootSrgb'],
+        cadRootSrgb(runtime.scene.find(first.id)!.geometry),
+      );
+      expect(
+        encoded.singleWhere((e) => e['id'] == second.id)['rootSrgb'],
+        cadRootSrgb(runtime.scene.find(second.id)!.geometry),
+      );
+      expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
+      expect(pathImports(), 0);
+    }
+    storage.gate = (phase) async {
+      if (phase == 'managedGeometry:beforeDispose') {
+        expect(runtime.scene.find(first.id), isNull);
+        expect(runtime.scene.find(second.id), isNull);
+        expect(runtime.hasManagedGeometry(first.id), isFalse);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+      }
+    };
+    await runtime.close();
+    noOwners();
+    expect(CadSceneDisplayAdapter().initial(runtime.scene).entities, isEmpty);
+    expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
+  });
+
+  for (final kind in CadAssetFile.values.where(
+    (k) => [
+      CadAssetFile.brep,
+      CadAssetFile.display,
+      CadAssetFile.appearance,
+    ].contains(k),
+  )) {
+    test(
+      'open rejects missing ${kind.name} without partial publication',
+      () async {
+        final entity = await import(0);
+        final refs = references(entity);
+        await runtime.close();
+        final prior = await establishPrevious(entity);
+        final previous = runtime.document!.toJson();
+        final visual = runtime.scene.find(prior.id);
+        final id = kind == CadAssetFile.brep
+            ? refs.shape
+            : kind == CadAssetFile.display
+            ? refs.display
+            : refs.appearance;
+        asset(id, kind).deleteSync();
+        await expectLater(
+          runtime.open('step-project', project),
+          throwsA(
+            isA<StateError>().having(
+              (e) => e.message,
+              'inventory',
+              'Managed asset contains unexpected entries',
+            ),
+          ),
+        );
+        expect(runtime.document!.toJson(), previous);
+        expect(runtime.scene.find(prior.id), same(visual));
+        expect(runtime.hasManagedGeometry(prior.id), isTrue);
+        expect(adapter.custodyDiagnostics!.allocations, 1);
+        expect(adapter.custodyDiagnostics!.leases, 0);
+        expect(pathImports(), 0);
+      },
+    );
+    test(
+      'open rejects divergent ${kind.name} hash without publication',
+      () async {
+        final entity = await import(0);
+        final refs = references(entity);
+        await runtime.close();
+        final prior = await establishPrevious(entity);
+        final previous = runtime.document!.toJson();
+        final visual = runtime.scene.find(prior.id);
+        final id = kind == CadAssetFile.brep
+            ? refs.shape
+            : kind == CadAssetFile.display
+            ? refs.display
+            : refs.appearance;
+        final file = asset(id, kind);
+        final size = file.lengthSync();
+        final handle = file.openSync(mode: FileMode.append);
+        handle.setPositionSync(0);
+        handle.writeByteSync(0);
+        handle.closeSync();
+        expect(file.lengthSync(), size);
+        await expectLater(
+          runtime.open('step-project', project),
+          throwsA(isA<StateError>()),
+        );
+        expect(runtime.document!.toJson(), previous);
+        expect(runtime.scene.find(prior.id), same(visual));
+        expect(runtime.hasManagedGeometry(prior.id), isTrue);
+        expect(adapter.custodyDiagnostics!.allocations, 1);
+        expect(adapter.custodyDiagnostics!.leases, 0);
+        expect(pathImports(), 0);
+      },
+    );
+  }
+
+  for (final fault in [
+    'json',
+    'utf8',
+    'schema',
+    'version',
+    'rgb',
+    'unit',
+    'name',
+    'duplicate',
+    'limit',
+  ]) {
+    test('open rejects appearance $fault after hash verification', () async {
+      final entity = await import(0);
+      final manifest =
+          jsonDecode(
+                asset(
+                  references(entity).appearance,
+                  CadAssetFile.appearance,
+                ).readAsStringSync(),
+              )
+              as Map<String, dynamic>;
+      await runtime.close();
+      final prior = await establishPrevious(entity);
+      final previous = runtime.document!.toJson();
+      final visual = runtime.scene.find(prior.id);
+      List<int> bytes;
+      switch (fault) {
+        case 'json':
+          bytes = utf8.encode('{');
+        case 'utf8':
+          bytes = [255];
+        case 'schema':
+          manifest['schema'] = 'invalid';
+          bytes = utf8.encode(jsonEncode(manifest));
+        case 'version':
+          manifest['version'] = 2;
+          bytes = utf8.encode(jsonEncode(manifest));
+        case 'rgb':
+          manifest['rootRgb'] = [2, .5, .75];
+          bytes = utf8.encode(jsonEncode(manifest));
+        case 'unit':
+          manifest['resolvedMetersPerUnit'] = 1;
+          bytes = utf8.encode(jsonEncode(manifest));
+        case 'name':
+          manifest['name'] = 'contradiction';
+          bytes = utf8.encode(jsonEncode(manifest));
+        case 'duplicate':
+          bytes = utf8.encode(
+            '${jsonEncode(manifest).substring(0, jsonEncode(manifest).length - 1)},"name":"${manifest['name']}"}',
+          );
+        default:
+          bytes = List.filled(16 * 1024 + 1, 32);
+      }
+      await corruptManifest(entity, bytes);
+      await expectLater(
+        runtime.open('step-project', project),
+        throwsA(isA<FormatException>()),
+      );
+      expect(runtime.document!.toJson(), previous);
+      expect(runtime.scene.find(prior.id), same(visual));
+      expect(runtime.hasManagedGeometry(prior.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 1);
+      expect(adapter.custodyDiagnostics!.leases, 0);
+      expect(pathImports(), 0);
+      capabilitiesReleased(entity);
+    });
+  }
+
+  for (final action in ['cancel', 'replace', 'shutdown', 'second']) {
+    test(
+      'STEP open $action drains prepared owners deterministically',
+      () async {
+        final entity = await import(0);
+        await import(6);
+        final before = await inventory(Directory(p.join(project.path, 'CAD')));
+        await runtime.close();
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        var prepared = 0;
+        storage.gate = (phase) async {
+          if (phase == 'managedOpen:afterMesh' && ++prepared == 1) {
+            entered.complete();
+            await release.future;
+          }
+          if (action == 'second' &&
+              phase == 'managedOpen:beforeEntity' &&
+              prepared == 1) {
+            throw StateError('injected:second');
+          }
+        };
+        final cancellation = CadAssetCancellation();
+        final pending = runtime.open(
+          'step-project',
+          project,
+          cancellation: cancellation,
+        );
+        final assertion = expectLater(
+          pending,
+          throwsA(
+            action == 'second'
+                ? isA<StateError>().having(
+                    (e) => e.message,
+                    'cause',
+                    'injected:second',
+                  )
+                : isA<StaleCadTransaction>(),
+          ),
+        );
+        await entered.future;
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+        expect(runtime.scene.entities, isEmpty);
+        Future<void>? boundary;
+        if (action == 'cancel') cancellation.cancel();
+        if (action == 'replace') {
+          boundary = runtime.open(
+            'replacement',
+            await Directory(p.join(root.path, 'replacement')).create(),
+          );
+        }
+        if (action == 'shutdown') boundary = runtime.shutdown();
+        release.complete();
+        await assertion;
+        await boundary;
+        noOwners();
+        capabilitiesReleased(entity);
+        expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
+      },
+    );
+  }
+
+  test('mixed STEP BREP STL and serialized legacy reopen together', () async {
+    await runtime.mutate(
+      command: 'test.legacy',
+      upsert: const [
+        CadDocumentEntity(
+          id: 'legacy',
+          kind: CadDocumentEntityKind.vertex,
+          data: {
+            'sceneKind': 'point',
+            'sceneGeometry': {
+              'position': [4, 5, 6],
+            },
+          },
+        ),
+      ],
+    );
+    // The bridge smoke fixture requires a direct child with this prefix.
+    final folder = await Directory.systemTemp.createTemp('cob-dart-');
+    addTearDown(() => folder.delete(recursive: true));
+    final result = await Process.run(
+      Platform.environment['FLCAD_SOURCE_FIXTURE_EXE']!,
+      [caf, occ, folder.path],
+    );
+    expect(result.exitCode, 0, reason: '${result.stdout}\n${result.stderr}');
+    final brep = await runtime.importManagedBrep(
+      p.join(folder.path, 'shape.brep'),
+      nativeBridgePath: bridge,
+    );
+    final stl = await runtime.importManagedStl(
+      p.join(folder.path, 'display.stl'),
+      nativeBridgePath: bridge,
+    );
+    final step = await import(0);
+    final before = await inventory(Directory(p.join(project.path, 'CAD')));
+    await runtime.close();
+    await runtime.open('step-project', project);
+    expect(
+      runtime.scene.entities.where(
+        (e) => ['legacy', brep.id, stl.id, step.id].contains(e.id),
+      ),
+      hasLength(4),
+    );
+    expect(adapter.custodyDiagnostics!.allocations, 5);
+    for (final id in [brep.id, stl.id, step.id]) {
+      expect(runtime.hasManagedGeometry(id), isTrue);
+    }
+    expect(runtime.scene.find('legacy')!.geometry['position'], [4, 5, 6]);
+    expect(runtime.scene.find(step.id)!.geometry['rootLinearRgb'], [
+      .125,
+      .5,
+      .75,
+    ]);
+    expect(
+      runtime.scene.find(brep.id)!.geometry.containsKey('rootLinearRgb'),
+      isFalse,
+    );
+    expect(
+      runtime.scene.find(stl.id)!.geometry.containsKey('rootLinearRgb'),
+      isFalse,
+    );
+    expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
+    expect(
+      Directory(p.join(project.path, 'NativeShapes')).existsSync(),
+      isFalse,
+    );
+    expect(
+      Directory(p.join(project.path, 'DisplayMeshes')).existsSync(),
+      isFalse,
+    );
+    expect(pathImports(), 0);
+  });
+
+  for (final kind in [
+    CadAssetFile.brep,
+    CadAssetFile.display,
+    CadAssetFile.appearance,
+  ]) {
+    test('anchored STEP ${kind.name} rejects late mutation', () async {
+      final entity = await import(0);
+      final refs = references(entity);
+      final id = kind == CadAssetFile.brep
+          ? refs.shape
+          : kind == CadAssetFile.display
+          ? refs.display
+          : refs.appearance;
+      final file = asset(id, kind);
+      final before = await inventory(Directory(p.join(project.path, 'CAD')));
+      await runtime.close();
+      storage.gate = (phase) async {
+        if (phase == 'managedOpen:beforePublish') {
+          // CAF keeps deny-write handles alive through publication.
+          final handle = file.openSync(mode: FileMode.append);
+          try {
+            handle.writeByteSync(0);
+          } finally {
+            handle.closeSync();
+          }
+        }
+      };
+      await expectLater(
+        runtime.open('step-project', project),
+        throwsA(
+          isA<PathAccessException>().having(
+            (e) => e.osError?.errorCode,
+            'sharing violation',
+            32,
+          ),
+        ),
+      );
+      expect(runtime.document, isNull);
+      expect(runtime.scene.entities, isEmpty);
+      noOwners();
+      capabilitiesReleased(entity);
+      expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
+    });
+  }
 }

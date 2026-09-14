@@ -89,7 +89,8 @@ final class CadAssetNativeFs {
     _closing = true;
   }
 
-  /// Internal native source scope. No bytes cross this callback.
+  /// Pins an already-open CAF source during use. CAD payload transport remains
+  /// C-to-C; bounded metadata readers may consume bytes through CAF.read.
   Future<T> withSourceCapability<T>(
     int id,
     Future<T> Function(int, Pointer<Void>) operation,

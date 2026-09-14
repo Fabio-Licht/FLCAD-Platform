@@ -207,17 +207,36 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     if (notify) notifyListeners();
   }
 
-  Future<void> open(String projectId, Directory directory) {
+  Future<void> open(
+    String projectId,
+    Directory directory, {
+    CadAssetCancellation? cancellation,
+  }) {
     if (_closingAdmission) return Future.error(const CadRuntimeShuttingDown());
     if (_callingTransaction != null) {
       return Future.error(StateError('Reentrant runtime transaction.'));
     }
+    if (cancellation?.isCancelled == true) {
+      return Future.error(const CadAssetCancelled());
+    }
     _transaction?.requestRevocation();
     final generation = ++_lifecycleGeneration;
-    return _enqueue(
-      (tx) => _openInTransaction(tx, projectId, directory),
-      lifecycle: generation,
-    );
+    return _enqueue((tx) async {
+      if (cancellation?.isCancelled == true) throw const CadAssetCancelled();
+      if (cancellation != null) {
+        unawaited(
+          Future.any<void>([
+            cancellation._done.future,
+            tx.revocation.future,
+          ]).then((_) {
+            if (cancellation.isCancelled && !tx.committed) {
+              tx.requestRevocation();
+            }
+          }),
+        );
+      }
+      await _openInTransaction(tx, projectId, directory);
+    }, lifecycle: generation);
   }
 
   Future<void> close() {
