@@ -363,14 +363,6 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> redo,
   ) async {
     tx.validate();
-    if ([
-      ...?tx.document?.entities.values,
-      ...candidate.entities.values,
-    ].any((e) => e.data['managedStepAssets'] != null)) {
-      throw UnsupportedError(
-        'Managed STEP editing and history restoration require STEP-2',
-      );
-    }
     candidate = _snapshots.document(candidate, normalized: true);
     undo = _snapshots.history(undo);
     redo = _snapshots.history(redo);
@@ -378,13 +370,15 @@ extension _CadTransactions on CadRuntime {
         tx.document?.entities.values.any(
           (entity) =>
               entity.data['managedBrepAssets'] != null ||
-              entity.data['managedStlAssets'] != null,
+              entity.data['managedStlAssets'] != null ||
+              entity.data['managedStepAssets'] != null,
         ) ??
         false;
     final candidateHasManaged = candidate.entities.values.any(
       (entity) =>
           entity.data['managedBrepAssets'] != null ||
-          entity.data['managedStlAssets'] != null,
+          entity.data['managedStlAssets'] != null ||
+          entity.data['managedStepAssets'] != null,
     );
     if (currentHasManaged || candidateHasManaged) {
       await _commitManagedSnapshot(tx, candidate, undo, redo);
@@ -429,11 +423,13 @@ extension _CadTransactions on CadRuntime {
   ) async {
     final directory = tx.directory!;
     _validateManagedStlTransition(tx.document, candidate);
+    _validateManagedStepTransition(tx.document, candidate);
     final targetEntities = candidate.entities.values
         .where(
           (entity) =>
               entity.data['managedBrepAssets'] != null ||
-              entity.data['managedStlAssets'] != null,
+              entity.data['managedStlAssets'] != null ||
+              entity.data['managedStepAssets'] != null,
         )
         .toList(growable: false);
     final retained = <String, ManagedEntityGeometry>{};
@@ -454,6 +450,33 @@ extension _CadTransactions on CadRuntime {
         } else {
           // STL has no shape variant to retain or synthesize. Redo restores
           // exactly one display mesh from its CAF-sealed durable asset.
+          restore.add(entity);
+        }
+        continue;
+      }
+      if (entity.data['managedStepAssets'] is Map) {
+        final targetAssets = _managedStepAssetsForEntity(entity);
+        if (currentGeometry is ManagedBrepEntityGeometry &&
+            currentEntity?.data['managedStepAssets'] is Map &&
+            _sameJson(
+              currentEntity!.data['managedStepAssets'],
+              targetAssets.toJson(),
+            )) {
+          // This entity is unchanged by this history step. Its native pair and
+          // scene appearance were already fully validated and published; keep
+          // its existing custody rather than recreate it while restoring a
+          // different STEP entity.
+          currentGeometry.validateTransfer();
+          if (currentGeometry.shape.descriptor.resourceType != 'solid') {
+            throw const FormatException(
+              'Retained STEP geometry is incompatible',
+            );
+          }
+          retained[entity.id] = currentGeometry;
+        } else {
+          // A restored STEP is never synthesized or recovered from its source:
+          // _prepareManagedOpen verifies BREP, display STL and manifest as one
+          // CAF-sealed durable set before it can be published.
           restore.add(entity);
         }
         continue;
@@ -502,6 +525,13 @@ extension _CadTransactions on CadRuntime {
                   entry.value,
                   kernel,
                 )
+              : entity.data['managedStepAssets'] is Map
+              ? await _prepareRetainedStepSceneEntity(
+                  candidate,
+                  entity,
+                  entry.value,
+                  kernel,
+                )
               : await _prepareManagedSceneEntity(
                   candidate,
                   entity,
@@ -515,6 +545,7 @@ extension _CadTransactions on CadRuntime {
         (entity) =>
             entity.data['managedBrepAssets'] == null &&
             entity.data['managedStlAssets'] == null &&
+            entity.data['managedStepAssets'] == null &&
             entity.shape != null &&
             entity.data['sceneGeometry'] is Map,
       );
@@ -1244,6 +1275,28 @@ extension _CadTransactions on CadRuntime {
     }
   }
 
+  void _validateManagedStepTransition(
+    CadDocument? current,
+    CadDocument candidate,
+  ) {
+    Map<String, Object?> references(CadDocument? document) => {
+      for (final entity
+          in document?.entities.values ?? const <CadDocumentEntity>[])
+        if (entity.data['managedStepAssets'] != null)
+          entity.id: _orderedJson(entity.data['managedStepAssets']),
+    };
+    final before = references(current);
+    final after = references(candidate);
+    if (before.keys
+        .toSet()
+        .intersection(after.keys.toSet())
+        .any((id) => !_sameJson(before[id], after[id]))) {
+      throw UnsupportedError(
+        'Changing managed STEP residency belongs to STEP-3',
+      );
+    }
+  }
+
   Future<CadSceneEntity> _prepareRetainedStlSceneEntity(
     CadDocument candidate,
     CadDocumentEntity entity,
@@ -1262,6 +1315,54 @@ extension _CadTransactions on CadRuntime {
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
       geometry: sceneGeometry,
+      visible:
+          entity.data['deleted'] != true &&
+          (entity.data['sceneVisible'] as bool? ?? true) &&
+          collection?.data['visible'] != false &&
+          collection?.data['deleted'] != true,
+      transparent: entity.data['sceneTransparent'] as bool? ?? false,
+    );
+  }
+
+  Future<CadSceneEntity> _prepareRetainedStepSceneEntity(
+    CadDocument candidate,
+    CadDocumentEntity entity,
+    ManagedEntityGeometry geometry,
+    OpenCascadeKernelAdapter kernel,
+  ) async {
+    _managedStepAssetsForEntity(entity);
+    if (geometry is! ManagedBrepEntityGeometry ||
+        geometry.shape.descriptor.resourceType != 'solid') {
+      throw const FormatException('Retained STEP geometry is incompatible');
+    }
+    final previous = scene.find(entity.id);
+    if (previous == null) {
+      throw StateError('Retained STEP appearance is unavailable');
+    }
+    final sceneGeometry = await geometry.displayMesh.prepareSceneGeometry(
+      kernel,
+    );
+    final rootLinearRgb = previous.geometry['rootLinearRgb'];
+    if (rootLinearRgb != null &&
+        (rootLinearRgb is! List ||
+            rootLinearRgb.length != 3 ||
+            rootLinearRgb.any(
+              (v) => v is! num || !v.isFinite || v < 0 || v > 1,
+            ))) {
+      throw const FormatException('Retained STEP appearance is incompatible');
+    }
+    final collection = candidate.entities[entity.data['collectionId']];
+    return CadSceneEntity(
+      id: entity.id,
+      kind: CadSceneEntityKind.mesh,
+      geometry: rootLinearRgb == null
+          ? sceneGeometry
+          : {
+              ...sceneGeometry,
+              'rootLinearRgb': (rootLinearRgb as List)
+                  .map((v) => (v as num).toDouble())
+                  .toList(),
+            },
       visible:
           entity.data['deleted'] != true &&
           (entity.data['sceneVisible'] as bool? ?? true) &&

@@ -2177,17 +2177,35 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     ]);
   });
 
-  Future<void> redoDocument() => _enqueue((tx) async {
-    if (_redo.isEmpty) return;
-    final candidate = FeatureLifecycleProjector.normalize(
-      _redo.last,
-      command: 'document.redo.lifecycle-restore',
-    );
-    await _commitDocument(tx, candidate, [
-      ..._undo,
-      _requireDocument(),
-    ], _redo.sublist(0, _redo.length - 1));
-  });
+  Future<void> redoDocument({CadAssetCancellation? cancellation}) {
+    if (cancellation?.isCancelled == true) {
+      return Future.error(const CadAssetCancelled());
+    }
+    return _enqueue((tx) async {
+      if (cancellation?.isCancelled == true) throw const CadAssetCancelled();
+      if (cancellation != null) {
+        unawaited(
+          Future.any<void>([
+            cancellation._done.future,
+            tx.revocation.future,
+          ]).then((_) {
+            if (cancellation.isCancelled && !tx.committed) {
+              tx.requestRevocation();
+            }
+          }),
+        );
+      }
+      if (_redo.isEmpty) return;
+      final candidate = FeatureLifecycleProjector.normalize(
+        _redo.last,
+        command: 'document.redo.lifecycle-restore',
+      );
+      await _commitDocument(tx, candidate, [
+        ..._undo,
+        _requireDocument(),
+      ], _redo.sublist(0, _redo.length - 1));
+    });
+  }
 
   Future<void> save({bool recordLifecycle = false}) => _enqueue((tx) async {
     final document = _document;

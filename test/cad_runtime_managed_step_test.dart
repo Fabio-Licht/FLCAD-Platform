@@ -5,6 +5,7 @@ import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
+import 'package:flcad_mobile/app/runtime/cad_asset_fs_native.dart';
 import 'package:flcad_mobile/app/cad_viewport/native/native_viewport_bridge.dart';
 import 'package:flcad_mobile/app/cad_viewport/rendering/cad_root_color.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
@@ -914,4 +915,298 @@ void main() {
       expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
     });
   }
+
+  test(
+    'STEP Undo removes presentation before disposal and Redo restores assets',
+    () async {
+      final entity = await import(0);
+      final refs = references(entity);
+      final durable = await inventory(Directory(p.join(project.path, 'CAD')));
+      final initialSrgb = cadRootSrgb(runtime.scene.find(entity.id)!.geometry);
+      runtime.select({entity.id});
+      var disposeChecks = 0;
+      storage.gate = (phase) async {
+        if (phase == 'managedGeometry:beforeDispose') {
+          disposeChecks++;
+          expect(runtime.document!.entities[entity.id], isNull);
+          expect(runtime.scene.find(entity.id), isNull);
+          expect(runtime.selection, isEmpty);
+          expect(runtime.hasManagedGeometry(entity.id), isFalse);
+        }
+      };
+
+      await runtime.undoDocument();
+
+      expect(disposeChecks, 1);
+      expect(runtime.canRedo, isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      expect(adapter.custodyDiagnostics!.leases, 0);
+      expect(await inventory(Directory(p.join(project.path, 'CAD'))), durable);
+
+      await runtime.redoDocument();
+
+      final restored = runtime.document!.entities[entity.id]!;
+      expect(references(restored).toJson(), refs.toJson());
+      expect(restored.data['name'], entity.data['name']);
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(runtime.scene.find(entity.id)!.geometry['rootLinearRgb'], [
+        .125,
+        .5,
+        .75,
+      ]);
+      expect(cadRootSrgb(runtime.scene.find(entity.id)!.geometry), initialSrgb);
+      expect(
+        CadSceneDisplayAdapter()
+            .initial(runtime.scene)
+            .entities
+            .single['rootSrgb'],
+        initialSrgb,
+      );
+      expect(await inventory(Directory(p.join(project.path, 'CAD'))), durable);
+      expect(pathImports(), 0);
+    },
+  );
+
+  test('repeated STEP Undo Redo has no duplicate owners and reopens', () async {
+    final entity = await import(2);
+    final refs = references(entity);
+    final durable = await inventory(Directory(p.join(project.path, 'CAD')));
+    for (var cycle = 0; cycle < 3; cycle++) {
+      await runtime.undoDocument();
+      expect(runtime.document!.entities[entity.id], isNull);
+      expect(runtime.scene.find(entity.id), isNull);
+      expect(runtime.hasManagedGeometry(entity.id), isFalse);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      await runtime.redoDocument();
+      expect(runtime.document!.entities.containsKey(entity.id), isTrue);
+      expect(
+        runtime.scene.entities.where((e) => e.id == entity.id),
+        hasLength(1),
+      );
+      expect(runtime.hasManagedGeometry(entity.id), isTrue);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(runtime.scene.find(entity.id)!.geometry['rootLinearRgb'], [
+        .125,
+        .5,
+        .75,
+      ]);
+    }
+    await runtime.save();
+    await runtime.close();
+    await runtime.open('step-project', project);
+    expect(
+      references(runtime.document!.entities[entity.id]!).toJson(),
+      refs.toJson(),
+    );
+    expect(runtime.hasManagedGeometry(entity.id), isTrue);
+    expect(await inventory(Directory(p.join(project.path, 'CAD'))), durable);
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'STEP history keeps first color while restoring only the last entity',
+    () async {
+      final first = await import(0);
+      final second = await import(6);
+      final firstGeometry = runtime.managedGeometryDiagnostics(first.id);
+      await runtime.undoDocument();
+      expect(runtime.document!.entities[first.id], isNotNull);
+      expect(runtime.document!.entities[second.id], isNull);
+      expect(runtime.managedGeometryDiagnostics(first.id), firstGeometry);
+      expect(runtime.scene.find(first.id)!.geometry['rootLinearRgb'], [
+        .125,
+        .5,
+        .75,
+      ]);
+      expect(runtime.scene.find(second.id), isNull);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      await runtime.redoDocument();
+      expect(runtime.scene.find(first.id)!.geometry['rootLinearRgb'], [
+        .125,
+        .5,
+        .75,
+      ]);
+      expect(runtime.scene.find(second.id)!.geometry['rootLinearRgb'], [
+        .75,
+        .125,
+        .5,
+      ]);
+      expect(adapter.custodyDiagnostics!.allocations, 4);
+      expect(pathImports(), 0);
+    },
+  );
+
+  for (final action in ['cancel', 'replace', 'shutdown']) {
+    test('STEP $action revokes a suspended Redo without publication', () async {
+      final entity = await import(0);
+      final durable = await inventory(Directory(p.join(project.path, 'CAD')));
+      await runtime.undoDocument();
+      final entered = Completer<void>(), release = Completer<void>();
+      final cleanup = Completer<void>();
+      storage.gate = (phase) async {
+        if (phase == 'managedOpen:afterMesh' && !entered.isCompleted) {
+          entered.complete();
+          await release.future;
+        } else if (phase == 'managedOpen:beforeEntityCleanup' &&
+            !cleanup.isCompleted) {
+          cleanup.complete();
+        }
+      };
+      final cancellation = CadAssetCancellation();
+      final redo = runtime.redoDocument(cancellation: cancellation);
+      await entered.future;
+      Future<void>? boundary;
+      if (action == 'cancel') {
+        cancellation.cancel();
+      }
+      if (action == 'replace') {
+        boundary = runtime.open(
+          'replacement',
+          await Directory(p.join(root.path, 'replacement')).create(),
+        );
+      }
+      if (action == 'shutdown') {
+        boundary = runtime.shutdown();
+      }
+      release.complete();
+      await cleanup.future;
+      await expectLater(redo, throwsA(isA<StaleCadTransaction>()));
+      await boundary;
+      expect(runtime.document?.entities[entity.id], isNull);
+      expect(runtime.scene.find(entity.id), isNull);
+      expect(runtime.hasManagedGeometry(entity.id), isFalse);
+      expect(adapter.custodyDiagnostics!.allocations, 0);
+      expect(adapter.custodyDiagnostics!.leases, 0);
+      expect(await inventory(Directory(p.join(project.path, 'CAD'))), durable);
+      capabilitiesReleased(entity);
+      expect(pathImports(), 0);
+    });
+  }
+
+  test(
+    'STEP Redo asset failures preserve history, scene and prior owners',
+    () async {
+      final first = await import(0);
+      final second = await import(6);
+      final refs = references(second);
+      await runtime.undoDocument();
+      runtime.select({first.id});
+      final documentBefore = jsonEncode(runtime.document!.toJson());
+      final sceneBefore = runtime.scene.entities
+          .map((e) => (e.id, jsonEncode(e.geometry)))
+          .toList();
+      final historyBefore = (
+        runtime.canUndo,
+        runtime.canRedo,
+        runtime.runtimeRevision,
+      );
+      Future<void> verifyFailure(
+        Future<void> Function() damage,
+        Future<void> Function() restore,
+        Matcher expected,
+      ) async {
+        await damage();
+        await expectLater(runtime.redoDocument(), throwsA(expected));
+        expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+        expect(
+          runtime.scene.entities
+              .map((e) => (e.id, jsonEncode(e.geometry)))
+              .toList(),
+          sceneBefore,
+        );
+        expect(runtime.selection, {first.id});
+        expect(runtime.managedGeometryDiagnostics(first.id), isNotNull);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+        expect(adapter.custodyDiagnostics!.leases, 0);
+        expect((
+          runtime.canUndo,
+          runtime.canRedo,
+          runtime.runtimeRevision,
+        ), historyBefore);
+        expect(pathImports(), 0);
+        await restore();
+      }
+
+      for (final pair in [
+        (refs.shape, CadAssetFile.brep),
+        (refs.display, CadAssetFile.display),
+        (refs.appearance, CadAssetFile.appearance),
+      ]) {
+        final original = asset(pair.$1, pair.$2).parent;
+        final missing = Directory('${original.path}.missing');
+        await verifyFailure(
+          () => original.rename(missing.path),
+          () => missing.rename(original.path),
+          isA<CadAssetNativeError>().having(
+            (e) => e.notFound,
+            'absent',
+            isTrue,
+          ),
+        );
+      }
+      for (final pair in [
+        (refs.shape, CadAssetFile.brep),
+        (refs.display, CadAssetFile.display),
+        (refs.appearance, CadAssetFile.appearance),
+      ]) {
+        final file = asset(pair.$1, pair.$2);
+        late List<int> original;
+        await verifyFailure(
+          () async {
+            original = await file.readAsBytes();
+            final damaged = List<int>.from(original)..[0] ^= 0xff;
+            await file.writeAsBytes(damaged, flush: true);
+          },
+          () => file.writeAsBytes(original, flush: true),
+          isA<StateError>().having(
+            (e) => e.message,
+            'hash divergence',
+            'Managed asset identity, size or hash diverged',
+          ),
+        );
+      }
+    },
+  );
+
+  test(
+    'STEP Redo parses a coherent invalid appearance from durable history',
+    () async {
+      final entity = await import(0);
+      final refs = references(entity);
+      await runtime.undoDocument();
+      await runtime.close();
+      final bytes = utf8.encode('{');
+      final manifest = asset(refs.appearance, CadAssetFile.appearance);
+      await manifest.writeAsBytes(bytes, flush: true);
+      final hash = sha256.convert(bytes).toString();
+      final descriptor = File(p.join(manifest.parent.path, 'asset.json'));
+      final metadata = jsonDecode(await descriptor.readAsString()) as Map;
+      final record =
+          (metadata['files'] as Map)[CadAssetFile.appearance.name] as Map;
+      record['size'] = bytes.length;
+      record['sha256'] = hash;
+      await descriptor.writeAsString(jsonEncode(metadata), flush: true);
+      final history = File(p.join(project.path, 'cad-document-history.json'));
+      final json = jsonDecode(await history.readAsString()) as Map;
+      final redo = (json['redo'] as List).last as Map;
+      final entities = redo['entities'] as List;
+      final data =
+          (entities.singleWhere((e) => e['id'] == entity.id) as Map)['data']
+              as Map;
+      (data['managedStepAssets'] as Map)['appearanceManifestSha256'] = hash;
+      await history.writeAsString(jsonEncode(json), flush: true);
+      await runtime.open('step-project', project);
+      final before = jsonEncode(runtime.document!.toJson());
+      await expectLater(
+        runtime.redoDocument(),
+        throwsA(isA<FormatException>()),
+      );
+      expect(jsonEncode(runtime.document!.toJson()), before);
+      expect(runtime.scene.find(entity.id), isNull);
+      noOwners();
+      capabilitiesReleased(entity);
+    },
+  );
 }
