@@ -968,6 +968,33 @@ void main() {
     },
   );
 
+  test('STEP close removes presentation before every dispose', () async {
+    final first = await import(0);
+    final second = await import(6);
+    final durable = await inventory(Directory(p.join(project.path, 'CAD')));
+    var disposals = 0;
+    storage.gate = (phase) async {
+      if (phase == 'managedGeometry:beforeDispose') {
+        disposals++;
+        expect(runtime.document, isNull);
+        expect(runtime.scene.find(first.id), isNull);
+        expect(runtime.scene.find(second.id), isNull);
+        expect(runtime.hasManagedGeometry(first.id), isFalse);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+        expect(
+          CadSceneDisplayAdapter().initial(runtime.scene).entities,
+          isEmpty,
+        );
+      }
+    };
+
+    await runtime.close();
+
+    expect(disposals, 2);
+    noOwners();
+    expect(await inventory(Directory(p.join(project.path, 'CAD'))), durable);
+  });
+
   test('repeated STEP Undo Redo has no duplicate owners and reopens', () async {
     final entity = await import(2);
     final refs = references(entity);
