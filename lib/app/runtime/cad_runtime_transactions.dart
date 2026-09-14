@@ -428,16 +428,19 @@ extension _CadTransactions on CadRuntime {
       final currentGeometry = _managedGeometry[entity.id];
       if (entity.data['managedStlAssets'] is Map) {
         final targetAssets = _managedStlAssetsForEntity(entity);
-        if (currentGeometry is! ManagedMeshEntityGeometry ||
-            currentEntity?.data['managedStlAssets'] is! Map ||
-            !_sameJson(
+        if (currentGeometry is ManagedMeshEntityGeometry &&
+            currentEntity?.data['managedStlAssets'] is Map &&
+            _sameJson(
               currentEntity!.data['managedStlAssets'],
               targetAssets.toJson(),
             )) {
-          throw UnsupportedError('Managed STL restoration belongs to STL-2');
+          currentGeometry.validateTransfer();
+          retained[entity.id] = currentGeometry;
+        } else {
+          // STL has no shape variant to retain or synthesize. Redo restores
+          // exactly one display mesh from its CAF-sealed durable asset.
+          restore.add(entity);
         }
-        currentGeometry.validateTransfer();
-        retained[entity.id] = currentGeometry;
         continue;
       }
       final targetAssets = _managedAssetsForEntity(entity);
@@ -471,7 +474,7 @@ extension _CadTransactions on CadRuntime {
       final kernel = kernels.active;
       if (retained.isNotEmpty && kernel is! OpenCascadeKernelAdapter) {
         throw UnsupportedError(
-          'Managed BREP history requires the OpenCascade kernel',
+          'Managed history requires the OpenCascade kernel',
         );
       }
       if (kernel is OpenCascadeKernelAdapter) {
@@ -1153,7 +1156,12 @@ extension _CadTransactions on CadRuntime {
         if (entity.data['managedStlAssets'] != null)
           entity.id: _orderedJson(entity.data['managedStlAssets']),
     };
-    if (!_sameJson(references(current), references(candidate))) {
+    final before = references(current);
+    final after = references(candidate);
+    if (before.keys
+        .toSet()
+        .intersection(after.keys.toSet())
+        .any((id) => !_sameJson(before[id], after[id]))) {
       throw UnsupportedError('Changing managed STL residency belongs to STL-2');
     }
   }
@@ -1387,9 +1395,6 @@ extension _CadTransactions on CadRuntime {
         if (!identical(next[entry.key], entry.value)) entry.key: entry.value,
     };
     try {
-      _managedGeometry
-        ..clear()
-        ..addAll(next);
       _install(
         tx,
         candidate,
@@ -1402,6 +1407,12 @@ extension _CadTransactions on CadRuntime {
         bounds: bounds,
         refreshDisplayPipeline: refreshDisplayPipeline,
       );
+      // _install removes document entities, scene geometry and invalid
+      // selection synchronously. Only after that visual boundary do we drop
+      // runtime custody; native disposal remains after this publication.
+      _managedGeometry
+        ..clear()
+        ..addAll(next);
       prepared.installed = true;
       prepared.transferred.clear();
       prepared.previous = null;

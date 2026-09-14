@@ -4,6 +4,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flcad_mobile/app/runtime/cad_asset_fs_native.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document_repository.dart';
@@ -657,22 +658,98 @@ void main() {
     expect(adapter.custodyDiagnostics!.allocations, 1);
   });
 
+  test('managed STL Undo removes visual state before mesh disposal', () async {
+    final stl = await importFile('display.stl');
+    final asset = assets(stl);
+    final files = [
+      payload(stl),
+      File(p.join(payload(stl).parent.path, 'asset.json')),
+    ];
+    final seals = <String, (int, String, DateTime)>{
+      for (final file in files)
+        file.path: (
+          await file.length(),
+          sha256.convert(await file.readAsBytes()).toString(),
+          await file.lastModified(),
+        ),
+    };
+    runtime.select({stl.id});
+    var disposals = 0;
+    storage.onPhase = (phase) async {
+      if (phase == 'managedGeometry:beforeDispose') {
+        disposals++;
+        expect(runtime.document!.entities[stl.id], isNull);
+        expect(runtime.scene.find(stl.id), isNull);
+        expect(runtime.selection, isEmpty);
+        expect(runtime.hasManagedGeometry(stl.id), isFalse);
+      }
+    };
+
+    await runtime.undoDocument();
+
+    expect(disposals, 1);
+    expect(runtime.canRedo, isTrue);
+    expect(adapter.custodyDiagnostics!.allocations, 0);
+    for (final file in files) {
+      final seal = seals[file.path]!;
+      expect(await file.length(), seal.$1);
+      expect(sha256.convert(await file.readAsBytes()).toString(), seal.$2);
+      expect(await file.lastModified(), seal.$3);
+    }
+
+    await runtime.redoDocument();
+
+    final restored = runtime.document!.entities[stl.id]!;
+    expect(assets(restored).toJson(), asset.toJson());
+    expect(restored.shape, isNull);
+    expect(restored.data['shapeAssetId'], isNull);
+    expect(runtime.scene.find(stl.id)?.geometry['nodes'], isNotEmpty);
+    expect(runtime.managedGeometryDiagnostics(stl.id)!['meshOnly'], isTrue);
+    expect(runtime.managedGeometryDiagnostics(stl.id)!['shape'], isNull);
+    expect(adapter.custodyDiagnostics!.allocations, 1);
+    expect(adapter.custodyDiagnostics!.leases, 0);
+    expect(pathImports(), 0);
+  });
+
   test(
-    'Undo changing STL set is rejected atomically with retention intact',
+    'repeated STL Undo Redo has one mesh owner per entity and reopens',
     () async {
-      final stl = await importFile('display.stl');
-      final before = jsonEncode(runtime.document!.toJson());
-      final sceneBefore = jsonEncode(runtime.scene.find(stl.id)!.geometry);
-      final diagnostics = runtime.managedGeometryDiagnostics(stl.id);
-      await expectLater(
-        runtime.undoDocument(),
-        throwsA(isA<UnsupportedError>()),
+      final first = await importFile('display.stl');
+      final second = await importFile('ascii.stl');
+      final firstAssets = assets(first);
+      for (var cycle = 0; cycle < 3; cycle++) {
+        await runtime.undoDocument();
+        expect(runtime.document!.entities[first.id], isNotNull);
+        expect(runtime.document!.entities[second.id], isNull);
+        expect(runtime.scene.find(first.id), isNotNull);
+        expect(runtime.scene.find(second.id), isNull);
+        expect(runtime.hasManagedGeometry(first.id), isTrue);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 1);
+        await runtime.redoDocument();
+        expect(runtime.document!.entities[second.id], isNotNull);
+        expect(
+          runtime.scene.entities.where((entity) => entity.id == second.id),
+          hasLength(1),
+        );
+        expect(
+          runtime.managedGeometryDiagnostics(second.id)!['meshOnly'],
+          isTrue,
+        );
+        expect(runtime.managedGeometryDiagnostics(second.id)!['shape'], isNull);
+        expect(adapter.custodyDiagnostics!.allocations, 2);
+      }
+      await runtime.save();
+      await runtime.close();
+      await runtime.open('managed-stl-project', project);
+      expect(
+        assets(runtime.document!.entities[first.id]!).toJson(),
+        firstAssets.toJson(),
       );
-      expect(jsonEncode(runtime.document!.toJson()), before);
-      expect(jsonEncode(runtime.scene.find(stl.id)!.geometry), sceneBefore);
-      expect(runtime.managedGeometryDiagnostics(stl.id), diagnostics);
-      expect(adapter.custodyDiagnostics!.allocations, 1);
-      expect(runtime.canUndo, isTrue);
+      expect(runtime.scene.find(first.id), isNotNull);
+      expect(runtime.scene.find(second.id), isNotNull);
+      expect(adapter.custodyDiagnostics!.allocations, 2);
+      expect(pathImports(), 0);
     },
   );
 
@@ -688,6 +765,156 @@ void main() {
       expect(adapter.custodyDiagnostics!.allocations, 1);
       expect(adapter.custodyDiagnostics!.leases, 0);
       expect(pathImports(), 0);
+    },
+  );
+
+  test('STL history preserves managed BREP ownership and scene', () async {
+    final brep = await runtime.importManagedBrep(
+      p.join(sourceDirectory.path, 'shape.brep'),
+      nativeBridgePath: bridge,
+    );
+    final stl = await importFile('display.stl');
+    final brepDiagnostics = runtime.managedGeometryDiagnostics(brep.id);
+
+    await runtime.undoDocument();
+
+    expect(runtime.document!.entities[brep.id], isNotNull);
+    expect(runtime.document!.entities[stl.id], isNull);
+    expect(runtime.scene.find(brep.id), isNotNull);
+    expect(runtime.scene.find(stl.id), isNull);
+    expect(runtime.managedGeometryDiagnostics(brep.id), brepDiagnostics);
+    expect(adapter.custodyDiagnostics!.allocations, 2);
+
+    await runtime.redoDocument();
+
+    expect(runtime.managedGeometryDiagnostics(brep.id), brepDiagnostics);
+    expect(runtime.managedGeometryDiagnostics(stl.id)!['meshOnly'], isTrue);
+    expect(runtime.managedGeometryDiagnostics(stl.id)!['shape'], isNull);
+    expect(runtime.scene.find(brep.id), isNotNull);
+    expect(runtime.scene.find(stl.id), isNotNull);
+    expect(adapter.custodyDiagnostics!.allocations, 3);
+    expect(pathImports(), 0);
+  });
+
+  test(
+    'failed STL Redo preserves document, history, scene, selection and owner',
+    () async {
+      final first = await importFile('display.stl');
+      final second = await importFile('ascii.stl');
+      final file = payload(second);
+      await runtime.undoDocument();
+      runtime.select({first.id});
+      final documentBefore = jsonEncode(runtime.document!.toJson());
+      final sceneBefore = runtime.scene.entities
+          .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+          .toList();
+      final ownerBefore = runtime.managedGeometryDiagnostics(first.id);
+      final historyBefore = (
+        runtime.canUndo,
+        runtime.canRedo,
+        runtime.runtimeRevision,
+      );
+
+      Future<void> verifyFailure(
+        Future<void> Function() damage,
+        Future<void> Function() restore,
+        Matcher expected,
+      ) async {
+        await damage();
+        await expectLater(runtime.redoDocument(), throwsA(expected));
+        expect(jsonEncode(runtime.document!.toJson()), documentBefore);
+        expect(
+          runtime.scene.entities
+              .map((entity) => (entity.id, jsonEncode(entity.geometry)))
+              .toList(),
+          sceneBefore,
+        );
+        expect(runtime.selection, {first.id});
+        expect(runtime.managedGeometryDiagnostics(first.id), ownerBefore);
+        expect(runtime.hasManagedGeometry(second.id), isFalse);
+        expect(adapter.custodyDiagnostics!.allocations, 1);
+        expect(adapter.custodyDiagnostics!.leases, 0);
+        expect((
+          runtime.canUndo,
+          runtime.canRedo,
+          runtime.runtimeRevision,
+        ), historyBefore);
+        expect(pathImports(), 0);
+        await restore();
+      }
+
+      final originalDirectory = file.parent;
+      final missing = Directory('${originalDirectory.path}.missing');
+      await verifyFailure(
+        () => originalDirectory.rename(missing.path),
+        () => missing.rename(originalDirectory.path),
+        isA<CadAssetNativeError>().having(
+          (error) => error.notFound,
+          'absent',
+          isTrue,
+        ),
+      );
+
+      late List<int> originalBytes;
+      await verifyFailure(
+        () async =>
+            originalBytes = await file.readAsBytes().then((bytes) async {
+              bytes[0] ^= 0xff;
+              await file.writeAsBytes(bytes, flush: true);
+              return originalBytes = List<int>.from(bytes)..[0] ^= 0xff;
+            }),
+        () => file.writeAsBytes(originalBytes, flush: true),
+        isA<StateError>().having(
+          (error) => error.message,
+          'hash divergence',
+          'Managed asset identity, size or hash diverged',
+        ),
+      );
+    },
+  );
+
+  test(
+    'superseding operation and shutdown revoke suspended STL Redo',
+    () async {
+      for (final action in ['open', 'shutdown']) {
+        final stl = await importFile('display.stl');
+        await runtime.undoDocument();
+        final entered = Completer<void>();
+        final release = Completer<void>();
+        final cleanupEntered = Completer<void>();
+        final cleanupRelease = Completer<void>();
+        storage.onPhase = (phase) async {
+          if (phase == 'managedOpen:afterMesh' && !entered.isCompleted) {
+            entered.complete();
+            await release.future;
+          } else if (phase == 'managedOpen:beforeEntityCleanup' &&
+              !cleanupEntered.isCompleted) {
+            cleanupEntered.complete();
+            await cleanupRelease.future;
+          }
+        };
+        final redo = runtime.redoDocument();
+        await entered.future;
+        final next = action == 'open'
+            ? runtime.open('managed-stl-project', project)
+            : runtime.shutdown();
+        release.complete();
+        await cleanupEntered.future;
+        cleanupRelease.complete();
+        await expectLater(redo, throwsA(isA<StaleCadTransaction>()));
+        await next;
+        expect(adapter.custodyDiagnostics!.leases, 0);
+        if (action == 'open') {
+          expect(runtime.document!.entities[stl.id], isNull);
+          expect(runtime.hasManagedGeometry(stl.id), isFalse);
+          expect(runtime.canRedo, isTrue);
+        } else {
+          expect(runtime.document!.entities[stl.id], isNull);
+        }
+        expect(adapter.custodyDiagnostics!.allocations, 0);
+        expect(pathImports(), 0);
+        if (action == 'shutdown') return;
+      }
     },
   );
 
