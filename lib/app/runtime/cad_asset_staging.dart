@@ -15,6 +15,7 @@ enum CadAssetFile {
   brep('shape.brep'),
   display('display.stl'),
   source('source/original.bin'),
+  appearance('appearance.json'),
   metadata('metadata.json');
 
   const CadAssetFile(this.relativePath);

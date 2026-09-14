@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 import 'package:ffi/ffi.dart';
 import '../../../../app/runtime/cad_asset_fs_native.dart';
+import '../../cad_document/managed_step_contract.dart';
 
 import '../analytics/kernel_analytics.dart';
 import '../api/geometry_kernel_api.dart';

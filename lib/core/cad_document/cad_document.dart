@@ -1,5 +1,6 @@
 import '../cad_kernel/io/kernel_io_models.dart';
 import '../cad_kernel/models/kernel_models.dart';
+import 'managed_step_contract.dart';
 
 enum CadDocumentEntityKind {
   collection,
@@ -49,7 +50,8 @@ class CadDocumentEntity {
     final data = Map<String, dynamic>.from(json['data'] as Map? ?? const {});
     final managed = data['managedBrepAssets'];
     final managedStl = data['managedStlAssets'];
-    if (managed != null && managedStl != null) {
+    final managedStep = data['managedStepAssets'];
+    if ([managed, managedStl, managedStep].where((v) => v != null).length > 1) {
       throw const FormatException('Ambiguous managed geometry asset reference');
     }
     if (managed != null) {
@@ -59,6 +61,34 @@ class CadDocumentEntity {
     }
     if (managedStl != null) {
       _validateManagedStlAssets(Map<String, dynamic>.from(managedStl as Map));
+    }
+    if (managedStep != null) {
+      if (managedStep is! Map ||
+          json['shape'] != null ||
+          json['mesh'] != null ||
+          json['kind'] != 'import' ||
+          data['format'] != 'step' ||
+          data['sceneKind'] != 'mesh' ||
+          data['name'] is! String ||
+          _hasStepTransientData(data) ||
+          data.keys.any(
+            (k) => !const {
+              'name',
+              'format',
+              'collectionId',
+              'sceneKind',
+              'managedStepAssets',
+              'featureLifecycle',
+            }.contains(k),
+          )) {
+        throw const FormatException('Invalid managed STEP document entity');
+      }
+      validateManagedStepAssets(Map<String, dynamic>.from(managedStep));
+    } else if (data['appearanceManifestAssetId'] != null ||
+        data['appearanceManifest'] != null) {
+      throw const FormatException(
+        'STEP appearance requires managed STEP assets',
+      );
     }
     return CadDocumentEntity(
       id: json['id'] as String,
@@ -73,6 +103,31 @@ class CadDocumentEntity {
           ? null
           : _meshFromJson(Map<String, dynamic>.from(json['mesh'] as Map)),
     );
+  }
+
+  static bool _hasStepTransientData(Object? value, [int depth = 0]) {
+    if (depth > 64) return true;
+    if (value is Map) {
+      return value.entries.any(
+        (e) =>
+            const {
+              'token',
+              'pointer',
+              'capability',
+              'pathname',
+              'sourcePath',
+              'registeredPath',
+              'ShapeHandle',
+              'KernelMeshHandle',
+              'fingerprint',
+            }.contains(e.key) ||
+            _hasStepTransientData(e.value, depth + 1),
+      );
+    }
+    if (value is List) {
+      return value.any((v) => _hasStepTransientData(v, depth + 1));
+    }
+    return false;
   }
 
   static void _validateManagedBrepAssets(Map<String, dynamic> value) {

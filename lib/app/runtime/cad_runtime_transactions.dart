@@ -21,6 +21,13 @@ class CadRuntimeShuttingDown implements Exception {
   const CadRuntimeShuttingDown();
 }
 
+/// Import persisted and published; only confirmation/cleanup failed. The caller
+/// must recover the journal rather than retrying or silently undoing the entity.
+final class CadManagedStepPostCommitFailure implements Exception {
+  const CadManagedStepPostCommitFailure(this.cause);
+  final Object cause;
+}
+
 class CadRecoveryFailure implements Exception {
   const CadRecoveryFailure(
     this.original,
@@ -356,6 +363,14 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> redo,
   ) async {
     tx.validate();
+    if ([
+      ...?tx.document?.entities.values,
+      ...candidate.entities.values,
+    ].any((e) => e.data['managedStepAssets'] != null)) {
+      throw UnsupportedError(
+        'Managed STEP editing and history restoration require STEP-2',
+      );
+    }
     candidate = _snapshots.document(candidate, normalized: true);
     undo = _snapshots.history(undo);
     redo = _snapshots.history(redo);
@@ -617,8 +632,12 @@ extension _CadTransactions on CadRuntime {
         entity.kind != CadDocumentEntityKind.import ||
         entity.shape != null ||
         entity.mesh != null ||
-        ((entity.data['managedBrepAssets'] is! Map) ==
-            (entity.data['managedStlAssets'] is! Map)) ||
+        [
+              entity.data['managedBrepAssets'],
+              entity.data['managedStlAssets'],
+              entity.data['managedStepAssets'],
+            ].whereType<Map>().length !=
+            1 ||
         managedScene.kind != CadSceneEntityKind.mesh) {
       throw StateError('Managed scene does not match its document entity');
     }
@@ -626,6 +645,10 @@ extension _CadTransactions on CadRuntime {
     if (meshOnly) {
       ManagedStlAssets.fromJson(
         Map<String, dynamic>.from(entity.data['managedStlAssets'] as Map),
+      );
+    } else if (entity.data['managedStepAssets'] != null) {
+      ManagedStepAssets.fromJson(
+        Map<String, dynamic>.from(entity.data['managedStepAssets'] as Map),
       );
     } else {
       ManagedBrepAssets.fromJson(
@@ -795,6 +818,11 @@ extension _CadTransactions on CadRuntime {
   ) async {
     final loaded = await _repository.load(projectId, directory);
     tx.validate();
+    if (loaded.entities.values.any(
+      (e) => e.data['managedStepAssets'] != null,
+    )) {
+      throw UnsupportedError('Managed STEP restoration requires STEP-2');
+    }
     final candidate = _snapshots.document(
       FeatureLifecycleProjector.normalize(
         _ensureProfessionalCollections(
@@ -1122,6 +1150,7 @@ extension _CadTransactions on CadRuntime {
         entity.mesh != null ||
         entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
         entity.data['managedStlAssets'] != null ||
+        entity.data['managedStepAssets'] != null ||
         entity.data['managedBrepAssets'] is! Map) {
       throw const FormatException('Invalid managed BREP document entity');
     }
@@ -1136,6 +1165,7 @@ extension _CadTransactions on CadRuntime {
         entity.mesh != null ||
         entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
         entity.data['managedBrepAssets'] != null ||
+        entity.data['managedStepAssets'] != null ||
         entity.data['shapeDescriptor'] != null ||
         entity.data['shapeAssetId'] != null ||
         entity.data['managedStlAssets'] is! Map) {

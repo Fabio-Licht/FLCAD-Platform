@@ -32,10 +32,40 @@ struct StepLibrary {
     }                                                                          \
   } while (false)
 int wmain(int argc, wchar_t **argv) {
-  if (argc != 3)
+  if (argc != 3 && argc != 4)
     return 2;
   try {
     StepLibrary caf(argv[1]), cob(argv[2]);
+    // Controlled discovery fixtures for the Dart integration suite. No product
+    // source is reopened and no temporary file participates in import.
+    if (argc == 4) {
+      const std::filesystem::path directory(argv[3]);
+      auto root = FN(caf, caf_open_root)(
+          reinterpret_cast<const uint16_t *>(directory.c_str()),
+          static_cast<uint32_t>(directory.native().size()));
+      CHECK(!root.status);
+      for (int mode = 0; mode < 6; ++mode) {
+        auto bytes = mode == 5 ? std::string("invalid STEP")
+                               : step_fixture(mode != 1,
+                                              mode == 3   ? 1
+                                              : mode == 4 ? 3
+                                                          : 0,
+                                              mode == 2);
+        const auto leaf = L"part-" + std::to_wstring(mode) + L".step";
+        auto file = FN(caf, caf_create_file)(
+            root.object, reinterpret_cast<const uint16_t *>(leaf.data()),
+            static_cast<uint32_t>(leaf.size()));
+        CHECK(!file.status);
+        auto written = FN(caf, caf_write)(
+            file.object, reinterpret_cast<const uint8_t *>(bytes.data()),
+            static_cast<uint32_t>(bytes.size()));
+        CHECK(!written.status && written.bytes == bytes.size());
+        CHECK(!FN(caf, caf_seal)(file.object, bytes.size()).status);
+        CHECK(!FN(caf, caf_close)(file.object).status);
+      }
+      CHECK(!FN(caf, caf_close)(root.object).status);
+      return 0;
+    }
     auto ca = reinterpret_cast<const void *>(
         GetProcAddress(caf.handle, "caf_source_version"));
     auto oc = reinterpret_cast<const void *>(

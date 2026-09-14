@@ -49,6 +49,7 @@ class NativeViewportHost {
     Microsoft::WRL::ComPtr<ID3D11Buffer> edge_buffer;
     Microsoft::WRL::ComPtr<ID3D11Buffer> point_buffer;
     bool visible = true;
+    float root_srgb[3]{.30f, .50f, .68f};
   };
   struct Constants { float matrix[16]; float color[4]; uint32_t pick[4]{}; };
 

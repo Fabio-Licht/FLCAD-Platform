@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
 import '../../core/cad_document/cad_document.dart';
+import '../../core/cad_document/managed_step_contract.dart';
 import '../../core/cad_document/dependency_walk.dart';
 import '../../core/cad_document/cad_document_repository.dart';
 import '../../core/cad_kernel/api/geometry_kernel_api.dart';
@@ -658,6 +659,257 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
       });
     } catch (error, stack) {
       primaryFailure = error;
+      primaryStack = stack;
+    }
+    if (!sourceDisposeAttempted) {
+      try {
+        openedSource.dispose();
+      } catch (cleanup, cleanupStack) {
+        if (primaryFailure != null) {
+          Error.throwWithStackTrace(
+            CadAssetOperationFailure(
+              primaryFailure,
+              cleanup,
+              primaryStack!,
+              cleanupStack,
+            ),
+            primaryStack,
+          );
+        }
+        Error.throwWithStackTrace(cleanup, cleanupStack);
+      }
+    }
+    if (primaryFailure != null) {
+      Error.throwWithStackTrace(primaryFailure, primaryStack!);
+    }
+    return committedEntity;
+  }
+
+  /// Single-part STEP import through the admitted CAF source. Appearance is
+  /// stored independently; native geometry is already canonical millimeters.
+  Future<CadDocumentEntity> importManagedStep(
+    String locator, {
+    CadAssetCancellation? cancellation,
+    @visibleForTesting String? nativeBridgePath,
+  }) async {
+    final rejection = _admissionError;
+    if (rejection != null) return Future<CadDocumentEntity>.error(rejection);
+    // The locator loses authority here, before this operation waits behind any
+    // previously admitted transaction. A later directory-entry replacement
+    // cannot redirect the already-open CAF object.
+    if (cancellation?.isCancelled == true) throw const CadAssetCancelled();
+    final openedSource = CadAssetNativeFs.openExternal(locator);
+    final openedIdentity = Map<String, dynamic>.unmodifiable({
+      ...openedSource.identity,
+    });
+    late CadDocumentEntity committedEntity;
+    var sourceDisposeAttempted = false;
+    var documentCommitted = false;
+    Object? primaryFailure;
+    StackTrace? primaryStack;
+    try {
+      await _enqueue((tx) async {
+        if (cancellation?.isCancelled == true) throw const CadAssetCancelled();
+        if (cancellation != null) {
+          unawaited(
+            cancellation._done.future.then((_) {
+              if (!tx.committed) tx.requestRevocation();
+            }),
+          );
+        }
+        tx.validate();
+        final kernel = kernels.active;
+        if (kernel is! OpenCascadeKernelAdapter) {
+          throw UnsupportedError(
+            'Managed STEP import requires the OpenCascade kernel',
+          );
+        }
+        late StepAppearanceManifest appearance;
+        ManagedNativeShape? shape;
+        ManagedNativeDisplayMesh? displayMesh;
+        ManagedEntityGeometry? operationGeometry;
+        try {
+          final sourceCancellation = NativeSourceCancellation();
+          unawaited(
+            Future.any<void>([
+              tx.revocation.future,
+              _assetShutdown.future,
+            ]).then((_) => sourceCancellation.revoke()),
+          );
+          NativeSourceResource sourceResource;
+          try {
+            sourceResource = await kernel.readOwnedAsset(
+              filesystem: openedSource.filesystem,
+              file: openedSource.file,
+              expected: openedIdentity,
+              kind: NativeResourceKind.shape,
+              step: true,
+              cancellation: sourceCancellation,
+              bridgePath: nativeBridgePath,
+            );
+          } on NativeSourcePublicationFailure catch (error, stack) {
+            shape = error.resource.claimShape();
+            Error.throwWithStackTrace(error.failure, stack);
+          }
+          try {
+            shape = sourceResource.claimShape();
+            appearance =
+                sourceResource.stepAppearance ??
+                (throw StateError('STEP metadata missing'));
+          } finally {
+            await sourceResource.dispose();
+          }
+          tx.validate();
+          // The source capability has served its only purpose. Closing it here
+          // keeps source cleanup on the pre-promotion side of the transaction.
+          sourceDisposeAttempted = true;
+          openedSource.dispose();
+          final managedShape = shape;
+
+          committedEntity = await _withGeometryStagingTransaction(tx, (
+            operation,
+          ) async {
+            final shapeAssetId = await operation.planAsset();
+            final displayAssetId = await operation.planAsset();
+            final appearanceAssetId = await operation.planAsset();
+            await _assetStorage.checkpoint('managedStep:beforeShapeWrite');
+            tx.validate();
+            final shapeAsset = await operation._writeManagedShape(
+              shapeAssetId,
+              CadAssetFile.brep,
+              kernel,
+              managedShape,
+              bridgePath: nativeBridgePath,
+            );
+            await _assetStorage.checkpoint('managedStep:beforeDisplayWrite');
+            tx.validate();
+            final displayAsset = await operation._writeManagedShape(
+              displayAssetId,
+              CadAssetFile.display,
+              kernel,
+              managedShape,
+              bridgePath: nativeBridgePath,
+            );
+            final meshCancellation = NativeSourceCancellation();
+            unawaited(
+              Future.any<void>([
+                tx.revocation.future,
+                _assetShutdown.future,
+              ]).then((_) => meshCancellation.revoke()),
+            );
+            final meshResource = await displayAsset.readAs(
+              kernel,
+              kind: NativeResourceKind.mesh,
+              cancellation: meshCancellation,
+              bridgePath: nativeBridgePath,
+            );
+            try {
+              displayMesh = meshResource.claimMesh();
+            } finally {
+              await meshResource.dispose();
+            }
+            final managedDisplayMesh = displayMesh!;
+            operationGeometry = ManagedBrepEntityGeometry(
+              managedShape,
+              managedDisplayMesh,
+            );
+            final sceneGeometry = await managedDisplayMesh.prepareSceneGeometry(
+              kernel,
+            );
+            final appearanceBytes = appearance.encode();
+            await _assetStorage.checkpoint('managedStep:beforeAppearance');
+            tx.validate();
+            await operation.write(
+              appearanceAssetId,
+              CadAssetFile.appearance,
+              Stream.value(appearanceBytes),
+            );
+            await operation.prepare();
+
+            final current = _snapshots.document(_requireDocument());
+            var entityId = _assetId('e1');
+            while (current.entities.containsKey(entityId) ||
+                _managedGeometry.containsKey(entityId)) {
+              entityId = _assetId('e1');
+            }
+            final assets = ManagedStepAssets(
+              shape: shapeAssetId,
+              display: displayAssetId,
+              appearance: appearanceAssetId,
+              appearanceSha256: sha256.convert(appearanceBytes).toString(),
+              shapeSha256: shapeAsset.metadata['sha256'] as String,
+              displaySha256: displayAsset.metadata['sha256'] as String,
+            );
+            final entity = CadDocumentEntity(
+              id: entityId,
+              kind: CadDocumentEntityKind.import,
+              data: {
+                'name': appearance.name,
+                'format': 'step',
+                'collectionId': 'collection:original',
+                'sceneKind': CadSceneEntityKind.mesh.name,
+                'managedStepAssets': assets.toJson(),
+              },
+            );
+            final candidate = FeatureLifecycleProjector.normalize(
+              current.mutate(command: 'import.step.managed', upsert: [entity]),
+              command: 'import.step.managed',
+              previousDocument: current,
+              touchedIds: {entityId},
+            );
+            final managedScene = CadSceneEntity(
+              id: entityId,
+              kind: CadSceneEntityKind.mesh,
+              geometry: {
+                ...sceneGeometry,
+                if (appearance.hasColor) 'rootLinearRgb': appearance.linearRgb,
+              },
+            );
+            final prepared = _prepareManagedCommit(
+              tx,
+              candidate: candidate,
+              undo: [..._undo, current],
+              redo: const [],
+              managedScene: managedScene,
+              geometry: operationGeometry!,
+              phasePrefix: 'managedStep',
+            );
+
+            // Descendant file capabilities must be closed before the anchored
+            // directory rename used by promotion.
+            await shapeAsset.release();
+            await displayAsset.release();
+            tx.validate();
+            await _assetStorage.checkpoint('managedStep:beforePromotion');
+            tx.validate();
+            await operation.promote();
+            await _assetStorage.checkpoint('managedStep:afterPromotion');
+            tx.validate();
+            await _commitPreparedManaged(tx, prepared);
+            await operation._confirmDocumentPublished();
+            committedEntity = prepared.candidate.entities[entityId]!;
+            return committedEntity;
+          }, cancellation: cancellation);
+        } finally {
+          documentCommitted = tx.committed;
+          final geometry = operationGeometry;
+          if (geometry != null) {
+            await geometry.dispose();
+          } else {
+            await Future.wait([
+              if (displayMesh != null) displayMesh!.dispose(),
+              if (shape != null) shape.dispose(),
+            ]);
+          }
+        }
+      });
+    } catch (error, stack) {
+      if (documentCommitted) {
+        _recoveryRequired = true;
+        primaryFailure = CadManagedStepPostCommitFailure(error);
+      } else {
+        primaryFailure = error;
+      }
       primaryStack = stack;
     }
     if (!sourceDisposeAttempted) {
@@ -1970,7 +2222,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           (entity) =>
               entity.kind == CadDocumentEntityKind.import &&
               entity.data['managedBrepAssets'] == null &&
-              entity.data['managedStlAssets'] == null,
+              entity.data['managedStlAssets'] == null &&
+              entity.data['managedStepAssets'] == null,
         )
         .toList();
     if (imports.isEmpty) return (null, null);

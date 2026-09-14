@@ -108,6 +108,50 @@ final class ManagedBrepAssets {
   }
 }
 
+final class ManagedStepAssets {
+  ManagedStepAssets({
+    required this.shape,
+    required this.display,
+    required this.appearance,
+    required this.shapeSha256,
+    required this.displaySha256,
+    required this.appearanceSha256,
+  }) {
+    validateManagedStepAssets(toJson());
+  }
+  final GeometryAssetId shape, display, appearance;
+  final String shapeSha256, displaySha256, appearanceSha256;
+  Map<String, dynamic> toJson() => {
+    'schema': 'flcad.managed-step-assets',
+    'version': 1,
+    'sourceFormat': 'step',
+    'meshOnly': false,
+    'shapeAssetId': shape.toJson(),
+    'shapeSha256': shapeSha256,
+    'displayMeshAssetId': display.toJson(),
+    'displayMeshSha256': displaySha256,
+    'appearanceManifestAssetId': appearance.toJson(),
+    'appearanceManifestSha256': appearanceSha256,
+  };
+  factory ManagedStepAssets.fromJson(Map<String, dynamic> json) {
+    validateManagedStepAssets(json);
+    return ManagedStepAssets(
+      shape: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['shapeAssetId'] as Map),
+      ),
+      display: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['displayMeshAssetId'] as Map),
+      ),
+      appearance: GeometryAssetId.fromJson(
+        Map<String, dynamic>.from(json['appearanceManifestAssetId'] as Map),
+      ),
+      shapeSha256: json['shapeSha256'] as String,
+      displaySha256: json['displayMeshSha256'] as String,
+      appearanceSha256: json['appearanceManifestSha256'] as String,
+    );
+  }
+}
+
 void _requireSha256(String value, String label) {
   if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(value)) {
     throw FormatException('Invalid $label asset hash');

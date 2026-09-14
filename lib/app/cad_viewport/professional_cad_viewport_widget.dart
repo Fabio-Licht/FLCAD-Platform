@@ -14,6 +14,7 @@ import '../navigation/navigation_debug_panel.dart';
 import 'camera/cad_camera_controller.dart';
 import 'rendering/cad_canvas_normal_pipeline.dart';
 import 'rendering/cad_tonal_separation.dart';
+import 'rendering/cad_root_color.dart';
 import 'scene/cad_scene_graph.dart';
 import 'selection/viewport_picking_controller.dart';
 
@@ -1287,7 +1288,7 @@ class _CadScenePainter extends CustomPainter {
       (_, _, CadSceneEntityKind.preview, _) => const Color(0xffff9f43),
       (_, _, CadSceneEntityKind.surface, _) => const Color(0xffe2e7ee),
       (_, _, CadSceneEntityKind.solid, _) => const Color(0xffd8e0e9),
-      _ => const Color(0xff7899ad),
+      _ => cadRootColor(entity.geometry) ?? const Color(0xff7899ad),
     };
     final foreground = foregroundColor.toARGB32();
     final legacyAnalysisMode =

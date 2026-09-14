@@ -89,6 +89,113 @@ final class _SourceBridgeResult extends Struct {
   external Array<Uint8> cleanupMessage;
 }
 
+final class _StepBuffers extends Struct {
+  @Uint32()
+  external int size;
+  @Uint32()
+  external int version;
+  external Pointer<Uint8> name;
+  @Uint32()
+  external int nameCapacity;
+  external Pointer<Uint8> unit;
+  @Uint32()
+  external int unitCapacity;
+}
+
+final class _StepMetadata extends Struct {
+  @Uint32()
+  external int size;
+  @Uint32()
+  external int version;
+  @Uint32()
+  external int nameBytes;
+  @Uint32()
+  external int unitBytes;
+  @Uint32()
+  external int hasColor;
+  @Uint32()
+  external int reserved;
+  @Double()
+  external double declaredScale;
+  @Double()
+  external double resolvedScale;
+  @Array(4)
+  external Array<Double> rgba;
+}
+
+final class _StepBridgeResult extends Struct {
+  @Uint32()
+  external int size;
+  @Uint32()
+  external int version;
+  external _SourceBridgeResult bridge;
+  external _StepMetadata metadata;
+}
+
+typedef _StepRunN =
+    Int32 Function(
+      Uint64,
+      Pointer<_StepBuffers>,
+      Pointer<_StepBridgeResult>,
+      Uint32,
+    );
+typedef _StepRunD =
+    int Function(int, Pointer<_StepBuffers>, Pointer<_StepBridgeResult>, int);
+
+/// Only bounded metadata crosses isolates; CAD payload transport stays C-to-C.
+Future<(int, Map<String, dynamic>)> _stepWorker(int address, int operation) =>
+    Isolate.run(() {
+      final run = Pointer<NativeFunction<_StepRunN>>.fromAddress(
+        address,
+      ).asFunction<_StepRunD>();
+      final out = calloc<_StepBridgeResult>();
+      final buffers = calloc<_StepBuffers>();
+      final name = calloc<Uint8>(4097);
+      final unit = calloc<Uint8>(257);
+      try {
+        buffers.ref
+          ..size = sizeOf<_StepBuffers>()
+          ..version = 1
+          ..name = name
+          ..nameCapacity = 4097
+          ..unit = unit
+          ..unitCapacity = 257;
+        final code = run(operation, buffers, out, sizeOf<_StepBridgeResult>());
+        final m = out.ref.metadata;
+        return (
+          code,
+          {
+            'validLayout':
+                out.ref.size == sizeOf<_StepBridgeResult>() &&
+                out.ref.version == 1 &&
+                m.size == sizeOf<_StepMetadata>() &&
+                m.version == 1 &&
+                m.reserved == 0 &&
+                m.nameBytes <= 4096 &&
+                m.unitBytes <= 256 &&
+                (m.hasColor == 0 || m.hasColor == 1) &&
+                name[m.nameBytes <= 4096 ? m.nameBytes : 0] == 0 &&
+                unit[m.unitBytes <= 256 ? m.unitBytes : 0] == 0,
+            'nameBytes': List<int>.of(
+              name.asTypedList(m.nameBytes <= 4096 ? m.nameBytes : 0),
+            ),
+            'unitBytes': List<int>.of(
+              unit.asTypedList(m.unitBytes <= 256 ? m.unitBytes : 0),
+            ),
+            'hasColor': m.hasColor,
+            'rgba': List<double>.generate(4, (i) => m.rgba[i]),
+            'declaredScale': m.declaredScale,
+            'resolvedScale': m.resolvedScale,
+          },
+        );
+      } finally {
+        calloc.free(name);
+        calloc.free(unit);
+        calloc.free(buffers);
+        calloc.free(out);
+      }
+    });
+
 final class _StreamOccResult extends Struct {
   @Uint32()
   external int version;
@@ -520,6 +627,8 @@ final class NativeSourceResource {
   final OwnedNativeShape? shape;
   final OwnedNativeMesh? mesh;
   final NativeGeometryDescriptor descriptor;
+  StepAppearanceManifest? _stepAppearance;
+  StepAppearanceManifest? get stepAppearance => _stepAppearance;
   bool _claimed = false;
   Future<void>? _disposal;
   ManagedNativeShape claimShape() {
@@ -751,7 +860,11 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
     String? bridgePath,
     void Function(NativeSourceResource)? onCaptured,
     bool debugRejectCustody = false,
+    bool step = false,
   }) async {
+    if (step && kind != NativeResourceKind.shape) {
+      throw ArgumentError('STEP requires shape custody');
+    }
     final snapshot = Map<String, dynamic>.of(expected);
     await initialize();
     final participant = _participant!;
@@ -764,6 +877,24 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
         Platform.environment['FLCAD_SOURCE_BRIDGE_DLL'] ??
         '${File(Platform.resolvedExecutable).parent.path}\\cad_occ_bridge.dll';
     final api = _SourceBridgeApi(path);
+    final int? stepAddress;
+    if (step) {
+      if (api.library.lookupFunction<Uint32 Function(), int Function()>(
+                'cob_step_version',
+              )() !=
+              1 ||
+          api.library.lookupFunction<Uint32 Function(), int Function()>(
+                'cob_step_result_size_v1',
+              )() !=
+              sizeOf<_StepBridgeResult>()) {
+        throw StateError('Incompatible STEP source bridge ABI');
+      }
+      stepAddress = api.library
+          .lookup<NativeFunction<_StepRunN>>('cob_step_run_v1')
+          .address;
+    } else {
+      stepAddress = null;
+    }
     return participant.run(
       () => filesystem.withSourceCapability(file, (cap, anchor) async {
         if (cancellation._used || cancellation._cancel != null) {
@@ -809,7 +940,11 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
             cap,
             spec,
             sizeOf<_SourceFsResult>(),
-            kind == NativeResourceKind.shape ? 1 : 2,
+            step
+                ? 3
+                : kind == NativeResourceKind.shape
+                ? 1
+                : 2,
             out,
             sizeOf<_SourceBridgeResult>(),
           );
@@ -818,12 +953,20 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
           cancellation._cancel = () => api.cancel(operation);
           cancellation._admitted.complete();
           if (cancellation.isRevoked) api.cancel(operation);
-          final result = await _sourceWorker(
-            api.library
-                .lookup<NativeFunction<_SourceActionN>>('cob_run_v1')
-                .address,
-            operation,
-          );
+          Map<String, dynamic>? stepMetadata;
+          final int result;
+          if (stepAddress != null) {
+            final response = await _stepWorker(stepAddress, operation);
+            result = response.$1;
+            stepMetadata = response.$2;
+          } else {
+            result = await _sourceWorker(
+              api.library
+                  .lookup<NativeFunction<_SourceActionN>>('cob_run_v1')
+                  .address,
+              operation,
+            );
+          }
           if (api.snapshot(operation, out, sizeOf<_SourceBridgeResult>()) !=
               0) {
             throw StateError('Source result is unavailable; escrow retained');
@@ -883,6 +1026,30 @@ extension NativeSourceBridge on OpenCascadeKernelAdapter {
           }
           adopted = true;
           captured = resource;
+          if (stepMetadata != null &&
+              result == 0 &&
+              out.ref.native.status == 0) {
+            try {
+              final m = stepMetadata;
+              final rgba = m['rgba'] as List<double>;
+              if (m['validLayout'] != true ||
+                  (m['hasColor'] == 0
+                      ? rgba.any((v) => v != 0)
+                      : rgba[3] != 1)) {
+                throw const FormatException('Invalid native STEP metadata');
+              }
+              resource._stepAppearance = StepAppearanceManifest(
+                name: utf8.decode(m['nameBytes'] as List<int>),
+                declaredUnit: utf8.decode(m['unitBytes'] as List<int>),
+                declaredMetersPerUnit: m['declaredScale'] as double,
+                resolvedMetersPerUnit: m['resolvedScale'] as double,
+                linearRgb: m['hasColor'] == 0 ? null : rgba.sublist(0, 3),
+              );
+            } catch (_) {
+              await resource.dispose();
+              rethrow;
+            }
+          }
           if (result != 0 || out.ref.native.status != 0) {
             throw NativeSourcePublicationFailure(
               resource,

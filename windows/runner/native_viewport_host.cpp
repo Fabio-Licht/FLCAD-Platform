@@ -292,8 +292,21 @@ void NativeViewportHost::ApplySnapshot(const flutter::EncodableMap& snapshot, bo
         existing->second.visible = std::get<bool>(*Find(*map, "visible"));
       continue;
     }
-    if(nodes->size()<3) continue;
-    SceneEntity entity; entity.id=*id;
+    if (nodes->size() < 3)
+      continue;
+    SceneEntity entity;
+    entity.id = *id;
+    if (const auto *color = Find(*map, "rootSrgb")) {
+      const auto *rgb = std::get_if<flutter::EncodableList>(color);
+      if (!rgb || rgb->size() != 3)
+        throw std::runtime_error("Invalid root sRGB color");
+      for (size_t i = 0; i < 3; ++i) {
+        const double channel = Number((*rgb)[i]);
+        if (!std::isfinite(channel) || channel < 0 || channel > 1)
+          throw std::runtime_error("Invalid root sRGB channel");
+        entity.root_srgb[i] = static_cast<float>(channel);
+      }
+    }
     entity.visible = Find(*map,"visible") ? std::get<bool>(*Find(*map,"visible")) : true;
     std::vector<XMFLOAT3> positions; positions.reserve(nodes->size()/3);
     for(size_t i=0;i+2<nodes->size();i+=3) positions.push_back({
@@ -342,7 +355,21 @@ void NativeViewportHost::Render() {
   context_->IASetInputLayout(input_layout_.Get());context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   context_->VSSetShader(vertex_shader_.Get(),nullptr,0);context_->VSSetConstantBuffers(0,1,constants_.GetAddressOf());context_->PSSetShader(pixel_shader_.Get(),nullptr,0);context_->PSSetConstantBuffers(0,1,constants_.GetAddressOf());
   context_->RSSetState(rasterizer_.Get());context_->OMSetDepthStencilState(depth_state_.Get(),0);triangles_=0;
-  for(auto& [id,e]:entities_){if(!e.visible||!e.vertex_buffer||!e.index_buffer)continue;constants.pick[1]=id==hover_.entity_id?hover_.kind:0;constants.pick[2]=id==hover_.entity_id?hover_.id:0;context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants,0,0);++constant_buffer_updates_;context_->IASetVertexBuffers(0,1,e.vertex_buffer.GetAddressOf(),&stride,&offset);context_->IASetIndexBuffer(e.index_buffer.Get(),DXGI_FORMAT_R32_UINT,0);context_->DrawIndexed(static_cast<UINT>(e.indices.size()),0,0);++draw_indexed_calls_;triangles_+=e.indices.size()/3;}
+  for (auto &[id, e] : entities_) {
+    if (!e.visible || !e.vertex_buffer || !e.index_buffer)
+      continue;
+    std::copy(std::begin(e.root_srgb), std::end(e.root_srgb), constants.color);
+    constants.pick[1] = id == hover_.entity_id ? hover_.kind : 0;
+    constants.pick[2] = id == hover_.entity_id ? hover_.id : 0;
+    context_->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
+    ++constant_buffer_updates_;
+    context_->IASetVertexBuffers(0, 1, e.vertex_buffer.GetAddressOf(), &stride,
+                                 &offset);
+    context_->IASetIndexBuffer(e.index_buffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+    context_->DrawIndexed(static_cast<UINT>(e.indices.size()), 0, 0);
+    ++draw_indexed_calls_;
+    triangles_ += e.indices.size() / 3;
+  }
   if(operational_selection_index_buffer_&&operational_selection_index_count_>0){auto found=entities_.find(operational_selection_entity_id_);if(found!=entities_.end()&&found->second.vertex_buffer){constants.color[0]=.92f;constants.color[1]=.38f;constants.color[2]=.04f;constants.pick[1]=0;constants.pick[2]=0;context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants,0,0);context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(),0);context_->IASetInputLayout(input_layout_.Get());context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->IASetVertexBuffers(0,1,found->second.vertex_buffer.GetAddressOf(),&stride,&offset);context_->IASetIndexBuffer(operational_selection_index_buffer_.Get(),DXGI_FORMAT_R32_UINT,0);context_->VSSetShader(vertex_shader_.Get(),nullptr,0);context_->PSSetShader(pixel_shader_.Get(),nullptr,0);context_->DrawIndexed(operational_selection_index_count_,0,0);}}
   if(operational_hover_id_!=operational_selection_id_&&operational_hover_index_buffer_&&operational_hover_index_count_>0){auto found=entities_.find(operational_hover_entity_id_);if(found!=entities_.end()&&found->second.vertex_buffer){constants.color[0]=.08f;constants.color[1]=.78f;constants.color[2]=.92f;constants.pick[1]=0;constants.pick[2]=0;context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants,0,0);context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(),0);context_->IASetInputLayout(input_layout_.Get());context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->IASetVertexBuffers(0,1,found->second.vertex_buffer.GetAddressOf(),&stride,&offset);context_->IASetIndexBuffer(operational_hover_index_buffer_.Get(),DXGI_FORMAT_R32_UINT,0);context_->VSSetShader(vertex_shader_.Get(),nullptr,0);context_->PSSetShader(pixel_shader_.Get(),nullptr,0);context_->DrawIndexed(operational_hover_index_count_,0,0);}}
   if(hover_.valid()&&hover_.kind>=2){auto found=entities_.find(hover_.entity_id);if(found!=entities_.end()){auto&e=found->second;context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(),0);context_->IASetInputLayout(pick_input_layout_.Get());context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->VSSetShader(pick_subentity_vs_.Get(),nullptr,0);context_->PSSetShader(hover_ps_.Get(),nullptr,0);stride=sizeof(PickVertex);constants.pick[1]=hover_.kind;constants.pick[2]=hover_.id;context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants,0,0);

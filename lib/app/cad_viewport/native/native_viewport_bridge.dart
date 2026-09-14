@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import '../scene/cad_scene_graph.dart';
+import '../rendering/cad_root_color.dart';
 import '../camera/cad_camera_controller.dart';
 
 enum ViewportBackend { flutterCanvas, nativeGpu }
@@ -178,6 +179,8 @@ class CadSceneDisplayAdapter {
     if (includeGeometry) {
       result['nodes'] = nodes;
       result['triangles'] = triangles;
+      final rgb = cadRootSrgb(entity.geometry);
+      if (rgb != null) result['rootSrgb'] = rgb;
     }
     return result;
   }
