@@ -231,7 +231,6 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         await _saveInTransaction(tx);
         tx.validate();
         final managed = Map<String, ManagedEntityGeometry>.of(_managedGeometry);
-        _managedGeometry.clear();
         try {
           // Scene and document disappear in the same synchronous section as
           // native residency. Native destruction happens only afterwards and
@@ -245,6 +244,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             const [],
             boundary: true,
           );
+          _managedGeometry.clear();
         } catch (_) {
           _managedGeometry.addAll(managed);
           rethrow;

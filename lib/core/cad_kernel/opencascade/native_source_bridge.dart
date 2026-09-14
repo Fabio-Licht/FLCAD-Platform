@@ -408,6 +408,29 @@ final class ManagedNativeDisplayMesh {
         )) {
       throw StateError('Native mesh does not match its published descriptor');
     }
+    if (descriptor.kind != NativeResourceKind.mesh ||
+        descriptor.vertices <= 0 ||
+        descriptor.triangles <= 0 ||
+        descriptor.bounds.length != 6 ||
+        descriptor.bounds.any((value) => !value.isFinite)) {
+      throw StateError('Native mesh bounds are invalid');
+    }
+    final bounds = List<double>.filled(6, 0);
+    for (var i = 0; i < geometry.nodes.length; i++) {
+      final axis = i % 3;
+      final value = geometry.nodes[i];
+      if (i < 3) {
+        bounds[axis] = bounds[axis + 3] = value;
+      } else {
+        if (value < bounds[axis]) bounds[axis] = value;
+        if (value > bounds[axis + 3]) bounds[axis + 3] = value;
+      }
+    }
+    for (var i = 0; i < 6; i++) {
+      if (bounds[i] != descriptor.bounds[i]) {
+        throw StateError('Native mesh bounds do not match its descriptor');
+      }
+    }
     return {
       'nodes': List<double>.unmodifiable(geometry.nodes),
       'triangles': List<int>.unmodifiable(geometry.triangles),

@@ -821,11 +821,6 @@ extension _CadTransactions on CadRuntime {
     Map<String, ManagedEntityGeometry>? replacedByLegacyOpen;
     try {
       if (managedEntities.isNotEmpty) {
-        if (managedEntities.any(
-          (entity) => entity.data['managedStlAssets'] != null,
-        )) {
-          throw UnsupportedError('Managed STL open belongs to STL-2');
-        }
         managed = await _prepareManagedOpen(
           tx,
           candidate,
@@ -988,7 +983,7 @@ extension _CadTransactions on CadRuntime {
     final kernel = kernels.active;
     if (kernel is! OpenCascadeKernelAdapter) {
       throw UnsupportedError(
-        'Managed BREP restoration requires the OpenCascade kernel',
+        'Managed restoration requires the OpenCascade kernel',
       );
     }
     final paths = await _AssetPaths.open(directory);
@@ -1000,32 +995,45 @@ extension _CadTransactions on CadRuntime {
         await _assetStorage.checkpoint('managedOpen:beforeEntity');
         tx.validate();
         if (geometry.containsKey(entity.id)) {
-          throw const FormatException('Duplicate managed BREP document entity');
+          throw const FormatException('Duplicate managed document entity');
         }
-        final assets = _managedAssetsForEntity(entity);
-        final shapeAsset = await paths.openManagedAsset(
-          projectId: candidate.projectId,
-          asset: assets.shape,
-          kind: CadAssetFile.brep,
-          expectedSha256: assets.shapeSha256,
-        );
-        verified.add(shapeAsset);
-        final shape = await _restoreManagedShape(tx, kernel, shapeAsset);
+        ManagedNativeShape? shape;
         ManagedNativeDisplayMesh? display;
         try {
-          await _assetStorage.checkpoint('managedOpen:afterShape');
-          tx.validate();
+          final GeometryAssetId displayId;
+          final String displaySha256;
+          if (entity.data['managedStlAssets'] != null) {
+            final assets = _managedStlAssetsForEntity(entity);
+            displayId = assets.display;
+            displaySha256 = assets.displaySha256;
+          } else {
+            final assets = _managedAssetsForEntity(entity);
+            displayId = assets.display;
+            displaySha256 = assets.displaySha256;
+            final shapeAsset = await paths.openManagedAsset(
+              projectId: candidate.projectId,
+              asset: assets.shape,
+              kind: CadAssetFile.brep,
+              expectedSha256: assets.shapeSha256,
+            );
+            verified.add(shapeAsset);
+            shape = await _restoreManagedShape(tx, kernel, shapeAsset);
+            await _assetStorage.checkpoint('managedOpen:afterShape');
+            tx.validate();
+          }
           final displayAsset = await paths.openManagedAsset(
             projectId: candidate.projectId,
-            asset: assets.display,
+            asset: displayId,
             kind: CadAssetFile.display,
-            expectedSha256: assets.displaySha256,
+            expectedSha256: displaySha256,
           );
           verified.add(displayAsset);
           display = await _restoreManagedMesh(tx, kernel, displayAsset);
           await _assetStorage.checkpoint('managedOpen:afterMesh');
           tx.validate();
-          final managed = ManagedBrepEntityGeometry(shape, display);
+          final ManagedEntityGeometry managed = shape == null
+              ? ManagedMeshEntityGeometry(display)
+              : ManagedBrepEntityGeometry(shape, display);
           final managedScene = await _prepareManagedSceneEntity(
             candidate,
             entity,
@@ -1035,6 +1043,7 @@ extension _CadTransactions on CadRuntime {
           tx.validate();
           scenes[entity.id] = managedScene;
           geometry[entity.id] = managed;
+          shape = null;
           display = null;
         } catch (error, stack) {
           Object? cleanupFailure;
@@ -1046,7 +1055,7 @@ extension _CadTransactions on CadRuntime {
             cleanupStack = cleanupTrace;
           }
           for (final cleanup in [
-            shape.dispose,
+            if (shape != null) shape.dispose,
             if (display != null) display.dispose,
           ]) {
             try {
@@ -1109,6 +1118,7 @@ extension _CadTransactions on CadRuntime {
         entity.shape != null ||
         entity.mesh != null ||
         entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
+        entity.data['managedStlAssets'] != null ||
         entity.data['managedBrepAssets'] is! Map) {
       throw const FormatException('Invalid managed BREP document entity');
     }
@@ -1123,6 +1133,8 @@ extension _CadTransactions on CadRuntime {
         entity.mesh != null ||
         entity.data['sceneKind'] != CadSceneEntityKind.mesh.name ||
         entity.data['managedBrepAssets'] != null ||
+        entity.data['shapeDescriptor'] != null ||
+        entity.data['shapeAssetId'] != null ||
         entity.data['managedStlAssets'] is! Map) {
       throw const FormatException('Invalid managed STL document entity');
     }
@@ -1179,6 +1191,14 @@ extension _CadTransactions on CadRuntime {
     ManagedEntityGeometry geometry,
     OpenCascadeKernelAdapter kernel,
   ) async {
+    if (entity.data['managedStlAssets'] != null) {
+      return _prepareRetainedStlSceneEntity(
+        candidate,
+        entity,
+        geometry,
+        kernel,
+      );
+    }
     if (geometry is! ManagedBrepEntityGeometry) {
       throw const FormatException('Managed BREP geometry requires a shape');
     }
