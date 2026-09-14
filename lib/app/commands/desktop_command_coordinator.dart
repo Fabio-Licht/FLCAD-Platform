@@ -164,7 +164,9 @@ class DesktopCommandCoordinator {
       },
     );
 
-    for (final format in CadImportFormat.values) {
+    for (final format in CadImportFormat.values.where(
+      (format) => format != CadImportFormat.step,
+    )) {
       register(
         id: 'import.${format.name}',
         module: 'Import/Export',
@@ -183,6 +185,23 @@ class DesktopCommandCoordinator {
         },
       );
     }
+    register(
+      id: 'import.step',
+      module: 'Import/Export',
+      validator: CommandValidation.projectRequired,
+      execute: (_, _) async {
+        await cad.pickAndImportManagedStep();
+        return cad.message;
+      },
+      undo: (_, _) async {
+        await cad.runtime.undoDocument();
+        return cad.message;
+      },
+      redo: (_, _) async {
+        await cad.runtime.redoDocument();
+        return cad.message;
+      },
+    );
     for (final format in CadExportFormat.values) {
       register(
         id: 'export.${format.name}',

@@ -444,6 +444,8 @@ class _DesktopShellState extends State<DesktopShell> {
       cad: cad,
       projects: ProjectManager.instance,
     );
+    cad.addListener(_refreshShell);
+    ProjectManager.instance.addListener(_refreshShell);
     unawaited(
       commands.initialize().then((_) {
         if (mounted) setState(() {});
@@ -453,8 +455,25 @@ class _DesktopShellState extends State<DesktopShell> {
 
   @override
   void dispose() {
+    ProjectManager.instance.removeListener(_refreshShell);
+    cad.removeListener(_refreshShell);
     cad.dispose();
     super.dispose();
+  }
+
+  void _refreshShell() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _dispatchStepImport() async {
+    if (!cad.canImportManagedStep) {
+      if (ProjectManager.instance.current == null) {
+        cad.setStatus('Abra ou crie um projeto antes de importar STEP.');
+      }
+      return;
+    }
+    await commands.refreshContext();
+    await commands.dispatch('import.step');
   }
 
   @override
@@ -502,7 +521,7 @@ class _DesktopShellState extends State<DesktopShell> {
               final parts = value.split(':');
               await commands.dispatch('${parts.first}.${parts.last}');
             },
-            itemBuilder: (_) => const [
+            itemBuilder: (_) => [
               PopupMenuItem(
                 value: 'project:save',
                 child: Text('Salvar Projeto'),
@@ -514,7 +533,16 @@ class _DesktopShellState extends State<DesktopShell> {
               PopupMenuDivider(),
               PopupMenuItem(enabled: false, child: Text('Importar')),
               PopupMenuItem(value: 'import:stl', child: Text('STL')),
-              PopupMenuItem(value: 'import:step', child: Text('STEP')),
+              if (cad.supportsManagedStep)
+                PopupMenuItem(
+                  value: 'import:step',
+                  enabled: cad.canImportManagedStep,
+                  child: Text(
+                    cad.canImportManagedStep
+                        ? 'Importar STEP'
+                        : 'Importar STEP (abra ou crie um projeto)',
+                  ),
+                ),
               PopupMenuItem(value: 'import:iges', child: Text('IGES')),
               PopupMenuDivider(),
               PopupMenuItem(enabled: false, child: Text('Exportar')),
@@ -533,6 +561,14 @@ class _DesktopShellState extends State<DesktopShell> {
               ),
             ),
           ),
+          if (cad.supportsManagedStep)
+            IconButton(
+              tooltip: cad.canImportManagedStep
+                  ? 'Importar STEP'
+                  : 'Importar STEP: abra ou crie um projeto',
+              onPressed: cad.canImportManagedStep ? _dispatchStepImport : null,
+              icon: const Icon(Icons.view_in_ar),
+            ),
           IconButton(
             tooltip: 'Undo',
             onPressed: commands.undo,
@@ -711,16 +747,26 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
                     await commands.dispatch('import.stl');
                   },
                 ),
-                _DashboardAction(
-                  icon: Icons.view_in_ar,
-                  label: 'Importar STEP',
-                  onTap: () async {
-                    if (!await _ensureProject(context)) return;
-                    onWorkspace();
-                    await commands.refreshContext();
-                    await commands.dispatch('import.step');
-                  },
-                ),
+                if (commands.cad.supportsManagedStep)
+                  _DashboardAction(
+                    icon: Icons.view_in_ar,
+                    label: 'Importar STEP',
+                    onTap: () async {
+                      if (!commands.cad.canImportManagedStep) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              'Abra ou crie um projeto antes de importar STEP.',
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      onWorkspace();
+                      await commands.refreshContext();
+                      await commands.dispatch('import.step');
+                    },
+                  ),
                 _DashboardAction(
                   icon: Icons.tune,
                   label: 'Configurações',
@@ -5498,8 +5544,12 @@ class _OfficialEngineeringWorkspaceState
                 ],
               ),
             ),
-            if (widget.cad.busy)
-              LinearProgressIndicator(value: widget.cad.progress),
+            if (widget.cad.isBusy)
+              LinearProgressIndicator(
+                value: widget.cad.managedStepOperationActive
+                    ? null
+                    : widget.cad.progress,
+              ),
             if (widget.cad.message != null)
               Padding(
                 padding: const EdgeInsets.symmetric(
@@ -5508,7 +5558,16 @@ class _OfficialEngineeringWorkspaceState
                 ),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: Text(widget.cad.message!),
+                  child: Row(
+                    children: [
+                      Expanded(child: Text(widget.cad.message!)),
+                      if (widget.cad.canCancelManagedStepImport)
+                        TextButton(
+                          onPressed: widget.cad.cancelManagedStepImport,
+                          child: const Text('Cancelar'),
+                        ),
+                    ],
+                  ),
                 ),
               ),
             Container(

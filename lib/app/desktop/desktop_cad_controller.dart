@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
 
+import '../../core/cad_document/cad_document.dart';
 import '../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../core/cad_kernel/manager/kernel_manager.dart';
 import '../../core/import_export/import_export.dart';
@@ -11,31 +12,162 @@ import '../../features/projects/data/project_repository.dart';
 import '../../features/projects/domain/project_manager.dart';
 import '../runtime/cad_runtime.dart';
 
+typedef ManagedStepFilePicker =
+    Future<String?> Function(List<String> allowedExtensions);
+
+typedef ManagedStepProjectOpener =
+    Future<void> Function(String projectId, CadAssetCancellation cancellation);
+
+typedef ManagedStepImporter =
+    Future<CadDocumentEntity> Function(
+      String locator,
+      CadAssetCancellation cancellation,
+    );
+
 class DesktopCadController extends ChangeNotifier {
   DesktopCadController({
     required this.kernels,
     required this.projects,
     ProjectRepository? projectRepository,
     ImportExportRepository? importExportRepository,
+    ManagedStepFilePicker? managedStepFilePicker,
+    ManagedStepProjectOpener? managedStepProjectOpener,
+    ManagedStepImporter? managedStepImporter,
   }) : projectRepository = projectRepository ?? ProjectRepository(),
        importExportRepository =
-           importExportRepository ?? const ImportExportRepository() {
+           importExportRepository ?? const ImportExportRepository(),
+       _managedStepFilePicker = managedStepFilePicker ?? _pickManagedStepFile {
     runtime = CadRuntime(kernels: kernels);
+    _managedStepProjectOpener =
+        managedStepProjectOpener ?? _openManagedStepProject;
+    _managedStepImporter = managedStepImporter ?? _importManagedStep;
   }
   final KernelManager kernels;
   final ProjectManager projects;
   final ProjectRepository projectRepository;
   final ImportExportRepository importExportRepository;
+  final ManagedStepFilePicker _managedStepFilePicker;
+  late final ManagedStepProjectOpener _managedStepProjectOpener;
+  late final ManagedStepImporter _managedStepImporter;
   late final CadRuntime runtime;
   ImportedCadDocument? get document => runtime.activeImport;
   KernelMeshGeometry? get meshGeometry => runtime.activeMeshGeometry;
   String? message;
   bool busy = false;
   double progress = 0;
+  bool _selectingManagedStep = false;
+  CadAssetCancellation? _managedStepCancellation;
+
+  bool get managedStepOperationActive =>
+      _selectingManagedStep || _managedStepCancellation != null;
+  bool get isBusy => busy || managedStepOperationActive;
+  bool get supportsManagedStep => Platform.isWindows;
+  bool get canImportManagedStep =>
+      supportsManagedStep && projects.current != null && !isBusy;
+  bool get canCancelManagedStepImport => _managedStepCancellation != null;
 
   void setStatus(String value) {
     message = value;
     notifyListeners();
+  }
+
+  /// The selected locator is deliberately passed straight to the runtime.
+  /// The UI never opens, reads, hashes, or persists the selected file.
+  Future<void> pickAndImportManagedStep() async {
+    if (!canImportManagedStep) {
+      if (projects.current == null) {
+        setStatus('Abra ou crie um projeto antes de importar STEP.');
+      }
+      return;
+    }
+    _selectingManagedStep = true;
+    message = 'Selecione uma peça STEP para importar.';
+    notifyListeners();
+    String? locator;
+    try {
+      locator = await _managedStepFilePicker(const ['step', 'stp']);
+    } finally {
+      _selectingManagedStep = false;
+    }
+    if (locator == null) {
+      message = null;
+      notifyListeners();
+      return;
+    }
+
+    final project = projects.current;
+    if (project == null) {
+      setStatus('Abra ou crie um projeto antes de importar STEP.');
+      return;
+    }
+    final cancellation = CadAssetCancellation();
+    _managedStepCancellation = cancellation;
+    message = 'Importando peça STEP...';
+    notifyListeners();
+    try {
+      await _managedStepProjectOpener(project.id, cancellation);
+      final entity = await _managedStepImporter(locator, cancellation);
+      if (cancellation.isCancelled) return;
+      runtime.select({entity.id});
+      final name = entity.data['name'];
+      final unit = entity.data['declaredUnit'];
+      final suffix = unit is String && unit.isNotEmpty ? ' ($unit)' : '';
+      message = name is String && name.isNotEmpty
+          ? 'Peça STEP "$name"$suffix importada.'
+          : 'Peça STEP$suffix importada.';
+    } catch (error) {
+      message = cancellation.isCancelled
+          ? 'Importação STEP cancelada.'
+          : runtime.recoveryRequired
+          ? 'A importação STEP foi confirmada e requer recuperação antes de continuar.'
+          : _managedStepFriendlyError(error);
+    } finally {
+      _managedStepCancellation = null;
+      notifyListeners();
+    }
+  }
+
+  void cancelManagedStepImport() {
+    final cancellation = _managedStepCancellation;
+    if (cancellation == null) return;
+    cancellation.cancel();
+    message = 'Cancelando importação STEP...';
+    notifyListeners();
+  }
+
+  Future<void> _openManagedStepProject(
+    String projectId,
+    CadAssetCancellation cancellation,
+  ) async {
+    if (runtime.document?.projectId == projectId) return;
+    final directory = await projectRepository.directoryFor(projectId);
+    await runtime.open(projectId, directory, cancellation: cancellation);
+  }
+
+  Future<CadDocumentEntity> _importManagedStep(
+    String locator,
+    CadAssetCancellation cancellation,
+  ) => runtime.importManagedStep(locator, cancellation: cancellation);
+
+  static Future<String?> _pickManagedStepFile(
+    List<String> allowedExtensions,
+  ) async {
+    final selected = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: allowedExtensions,
+      dialogTitle: 'Importar STEP',
+    );
+    return selected?.path;
+  }
+
+  String _managedStepFriendlyError(Object error) {
+    if (error is UnsupportedError) {
+      return 'A importação STEP não está disponível neste ambiente.';
+    }
+    if (error is FormatException) {
+      return 'O arquivo STEP é inválido ou incompatível.';
+    }
+    return 'Não foi possível importar a peça STEP. Verifique o arquivo e tente novamente.';
   }
 
   Future<void> pickAndImport(CadImportFormat format) async {
