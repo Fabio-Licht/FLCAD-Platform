@@ -1,6 +1,9 @@
 import 'dart:io';
 
 import 'package:flcad_mobile/app/cad_viewport/native/native_viewport_bridge.dart';
+import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
+import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
+import 'package:flcad_mobile/app/engineering_bridge/contracts/bridge_selection.dart';
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
 import 'package:flcad_mobile/app/engineering_bridge/operational_reverse_engineering_controller.dart';
@@ -19,6 +22,8 @@ import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart'
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
+import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
+import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
 import 'package:flcad_mobile/features/projects/data/project_repository.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
@@ -1084,6 +1089,44 @@ void main() {
     },
   );
 
+  test(
+    'driving dimension keeps scene synchronization available for later lines',
+    () async {
+      const planeId = 'managed-reference-sketch:world:xy-plane';
+      controller.selectSketchSupport(planeId);
+      await controller.openSketch();
+      final first = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(4, 0),
+      );
+      controller.selectedSketchEntityIds.add(first.id);
+      await controller.createDrivingDimension(
+        SketchDimensionType.linear,
+        20,
+        anchorReference: '${first.id}:start',
+      );
+
+      expect(first.parameters['end'], [20.0, 0.0, 0.0]);
+      final dimension = controller.dimensions.single;
+      expect(
+        controller.runtime.scene.find(dimension.id)?.kind,
+        CadSceneEntityKind.sketch,
+      );
+
+      final second = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 5),
+        const SketchVector(8, 5),
+      );
+      await controller.refreshSketchSceneAfterExit();
+      expect(controller.runtime.scene.find(first.id), isNotNull);
+      expect(controller.runtime.scene.find(second.id), isNotNull);
+      expect(controller.runtime.scene.find(second.id)?.geometry['points'], [
+        [0.0, 5.0, 0.0],
+        [8.0, 5.0, 0.0],
+      ]);
+    },
+  );
+
   test('construction Sketch line is an analytic Revolve axis', () async {
     const planeId = 'managed-reference-sketch:world:xy-plane';
     controller.selectSketchSupport(planeId);
@@ -1172,7 +1215,32 @@ void main() {
         const SketchVector(22, 10),
       );
       controller.beginSketchTangentBlend();
-      controller.selectedSketchEntityIds.addAll([first.id, second.id]);
+      await controller.captureSketchEditingPick(
+        CadViewportPick(
+          entityId: first.id,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(18, 0, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      expect(controller.sketchBlendFirstEndpoint, '${first.id}:end');
+      expect(
+        controller.runtime.scene.find('sketch-blend-first-endpoint'),
+        isNotNull,
+      );
+      await controller.captureSketchEditingPick(
+        CadViewportPick(
+          entityId: second.id,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(22, 4, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      expect(controller.sketchBlendSecondEndpoint, '${second.id}:start');
       controller.setSketchEditingValue(3);
       expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
       expect(
@@ -1181,9 +1249,33 @@ void main() {
       );
       controller.finishSketchEditingTool();
       expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(
+        controller.runtime.scene.find('sketch-blend-first-endpoint'),
+        isNull,
+      );
       controller.beginSketchTangentBlend();
-      controller.selectedSketchEntityIds.addAll([first.id, second.id]);
-      controller.setSketchEditingValue(3);
+      await controller.captureSketchEditingPick(
+        CadViewportPick(
+          entityId: first.id,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(18, 0, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      await controller.captureSketchEditingPick(
+        CadViewportPick(
+          entityId: second.id,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(22, 4, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      controller.setSketchBlendTangentLength(firstEndpoint: true, value: 2);
+      controller.setSketchBlendTangentLength(firstEndpoint: false, value: 5);
       await controller.commitSketchCorner();
       expect(controller.sketchTangentBlendActive, isTrue);
       expect(controller.selectedSketchEntityIds, isEmpty);
@@ -1193,6 +1285,12 @@ void main() {
             (entity) => entity.metadata['featureType'] == 'tangentBlend',
           );
       expect(blend.metadata['sourceEntityIds'], [first.id, second.id]);
+      expect(blend.metadata['sourceEndpointReferences'], [
+        '${first.id}:end',
+        '${second.id}:start',
+      ]);
+      expect(blend.metadata['firstTangentLength'], 2.0);
+      expect(blend.metadata['secondTangentLength'], 5.0);
       expect(blend.parameters['interpolation'], 'cubicBezierG1');
       expect(controller.sketchApi!.entity(first.id), isNotNull);
       expect(controller.sketchApi!.entity(second.id), isNotNull);
@@ -1212,6 +1310,190 @@ void main() {
         'cubicBezierG1',
       );
       expect(nativeSceneUnsupportedReason(cad.runtime.scene, style: 0), isNull);
+    },
+  );
+
+  test(
+    'point constraints and professional point distance use explicit viewport picks',
+    () async {
+      const planeId = 'managed-reference-sketch:world:xy-plane';
+      controller.selectSketchSupport(planeId);
+      await controller.openSketch();
+      final anchor = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final target = controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 5),
+        const SketchVector(30, 5),
+      );
+      final selectionBefore = cad.runtime.selection.toSet();
+
+      controller.beginSketchPointReferenceCapture('coincident');
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: anchor.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(5, 0, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      expect(controller.sketchPointReferenceCaptureReferences, isEmpty);
+      expect(
+        controller.sketchPointReferenceCaptureDiagnostic,
+        contains('extremidade'),
+      );
+      expect(cad.runtime.selection, selectionBefore);
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: anchor.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(10, 0, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: target.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(20, 5, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      expect(controller.sketchPointReferenceCaptureReferences, [
+        '${anchor.id}:end',
+        '${target.id}:start',
+      ]);
+      expect(cad.runtime.selection, selectionBefore);
+      await controller.confirmSketchPointReferenceCapture();
+      expect(target.parameters['start'], [10.0, 0.0, 0.0]);
+      expect(controller.sketchPointReferenceCaptureActive, isFalse);
+
+      controller.beginSketchPointReferenceCapture('distance');
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: anchor.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(0, 0, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: target.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(30, 5, 0),
+            distance: 0,
+          ),
+        ),
+      );
+      await controller.confirmSketchPointReferenceCapture(value: 25);
+      final dimension = controller.dimensions.single;
+      expect(dimension.references, ['${anchor.id}:start', '${target.id}:end']);
+      expect(dimension.value, 25);
+      expect(cad.runtime.scene.find(dimension.id), isNotNull);
+
+      final horizontalAnchor = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 20),
+        const SketchVector(4, 20),
+      );
+      final horizontalTarget = controller.sketchApi!.builders.line.build(
+        const SketchVector(7, 26),
+        const SketchVector(12, 26),
+      );
+      controller.beginSketchPointReferenceCapture('horizontalDistance');
+      for (final pick in [
+        CadViewportPick(
+          entityId: horizontalAnchor.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(4, 20, 0),
+            distance: 0,
+          ),
+        ),
+        CadViewportPick(
+          entityId: horizontalTarget.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(7, 26, 0),
+            distance: 0,
+          ),
+        ),
+      ]) {
+        await controller.captureSketchPointReferencePick(pick);
+      }
+      await controller.confirmSketchPointReferenceCapture(value: 14);
+      expect(
+        controller.dimensions.where(
+          (item) => item.type == SketchDimensionType.horizontal,
+        ),
+        hasLength(1),
+      );
+
+      final angularReference = controller.sketchApi!.builders.line.build(
+        const SketchVector(40, 0),
+        const SketchVector(50, 0),
+      );
+      final angularTarget = controller.sketchApi!.builders.line.build(
+        const SketchVector(40, 10),
+        const SketchVector(40, 18),
+      );
+      controller.beginSketchPointReferenceCapture('angleBetweenLines');
+      for (final pick in [
+        CadViewportPick(
+          entityId: angularReference.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(45, 0, 0),
+            distance: 0,
+          ),
+        ),
+        CadViewportPick(
+          entityId: angularTarget.id,
+          hit: const MeshHit(
+            triangleIndex: -1,
+            point: Vector3(40, 14, 0),
+            distance: 0,
+          ),
+        ),
+      ]) {
+        await controller.captureSketchPointReferencePick(pick);
+      }
+      await controller.confirmSketchPointReferenceCapture(value: 35);
+      expect(
+        controller.dimensions.where(
+          (item) =>
+              item.type == SketchDimensionType.angular &&
+              item.references.length == 2,
+        ),
+        hasLength(1),
+      );
+
+      controller.beginSketchPointReferenceCapture('midpoint');
+      final targetEnd = SketchVector.fromJson(target.parameters['end']);
+      await controller.captureSketchPointReferencePick(
+        CadViewportPick(
+          entityId: target.id,
+          hit: MeshHit(
+            triangleIndex: -1,
+            point: Vector3(targetEnd.x, targetEnd.y, targetEnd.z),
+            distance: 0,
+          ),
+        ),
+      );
+      expect(cad.runtime.scene.find('sketch-point-capture-1'), isNotNull);
+      controller.cancelPendingSketchOperation();
+      expect(controller.sketchPointReferenceCaptureActive, isFalse);
+      expect(cad.runtime.scene.find('sketch-point-capture-1'), isNull);
     },
   );
 

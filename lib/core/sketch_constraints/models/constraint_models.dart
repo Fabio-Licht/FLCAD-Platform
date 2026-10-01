@@ -121,6 +121,8 @@ class SketchConstraint {
 
 enum SketchDimensionType {
   linear,
+  horizontal,
+  vertical,
   angular,
   radius,
   diameter,
@@ -137,6 +139,7 @@ class SketchDimension {
     required this.value,
     List<String> references = const [],
     this.anchorReference,
+    this.orientationSign,
     this.labelX = 0,
     this.labelY = 0,
     this.visible = true,
@@ -148,6 +151,7 @@ class SketchDimension {
   final String constraintId;
   final List<String> references;
   String? anchorReference;
+  final double? orientationSign;
   double value;
   double labelX, labelY;
   bool visible;
@@ -157,6 +161,7 @@ class SketchDimension {
     'constraintId': constraintId,
     'references': references,
     'anchorReference': anchorReference,
+    'orientationSign': orientationSign,
     'value': value,
     'labelX': labelX,
     'labelY': labelY,
@@ -168,6 +173,7 @@ class SketchDimension {
     constraintId: j['constraintId'] as String,
     references: (j['references'] as List?)?.cast<String>() ?? const [],
     anchorReference: j['anchorReference'] as String?,
+    orientationSign: (j['orientationSign'] as num?)?.toDouble(),
     value: (j['value'] as num).toDouble(),
     labelX: (j['labelX'] as num?)?.toDouble() ?? 0,
     labelY: (j['labelY'] as num?)?.toDouble() ?? 0,

@@ -124,4 +124,48 @@ class SketchTangentBlendGeometry {
       chosen.$3,
     ];
   }
+
+  /// Builds a G1 Blend from the two endpoints explicitly chosen by the user.
+  /// [firstAdjacent] and [secondAdjacent] must be the opposite endpoints of
+  /// their respective source lines. This intentionally does not infer the
+  /// closest pair: a polyline may expose several valid corners.
+  static List<SketchVector> betweenSelectedEndpoints(
+    SketchVector firstEndpoint,
+    SketchVector firstAdjacent,
+    SketchVector secondEndpoint,
+    SketchVector secondAdjacent, {
+    required double firstTangentLength,
+    required double secondTangentLength,
+  }) {
+    if (!firstTangentLength.isFinite ||
+        firstTangentLength <= 0 ||
+        !secondTangentLength.isFinite ||
+        secondTangentLength <= 0) {
+      throw ArgumentError('Tangency lengths must be positive and finite.');
+    }
+    final gap = SketchSplineGeometry._distance(firstEndpoint, secondEndpoint);
+    final firstLength = SketchSplineGeometry._distance(
+      firstEndpoint,
+      firstAdjacent,
+    );
+    final secondLength = SketchSplineGeometry._distance(
+      secondEndpoint,
+      secondAdjacent,
+    );
+    if (gap <= 1e-9 || firstLength <= 1e-9 || secondLength <= 1e-9) {
+      throw ArgumentError(
+        'Blend needs two distinct, non-degenerate endpoints.',
+      );
+    }
+    final departing = (firstEndpoint - firstAdjacent).scale(1 / firstLength);
+    // P3 - P2 follows the tangent from the selected endpoint toward the
+    // remainder of its source line, matching the established Sketch G1 rule.
+    final arriving = (secondAdjacent - secondEndpoint).scale(1 / secondLength);
+    return [
+      firstEndpoint,
+      firstEndpoint + departing.scale(firstTangentLength),
+      secondEndpoint - arriving.scale(secondTangentLength),
+      secondEndpoint,
+    ];
+  }
 }

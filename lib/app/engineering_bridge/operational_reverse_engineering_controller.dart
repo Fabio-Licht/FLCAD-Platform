@@ -416,6 +416,27 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   bool get sketchTangentBlendActive =>
       sketchEditingCommandActive &&
       (runtime.read<bool>('sketch.edit.tangentBlend') ?? false);
+  String? get sketchBlendFirstEndpoint =>
+      runtime.read<String>('sketch.blend.firstEndpoint');
+  String? get sketchBlendSecondEndpoint =>
+      runtime.read<String>('sketch.blend.secondEndpoint');
+  String get sketchBlendCaptureHint {
+    if (sketchBlendFirstEndpoint == null) {
+      return 'Clique na primeira extremidade do Blend.';
+    }
+    if (sketchBlendSecondEndpoint == null) {
+      return 'Agora clique na segunda extremidade.';
+    }
+    return 'Extremidades escolhidas. Ajuste o comprimento e confirme.';
+  }
+
+  double get sketchBlendFirstTangentLength =>
+      runtime.read<double>('sketch.blend.firstTangentLength') ??
+      sketchEditingValue;
+  double get sketchBlendSecondTangentLength =>
+      runtime.read<double>('sketch.blend.secondTangentLength') ??
+      sketchEditingValue;
+
   String? get sketchEditingDiagnostic =>
       runtime.read<String>('sketch.edit.diagnostic');
   double get sketchEditingValue =>
@@ -2128,11 +2149,98 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       constraintApi?.constraints ?? const [];
   List<SketchDimension> get dimensions => constraintApi?.dimensions ?? const [];
 
+  bool get sketchPointReferenceCaptureActive =>
+      runtime.read<String>('sketch.pointCapture.mode') != null;
+  String? get sketchPointReferenceCaptureMode =>
+      runtime.read<String>('sketch.pointCapture.mode');
+  List<String> get sketchPointReferenceCaptureReferences => List.unmodifiable(
+    runtime.read<List<String>>('sketch.pointCapture.references') ??
+        const <String>[],
+  );
+  String? get sketchPointReferenceCaptureDiagnostic =>
+      runtime.read<String>('sketch.pointCapture.diagnostic');
+  bool get sketchPointReferenceCaptureReady {
+    final mode = sketchPointReferenceCaptureMode;
+    final count = sketchPointReferenceCaptureReferences.length;
+    return mode != null && count == 2;
+  }
+
+  String get sketchPointReferenceCaptureHint {
+    final mode = sketchPointReferenceCaptureMode;
+    final count = sketchPointReferenceCaptureReferences.length;
+    if (mode == null) return '';
+    if (count == 0) {
+      return switch (mode) {
+        'midpoint' || 'pointOnLine' =>
+          'Clique no ponto ou na extremidade que deve ser restringida.',
+        'angleBetweenLines' => 'Clique na primeira linha de refer\u00eancia.',
+        _ => 'Clique no primeiro ponto ou extremidade.',
+      };
+    }
+    if (count == 1) {
+      return switch (mode) {
+        'midpoint' => 'Clique na linha cujo ponto m\u00e9dio ser\u00e1 usado.',
+        'pointOnLine' => 'Clique na linha de suporte.',
+        'angleBetweenLines' => 'Clique na segunda linha que deve ser dirigida.',
+        _ => 'Clique no segundo ponto ou extremidade.',
+      };
+    }
+    return const {
+          'distance',
+          'horizontalDistance',
+          'verticalDistance',
+          'angleBetweenLines',
+        }.contains(mode)
+        ? mode == 'angleBetweenLines'
+              ? 'Duas linhas capturadas. Informe o \u00e2ngulo e aplique.'
+              : 'Dois pontos capturados. Informe a cota e aplique.'
+        : 'Refer\u00eancias capturadas. Confirme para aplicar.';
+  }
+
+  double? get sketchPointReferenceMeasuredDistance {
+    final references = sketchPointReferenceCaptureReferences;
+    final mode = sketchPointReferenceCaptureMode;
+    if (mode == 'angleBetweenLines' && references.length == 2) {
+      final first = sketchApi?.entity(references[0]);
+      final second = sketchApi?.entity(references[1]);
+      if (first is! SketchLine || second is! SketchLine) return null;
+      double angle(SketchLine line) {
+        final start = SketchVector.fromJson(line.parameters['start']);
+        final end = SketchVector.fromJson(line.parameters['end']);
+        return math.atan2(end.y - start.y, end.x - start.x);
+      }
+
+      var degrees = (angle(second) - angle(first)).abs() * 180 / math.pi;
+      while (degrees > 180) {
+        degrees -= 180;
+      }
+      return degrees;
+    }
+    if (!const {
+          'distance',
+          'horizontalDistance',
+          'verticalDistance',
+        }.contains(mode) ||
+        references.length != 2) {
+      return null;
+    }
+    final first = _sketchPointReferencePosition(references[0]);
+    final second = _sketchPointReferencePosition(references[1]);
+    if (first == null || second == null) return null;
+    final delta = second - first;
+    return switch (mode) {
+      'horizontalDistance' => delta.x.abs(),
+      'verticalDistance' => delta.y.abs(),
+      _ => math.sqrt(delta.dot(delta)),
+    };
+  }
+
   Future<void> configureProject({
     required String projectId,
     required Directory projectDirectory,
   }) async {
     if (configuredProjectId == projectId) return;
+    cancelSketchPointReferenceCapture(notify: false);
     configuredProjectId = projectId;
     final sketch = const SketchEngineFactory().create(projectDirectory);
     final constraints = const ConstraintFactory().create(
@@ -2235,6 +2343,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void detachProject() {
+    cancelSketchPointReferenceCapture(notify: false);
     configuredProjectId = null;
     activeReference = null;
     activeSketch = null;
@@ -2611,6 +2720,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.edit.active', true);
     runtime.write('sketch.edit.tangentBlend', false);
     runtime.write('sketch.edit.diagnostic', null);
+    _clearSketchBlendEndpoints();
     runtime.write('sketch.trim.firstId', null);
     runtime.write('sketch.trim.firstPoint', null);
     runtime.hideTransient('sketch-edit-preview');
@@ -2620,8 +2730,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void setSketchEditingValue(double value) {
     if (value <= 0 || !value.isFinite) return;
     runtime.write('sketch.edit.value', value);
+    if (sketchTangentBlendActive) {
+      runtime.write('sketch.blend.firstTangentLength', value);
+      runtime.write('sketch.blend.secondTangentLength', value);
+    }
     _updateSketchCornerPreview();
     notifyListeners();
+  }
+
+  void setSketchBlendTangentLength({
+    required bool firstEndpoint,
+    required double value,
+  }) {
+    if (!value.isFinite || value <= 0) return;
+    runtime.write(
+      firstEndpoint
+          ? 'sketch.blend.firstTangentLength'
+          : 'sketch.blend.secondTangentLength',
+      value,
+    );
+    _updateSketchCornerPreview();
+    notifyListeners();
+  }
+
+  void _clearSketchBlendEndpoints() {
+    runtime.write('sketch.blend.firstEndpoint', null);
+    runtime.write('sketch.blend.secondEndpoint', null);
+    runtime.write('sketch.blend.firstTangentLength', null);
+    runtime.write('sketch.blend.secondTangentLength', null);
+    runtime.hideTransient('sketch-blend-first-endpoint');
+    runtime.hideTransient('sketch-blend-second-endpoint');
   }
 
   void setSketchFilletAutoTrim(bool value) {
@@ -2682,6 +2820,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (sketchTangentBlendActive) {
+      _captureSketchBlendEndpoint(entity, local);
+      return;
+    }
     if (!selectedSketchEntityIds.contains(entity.id)) {
       selectedSketchEntityIds.add(entity.id);
     }
@@ -2724,21 +2866,144 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   List<SketchVector> _selectedSketchBlendControls() {
-    if (selectedSketchEntityIds.length != 2) {
-      throw StateError('Selecione duas linhas para o Blend tangente.');
+    final firstReference = sketchBlendFirstEndpoint;
+    final secondReference = sketchBlendSecondEndpoint;
+    if (firstReference == null || secondReference == null) {
+      throw StateError(
+        'Clique nas duas extremidades que devem receber o Blend.',
+      );
     }
-    final ids = selectedSketchEntityIds.toList(growable: false);
-    final first = sketchApi?.entity(ids[0]);
-    final second = sketchApi?.entity(ids[1]);
-    if (first is! SketchLine || second is! SketchLine) {
-      throw StateError('O Blend tangente aceita duas linhas do Sketch.');
+    final first = _sketchBlendEndpoint(firstReference);
+    final second = _sketchBlendEndpoint(secondReference);
+    if (first.entity.id == second.entity.id) {
+      throw StateError('Escolha extremidades de duas linhas diferentes.');
     }
-    return SketchTangentBlendGeometry.betweenLines(
-      SketchVector.fromJson(first.parameters['start']),
-      SketchVector.fromJson(first.parameters['end']),
-      SketchVector.fromJson(second.parameters['start']),
-      SketchVector.fromJson(second.parameters['end']),
-      tangentLength: sketchEditingValue,
+    return SketchTangentBlendGeometry.betweenSelectedEndpoints(
+      first.point,
+      first.adjacent,
+      second.point,
+      second.adjacent,
+      firstTangentLength: sketchBlendFirstTangentLength,
+      secondTangentLength: sketchBlendSecondTangentLength,
+    );
+  }
+
+  void _captureSketchBlendEndpoint(SketchEntity entity, SketchVector hit) {
+    if (entity is! SketchLine) {
+      throw StateError(
+        'Blend tangente aceita extremidades de linhas do Sketch.',
+      );
+    }
+    final endpoint = _nearestSketchBlendEndpoint(entity, hit);
+    final firstReference = sketchBlendFirstEndpoint;
+    if (firstReference == null) {
+      runtime.write('sketch.blend.firstEndpoint', endpoint.reference);
+      selectedSketchEntityIds
+        ..clear()
+        ..add(entity.id);
+      _showSketchBlendEndpointMarker(endpoint, ordinal: 1);
+      runtime.write('sketch.edit.diagnostic', null);
+      runtime.select(selectedSketchEntityIds);
+      notifyListeners();
+      return;
+    }
+    if (firstReference == endpoint.reference) {
+      throw StateError(
+        'Escolha uma segunda extremidade diferente para o Blend.',
+      );
+    }
+    final first = _sketchBlendEndpoint(firstReference);
+    if (first.entity.id == entity.id) {
+      throw StateError('Escolha a extremidade de outra linha para o Blend.');
+    }
+    runtime.write('sketch.blend.secondEndpoint', endpoint.reference);
+    selectedSketchEntityIds
+      ..clear()
+      ..add(first.entity.id)
+      ..add(entity.id);
+    _showSketchBlendEndpointMarker(endpoint, ordinal: 2);
+    runtime.write('sketch.edit.diagnostic', null);
+    runtime.select(selectedSketchEntityIds);
+    _updateSketchCornerPreview();
+    notifyListeners();
+  }
+
+  ({
+    String reference,
+    SketchLine entity,
+    SketchVector point,
+    SketchVector adjacent,
+  })
+  _nearestSketchBlendEndpoint(SketchLine entity, SketchVector hit) {
+    final start = SketchVector.fromJson(entity.parameters['start']);
+    final end = SketchVector.fromJson(entity.parameters['end']);
+    final startDistance = (hit - start).dot(hit - start);
+    final endDistance = (hit - end).dot(hit - end);
+    // Viewport picking snaps an endpoint hit to its exact analytic location.
+    // Reject an interior hit instead of silently choosing an arbitrary end.
+    if (math.min(startDistance, endDistance) > 1e-10) {
+      throw StateError('Clique diretamente em uma extremidade da linha.');
+    }
+    final useStart = startDistance <= endDistance;
+    return (
+      reference: '${entity.id}:${useStart ? 'start' : 'end'}',
+      entity: entity,
+      point: useStart ? start : end,
+      adjacent: useStart ? end : start,
+    );
+  }
+
+  ({SketchLine entity, SketchVector point, SketchVector adjacent})
+  _sketchBlendEndpoint(String reference) {
+    final separator = reference.lastIndexOf(':');
+    final entityId = separator < 0
+        ? reference
+        : reference.substring(0, separator);
+    final endpoint = separator < 0 ? '' : reference.substring(separator + 1);
+    final entity = sketchApi?.entity(entityId);
+    if (entity is! SketchLine || (endpoint != 'start' && endpoint != 'end')) {
+      throw StateError(
+        'A extremidade escolhida para o Blend n\u00e3o est\u00e1 dispon\u00edvel.',
+      );
+    }
+    final start = SketchVector.fromJson(entity.parameters['start']);
+    final end = SketchVector.fromJson(entity.parameters['end']);
+    return (
+      entity: entity,
+      point: endpoint == 'start' ? start : end,
+      adjacent: endpoint == 'start' ? end : start,
+    );
+  }
+
+  void _showSketchBlendEndpointMarker(
+    ({
+      String reference,
+      SketchLine entity,
+      SketchVector point,
+      SketchVector adjacent,
+    })
+    endpoint, {
+    required int ordinal,
+  }) {
+    final sketch = activeSketch;
+    if (sketch == null) return;
+    runtime.showTransient(
+      CadSceneEntity(
+        id: ordinal == 1
+            ? 'sketch-blend-first-endpoint'
+            : 'sketch-blend-second-endpoint',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'points': const <List<double>>[],
+          'dimensionLabel': 'BLEND $ordinal',
+          'labelPosition': sketch.coordinates
+              .localToGlobal(endpoint.point)
+              .toJson(),
+          'labelScreenOffset': const [0.0, -18.0],
+          'floatingHud': true,
+        },
+      ),
     );
   }
 
@@ -2864,7 +3129,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'operationParameters': {
           'bezierControls': controls.map((point) => point.toJson()).toList(),
           'sourceEntityIds': ids,
+          'sourceEndpointReferences': [
+            sketchBlendFirstEndpoint,
+            sketchBlendSecondEndpoint,
+          ],
           'tangentLength': sketchEditingValue,
+          'firstTangentLength': sketchBlendFirstTangentLength,
+          'secondTangentLength': sketchBlendSecondTangentLength,
         },
       });
     } else {
@@ -2878,6 +3149,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (error != null) throw StateError(error!);
     selectedSketchEntityIds.clear();
     runtime.hideTransient('sketch-edit-preview');
+    _clearSketchBlendEndpoints();
     runtime.write('sketch.trim.firstId', null);
     runtime.write('sketch.trim.firstPoint', null);
     runtime.select(const <String>{});
@@ -2888,6 +3160,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.edit.active', false);
     runtime.write('sketch.edit.tangentBlend', false);
     runtime.hideTransient('sketch-edit-preview');
+    _clearSketchBlendEndpoints();
     selectedSketchEntityIds.clear();
     runtime.select(const <String>{});
     notifyListeners();
@@ -3016,6 +3289,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void beginSketchTangentBlend() {
     beginSketchEditingTool(SketchToolType.fillet);
     if (!sketchEditingCommandActive) return;
+    _clearSketchBlendEndpoints();
     runtime.write('sketch.edit.tangentBlend', true);
     runtime.write('sketch.edit.value', 5.0);
     notifyListeners();
@@ -3130,6 +3404,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void cancelPendingSketchOperation() {
+    if (sketchPointReferenceCaptureActive) {
+      cancelSketchPointReferenceCapture();
+      return;
+    }
     if (sketchEditingCommandActive) {
       finishSketchEditingTool();
       activeTool = SketchToolType.point;
@@ -4713,6 +4991,261 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     });
   }
 
+  void beginSketchPointReferenceCapture(String mode) {
+    if (!const {
+      'coincident',
+      'midpoint',
+      'pointOnLine',
+      'distance',
+      'horizontalDistance',
+      'verticalDistance',
+      'angleBetweenLines',
+    }.contains(mode)) {
+      throw StateError('Unsupported point-reference command: $mode');
+    }
+    cancelSketchPointReferenceCapture(notify: false);
+    cancelSketchCommand();
+    runtime.write('sketch.pointCapture.mode', mode);
+    runtime.write('sketch.pointCapture.references', <String>[]);
+    runtime.write('sketch.pointCapture.diagnostic', null);
+    notifyListeners();
+  }
+
+  void cancelSketchPointReferenceCapture({bool notify = true}) {
+    runtime.write('sketch.pointCapture.mode', null);
+    runtime.write('sketch.pointCapture.references', <String>[]);
+    runtime.write('sketch.pointCapture.diagnostic', null);
+    runtime.hideTransient('sketch-point-capture-1');
+    runtime.hideTransient('sketch-point-capture-2');
+    if (notify) notifyListeners();
+  }
+
+  Future<void> captureSketchPointReferencePick(CadViewportPick pick) async {
+    final mode = sketchPointReferenceCaptureMode;
+    final sketch = activeSketch;
+    final entity = sketchApi?.entity(pick.entityId);
+    if (mode == null || sketch == null || entity == null) return;
+    final references = sketchPointReferenceCaptureReferences.toList();
+    final localHit = sketch.coordinates.globalToLocal(
+      SketchVector(pick.hit.point.x, pick.hit.point.y, pick.hit.point.z),
+    );
+    try {
+      late final String reference;
+      late final SketchVector position;
+      if (mode == 'angleBetweenLines') {
+        if (entity is! SketchLine) {
+          throw StateError('A cota angular exige duas linhas.');
+        }
+        reference = entity.id;
+        final start = SketchVector.fromJson(entity.parameters['start']);
+        final end = SketchVector.fromJson(entity.parameters['end']);
+        position = (start + end).scale(.5);
+      } else if (references.length == 1 &&
+          (mode == 'midpoint' || mode == 'pointOnLine')) {
+        if (entity is! SketchLine) {
+          throw StateError('A segunda sele\u00e7\u00e3o deve ser uma linha.');
+        }
+        reference = entity.id;
+        final start = SketchVector.fromJson(entity.parameters['start']);
+        final end = SketchVector.fromJson(entity.parameters['end']);
+        position = (start + end).scale(.5);
+      } else {
+        final resolved = _explicitSketchPointReference(entity, localHit);
+        reference = resolved.$1;
+        position = resolved.$2;
+      }
+      if (references.contains(reference)) {
+        throw StateError('Escolha uma refer\u00eancia diferente.');
+      }
+      references.add(reference);
+      runtime.write('sketch.pointCapture.references', references);
+      runtime.write('sketch.pointCapture.diagnostic', null);
+      _showSketchPointReferenceMarker(
+        position,
+        ordinal: references.length,
+        sketch: sketch,
+      );
+    } on StateError catch (failure) {
+      runtime.write('sketch.pointCapture.diagnostic', failure.message);
+    }
+    notifyListeners();
+  }
+
+  (String, SketchVector) _explicitSketchPointReference(
+    SketchEntity entity,
+    SketchVector hit,
+  ) {
+    if (entity is SketchPoint) {
+      return (entity.id, SketchVector.fromJson(entity.parameters['point']));
+    }
+    final candidates = <(String, SketchVector)>[];
+    if (entity is SketchLine) {
+      candidates.addAll([
+        (
+          '${entity.id}:start',
+          SketchVector.fromJson(entity.parameters['start']),
+        ),
+        ('${entity.id}:end', SketchVector.fromJson(entity.parameters['end'])),
+      ]);
+    } else if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      for (final item in const [('start', 'startAngle'), ('end', 'endAngle')]) {
+        final angle = (entity.parameters[item.$2] as num).toDouble();
+        candidates.add((
+          '${entity.id}:${item.$1}',
+          SketchVector(
+            center.x + radius * math.cos(angle),
+            center.y + radius * math.sin(angle),
+          ),
+        ));
+      }
+    }
+    if (candidates.isEmpty) {
+      throw StateError('Selecione um ponto ou uma extremidade de linha/arco.');
+    }
+    candidates.sort((a, b) {
+      final da = (a.$2 - hit).dot(a.$2 - hit);
+      final db = (b.$2 - hit).dot(b.$2 - hit);
+      return da.compareTo(db);
+    });
+    final nearest = candidates.first;
+    final scale = candidates.length > 1
+        ? math.sqrt(
+            (candidates.first.$2 - candidates.last.$2).dot(
+              candidates.first.$2 - candidates.last.$2,
+            ),
+          )
+        : 1.0;
+    final tolerance = math.max(1e-5, scale * .04);
+    if ((nearest.$2 - hit).dot(nearest.$2 - hit) > tolerance * tolerance) {
+      throw StateError('Clique diretamente na extremidade desejada.');
+    }
+    return nearest;
+  }
+
+  SketchVector? _sketchPointReferencePosition(String reference) {
+    final entityId = reference.replaceFirst(RegExp(r':(start|end)$'), '');
+    final entity = sketchApi?.entity(entityId);
+    if (entity is SketchPoint) {
+      return SketchVector.fromJson(entity.parameters['point']);
+    }
+    if (entity is SketchLine) {
+      if (!reference.endsWith(':start') && !reference.endsWith(':end')) {
+        return null;
+      }
+      return SketchVector.fromJson(
+        entity.parameters[reference.endsWith(':start') ? 'start' : 'end'],
+      );
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final angle =
+          (entity.parameters[reference.endsWith(':start')
+                      ? 'startAngle'
+                      : 'endAngle']
+                  as num)
+              .toDouble();
+      return SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
+      );
+    }
+    return null;
+  }
+
+  void _showSketchPointReferenceMarker(
+    SketchVector local, {
+    required int ordinal,
+    required Sketch sketch,
+  }) {
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'sketch-point-capture-$ordinal',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'points': const <List<double>>[],
+          'dimensionLabel': 'P$ordinal',
+          'labelPosition': sketch.coordinates.localToGlobal(local).toJson(),
+          'labelScreenOffset': const [0.0, -16.0],
+          'floatingHud': true,
+          'displayColor': 'previewCyan',
+        },
+      ),
+    );
+  }
+
+  Future<void> confirmSketchPointReferenceCapture({double? value}) async {
+    final mode = sketchPointReferenceCaptureMode;
+    final references = sketchPointReferenceCaptureReferences;
+    if (mode == null || references.length != 2) {
+      throw StateError('Capture as duas refer\u00eancias antes de aplicar.');
+    }
+    if (const {
+      'distance',
+      'horizontalDistance',
+      'verticalDistance',
+      'angleBetweenLines',
+    }.contains(mode)) {
+      if (value == null || !value.isFinite || value <= 0) {
+        throw StateError(
+          mode == 'angleBetweenLines'
+              ? 'Informe um \u00e2ngulo positivo em graus.'
+              : 'Informe uma dist\u00e2ncia positiva em mm.',
+        );
+      }
+      final first = mode == 'angleBetweenLines'
+          ? _sketchLineMidpoint(references[0])
+          : _sketchPointReferencePosition(references[0])!;
+      final second = mode == 'angleBetweenLines'
+          ? _sketchLineMidpoint(references[1])
+          : _sketchPointReferencePosition(references[1])!;
+      final label = SketchVector(
+        (first.x + second.x) / 2 - (second.y - first.y) * .15,
+        (first.y + second.y) / 2 + (second.x - first.x) * .15,
+      );
+      await _run('reverse.sketch.dimension.create', {
+        'type': switch (mode) {
+          'horizontalDistance' => SketchDimensionType.horizontal.name,
+          'verticalDistance' => SketchDimensionType.vertical.name,
+          'angleBetweenLines' => SketchDimensionType.angular.name,
+          _ => SketchDimensionType.linear.name,
+        },
+        'value': value,
+        'references': references,
+        'anchorReference': mode == 'angleBetweenLines'
+            ? '${references[1]}:start'
+            : references.first,
+        'labelX': label.x,
+        'labelY': label.y,
+      });
+    } else {
+      final type = switch (mode) {
+        'coincident' => SketchConstraintType.coincident,
+        'midpoint' => SketchConstraintType.midpoint,
+        'pointOnLine' => SketchConstraintType.pointOnLine,
+        _ => throw StateError('Unsupported point-reference command: $mode'),
+      };
+      await _run('reverse.sketch.constraint', {
+        'type': type.name,
+        'references': references,
+      });
+    }
+    cancelSketchPointReferenceCapture();
+  }
+
+  SketchVector _sketchLineMidpoint(String entityId) {
+    final entity = sketchApi?.entity(entityId);
+    if (entity is! SketchLine) {
+      throw StateError('A cota angular exige duas linhas.');
+    }
+    final start = SketchVector.fromJson(entity.parameters['start']);
+    final end = SketchVector.fromJson(entity.parameters['end']);
+    return (start + end).scale(.5);
+  }
+
   /// Builds directional references for scan-derived geometry. Selection order
   /// is intentional: the first entity is the trusted reference and the second
   /// is the entity the solver is allowed to correct.
@@ -4738,6 +5271,30 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           throw invalid('two lines');
         }
         return selected.map((e) => e.id).toList(growable: false);
+      case SketchConstraintType.equal:
+        if (selected.length != 2) throw invalid('two compatible entities');
+        final bothLines = selected.every((entity) => entity is SketchLine);
+        final bothCircular = selected.every(
+          (entity) => entity is SketchCircle || entity is SketchArc,
+        );
+        if (!bothLines && !bothCircular) {
+          throw invalid('two lines or two circles/arcs');
+        }
+        return selected.map((entity) => entity.id).toList(growable: false);
+      case SketchConstraintType.tangent:
+        if (selected.length != 2 ||
+            selected.any(
+              (entity) =>
+                  entity is! SketchLine &&
+                  entity is! SketchCircle &&
+                  entity is! SketchArc,
+            )) {
+          throw invalid('two lines, circles or arcs');
+        }
+        return selected.map((entity) => entity.id).toList(growable: false);
+      case SketchConstraintType.fixed:
+        if (selected.length != 1) throw invalid('one Sketch entity');
+        return [selected.single.id];
       case SketchConstraintType.concentric:
         if (selected.length != 2 ||
             selected.any((e) => e is! SketchCircle && e is! SketchArc)) {
@@ -4800,7 +5357,27 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchConstraintType.parallel => 'Parallel',
     SketchConstraintType.perpendicular => 'Perpendicular',
     SketchConstraintType.concentric => 'Concentric',
+    SketchConstraintType.midpoint => 'Midpoint',
+    SketchConstraintType.pointOnLine => 'Point on line',
+    SketchConstraintType.equal => 'Equal',
+    SketchConstraintType.tangent => 'Tangent',
+    SketchConstraintType.fixed => 'Fix',
     _ => type.name,
+  };
+
+  static String _constraintSymbol(SketchConstraintType type) => switch (type) {
+    SketchConstraintType.horizontal => 'H',
+    SketchConstraintType.vertical => 'V',
+    SketchConstraintType.coincident => '\u25cf',
+    SketchConstraintType.parallel => '\u2225',
+    SketchConstraintType.perpendicular => '\u22a5',
+    SketchConstraintType.concentric => '\u25ce',
+    SketchConstraintType.midpoint => 'M',
+    SketchConstraintType.pointOnLine => '\u2299',
+    SketchConstraintType.equal => '=',
+    SketchConstraintType.tangent => 'T',
+    SketchConstraintType.fixed => 'FIX',
+    _ => '\u25c7',
   };
 
   void _validateConstrainedParameterEdit(
@@ -10406,17 +10983,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               value: (parameters['value'] as num?)?.toDouble(),
             );
         parameters['createdId'] = explicitConstraint.id;
-        await constraintApi!.solve(only: [explicitConstraint.id]);
+        final solution = await constraintApi!.solve(
+          only: [explicitConstraint.id],
+        );
+        if (!solution.solvedIds.contains(explicitConstraint.id)) {
+          constraintApi!.engine.undo();
+          constraintApi!.engine.undo();
+          final diagnostic = solution.diagnostics
+              .where(
+                (item) =>
+                    item.constraintIds.isEmpty ||
+                    item.constraintIds.contains(explicitConstraint.id),
+              )
+              .firstOrNull;
+          throw StateError(
+            diagnostic?.message ?? 'The Sketch constraint could not be solved.',
+          );
+        }
+        await persist();
         await _synchronizeSketchScene();
         return explicitConstraint.id;
       },
       undo: (parameters) async {
-        final id = parameters['createdId'] as String?;
-        if (id != null) {
-          constraintApi!.delete(id);
+        final geometryUndone = constraintApi!.engine.undo();
+        final constraintUndone = constraintApi!.engine.undo();
+        if (!geometryUndone || !constraintUndone) {
+          throw StateError('Constraint undo history is incomplete.');
         }
+        await persist();
         await _synchronizeSketchScene();
-        return 'constraint removed';
+        return '${parameters['createdId']} removed and geometry restored';
       },
     );
 
@@ -11193,40 +11789,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             RegExp(r':(start|end|point)$'),
             '',
           );
+          final visual = _constraintVisual(
+            value,
+            referenceId == null ? activeSketch : sketchByEntityId[referenceId],
+          );
           return CadDocumentEntity(
             id: value.id,
             kind: CadDocumentEntityKind.constraint,
             data: {
               'name':
-                  '${switch (value.type) {
-                    SketchConstraintType.horizontal => '—',
-                    SketchConstraintType.vertical => '|',
-                    SketchConstraintType.coincident => '●',
-                    SketchConstraintType.parallel => '∥',
-                    SketchConstraintType.perpendicular => '⊥',
-                    SketchConstraintType.concentric => '◎',
-                    _ => '◇',
-                  }} ${_constraintLabel(value.type)}',
+                  '${_constraintSymbol(value.type)} ${_constraintLabel(value.type)}',
               'group': 'Constraints',
               'parentSketchId': referenceId == null
                   ? activeSketch?.id
                   : sketchByEntityId[referenceId]?.id,
               'sceneVisible': value.visible,
-              'symbol': switch (value.type) {
-                SketchConstraintType.horizontal => '—',
-                SketchConstraintType.vertical => '|',
-                SketchConstraintType.coincident => '●',
-                SketchConstraintType.parallel => '∥',
-                SketchConstraintType.perpendicular => '⊥',
-                SketchConstraintType.concentric => '◎',
-                _ => '◇',
-              },
+              'sceneKind': visual.kind.name,
+              'sceneGeometry': visual.geometry,
+              'symbol': _constraintSymbol(value.type),
               'constraint': value.toJson(),
             },
           );
         }),
         ...dimensions.map((value) {
-          final referenceId = value.references.firstOrNull;
+          final referenceId = value.references.firstOrNull?.replaceFirst(
+            RegExp(r':(start|end|center)$'),
+            '',
+          );
           final visual = _dimensionVisual(value, sketchByEntityId[referenceId]);
           return CadDocumentEntity(
             id: value.id,
@@ -11238,7 +11827,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                   ? activeSketch?.id
                   : sketchByEntityId[referenceId]?.id,
               'sceneVisible': value.visible,
-              'sceneKind': 'dimension',
+              // Dimensions are presentation-only Sketch overlays. Publishing
+              // a non-existent scene kind here aborts later scene syncs,
+              // leaving new Sketch entities invisible after the first cota.
+              'sceneKind': visual.kind.name,
               'sceneGeometry': visual.geometry,
               'dimension': value.toJson(),
             },
@@ -12005,19 +12597,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   CadSceneEntity _dimensionVisual(SketchDimension dimension, Sketch? sketch) {
-    final entity = dimension.references.firstOrNull == null
-        ? null
-        : sketchApi?.entity(dimension.references.first);
     final localPoints = <SketchVector>[];
-    if (entity is SketchLine) {
-      localPoints.addAll([
-        SketchVector.fromJson(entity.parameters['start']),
-        SketchVector.fromJson(entity.parameters['end']),
-      ]);
-    } else if (entity is SketchCircle || entity is SketchArc) {
-      final center = SketchVector.fromJson(entity!.parameters['center']);
-      final radius = (entity.parameters['radius'] as num).toDouble();
-      localPoints.addAll([center, SketchVector(center.x + radius, center.y)]);
+    if (const {
+          SketchDimensionType.linear,
+          SketchDimensionType.horizontal,
+          SketchDimensionType.vertical,
+        }.contains(dimension.type) &&
+        dimension.references.length == 2) {
+      final first = _sketchPointReferencePosition(dimension.references[0]);
+      final second = _sketchPointReferencePosition(dimension.references[1]);
+      if (first != null && second != null) localPoints.addAll([first, second]);
+    } else {
+      final reference = dimension.references.firstOrNull;
+      final entity = reference == null
+          ? null
+          : sketchApi?.entity(
+              reference.replaceFirst(RegExp(r':(start|end|center)$'), ''),
+            );
+      if (entity is SketchLine) {
+        localPoints.addAll([
+          SketchVector.fromJson(entity.parameters['start']),
+          SketchVector.fromJson(entity.parameters['end']),
+        ]);
+      } else if (entity is SketchCircle || entity is SketchArc) {
+        final center = SketchVector.fromJson(entity!.parameters['center']);
+        final radius = (entity.parameters['radius'] as num).toDouble();
+        localPoints.addAll([center, SketchVector(center.x + radius, center.y)]);
+      }
     }
     final coordinates = sketch?.coordinates;
     final label = SketchVector(dimension.labelX, dimension.labelY);
@@ -12036,11 +12642,74 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             'Ø ${dimension.value.toStringAsFixed(3)}',
           SketchDimensionType.angular =>
             '${dimension.value.toStringAsFixed(2)}°',
+          SketchDimensionType.horizontal =>
+            'ΔX ${dimension.value.toStringAsFixed(3)}',
+          SketchDimensionType.vertical =>
+            'ΔY ${dimension.value.toStringAsFixed(3)}',
           _ => dimension.value.toStringAsFixed(3),
         },
         'labelPosition': (coordinates?.localToGlobal(label) ?? label).toJson(),
         'displayColor': 'drivingDimension',
         'strokeWidth': 1.0,
+      },
+    );
+  }
+
+  CadSceneEntity _constraintVisual(
+    SketchConstraint constraint,
+    Sketch? sketch,
+  ) {
+    final reference = constraint.references.lastOrNull ?? '';
+    final entityId = reference.replaceFirst(
+      RegExp(r':(start|end|point|center)$'),
+      '',
+    );
+    final entity = sketchApi?.entity(entityId);
+    SketchVector local = const SketchVector(0, 0, 0);
+    if (entity is SketchLine) {
+      final start = SketchVector.fromJson(entity.parameters['start']);
+      final end = SketchVector.fromJson(entity.parameters['end']);
+      local = reference.endsWith(':start')
+          ? start
+          : reference.endsWith(':end')
+          ? end
+          : SketchVector(
+              (start.x + end.x) / 2,
+              (start.y + end.y) / 2,
+              (start.z + end.z) / 2,
+            );
+    } else if (entity is SketchPoint) {
+      local = SketchVector.fromJson(entity.parameters['point']);
+    } else if (entity is SketchCircle || entity is SketchArc) {
+      final center = SketchVector.fromJson(entity!.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      local = constraint.type == SketchConstraintType.concentric
+          ? center
+          : SketchVector(center.x + radius * .7, center.y + radius * .7);
+    } else if (entity is SketchEllipse) {
+      local = SketchVector.fromJson(entity.parameters['center']);
+    } else if (entity is SketchSpline) {
+      final points = (entity.parameters['points'] as List? ?? const [])
+          .map(SketchVector.fromJson)
+          .toList(growable: false);
+      if (points.isNotEmpty) local = points[points.length ~/ 2];
+    }
+    final world = sketch?.coordinates.localToGlobal(local) ?? local;
+    final isError =
+        constraint.status == ConstraintStatus.conflicting ||
+        constraint.status == ConstraintStatus.overdefined ||
+        constraint.status == ConstraintStatus.invalid;
+    return CadSceneEntity(
+      id: constraint.id,
+      kind: CadSceneEntityKind.sketch,
+      geometry: {
+        'points': const <List<double>>[],
+        'dimensionLabel': _constraintSymbol(constraint.type),
+        'labelPosition': world.toJson(),
+        'labelScreenOffset': const [12.0, -14.0],
+        'constraintGlyph': true,
+        'constraintStatus': constraint.status.name,
+        'displayColor': isError ? 'destructiveRed' : 'constraintYellow',
       },
     );
   }

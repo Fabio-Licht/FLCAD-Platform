@@ -5351,9 +5351,21 @@ class _OfficialEngineeringWorkspaceState
                                           (!operational
                                                   .sketchCreationCommandActive ||
                                               operational
-                                                  .sketchEditingCommandActive)
+                                                  .sketchEditingCommandActive ||
+                                              operational
+                                                  .sketchPointReferenceCaptureActive)
                                       ? (pick) async {
                                           if (operational
+                                              .sketchPointReferenceCaptureActive) {
+                                            await operational
+                                                .captureSketchPointReferencePick(
+                                                  pick,
+                                                );
+                                            widget.cad.setStatus(
+                                              operational
+                                                  .sketchPointReferenceCaptureHint,
+                                            );
+                                          } else if (operational
                                               .sketchEditingCommandActive) {
                                             try {
                                               await operational
@@ -5377,14 +5389,17 @@ class _OfficialEngineeringWorkspaceState
                                                   .isControlPressed,
                                             );
                                           }
-                                          geometrySelection.select(
-                                            pick.entityId,
-                                            toggle: false,
-                                            range: false,
-                                          );
-                                          widget.cad.setStatus(
-                                            'Sketch entity selected · edit parameters in Inspector.',
-                                          );
+                                          if (!operational
+                                              .sketchPointReferenceCaptureActive) {
+                                            geometrySelection.select(
+                                              pick.entityId,
+                                              toggle: false,
+                                              range: false,
+                                            );
+                                            widget.cad.setStatus(
+                                              'Sketch entity selected · edit parameters in Inspector.',
+                                            );
+                                          }
                                         }
                                       : null,
                                   onSketchEntityDoublePick:
@@ -9305,6 +9320,66 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     );
   }
 
+  Future<void> _confirmPointReferenceCapture(BuildContext context) async {
+    if (!controller.sketchPointReferenceCaptureReady) return;
+    final mode = controller.sketchPointReferenceCaptureMode;
+    if (!const {
+      'distance',
+      'horizontalDistance',
+      'verticalDistance',
+      'angleBetweenLines',
+    }.contains(mode)) {
+      await controller.confirmSketchPointReferenceCapture();
+      return;
+    }
+    final measured = controller.sketchPointReferenceMeasuredDistance;
+    final input = TextEditingController(
+      text: measured?.toStringAsFixed(3) ?? '',
+    );
+    final value = await showDialog<double>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          mode == 'angleBetweenLines'
+              ? 'Cota angular entre linhas'
+              : 'Cota entre pontos',
+        ),
+        content: TextField(
+          controller: input,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: InputDecoration(
+            labelText: mode == 'angleBetweenLines'
+                ? 'Ângulo dirigido'
+                : 'Distância dirigida',
+            suffixText: mode == 'angleBetweenLines' ? '°' : 'mm',
+          ),
+          onSubmitted: (text) => Navigator.pop(
+            context,
+            double.tryParse(text.replaceAll(',', '.')),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(
+              context,
+              double.tryParse(input.text.replaceAll(',', '.')),
+            ),
+            child: const Text('Aplicar'),
+          ),
+        ],
+      ),
+    );
+    input.dispose();
+    if (value != null) {
+      await controller.confirmSketchPointReferenceCapture(value: value);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final hud = controller.lineHud;
@@ -9628,32 +9703,73 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                 icon: const Icon(Icons.multiline_chart, size: 17),
                 label: Text(
                   controller.sketchTangentBlendActive
-                      ? 'Blend tangente: selecione duas linhas'
+                      ? 'Blend tangente: escolha duas extremidades'
                       : 'Blend tangente',
                 ),
               ),
             ),
             if (controller.sketchTangentBlendActive) ...[
               const SizedBox(height: 5),
-              const Text(
-                'Selecione duas linhas na viewport. A prévia liga as extremidades mais próximas sem cortar as linhas.',
+              Text(
+                controller.sketchBlendCaptureHint,
                 style: TextStyle(fontSize: 10),
               ),
-              TextFormField(
-                key: const ValueKey('sketch-tangent-blend-length'),
-                initialValue: controller.sketchEditingValue.toString(),
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  labelText: 'Comprimento da tangência',
-                  suffixText: 'mm',
-                ),
-                onChanged: (text) {
-                  final value = double.tryParse(text.replaceAll(',', '.'));
-                  if (value != null) controller.setSketchEditingValue(value);
-                },
+              Row(
+                children: [
+                  Expanded(
+                    child: TextFormField(
+                      key: const ValueKey('sketch-tangent-blend-first-length'),
+                      initialValue: controller.sketchBlendFirstTangentLength
+                          .toString(),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        labelText: 'Comprimento ponta 1',
+                        suffixText: 'mm',
+                      ),
+                      onChanged: (text) {
+                        final value = double.tryParse(
+                          text.replaceAll(',', '.'),
+                        );
+                        if (value != null) {
+                          controller.setSketchBlendTangentLength(
+                            firstEndpoint: true,
+                            value: value,
+                          );
+                        }
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: TextFormField(
+                      key: const ValueKey('sketch-tangent-blend-second-length'),
+                      initialValue: controller.sketchBlendSecondTangentLength
+                          .toString(),
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        labelText: 'Comprimento ponta 2',
+                        suffixText: 'mm',
+                      ),
+                      onChanged: (text) {
+                        final value = double.tryParse(
+                          text.replaceAll(',', '.'),
+                        );
+                        if (value != null) {
+                          controller.setSketchBlendTangentLength(
+                            firstEndpoint: false,
+                            value: value,
+                          );
+                        }
+                      },
+                    ),
+                  ),
+                ],
               ),
               if (controller.sketchEditingDiagnostic case final diagnostic?)
                 Text(
@@ -9667,7 +9783,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                 children: [
                   Expanded(
                     child: FilledButton.tonal(
-                      onPressed: controller.selectedSketchEntityIds.length == 2
+                      onPressed:
+                          controller.sketchBlendFirstEndpoint != null &&
+                              controller.sketchBlendSecondEndpoint != null
                           ? () async {
                               try {
                                 await controller.commitSketchCorner();
@@ -9984,7 +10102,6 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     Icons.vertical_align_center,
                     SketchConstraintType.vertical,
                   ),
-                  ('Coincident', Icons.adjust, SketchConstraintType.coincident),
                   (
                     'Parallel',
                     Icons.drag_handle,
@@ -10000,10 +10117,13 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     Icons.radio_button_checked,
                     SketchConstraintType.concentric,
                   ),
+                  ('Equal', Icons.drag_handle, SketchConstraintType.equal),
+                  ('Tangent', Icons.gesture, SketchConstraintType.tangent),
+                  ('Fix', Icons.lock_outline, SketchConstraintType.fixed),
                 ])
                   Tooltip(
                     message: item.$1,
-                    child: OutlinedButton(
+                    child: OutlinedButton.icon(
                       onPressed: () async {
                         try {
                           await controller.applyConstraint(item.$3);
@@ -10015,15 +10135,90 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                         minimumSize: const Size(42, 34),
                         padding: const EdgeInsets.symmetric(horizontal: 8),
                       ),
-                      child: Icon(item.$2, size: 17),
+                      icon: Icon(item.$2, size: 16),
+                      label: Text(
+                        item.$1,
+                        style: const TextStyle(fontSize: 10),
+                      ),
                     ),
                   ),
               ],
             ),
+            const SizedBox(height: 7),
+            Wrap(
+              spacing: 5,
+              runSpacing: 5,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      controller.beginSketchPointReferenceCapture('coincident'),
+                  icon: const Icon(Icons.adjust, size: 16),
+                  label: const Text('Coincidir pontos'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () =>
+                      controller.beginSketchPointReferenceCapture('midpoint'),
+                  icon: const Icon(Icons.center_focus_strong, size: 16),
+                  label: const Text('Ponto médio'),
+                ),
+                OutlinedButton.icon(
+                  onPressed: () => controller.beginSketchPointReferenceCapture(
+                    'pointOnLine',
+                  ),
+                  icon: const Icon(Icons.linear_scale, size: 16),
+                  label: const Text('Ponto na linha'),
+                ),
+              ],
+            ),
+            if (controller.sketchPointReferenceCaptureActive &&
+                controller.sketchPointReferenceCaptureMode != 'distance')
+              Card(
+                margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        controller.sketchPointReferenceCaptureHint,
+                        style: const TextStyle(fontSize: 10),
+                      ),
+                      if (controller.sketchPointReferenceCaptureDiagnostic
+                          case final diagnostic?)
+                        Text(
+                          diagnostic,
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton(
+                              onPressed:
+                                  controller.sketchPointReferenceCaptureReady
+                                  ? () => _confirmPointReferenceCapture(context)
+                                  : null,
+                              child: const Text('Aplicar'),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed:
+                                controller.cancelSketchPointReferenceCapture,
+                            child: const Text('Cancelar'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             const Padding(
               padding: EdgeInsets.fromLTRB(10, 7, 10, 0),
               child: Text(
-                'For pairs: select the trusted reference first, then the geometry to correct.',
+                'Equal/Tangent: select the reference first and the target with Ctrl. '
+                'Fix: select exactly one entity.',
                 style: TextStyle(fontSize: 9.5),
               ),
             ),
@@ -10032,9 +10227,14 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
         ExpansionTile(
           tilePadding: const EdgeInsets.symmetric(horizontal: 12),
           leading: const Icon(Icons.straighten_outlined, size: 17),
-          title: const Text('Dimensions'),
+          title: const Text('Dimensions / Cotas'),
           subtitle: Text(
-            '${controller.dimensions.length} driving · select one entity',
+            dimensionEntity is SketchLine
+                ? 'Linha selecionada · Linear define seu comprimento'
+                : dimensionEntity is SketchCircle ||
+                      dimensionEntity is SketchArc
+                ? 'Curva selecionada · use Raio ou Diâmetro'
+                : '${controller.dimensions.length} dirigidas · selecione uma entidade',
             style: const TextStyle(fontSize: 9.5),
           ),
           children: [
@@ -10061,6 +10261,103 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     child: Text(item.$1),
                   ),
               ],
+            ),
+            const SizedBox(height: 6),
+            OutlinedButton.icon(
+              onPressed: () =>
+                  controller.beginSketchPointReferenceCapture('distance'),
+              icon: const Icon(Icons.social_distance, size: 16),
+              label: const Text('Linear entre dois pontos'),
+            ),
+            Wrap(
+              spacing: 5,
+              runSpacing: 5,
+              children: [
+                OutlinedButton(
+                  onPressed: () => controller.beginSketchPointReferenceCapture(
+                    'horizontalDistance',
+                  ),
+                  child: const Text('Horizontal entre pontos'),
+                ),
+                OutlinedButton(
+                  onPressed: () => controller.beginSketchPointReferenceCapture(
+                    'verticalDistance',
+                  ),
+                  child: const Text('Vertical entre pontos'),
+                ),
+                OutlinedButton(
+                  onPressed: () => controller.beginSketchPointReferenceCapture(
+                    'angleBetweenLines',
+                  ),
+                  child: const Text('Ângulo entre linhas'),
+                ),
+              ],
+            ),
+            if (controller.sketchPointReferenceCaptureActive &&
+                const {
+                  'distance',
+                  'horizontalDistance',
+                  'verticalDistance',
+                  'angleBetweenLines',
+                }.contains(controller.sketchPointReferenceCaptureMode))
+              Card(
+                margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Text(
+                        controller.sketchPointReferenceCaptureHint,
+                        style: const TextStyle(fontSize: 10),
+                      ),
+                      if (controller.sketchPointReferenceMeasuredDistance
+                          case final measured?)
+                        Text(
+                          controller.sketchPointReferenceCaptureMode ==
+                                  'angleBetweenLines'
+                              ? 'Atual: ${measured.toStringAsFixed(3)}°'
+                              : 'Atual: ${measured.toStringAsFixed(3)} mm',
+                          style: const TextStyle(fontSize: 9.5),
+                        ),
+                      if (controller.sketchPointReferenceCaptureDiagnostic
+                          case final diagnostic?)
+                        Text(
+                          diagnostic,
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton(
+                              onPressed:
+                                  controller.sketchPointReferenceCaptureReady
+                                  ? () => _confirmPointReferenceCapture(context)
+                                  : null,
+                              child: const Text('Definir cota'),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed:
+                                controller.cancelSketchPointReferenceCapture,
+                            child: const Text('Cancelar'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            const Padding(
+              padding: EdgeInsets.fromLTRB(10, 7, 10, 3),
+              child: Text(
+                'Cota linear: selecione uma única linha na viewport, clique em '
+                'Linear e informe o comprimento em mm.',
+                style: TextStyle(fontSize: 9.5),
+              ),
             ),
             for (final dimension in controller.dimensions)
               ListTile(

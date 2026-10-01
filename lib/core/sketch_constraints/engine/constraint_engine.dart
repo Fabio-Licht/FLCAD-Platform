@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 import '../../sketch_engine/api/sketch_engine_api.dart';
 import '../../sketch_engine/entities/sketch_entities.dart';
 import '../analytics/constraint_analytics.dart';
@@ -135,16 +136,32 @@ class ConstraintEngine {
   }) => transaction(
     'create-driving-dimension',
     () => sketch.engine.transaction('create-driving-dimension', () {
+      final orientationSign = _angularOrientationSign(type, references);
       final duplicate = dimensions.values.where((dimension) {
         if (dimension.references.isEmpty || references.isEmpty) return false;
-        if (dimension.references.first != references.first) return false;
         final existingRadial =
             dimension.type == SketchDimensionType.radius ||
             dimension.type == SketchDimensionType.diameter;
         final requestedRadial =
             type == SketchDimensionType.radius ||
             type == SketchDimensionType.diameter;
-        return dimension.type == type || (existingRadial && requestedRadial);
+        if (existingRadial && requestedRadial) {
+          return dimension.references.first == references.first;
+        }
+        if (dimension.type != type ||
+            dimension.references.length != references.length) {
+          return false;
+        }
+        if (const {
+              SketchDimensionType.linear,
+              SketchDimensionType.horizontal,
+              SketchDimensionType.vertical,
+            }.contains(type) &&
+            references.length == 2) {
+          final existing = dimension.references.toSet();
+          return existing.length == 2 && existing.containsAll(references);
+        }
+        return dimension.references.first == references.first;
       }).firstOrNull;
       if (duplicate != null) {
         throw StateError(
@@ -153,7 +170,9 @@ class ConstraintEngine {
         );
       }
       final constraintType = switch (type) {
-        SketchDimensionType.linear => SketchConstraintType.distance,
+        SketchDimensionType.linear ||
+        SketchDimensionType.horizontal ||
+        SketchDimensionType.vertical => SketchConstraintType.distance,
         SketchDimensionType.angular => SketchConstraintType.angle,
         SketchDimensionType.radius => SketchConstraintType.radius,
         SketchDimensionType.diameter => SketchConstraintType.diameter,
@@ -172,6 +191,7 @@ class ConstraintEngine {
         references: references,
         value: value,
         anchorReference: anchorReference,
+        orientationSign: orientationSign,
       );
       return addDimension(
         SketchDimension(
@@ -180,6 +200,7 @@ class ConstraintEngine {
           value: value,
           references: references,
           anchorReference: solution.anchorReference,
+          orientationSign: orientationSign,
           labelX: labelX,
           labelY: labelY,
         ),
@@ -201,6 +222,9 @@ class ConstraintEngine {
         references: dimension.references,
         value: value,
         anchorReference: anchorReference ?? dimension.anchorReference,
+        orientationSign:
+            dimension.orientationSign ??
+            _angularOrientationSign(dimension.type, dimension.references),
         ignoredConstraintId: dimension.constraintId,
       );
       return updateDimension(
@@ -216,6 +240,7 @@ class ConstraintEngine {
     required List<String> references,
     required double value,
     String? anchorReference,
+    double? orientationSign,
     String? ignoredConstraintId,
   }) {
     final active = constraints.values
@@ -231,12 +256,14 @@ class ConstraintEngine {
             references: references,
             value: value,
             anchorReference: anchor,
+            orientationSign: orientationSign,
           ),
         );
     if (anchorReference != null) return attempt(anchorReference);
     try {
       return attempt(null);
     } on StateError catch (automaticFailure) {
+      if (references.length == 2) rethrow;
       final entity = references.isEmpty
           ? null
           : sketch.entity(references.first);
@@ -254,6 +281,24 @@ class ConstraintEngine {
         '${diagnostics.toSet().join(' ')}',
       );
     }
+  }
+
+  double? _angularOrientationSign(
+    SketchDimensionType type,
+    List<String> references,
+  ) {
+    if (type != SketchDimensionType.angular || references.length != 2) {
+      return null;
+    }
+    final first = sketch.entity(references[0]);
+    final second = sketch.entity(references[1]);
+    if (first is! SketchLine || second is! SketchLine) return null;
+    final firstAngle =
+        (first.parameters['angleDegrees'] as num).toDouble() * math.pi / 180;
+    final secondAngle =
+        (second.parameters['angleDegrees'] as num).toDouble() * math.pi / 180;
+    final cross = math.sin(secondAngle - firstAngle);
+    return cross < 0 ? -1 : 1;
   }
 
   SketchDimension updateDimension(
@@ -429,6 +474,13 @@ class ConstraintEngine {
     (jsonDecode(jsonEncode(dimensions.map((k, v) => MapEntry(k, v.toJson()))))
             as Map)
         .cast<String, dynamic>(),
+    (jsonDecode(
+              jsonEncode(
+                sketch.engine.entities.map((k, v) => MapEntry(k, v.toJson())),
+              ),
+            )
+            as Map)
+        .cast<String, dynamic>(),
     (jsonDecode(jsonEncode(graphs.toJson())) as Map).cast<String, dynamic>(),
     [
       analytics.totalConstraints,
@@ -455,6 +507,37 @@ class ConstraintEngine {
         (e.value as Map).cast<String, dynamic>(),
       );
     }
+    sketch.engine.entities.removeWhere((id, _) => !s.entities.containsKey(id));
+    for (final e in s.entities.entries) {
+      final restored = SketchEntity.fromJson(
+        (e.value as Map).cast<String, dynamic>(),
+      );
+      final current = sketch.engine.entities[e.key];
+      if (current == null || current.type != restored.type) {
+        sketch.engine.entities[e.key] = restored;
+        continue;
+      }
+      current.version = restored.version;
+      current.history
+        ..clear()
+        ..addAll(restored.history);
+      current
+        ..graphNode = restored.graphNode
+        ..selectionState = restored.selectionState
+        ..visible = restored.visible
+        ..locked = restored.locked
+        ..construction = restored.construction
+        ..reference = restored.reference;
+      current.metadata
+        ..clear()
+        ..addAll(restored.metadata);
+      current.diagnostics
+        ..clear()
+        ..addAll(restored.diagnostics);
+      current.parameters
+        ..clear()
+        ..addAll(restored.parameters);
+    }
     graphs.restore(s.graphs);
     analytics.totalConstraints = s.analytics[0];
     analytics.solved = s.analytics[1];
@@ -473,10 +556,11 @@ class _ConstraintSnapshot {
     this.target,
     this.constraints,
     this.dimensions,
+    this.entities,
     this.graphs,
     this.analytics,
   );
   final String target;
-  final Map<String, dynamic> constraints, dimensions, graphs;
+  final Map<String, dynamic> constraints, dimensions, entities, graphs;
   final List<int> analytics;
 }

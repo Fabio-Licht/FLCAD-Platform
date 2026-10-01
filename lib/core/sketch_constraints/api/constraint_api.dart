@@ -56,8 +56,8 @@ class ConstraintApi {
     String? anchorReference,
   }) => engine.driveDimension(id, value, anchorReference: anchorReference);
   bool undoDimensionEdit() {
-    final constraintUndone = engine.undo();
     final sketchUndone = engine.sketch.engine.undo();
+    final constraintUndone = engine.undo();
     return constraintUndone && sketchUndone;
   }
 

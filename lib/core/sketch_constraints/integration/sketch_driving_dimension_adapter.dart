@@ -34,6 +34,7 @@ class SketchDrivingDimensionAdapter {
     required List<String> references,
     required double value,
     String? anchorReference,
+    double? orientationSign,
   }) {
     if (!value.isFinite || value <= 0) {
       throw StateError('A driving dimension must be greater than zero.');
@@ -59,7 +60,130 @@ class SketchDrivingDimensionAdapter {
     }
 
     String? selectedAnchor = anchorReference;
-    if (entity is SketchLine &&
+    if (const {
+          SketchDimensionType.linear,
+          SketchDimensionType.horizontal,
+          SketchDimensionType.vertical,
+        }.contains(type) &&
+        references.length == 2) {
+      final firstReference = references[0];
+      final secondReference = references[1];
+      final firstPoint = _endpoint(sketch, firstReference);
+      final secondPoint = _endpoint(sketch, secondReference);
+      if (firstPoint == null || secondPoint == null) {
+        throw StateError(
+          'A point-to-point dimension requires two explicit points or endpoints.',
+        );
+      }
+      final allReferences = <String>{
+        firstReference,
+        secondReference,
+        ...groups.values.expand((members) => members),
+      };
+      final relationKeys = <String>{};
+      final dependencies = <ParametricDependency>[];
+      for (final group in groups.values) {
+        final key = (group.toList()..sort()).join('|');
+        if (relationKeys.add(key) && group.length > 1) {
+          dependencies.add(ParametricDependency('connection:$key', group));
+        }
+      }
+      late final ParametricMotionPlan plan;
+      try {
+        plan = parametricSolver.solve(
+          ParametricSolveRequest(
+            first: firstReference,
+            second: secondReference,
+            degreesOfFreedom: [
+              for (final reference in allReferences)
+                ParametricDegreeOfFreedom(
+                  reference,
+                  fixed: fixed.contains(reference),
+                ),
+            ],
+            parameters: [ParametricParameter('dimension:value', value)],
+            dependencies: dependencies,
+            anchors: fixed,
+            preferredAnchor: selectedAnchor ?? firstReference,
+          ),
+        );
+      } on ParametricSolveConflict catch (conflict) {
+        throw StateError(conflict.message);
+      }
+      selectedAnchor = plan.anchor;
+      final movingReference = plan.moving;
+      final anchor = _endpoint(sketch, selectedAnchor)!;
+      final moving = _endpoint(sketch, movingReference)!;
+      final delta = moving - anchor;
+      final currentLength = math.sqrt(delta.x * delta.x + delta.y * delta.y);
+      if (type == SketchDimensionType.linear && currentLength <= 1e-12) {
+        throw StateError(
+          'A point-to-point dimension is undefined for coincident points.',
+        );
+      }
+      final target = switch (type) {
+        SketchDimensionType.horizontal => SketchVector(
+          anchor.x + (delta.x < 0 ? -value : value),
+          moving.y,
+          moving.z,
+        ),
+        SketchDimensionType.vertical => SketchVector(
+          moving.x,
+          anchor.y + (delta.y < 0 ? -value : value),
+          moving.z,
+        ),
+        _ => SketchVector(
+          anchor.x + delta.x * value / currentLength,
+          anchor.y + delta.y * value / currentLength,
+          anchor.z + delta.z * value / currentLength,
+        ),
+      };
+      moveGroup(movingReference, target);
+    } else if (type == SketchDimensionType.angular && references.length == 2) {
+      final referenceLine = sketch.entity(_entityId(references[0]));
+      final targetLine = sketch.entity(_entityId(references[1]));
+      if (referenceLine is! SketchLine || targetLine is! SketchLine) {
+        throw StateError('An angular dimension requires two lines.');
+      }
+      final startReference = '${targetLine.id}:start';
+      final endReference = '${targetLine.id}:end';
+      if (fixed.contains(startReference) && fixed.contains(endReference)) {
+        throw StateError('Sketch over constrained: target line is fixed.');
+      }
+      selectedAnchor ??= fixed.contains(endReference)
+          ? endReference
+          : startReference;
+      if (selectedAnchor != startReference && selectedAnchor != endReference) {
+        throw StateError(
+          'Angular dimension anchor must belong to target line.',
+        );
+      }
+      final movingReference = selectedAnchor == startReference
+          ? endReference
+          : startReference;
+      final anchor = _endpoint(sketch, selectedAnchor)!;
+      final moving = _endpoint(sketch, movingReference)!;
+      final delta = moving - anchor;
+      final length = math.sqrt(delta.x * delta.x + delta.y * delta.y);
+      final referenceStart = _endpoint(sketch, '${referenceLine.id}:start')!;
+      final referenceEnd = _endpoint(sketch, '${referenceLine.id}:end')!;
+      final referenceAngle = math.atan2(
+        referenceEnd.y - referenceStart.y,
+        referenceEnd.x - referenceStart.x,
+      );
+      final targetAngle =
+          referenceAngle +
+          (orientationSign ?? 1) * value * math.pi / 180 +
+          (selectedAnchor == endReference ? math.pi : 0);
+      moveGroup(
+        movingReference,
+        SketchVector(
+          anchor.x + length * math.cos(targetAngle),
+          anchor.y + length * math.sin(targetAngle),
+          moving.z,
+        ),
+      );
+    } else if (entity is SketchLine &&
         (type == SketchDimensionType.linear ||
             type == SketchDimensionType.angular)) {
       final startRef = '${entity.id}:start', endRef = '${entity.id}:end';
@@ -199,6 +323,8 @@ class SketchDrivingDimensionAdapter {
       } else if (entity is SketchArc) {
         refs['${entity.id}:start'] = _endpoint(sketch, '${entity.id}:start')!;
         refs['${entity.id}:end'] = _endpoint(sketch, '${entity.id}:end')!;
+      } else if (entity is SketchPoint) {
+        refs[entity.id] = SketchVector.fromJson(entity.parameters['point']);
       }
     }
     final adjacency = {
@@ -358,6 +484,10 @@ class SketchDrivingDimensionAdapter {
           point.y - center.y,
           point.x - center.x,
         );
+      });
+    } else if (entity is SketchPoint) {
+      sketch.engine.modify(entity.id, SketchHistoryAction.modify, (item) {
+        item.parameters['point'] = point.toJson();
       });
     }
   }

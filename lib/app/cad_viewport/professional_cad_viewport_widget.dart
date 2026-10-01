@@ -2452,6 +2452,9 @@ class _CadScenePainter extends CustomPainter {
               : Offset.zero;
           final position = project(vector(labelPosition)) + screenOffset;
           final floatingHud = entity.geometry['floatingHud'] == true;
+          final constraintGlyph = entity.geometry['constraintGlyph'] == true;
+          final constraintError =
+              entity.geometry['displayColor'] == 'destructiveRed';
           final text = TextPainter(
             text: TextSpan(
               text: dimensionLabel,
@@ -2460,9 +2463,17 @@ class _CadScenePainter extends CustomPainter {
                     ? const Color(0xffdff7ff)
                     : entity.selected
                     ? const Color(0xffffb02e)
+                    : constraintGlyph
+                    ? constraintError
+                          ? Colors.redAccent
+                          : const Color(0xffffd166)
                     : const Color(0xff65c7ff),
-                fontSize: floatingHud ? 10.5 : 11,
-                fontWeight: FontWeight.w600,
+                fontSize: floatingHud
+                    ? 10.5
+                    : constraintGlyph
+                    ? 11.5
+                    : 11,
+                fontWeight: constraintGlyph ? FontWeight.w700 : FontWeight.w600,
               ),
             ),
             textDirection: TextDirection.ltr,

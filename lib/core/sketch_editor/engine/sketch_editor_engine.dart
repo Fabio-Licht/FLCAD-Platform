@@ -145,7 +145,14 @@ class SketchEditorEngine {
           spline.metadata.addAll({
             'featureType': 'tangentBlend',
             'sourceEntityIds': sourceIds.cast<String>(),
+            if (op.parameters['sourceEndpointReferences'] is List)
+              'sourceEndpointReferences':
+                  (op.parameters['sourceEndpointReferences'] as List)
+                      .whereType<String>()
+                      .toList(growable: false),
             'tangentLength': op.parameters['tangentLength'],
+            'firstTangentLength': op.parameters['firstTangentLength'],
+            'secondTangentLength': op.parameters['secondTangentLength'],
           });
         }
         out.add(spline);

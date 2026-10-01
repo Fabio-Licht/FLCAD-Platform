@@ -56,6 +56,8 @@ class ConstraintSolveResult {
   bool get success => diagnostics.every(
     (d) =>
         d.kind != ConstraintDiagnosticKind.conflict &&
+        d.kind != ConstraintDiagnosticKind.duplicate &&
+        d.kind != ConstraintDiagnosticKind.overConstraint &&
         d.kind != ConstraintDiagnosticKind.failure &&
         d.kind != ConstraintDiagnosticKind.missingReference &&
         d.kind != ConstraintDiagnosticKind.circularDependency,
