@@ -9328,6 +9328,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
       'horizontalDistance',
       'verticalDistance',
       'angleBetweenLines',
+      'parallelDistance',
+      'ordinateX',
+      'ordinateY',
     }.contains(mode)) {
       await controller.confirmSketchPointReferenceCapture();
       return;
@@ -9342,6 +9345,12 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
         title: Text(
           mode == 'angleBetweenLines'
               ? 'Cota angular entre linhas'
+              : mode == 'parallelDistance'
+              ? 'Distância entre linhas'
+              : mode == 'ordinateX'
+              ? 'Coordenada X'
+              : mode == 'ordinateY'
+              ? 'Coordenada Y'
               : 'Cota entre pontos',
         ),
         content: TextField(
@@ -9351,6 +9360,10 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
           decoration: InputDecoration(
             labelText: mode == 'angleBetweenLines'
                 ? 'Ângulo dirigido'
+                : mode == 'parallelDistance'
+                ? 'Distância perpendicular entre linhas'
+                : mode == 'ordinateX' || mode == 'ordinateY'
+                ? 'Coordenada global do Sketch'
                 : 'Distância dirigida',
             suffixText: mode == 'angleBetweenLines' ? '°' : 'mm',
           ),
@@ -10291,6 +10304,22 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   ),
                   child: const Text('Ângulo entre linhas'),
                 ),
+                OutlinedButton(
+                  onPressed: () => controller.beginSketchPointReferenceCapture(
+                    'parallelDistance',
+                  ),
+                  child: const Text('Distância entre linhas'),
+                ),
+                OutlinedButton(
+                  onPressed: () =>
+                      controller.beginSketchPointReferenceCapture('ordinateX'),
+                  child: const Text('Coordenada X'),
+                ),
+                OutlinedButton(
+                  onPressed: () =>
+                      controller.beginSketchPointReferenceCapture('ordinateY'),
+                  child: const Text('Coordenada Y'),
+                ),
               ],
             ),
             if (controller.sketchPointReferenceCaptureActive &&
@@ -10299,6 +10328,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   'horizontalDistance',
                   'verticalDistance',
                   'angleBetweenLines',
+                  'parallelDistance',
+                  'ordinateX',
+                  'ordinateY',
                 }.contains(controller.sketchPointReferenceCaptureMode))
               Card(
                 margin: const EdgeInsets.fromLTRB(8, 8, 8, 0),

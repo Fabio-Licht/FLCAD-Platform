@@ -156,6 +156,9 @@ class ConstraintEngine {
               SketchDimensionType.linear,
               SketchDimensionType.horizontal,
               SketchDimensionType.vertical,
+              SketchDimensionType.parallelDistance,
+              SketchDimensionType.ordinateX,
+              SketchDimensionType.ordinateY,
             }.contains(type) &&
             references.length == 2) {
           final existing = dimension.references.toSet();
@@ -172,7 +175,10 @@ class ConstraintEngine {
       final constraintType = switch (type) {
         SketchDimensionType.linear ||
         SketchDimensionType.horizontal ||
-        SketchDimensionType.vertical => SketchConstraintType.distance,
+        SketchDimensionType.vertical ||
+        SketchDimensionType.parallelDistance ||
+        SketchDimensionType.ordinateX ||
+        SketchDimensionType.ordinateY => SketchConstraintType.distance,
         SketchDimensionType.angular => SketchConstraintType.angle,
         SketchDimensionType.radius => SketchConstraintType.radius,
         SketchDimensionType.diameter => SketchConstraintType.diameter,
@@ -311,7 +317,12 @@ class ConstraintEngine {
     final dimension =
         dimensions[id] ?? (throw StateError('Unknown dimension: $id'));
     if (value != null) {
-      if (!value.isFinite || value <= 0) {
+      if (!value.isFinite ||
+          (value <= 0 &&
+              !const {
+                SketchDimensionType.ordinateX,
+                SketchDimensionType.ordinateY,
+              }.contains(dimension.type))) {
         throw StateError('A driving dimension must be greater than zero.');
       }
       dimension.value = value;

@@ -492,4 +492,48 @@ void main() {
     );
     expect(restored.orientationSign, -1);
   });
+
+  test('ordinate dimensions drive signed X and Y coordinates', () {
+    final point = sketch.builders.point.build(const SketchVector(8, -3));
+    final x = constraints.createDrivingDimension(
+      type: SketchDimensionType.ordinateX,
+      references: [point.id],
+      value: -12,
+      anchorReference: point.id,
+    );
+    expect(x.value, -12);
+    expect(point.parameters['point'], [-12.0, -3.0, 0.0]);
+
+    final y = constraints.createDrivingDimension(
+      type: SketchDimensionType.ordinateY,
+      references: [point.id],
+      value: 0,
+      anchorReference: point.id,
+    );
+    expect(y.value, 0);
+    expect(point.parameters['point'], [-12.0, 0.0, 0.0]);
+  });
+
+  test(
+    'parallel line distance drives the second line without changing angle',
+    () {
+      final reference = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final target = sketch.builders.line.build(
+        const SketchVector(0, 4),
+        const SketchVector(10, 4),
+      );
+      final dimension = constraints.createDrivingDimension(
+        type: SketchDimensionType.parallelDistance,
+        references: [reference.id, target.id],
+        value: 12,
+        anchorReference: reference.id,
+      );
+      expect(dimension.value, 12);
+      expect(SketchVector.fromJson(target.parameters['start']).y, 12);
+      expect(SketchVector.fromJson(target.parameters['end']).y, 12);
+    },
+  );
 }

@@ -1479,7 +1479,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final sketch = activeSketch ?? (throw StateError('No active Sketch.'));
     final visible = sketch.metadata['visible'] as bool? ?? true;
     sketch.metadata['visible'] = !visible;
-    final ids = [sketch.id, ...sketch.entityIds];
+    final entityIds = sketch.entityIds.toSet();
+    final overlayIds = <String>[
+      ...constraints
+          .where(
+            (item) => item.references.any(
+              (reference) => entityIds.contains(
+                reference.replaceFirst(
+                  RegExp(r':(start|end|point|center)$'),
+                  '',
+                ),
+              ),
+            ),
+          )
+          .map((item) => item.id),
+      ...dimensions
+          .where(
+            (item) => item.references.any(
+              (reference) => entityIds.contains(
+                reference.replaceFirst(RegExp(r':(start|end|center)$'), ''),
+              ),
+            ),
+          )
+          .map((item) => item.id),
+    ];
+    final ids = [sketch.id, ...sketch.entityIds, ...overlayIds];
     for (final id in ids) {
       await runtime.setEntityVisibility(id, !visible);
     }
@@ -2162,7 +2186,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   bool get sketchPointReferenceCaptureReady {
     final mode = sketchPointReferenceCaptureMode;
     final count = sketchPointReferenceCaptureReferences.length;
-    return mode != null && count == 2;
+    final required = const {'ordinateX', 'ordinateY'}.contains(mode) ? 1 : 2;
+    return mode != null && count == required;
   }
 
   String get sketchPointReferenceCaptureHint {
@@ -2174,6 +2199,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'midpoint' || 'pointOnLine' =>
           'Clique no ponto ou na extremidade que deve ser restringida.',
         'angleBetweenLines' => 'Clique na primeira linha de refer\u00eancia.',
+        'parallelDistance' => 'Clique na primeira linha de refer\u00eancia.',
+        'ordinateX' || 'ordinateY' =>
+          'Clique na linha ou extremidade; a extremidade mais pr\u00f3xima ser\u00e1 medida.',
         _ => 'Clique no primeiro ponto ou extremidade.',
       };
     }
@@ -2182,6 +2210,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'midpoint' => 'Clique na linha cujo ponto m\u00e9dio ser\u00e1 usado.',
         'pointOnLine' => 'Clique na linha de suporte.',
         'angleBetweenLines' => 'Clique na segunda linha que deve ser dirigida.',
+        'parallelDistance' =>
+          'Clique na segunda linha para medir a dist\u00e2ncia.',
+        'ordinateX' || 'ordinateY' => 'Ponto capturado. Informe a coordenada.',
         _ => 'Clique no segundo ponto ou extremidade.',
       };
     }
@@ -2190,9 +2221,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'horizontalDistance',
           'verticalDistance',
           'angleBetweenLines',
+          'parallelDistance',
+          'ordinateX',
+          'ordinateY',
         }.contains(mode)
         ? mode == 'angleBetweenLines'
               ? 'Duas linhas capturadas. Informe o \u00e2ngulo e aplique.'
+              : mode == 'parallelDistance'
+              ? 'Duas linhas capturadas. Informe a dist\u00e2ncia e aplique.'
               : 'Dois pontos capturados. Informe a cota e aplique.'
         : 'Refer\u00eancias capturadas. Confirme para aplicar.';
   }
@@ -2200,10 +2236,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   double? get sketchPointReferenceMeasuredDistance {
     final references = sketchPointReferenceCaptureReferences;
     final mode = sketchPointReferenceCaptureMode;
-    if (mode == 'angleBetweenLines' && references.length == 2) {
+    if (const {'angleBetweenLines', 'parallelDistance'}.contains(mode) &&
+        references.length == 2) {
       final first = sketchApi?.entity(references[0]);
       final second = sketchApi?.entity(references[1]);
       if (first is! SketchLine || second is! SketchLine) return null;
+      if (mode == 'parallelDistance') {
+        final a = SketchVector.fromJson(first.parameters['start']);
+        final b = SketchVector.fromJson(first.parameters['end']);
+        final c = SketchVector.fromJson(second.parameters['start']);
+        final d = b - a;
+        final length = math.sqrt(d.x * d.x + d.y * d.y);
+        if (length <= 1e-12) return null;
+        return ((c.x - a.x) * (-d.y) + (c.y - a.y) * d.x).abs() / length;
+      }
       double angle(SketchLine line) {
         final start = SketchVector.fromJson(line.parameters['start']);
         final end = SketchVector.fromJson(line.parameters['end']);
@@ -2220,11 +2266,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'distance',
           'horizontalDistance',
           'verticalDistance',
+          'ordinateX',
+          'ordinateY',
         }.contains(mode) ||
-        references.length != 2) {
+        (const {'ordinateX', 'ordinateY'}.contains(mode)
+            ? references.length != 1
+            : references.length != 2)) {
       return null;
     }
     final first = _sketchPointReferencePosition(references[0]);
+    if (const {'ordinateX', 'ordinateY'}.contains(mode)) {
+      if (first == null) return null;
+      return mode == 'ordinateX' ? first.x : first.y;
+    }
     final second = _sketchPointReferencePosition(references[1]);
     if (first == null || second == null) return null;
     final delta = second - first;
@@ -5000,6 +5054,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'horizontalDistance',
       'verticalDistance',
       'angleBetweenLines',
+      'parallelDistance',
+      'ordinateX',
+      'ordinateY',
     }.contains(mode)) {
       throw StateError('Unsupported point-reference command: $mode');
     }
@@ -5032,14 +5089,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     try {
       late final String reference;
       late final SketchVector position;
-      if (mode == 'angleBetweenLines') {
+      if (mode == 'angleBetweenLines' || mode == 'parallelDistance') {
         if (entity is! SketchLine) {
-          throw StateError('A cota angular exige duas linhas.');
+          throw StateError(
+            mode == 'parallelDistance'
+                ? 'A distância entre linhas exige duas linhas.'
+                : 'A cota angular exige duas linhas.',
+          );
         }
         reference = entity.id;
         final start = SketchVector.fromJson(entity.parameters['start']);
         final end = SketchVector.fromJson(entity.parameters['end']);
         position = (start + end).scale(.5);
+      } else if (const {'ordinateX', 'ordinateY'}.contains(mode) &&
+          (entity is SketchLine || entity is SketchArc)) {
+        // Ordinate dimensions are point dimensions, but selecting the exact
+        // vertex is unnecessarily difficult at normal zoom.  For this mode a
+        // click anywhere on a line/arc resolves to its nearest endpoint.  The
+        // solver still drives only that explicit endpoint, so existing angle
+        // and connectivity constraints remain authoritative.
+        final candidates = _sketchEndpointCandidates(entity);
+        candidates.sort((a, b) {
+          final da = (a.$2 - localHit).dot(a.$2 - localHit);
+          final db = (b.$2 - localHit).dot(b.$2 - localHit);
+          return da.compareTo(db);
+        });
+        reference = candidates.first.$1;
+        position = candidates.first.$2;
       } else if (references.length == 1 &&
           (mode == 'midpoint' || mode == 'pointOnLine')) {
         if (entity is! SketchLine) {
@@ -5124,6 +5200,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return nearest;
   }
 
+  List<(String, SketchVector)> _sketchEndpointCandidates(SketchEntity entity) {
+    if (entity is SketchLine) {
+      return [
+        (
+          '${entity.id}:start',
+          SketchVector.fromJson(entity.parameters['start']),
+        ),
+        ('${entity.id}:end', SketchVector.fromJson(entity.parameters['end'])),
+      ];
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      return [
+        for (final item in const [('start', 'startAngle'), ('end', 'endAngle')])
+          (
+            '${entity.id}:${item.$1}',
+            () {
+              final angle = (entity.parameters[item.$2] as num).toDouble();
+              return SketchVector(
+                center.x + radius * math.cos(angle),
+                center.y + radius * math.sin(angle),
+              );
+            }(),
+          ),
+      ];
+    }
+    return const <(String, SketchVector)>[];
+  }
+
   SketchVector? _sketchPointReferencePosition(String reference) {
     final entityId = reference.replaceFirst(RegExp(r':(start|end)$'), '');
     final entity = sketchApi?.entity(entityId);
@@ -5180,7 +5286,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> confirmSketchPointReferenceCapture({double? value}) async {
     final mode = sketchPointReferenceCaptureMode;
     final references = sketchPointReferenceCaptureReferences;
-    if (mode == null || references.length != 2) {
+    final required = const {'ordinateX', 'ordinateY'}.contains(mode) ? 1 : 2;
+    if (mode == null || references.length != required) {
       throw StateError('Capture as duas refer\u00eancias antes de aplicar.');
     }
     if (const {
@@ -5188,18 +5295,42 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'horizontalDistance',
       'verticalDistance',
       'angleBetweenLines',
+      'parallelDistance',
+      'ordinateX',
+      'ordinateY',
     }.contains(mode)) {
-      if (value == null || !value.isFinite || value <= 0) {
+      final coordinate = const {'ordinateX', 'ordinateY'}.contains(mode);
+      if (value == null || !value.isFinite || (!coordinate && value <= 0)) {
         throw StateError(
-          mode == 'angleBetweenLines'
+          coordinate
+              ? 'Informe uma coordenada finita em mm.'
+              : mode == 'angleBetweenLines'
               ? 'Informe um \u00e2ngulo positivo em graus.'
+              : mode == 'parallelDistance'
+              ? 'Informe uma dist\u00e2ncia positiva em mm.'
               : 'Informe uma dist\u00e2ncia positiva em mm.',
         );
       }
-      final first = mode == 'angleBetweenLines'
+      if (coordinate) {
+        await _run('reverse.sketch.dimension.create', {
+          'type': mode == 'ordinateX'
+              ? SketchDimensionType.ordinateX.name
+              : SketchDimensionType.ordinateY.name,
+          'value': value,
+          'references': references,
+          'anchorReference': references.first,
+          'labelX': 0.0,
+          'labelY': 0.0,
+        });
+        cancelSketchPointReferenceCapture();
+        return;
+      }
+      final first =
+          const {'angleBetweenLines', 'parallelDistance'}.contains(mode)
           ? _sketchLineMidpoint(references[0])
           : _sketchPointReferencePosition(references[0])!;
-      final second = mode == 'angleBetweenLines'
+      final second =
+          const {'angleBetweenLines', 'parallelDistance'}.contains(mode)
           ? _sketchLineMidpoint(references[1])
           : _sketchPointReferencePosition(references[1])!;
       final label = SketchVector(
@@ -5211,6 +5342,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'horizontalDistance' => SketchDimensionType.horizontal.name,
           'verticalDistance' => SketchDimensionType.vertical.name,
           'angleBetweenLines' => SketchDimensionType.angular.name,
+          'parallelDistance' => SketchDimensionType.parallelDistance.name,
           _ => SketchDimensionType.linear.name,
         },
         'value': value,
@@ -11789,10 +11921,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             RegExp(r':(start|end|point)$'),
             '',
           );
-          final visual = _constraintVisual(
-            value,
-            referenceId == null ? activeSketch : sketchByEntityId[referenceId],
-          );
+          final parentSketch = referenceId == null
+              ? activeSketch
+              : sketchByEntityId[referenceId];
+          final visual = _constraintVisual(value, parentSketch);
           return CadDocumentEntity(
             id: value.id,
             kind: CadDocumentEntityKind.constraint,
@@ -11803,7 +11935,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'parentSketchId': referenceId == null
                   ? activeSketch?.id
                   : sketchByEntityId[referenceId]?.id,
-              'sceneVisible': value.visible,
+              'sceneVisible':
+                  value.visible &&
+                  (parentSketch?.metadata['visible'] as bool? ?? true),
               'sceneKind': visual.kind.name,
               'sceneGeometry': visual.geometry,
               'symbol': _constraintSymbol(value.type),
@@ -11816,7 +11950,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             RegExp(r':(start|end|center)$'),
             '',
           );
-          final visual = _dimensionVisual(value, sketchByEntityId[referenceId]);
+          final parentSketch = referenceId == null
+              ? activeSketch
+              : sketchByEntityId[referenceId];
+          final visual = _dimensionVisual(value, parentSketch);
           return CadDocumentEntity(
             id: value.id,
             kind: CadDocumentEntityKind.constraint,
@@ -11826,7 +11963,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'parentSketchId': referenceId == null
                   ? activeSketch?.id
                   : sketchByEntityId[referenceId]?.id,
-              'sceneVisible': value.visible,
+              'sceneVisible':
+                  value.visible &&
+                  (parentSketch?.metadata['visible'] as bool? ?? true),
               // Dimensions are presentation-only Sketch overlays. Publishing
               // a non-existent scene kind here aborts later scene syncs,
               // leaving new Sketch entities invisible after the first cota.
@@ -12599,6 +12738,44 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   CadSceneEntity _dimensionVisual(SketchDimension dimension, Sketch? sketch) {
     final localPoints = <SketchVector>[];
     if (const {
+          SketchDimensionType.ordinateX,
+          SketchDimensionType.ordinateY,
+        }.contains(dimension.type) &&
+        dimension.references.length == 1) {
+      final point = _sketchPointReferencePosition(dimension.references.single);
+      if (point != null) {
+        localPoints.addAll([
+          const SketchVector(0, 0),
+          dimension.type == SketchDimensionType.ordinateX
+              ? SketchVector(point.x, 0)
+              : SketchVector(0, point.y),
+          point,
+        ]);
+      }
+    } else if (dimension.type == SketchDimensionType.parallelDistance &&
+        dimension.references.length == 2) {
+      final first = sketchApi?.entity(dimension.references[0]);
+      final second = sketchApi?.entity(dimension.references[1]);
+      if (first is SketchLine && second is SketchLine) {
+        final firstStart = SketchVector.fromJson(first.parameters['start']);
+        final firstEnd = SketchVector.fromJson(first.parameters['end']);
+        final secondStart = SketchVector.fromJson(second.parameters['start']);
+        final secondEnd = SketchVector.fromJson(second.parameters['end']);
+        final firstMid = (firstStart + firstEnd).scale(.5);
+        final secondDirection = secondEnd - secondStart;
+        final denominator = secondDirection.dot(secondDirection);
+        if (denominator > 1e-12) {
+          final projection =
+              secondStart +
+              secondDirection.scale(
+                (firstMid - secondStart).dot(secondDirection) / denominator,
+              );
+          // A line-distance dimension is drawn on the common perpendicular,
+          // never along an arbitrary endpoint-to-endpoint diagonal.
+          localPoints.addAll([firstMid, projection]);
+        }
+      }
+    } else if (const {
           SketchDimensionType.linear,
           SketchDimensionType.horizontal,
           SketchDimensionType.vertical,

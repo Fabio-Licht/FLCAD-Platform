@@ -36,7 +36,12 @@ class SketchDrivingDimensionAdapter {
     String? anchorReference,
     double? orientationSign,
   }) {
-    if (!value.isFinite || value <= 0) {
+    if (!value.isFinite ||
+        (value <= 0 &&
+            !const {
+              SketchDimensionType.ordinateX,
+              SketchDimensionType.ordinateY,
+            }.contains(type))) {
       throw StateError('A driving dimension must be greater than zero.');
     }
     if (references.isEmpty) throw StateError('Dimension has no references.');
@@ -61,6 +66,25 @@ class SketchDrivingDimensionAdapter {
 
     String? selectedAnchor = anchorReference;
     if (const {
+          SketchDimensionType.ordinateX,
+          SketchDimensionType.ordinateY,
+        }.contains(type) &&
+        references.length == 1) {
+      final reference = references.single;
+      final point = _endpoint(sketch, reference);
+      if (point == null) {
+        throw StateError(
+          'A coordinate dimension requires one explicit point or endpoint.',
+        );
+      }
+      moveGroup(
+        reference,
+        type == SketchDimensionType.ordinateX
+            ? SketchVector(value, point.y, point.z)
+            : SketchVector(point.x, value, point.z),
+      );
+      selectedAnchor = reference;
+    } else if (const {
           SketchDimensionType.linear,
           SketchDimensionType.horizontal,
           SketchDimensionType.vertical,
@@ -139,6 +163,50 @@ class SketchDrivingDimensionAdapter {
         ),
       };
       moveGroup(movingReference, target);
+    } else if (type == SketchDimensionType.parallelDistance &&
+        references.length == 2) {
+      final first = sketch.entity(_entityId(references[0]));
+      final second = sketch.entity(_entityId(references[1]));
+      if (first is! SketchLine || second is! SketchLine) {
+        throw StateError('A line distance requires two lines.');
+      }
+      final firstStart = _endpoint(sketch, '${first.id}:start')!;
+      final firstEnd = _endpoint(sketch, '${first.id}:end')!;
+      final secondStart = _endpoint(sketch, '${second.id}:start')!;
+      final secondEnd = _endpoint(sketch, '${second.id}:end')!;
+      final direction = firstEnd - firstStart;
+      final length = math.sqrt(
+        direction.x * direction.x + direction.y * direction.y,
+      );
+      if (length <= 1e-12) {
+        throw StateError('The reference line is degenerate.');
+      }
+      final secondDirection = secondEnd - secondStart;
+      final cross =
+          direction.x * secondDirection.y - direction.y * secondDirection.x;
+      if (cross.abs() >
+          connectionTolerance *
+              length *
+              math.max(
+                1.0,
+                math.sqrt(
+                  secondDirection.x * secondDirection.x +
+                      secondDirection.y * secondDirection.y,
+                ),
+              )) {
+        throw StateError(
+          'Distance between lines requires parallel lines. Use Angle between lines first.',
+        );
+      }
+      final normal = SketchVector(-direction.y / length, direction.x / length);
+      final current =
+          (secondStart - firstStart).x * normal.x +
+          (secondStart - firstStart).y * normal.y;
+      final sign = current.abs() <= connectionTolerance ? 1.0 : current.sign;
+      final delta = sign * value - current;
+      moveGroup('${second.id}:start', secondStart + normal.scale(delta));
+      moveGroup('${second.id}:end', secondEnd + normal.scale(delta));
+      selectedAnchor ??= first.id;
     } else if (type == SketchDimensionType.angular && references.length == 2) {
       final referenceLine = sketch.entity(_entityId(references[0]));
       final targetLine = sketch.entity(_entityId(references[1]));
