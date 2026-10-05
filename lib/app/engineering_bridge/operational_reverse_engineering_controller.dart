@@ -6649,6 +6649,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                   explicit.data['sketch'] is Map) ||
               (explicit.kind == CadDocumentEntityKind.surface &&
                   explicit.shape != null))) {
+        if (explicit.kind == CadDocumentEntityKind.sketch) {
+          // A reconstructed Sketch may have gained entities outside its
+          // persisted membership. Reconcile before it is used as a source so
+          // health/profile evaluation sees the current geometry.
+          final restored = sketchApi?.sketches
+              .where((item) => item.id == explicit.id)
+              .firstOrNull;
+          if (restored != null) _reconcileSketchEntityMembership(restored);
+        }
         return explicit;
       }
     }
@@ -7142,13 +7151,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }) async {
     final source = selectedExtrudeSource;
     if (source == null) {
-      throw StateError('Select exactly one Sketch or Surface.');
+      error = 'Select one Sketch or Surface to start Extrude.';
+      notifyListeners();
+      throw StateError(error!);
     }
     final id =
         featureId ??
         ProfessionalExtrudeNaming.nextId(runtime.document!.entities.keys);
     busy = true;
-    error = null;
+    // Keep any previous diagnostic until this attempt succeeds. A new failure
+    // overwrites it in the catch block; new source selection or cancel clears
+    // it, so a repeated invalid preview never leaves the panel blank.
     notifyListeners();
     try {
       final sourceKind = source.kind == CadDocumentEntityKind.sketch
@@ -7341,6 +7354,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         if (multiProfile) 'multiProfilePreview': true,
       };
       professionalExtrudePreview = value;
+      // A successful preview supersedes any previous diagnostic.
+      error = null;
       await runtime.showTransientShape(
         CadSceneEntity(
           id: 'preview:$id',
@@ -7487,6 +7502,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (value != null) runtime.hideTransient('preview:${value['id']}');
     if (value?['multiProfilePreview'] == true) clearExtrudeSource();
     professionalExtrudePreview = null;
+    // Cancel is an explicit user action: the previous diagnostic no longer
+    // applies to any active command state, so clear it.
+    error = null;
     notifyListeners();
   }
 

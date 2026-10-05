@@ -199,8 +199,20 @@ class ProfessionalExtrudeConstraintAdapter {
     required double draftAngleDegrees,
   }) {
     final message = error.toString().replaceFirst('Bad state: ', '');
-    if (draftAngleDegrees.abs() <= 1e-9) return message;
     final normalized = message.toLowerCase();
+    // Profile/topology validation runs locally, before the native Draft task.
+    // When it fails, the real cause must win even if a Draft angle is present,
+    // otherwise an open profile would be mislabelled as a generic kernel Draft
+    // failure.
+    final isProfileFailure =
+        normalized.contains('perfil') ||
+        normalized.contains('abert') ||
+        normalized.contains('fechado') ||
+        normalized.contains('gap') ||
+        normalized.contains('incompleto') ||
+        normalized.contains('wire');
+    if (isProfileFailure) return message;
+    if (draftAngleDegrees.abs() <= 1e-9) return message;
     if (normalized.contains('extrude draft angle must')) {
       return 'Valor de Draft inválido: $message';
     }

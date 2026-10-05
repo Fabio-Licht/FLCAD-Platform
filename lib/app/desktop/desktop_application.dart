@@ -11667,7 +11667,7 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
               selectedFeature != null
                   ? 'Selected: ${selectedFeature.id}'
                   : widget.controller.selectedExtrudeSource == null
-                  ? 'Select one Sketch or Surface.'
+                  ? 'Selecione um Sketch ou uma superfície para iniciar o Extrude.'
                   : 'Ready: ${widget.controller.selectedExtrudeSource!.id}',
             ),
             if (selectedFeature != null) ...[
@@ -11736,7 +11736,7 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                       const SizedBox(height: 16),
                       Text(
                         widget.controller.selectedExtrudeSource == null
-                            ? 'Select one Sketch or Surface.'
+                            ? 'Selecione um Sketch ou uma superfície para iniciar o Extrude.'
                             : widget
                                   .controller
                                   .selectedExtrudeProfileEntityIds
@@ -11828,8 +11828,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                           );
                           if (parsed != null && parsed > 0) {
                             distance = parsed;
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11853,8 +11851,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                           );
                           if (parsed != null && parsed.abs() < 89) {
                             draftAngleDegrees = parsed;
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11894,8 +11890,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                         onChanged: (value) {
                           if (value != null) {
                             directionSourceId = value;
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11918,8 +11912,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                         onChanged: (value) {
                           if (value != null) {
                             direction = value;
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11940,8 +11932,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                         onChanged: (value) {
                           if (value != null) {
                             setState(() => extent = value);
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11964,8 +11954,6 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                         onChanged: (value) {
                           if (value != null) {
                             setState(() => output = value);
-                            widget.controller
-                                .clearProfessionalExtrudeDiagnostic();
                           }
                         },
                       ),
@@ -11991,10 +11979,15 @@ class _ProfessionalExtrudePanelState extends State<_ProfessionalExtrudePanel> {
                                               output: output,
                                               extent: extent,
                                             );
-                                      } catch (_) {
-                                        // The controller preserves the native
-                                        // diagnostic for this panel and has
-                                        // already removed any failed preview.
+                                      } catch (value) {
+                                        // Never swallow the failure: surface a
+                                        // safe, readable message even when the
+                                        // controller could not classify it.
+                                        if (widget.controller.error == null) {
+                                          widget.controller.error =
+                                              'Preview do Extrude falhou: $value';
+                                        }
+                                        if (mounted) setState(() {});
                                       }
                                     },
                               child: const Text('Preview'),
