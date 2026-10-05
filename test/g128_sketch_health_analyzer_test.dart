@@ -275,4 +275,85 @@ void main() {
       expect(report.diagnosticEntityIds, isEmpty);
     },
   );
+
+  test(
+    'a stale closed loop does not mask the larger open profile without selection',
+    () {
+      // Old, small, closed leftover loop near the origin. It shares NO vertex
+      // with the open profile below, so they are independent components.
+      final report = analyzer.analyze([
+        SketchLine(
+          const SketchVector(0, 0),
+          const SketchVector(1, 0),
+          id: 'old-a',
+        ),
+        SketchLine(
+          const SketchVector(1, 0),
+          const SketchVector(1, 1),
+          id: 'old-b',
+        ),
+        SketchLine(
+          const SketchVector(1, 1),
+          const SketchVector(0, 1),
+          id: 'old-c',
+        ),
+        SketchLine(
+          const SketchVector(0, 1),
+          const SketchVector(0, 0),
+          id: 'old-d',
+        ),
+        // Larger profile the operator is drawing, visibly OPEN: the closing
+        // segment (10,10)->(10,0) is missing. No endpoints are shared with the
+        // stale loop, so endpoint coincidence cannot merge the components.
+        SketchLine(
+          const SketchVector(20, 0),
+          const SketchVector(30, 0),
+          id: 'new-a',
+        ),
+        SketchLine(
+          const SketchVector(30, 0),
+          const SketchVector(30, 10),
+          id: 'new-b',
+        ),
+        SketchLine(
+          const SketchVector(30, 10),
+          const SketchVector(20, 10),
+          id: 'new-c',
+        ),
+      ]);
+
+      expect(report.closedProfile, isFalse);
+      expect(report.readyForSurface, isFalse);
+      expect(report.hasOpenEnds, isTrue);
+      // The larger open profile is the active component, not the stale loop.
+      expect(report.activeProfileEntityIds, {'new-a', 'new-b', 'new-c'});
+      expect(
+        report.activeProfileEntityIds,
+        isNot(containsAll(<String>['old-a', 'old-b', 'old-c', 'old-d'])),
+      );
+    },
+  );
+
+  test('an explicit selection still wins over a larger closed loop', () {
+    final report = analyzer.analyze(
+      [
+        SketchCircle(const SketchVector(0, 0), 1, id: 'big-closed'),
+        SketchLine(
+          const SketchVector(20, 0),
+          const SketchVector(25, 0),
+          id: 'sel-a',
+        ),
+        SketchLine(
+          const SketchVector(25, 0),
+          const SketchVector(30, 0),
+          id: 'sel-b',
+        ),
+      ],
+      activeSelection: const ['sel-a'],
+    );
+
+    expect(report.closedProfile, isFalse);
+    expect(report.activeProfileEntityIds, {'sel-a', 'sel-b'});
+    expect(report.hasOpenEnds, isTrue);
+  });
 }

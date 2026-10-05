@@ -205,31 +205,12 @@ class SketchHealthAnalyzer {
       components.putIfAbsent(root(entity.id), () => []).add(entity.id);
     }
     final entityById = {for (final entity in entities) entity.id: entity};
-    final closedComponents = components.values
-        .where(
-          (component) => _componentClosed(
-            component,
-            entityById,
-            endpointIndicesByEntity,
-            endpointIndicesByVertex,
-          ),
-        )
-        .toList(growable: false);
     final selectedIds = activeSelection.where(entityById.containsKey).toSet();
     final selectedComponents = selectedIds.isEmpty
         ? const <List<String>>[]
         : components.values
               .where((component) => component.any(selectedIds.contains))
               .toList(growable: false);
-    final largestClosedComponent = closedComponents.isEmpty
-        ? null
-        : (closedComponents.toList()..sort(
-                (a, b) => _componentMeasure(
-                  b,
-                  entityById,
-                ).compareTo(_componentMeasure(a, entityById)),
-              ))
-              .first;
     final largestComponent = components.values.isEmpty
         ? null
         : (components.values.toList()..sort(
@@ -239,15 +220,17 @@ class SketchHealthAnalyzer {
                 ).compareTo(_componentMeasure(a, entityById)),
               ))
               .first;
-    // A live selection is intentional user input.  Never silently replace an
-    // open selected chain with an unrelated closed loop elsewhere in Sketch.
+    // A live selection is intentional user input; it always wins and is never
+    // silently replaced by an unrelated loop elsewhere in the Sketch. Without
+    // a selection, promote the largest component regardless of whether it is
+    // closed: an old closed loop must not mask the larger open profile the
+    // operator is drawing.  A closed component is still promoted when it IS
+    // the largest component (the common single-loop case).
     final activeComponents = selectedComponents.isNotEmpty
         ? selectedComponents
-        : largestClosedComponent == null
-        ? (largestComponent == null
-              ? const <List<String>>[]
-              : [largestComponent])
-        : [largestClosedComponent];
+        : largestComponent == null
+        ? const <List<String>>[]
+        : [largestComponent];
     final activeProfileIds = activeComponents.expand((item) => item).toSet();
     final closedProfile =
         activeComponents.length == 1 &&
