@@ -52,16 +52,22 @@ void main() {
   });
 
   test('detects reversed duplicates, overlap and coincident circles', () {
-    final report = analyzer.analyze([
+    final duplicates = analyzer.analyze([
       SketchLine(const SketchVector(0, 0), const SketchVector(10, 0), id: 'a'),
       SketchLine(const SketchVector(10, 0), const SketchVector(0, 0), id: 'b'),
+    ]);
+    final overlap = analyzer.analyze([
+      SketchLine(const SketchVector(0, 0), const SketchVector(10, 0), id: 'a'),
       SketchLine(const SketchVector(3, 0), const SketchVector(12, 0), id: 'c'),
+    ]);
+    final circles = analyzer.analyze([
       SketchCircle(const SketchVector(20, 20), 4, id: 'c1'),
       SketchCircle(const SketchVector(20, 20), 4, id: 'c2'),
     ]);
 
-    expect(report.ofType(SketchHealthIssueType.duplicate), hasLength(2));
-    expect(report.ofType(SketchHealthIssueType.overlap), isNotEmpty);
+    expect(duplicates.ofType(SketchHealthIssueType.duplicate), hasLength(1));
+    expect(overlap.ofType(SketchHealthIssueType.overlap), isNotEmpty);
+    expect(circles.ofType(SketchHealthIssueType.duplicate), hasLength(1));
   });
 
   test('detects an interior crossing and tiny geometry', () {
@@ -90,4 +96,183 @@ void main() {
     analyzer.analyze([line]);
     expect(line.toJson().toString(), before);
   });
+
+  test('closed section spline is a valid profile', () {
+    final spline = SketchSpline(const [
+      SketchVector(0, 0),
+      SketchVector(2, 0),
+      SketchVector(2, 2),
+      SketchVector(0, 2),
+      SketchVector(0, 0),
+    ]);
+    final report = analyzer.analyze([spline]);
+    expect(report.closedProfile, isTrue);
+    expect(report.readyForSurface, isTrue);
+  });
+
+  test('separate closed profiles are warnings, not surface blockers', () {
+    final report = analyzer.analyze([
+      SketchCircle(const SketchVector(0, 0), 1, id: 'main-circle'),
+      SketchCircle(const SketchVector(5, 0), .5, id: 'extra-circle'),
+    ]);
+    expect(report.hasDisconnected, isTrue);
+    expect(report.hasDisconnectedWarnings, isTrue);
+    expect(report.warningIssues, hasLength(1));
+    expect(report.closedProfile, isTrue);
+    expect(report.readyForSurface, isTrue);
+    expect(report.activeProfileEntityIds, {'main-circle'});
+    expect(report.diagnosticEntityIds, {'extra-circle'});
+  });
+
+  test('a spline crossing itself blocks surface preview', () {
+    final report = analyzer.analyze([
+      SketchSpline(const [
+        SketchVector(0, 0),
+        SketchVector(2, 2),
+        SketchVector(0, 2),
+        SketchVector(2, 0),
+        SketchVector(0, 0),
+      ]),
+    ]);
+    expect(report.hasSelfIntersections, isTrue);
+    expect(report.readyForSurface, isFalse);
+  });
+
+  test(
+    'closed active loop allows loose section leftovers as compact warning',
+    () {
+      final report = analyzer.analyze([
+        SketchLine(
+          const SketchVector(0, 0),
+          const SketchVector(10, 0),
+          id: 'bottom',
+        ),
+        SketchLine(
+          const SketchVector(10, 0),
+          const SketchVector(10, 10),
+          id: 'right',
+        ),
+        SketchLine(
+          const SketchVector(10, 10),
+          const SketchVector(0, 10),
+          id: 'top',
+        ),
+        SketchLine(
+          const SketchVector(0, 10),
+          const SketchVector(0, 0),
+          id: 'left',
+        ),
+        for (var index = 0; index < 18; index++)
+          SketchLine(
+            SketchVector(30.0 + index, 0),
+            SketchVector(30.2 + index, .3),
+            id: 'loose-$index',
+          ),
+      ]);
+
+      expect(report.closedProfile, isTrue);
+      expect(report.readyForSurface, isTrue);
+      expect(report.hasOpenEnds, isFalse);
+      expect(report.hasGaps, isFalse);
+      expect(report.activeProfileEntityIds, {'bottom', 'right', 'top', 'left'});
+      final warning = report.ofType(SketchHealthIssueType.disconnected).single;
+      expect(warning.blocking, isFalse);
+      expect(warning.entityIds, hasLength(18));
+      expect(warning.message, '18 loose entities outside active profile');
+      expect(warning.message, isNot(contains('loose-0')));
+    },
+  );
+
+  test('gap in the active open profile remains a blocking error', () {
+    final report = analyzer.analyze([
+      SketchLine(const SketchVector(0, 0), const SketchVector(10, 0), id: 'a'),
+      SketchLine(
+        const SketchVector(10.05, 0),
+        const SketchVector(10, 10),
+        id: 'b',
+      ),
+      SketchLine(
+        const SketchVector(10, 10),
+        const SketchVector(0, 10),
+        id: 'c',
+      ),
+      SketchLine(const SketchVector(0, 10), const SketchVector(0, 0), id: 'd'),
+    ]);
+
+    final gap = report.ofType(SketchHealthIssueType.gap).single;
+    expect(report.closedProfile, isFalse);
+    expect(report.readyForSurface, isFalse);
+    expect(report.hasGaps, isTrue);
+    expect(gap.blocking, isTrue);
+    expect(gap.canAutoHeal, isTrue);
+  });
+
+  test('a simple open chain is never classified as a closed profile', () {
+    final report = analyzer.analyze([
+      SketchLine(const SketchVector(0, 0), const SketchVector(5, 0), id: 'a'),
+      SketchLine(const SketchVector(5, 0), const SketchVector(10, 0), id: 'b'),
+    ]);
+
+    expect(report.closedProfile, isFalse);
+    expect(report.readyForSurface, isFalse);
+    expect(report.hasOpenEnds, isTrue);
+    expect(report.activeProfileEntityIds, {'a', 'b'});
+  });
+
+  test('nearby but unconnected endpoints report a blocking active gap', () {
+    final report = analyzer.analyze([
+      SketchLine(const SketchVector(0, 0), const SketchVector(5, 0), id: 'a'),
+      SketchLine(
+        const SketchVector(5.025, 0),
+        const SketchVector(10, 0),
+        id: 'b',
+      ),
+    ]);
+
+    expect(report.closedProfile, isFalse);
+    expect(report.readyForSurface, isFalse);
+    expect(report.blockingOfType(SketchHealthIssueType.gap), hasLength(1));
+  });
+
+  test('an explicit open selection is not replaced by another closed loop', () {
+    final report = analyzer.analyze(
+      [
+        SketchCircle(const SketchVector(0, 0), 2, id: 'closed-loop'),
+        SketchLine(
+          const SketchVector(10, 0),
+          const SketchVector(15, 0),
+          id: 'open-a',
+        ),
+        SketchLine(
+          const SketchVector(15, 0),
+          const SketchVector(20, 0),
+          id: 'open-b',
+        ),
+      ],
+      activeSelection: const ['open-a'],
+    );
+
+    expect(report.closedProfile, isFalse);
+    expect(report.readyForSurface, isFalse);
+    expect(report.activeProfileEntityIds, {'open-a', 'open-b'});
+    expect(report.hasOpenEnds, isTrue);
+  });
+
+  test(
+    'construction and reference entities are ignored by active profile health',
+    () {
+      final reference = ReferenceGeometry({'kind': 'section'}, id: 'reference');
+      final construction = ConstructionGeometry({'kind': 'axis'}, id: 'axis');
+      final report = analyzer.analyze([
+        SketchCircle(const SketchVector(0, 0), 1, id: 'circle'),
+        reference,
+        construction,
+      ]);
+
+      expect(report.readyForSurface, isTrue);
+      expect(report.hasDisconnected, isFalse);
+      expect(report.activeProfileEntityIds, {'circle'});
+      expect(report.diagnosticEntityIds, isEmpty);
+    },
+  );
 }

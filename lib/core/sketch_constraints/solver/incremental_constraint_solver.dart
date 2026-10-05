@@ -598,11 +598,19 @@ class IncrementalConstraintSolver {
         'A degenerate line cannot receive a directional constraint.',
       );
     }
+    // Parallel/perpendicular relations are undirected. Keep the current
+    // endpoint orientation by choosing the equivalent angle nearest to it;
+    // applying an inference must never visually reverse the line.
+    final current = _lineAngle(line);
+    var resolved = angle;
+    while ((resolved - current).abs() > math.pi / 2) {
+      resolved += resolved > current ? -math.pi : math.pi;
+    }
     return _setLineEnd(
       line,
       SketchVector(
-        start.x + length * math.cos(angle),
-        start.y + length * math.sin(angle),
+        start.x + length * math.cos(resolved),
+        start.y + length * math.sin(resolved),
         start.z,
       ),
     );
@@ -642,6 +650,30 @@ class IncrementalConstraintSolver {
       final endpoint = reference.endsWith(':start') ? 'start' : 'end';
       return SketchVector.fromJson(entity.parameters[endpoint]);
     }
+    if (entity is SketchSpline) {
+      final points =
+          (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
+              as List?;
+      if (points == null || points.length < 2) return null;
+      return SketchVector.fromJson(
+        reference.endsWith(':start') ? points.first : points.last,
+      );
+    }
+    if (entity is SketchArc &&
+        (reference.endsWith(':start') || reference.endsWith(':end'))) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final angle =
+          (entity.parameters[reference.endsWith(':start')
+                      ? 'startAngle'
+                      : 'endAngle']
+                  as num)
+              .toDouble();
+      return SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
+      );
+    }
     if (entity != null && reference.endsWith(':center')) {
       return _center(entity);
     }
@@ -667,6 +699,29 @@ class IncrementalConstraintSolver {
       entity.parameters[reference.endsWith(':start') ? 'start' : 'end'] = point
           .toJson();
       entity.refreshDerivedParameters();
+    } else if (entity is SketchSpline) {
+      final key = reference.endsWith(':start') ? 0 : -1;
+      final points = (entity.parameters['points'] as List?)?.toList();
+      if (points == null || points.length < 2) return false;
+      final index = key == 0 ? 0 : points.length - 1;
+      points[index] = point.toJson();
+      entity.parameters['points'] = points;
+      final sampled = (entity.parameters['sampledPoints'] as List?)?.toList();
+      if (sampled != null && sampled.length >= 2) {
+        sampled[key == 0 ? 0 : sampled.length - 1] = point.toJson();
+        entity.parameters['sampledPoints'] = sampled;
+      }
+    } else if (entity is SketchArc &&
+        (reference.endsWith(':start') || reference.endsWith(':end'))) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final dx = point.x - center.x;
+      final dy = point.y - center.y;
+      entity.parameters[reference.endsWith(':start')
+          ? 'startAngle'
+          : 'endAngle'] = math.atan2(
+        dy,
+        dx,
+      );
     } else {
       return false;
     }

@@ -135,6 +135,32 @@ void main() {
     expect(target.parameters['end'], untouchedEnd);
   });
 
+  test('coincident supports spline endpoints from mesh sketches', () async {
+    final reference = sketch.builders.spline.build([
+      const SketchVector(0, 0),
+      const SketchVector(5, 0),
+    ]);
+    final target = sketch.builders.spline.build([
+      const SketchVector(5.2, 0.1),
+      const SketchVector(8, 2),
+    ]);
+    api.builders.coincident.build([
+      '${reference.id}:end',
+      '${target.id}:start',
+    ]);
+
+    await api.solve();
+
+    expect(
+      (target.parameters['points'] as List).first,
+      (reference.parameters['points'] as List).last,
+    );
+    expect(
+      (target.parameters['sampledPoints'] as List).first,
+      (reference.parameters['sampledPoints'] as List).last,
+    );
+  });
+
   test(
     'detects missing references, overdefinition and duplicate constraints',
     () async {

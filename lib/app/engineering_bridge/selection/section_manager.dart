@@ -10,6 +10,7 @@ import 'mesh_section_kernel.dart';
 class SectionManager {
   const SectionManager(this.runtime);
   final CadRuntime runtime;
+  static const _maxDisplaySegments = 1000;
 
   List<CadDocumentEntity> get sections =>
       runtime.document?.entities.values
@@ -21,16 +22,33 @@ class SectionManager {
     required String planeId,
     required Vector3 origin,
     required Vector3 normal,
+    String? meshId,
     String? name,
     double absoluteTolerance = 1e-9,
     double relativeTolerance = 1e-10,
   }) async {
+    final managedFallback = runtime.document?.entities.values
+        .where((entity) => entity.data['managedStlAssets'] is Map)
+        .singleOrNull;
+    final managedMeshId =
+        meshId ?? runtime.activeImport?.id ?? managedFallback?.id;
     final geometry =
-        runtime.activeMeshGeometry ??
-        (throw StateError('Import an STL before creating a Section.'));
-    final meshEntity =
-        runtime.activeImport ??
-        (throw StateError('The active STL has no official mesh handle.'));
+        managedMeshId != null &&
+            runtime.document?.entities[managedMeshId]?.data['managedStlAssets']
+                is Map
+        ? await runtime.managedMeshGeometryFor(managedMeshId)
+        : runtime.activeMeshGeometry;
+    if (geometry == null) {
+      throw StateError(
+        'Import or select a managed STL before creating a Section.',
+      );
+    }
+    final meshEntity = managedMeshId == null
+        ? null
+        : runtime.document?.entities[managedMeshId];
+    if (meshEntity == null) {
+      throw StateError('The selected STL has no durable mesh entity.');
+    }
     final bvh = runtime.readOrCreate<MeshBvh>(
       'sections.meshBvh',
       () => MeshBvh(geometry),
@@ -244,6 +262,7 @@ class SectionManager {
       (total, segment) => total + segment.a.distanceTo(segment.b),
     );
     final topology = _topology(result.segments, normal);
+    final displaySegments = _displaySegments(segments);
     return CadDocumentEntity(
       id: id,
       kind: CadDocumentEntityKind.section,
@@ -261,7 +280,11 @@ class SectionManager {
         'sceneKind': 'curve',
         'sceneVisible': true,
         'sceneGeometry': {
-          'segments': segments,
+          // Keep the exact section in `section.segments`; this bounded
+          // presentation prevents a dense STL intersection from blocking the
+          // Flutter overlay when it is selected or highlighted.
+          'segments': displaySegments,
+          'referenceCurve': true,
           'displayColor': 'referenceCurve',
           'strokeWidth': 1.35,
         },
@@ -306,6 +329,17 @@ class SectionManager {
         },
       },
     );
+  }
+
+  List<List<List<double>>> _displaySegments(List<List<List<double>>> segments) {
+    if (segments.length <= _maxDisplaySegments) return segments;
+    final stride = (segments.length / _maxDisplaySegments).ceil();
+    final output = <List<List<double>>>[];
+    for (var start = 0; start < segments.length; start += stride) {
+      final end = math.min(start + stride - 1, segments.length - 1);
+      output.add([segments[start].first, segments[end].last]);
+    }
+    return output;
   }
 
   (int, bool, double) _topology(List<SectionSegment> segments, Vector3 normal) {

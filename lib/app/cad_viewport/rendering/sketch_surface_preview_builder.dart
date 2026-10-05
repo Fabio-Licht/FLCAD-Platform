@@ -70,6 +70,13 @@ class SketchSurfacePreviewBuilder {
         loops.add(_sample(entity));
       } else if (entity is SketchLine || entity is SketchArc) {
         edges.add(_sample(entity));
+      } else if (entity is SketchSpline) {
+        final raw =
+            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
+                as List?;
+        if (raw != null && raw.length >= 2) {
+          edges.add(raw.map(SketchVector.fromJson).toList(growable: false));
+        }
       }
     }
     while (edges.isNotEmpty) {

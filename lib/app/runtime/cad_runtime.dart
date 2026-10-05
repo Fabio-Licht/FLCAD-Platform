@@ -191,6 +191,14 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   bool hasManagedGeometry(String entityId) =>
       _managedGeometry.containsKey(entityId);
 
+  Future<KernelMeshGeometry?> managedMeshGeometryFor(String entityId) async {
+    final geometry = _managedGeometry[entityId];
+    if (geometry is! ManagedMeshEntityGeometry) return null;
+    final kernel = kernels.active;
+    if (kernel is! OpenCascadeKernelAdapter) return null;
+    return geometry.displayMesh.inspectGeometry(kernel);
+  }
+
   @visibleForTesting
   Map<String, dynamic>? managedGeometryDiagnostics(String entityId) {
     final value = _managedGeometry[entityId];

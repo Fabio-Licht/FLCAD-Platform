@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
@@ -10,12 +11,14 @@ import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
 import 'package:flcad_mobile/core/cad_kernel/api/geometry_kernel_api.dart';
 import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
+import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/reference_engine/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart';
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
+import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
 import 'package:flcad_mobile/features/projects/data/project_repository.dart';
@@ -150,6 +153,99 @@ void main() {
       expect(controller.selectedSketchEntityIds, {circle.id});
       expect(cad.runtime.scene.find(line.id)!.selected, isFalse);
       expect(cad.runtime.scene.find(circle.id)!.selected, isTrue);
+
+      // A radius-only edit trims the two neighbors to tangent contact points.
+      // One Undo must restore only that edit, not an earlier profile operation.
+      final arc = controller.sketchApi!.builders.arc.build(
+        const SketchVector(0, 0),
+        1,
+        0,
+        math.pi / 2,
+      );
+      final preceding = controller.sketchApi!.builders.line.build(
+        const SketchVector(1, -1),
+        const SketchVector(1, 0),
+      );
+      final following = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 1),
+        const SketchVector(-1, 1),
+      );
+      await controller.updateSketchEntityParameters(arc.id, {'radius': 1.5});
+      SketchVector arcEnd(String key) {
+        final current = controller.sketchApi!.entity(arc.id)!;
+        final center = SketchVector.fromJson(current.parameters['center']);
+        final radius = (current.parameters['radius'] as num).toDouble();
+        final angle = (current.parameters['${key}Angle'] as num).toDouble();
+        return SketchVector(
+          center.x + radius * math.cos(angle),
+          center.y + radius * math.sin(angle),
+        );
+      }
+
+      expect(arcEnd('start').x, closeTo(1, 1e-9));
+      expect(arcEnd('start').y, closeTo(-.5, 1e-9));
+      expect(arcEnd('end').x, closeTo(-.5, 1e-9));
+      expect(arcEnd('end').y, closeTo(1, 1e-9));
+      final previousEnd = SketchVector.fromJson(
+        controller.sketchApi!.entity(preceding.id)!.parameters['end'],
+      );
+      final nextStart = SketchVector.fromJson(
+        controller.sketchApi!.entity(following.id)!.parameters['start'],
+      );
+      expect(previousEnd.y, closeTo(arcEnd('start').y, 1e-9));
+      expect(nextStart.x, closeTo(arcEnd('end').x, 1e-9));
+      final center = SketchVector.fromJson(
+        controller.sketchApi!.entity(arc.id)!.parameters['center'],
+      );
+      final beforeDirection =
+          previousEnd -
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(preceding.id)!.parameters['start'],
+          );
+      final afterDirection =
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(following.id)!.parameters['end'],
+          ) -
+          nextStart;
+      expect((arcEnd('start') - center).dot(beforeDirection), closeTo(0, 1e-9));
+      expect((arcEnd('end') - center).dot(afterDirection), closeTo(0, 1e-9));
+      await controller.undo();
+      expect(controller.sketchApi!.entity(arc.id), isNotNull);
+      expect(controller.sketchApi!.entity(preceding.id), isNotNull);
+      expect(controller.sketchApi!.entity(following.id), isNotNull);
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1);
+      await controller.updateSketchEntityParameters(arc.id, {'radius': 1.5});
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
+
+      await controller.setSketchEntityVisibility(circle.id, false);
+      final gapLineA = controller.sketchApi!.builders.line.build(
+        const SketchVector(200, 200),
+        const SketchVector(201, 200),
+      );
+      final gapLineB = controller.sketchApi!.builders.line.build(
+        const SketchVector(201.05, 200),
+        const SketchVector(201.05, 201),
+      );
+      bool hasTestGap() => controller.sketchHealth
+          .ofType(SketchHealthIssueType.gap)
+          .any(
+            (issue) =>
+                issue.entityIds.contains(gapLineA.id) &&
+                issue.entityIds.contains(gapLineB.id),
+          );
+      final gap = controller.sketchHealth
+          .ofType(SketchHealthIssueType.gap)
+          .firstWhere(
+            (issue) =>
+                issue.entityIds.contains(gapLineA.id) &&
+                issue.entityIds.contains(gapLineB.id),
+          );
+      await controller.autoHealSketchGap(gap);
+      expect(hasTestGap(), isFalse);
+      await controller.undo();
+      expect(hasTestGap(), isTrue);
+      await controller.redo();
+      expect(hasTestGap(), isFalse);
     },
   );
 
@@ -234,6 +330,195 @@ void main() {
           ),
         ),
       );
+    },
+  );
+
+  test(
+    'preview persists, invalidates on edit, and section visibility undoes',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'sketch-stabilization-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+
+      Future<(DesktopCadController, OperationalReverseEngineeringController)>
+      open() async {
+        final kernels = KernelManager()
+          ..register(_HealthySurfaceKernel(), makeDefault: true);
+        final cad = DesktopCadController(
+          kernels: kernels,
+          projects: ProjectManager.instance,
+        );
+        final commands = DesktopCommandCoordinator(
+          cad: cad,
+          projects: ProjectManager.instance,
+        );
+        final controller = OperationalReverseEngineeringController(
+          recognition: ProfessionalRecognitionApi(),
+          commands: commands,
+          runtime: cad.runtime,
+          referenceApi: ReferenceApi(
+            engine: ReferenceEngine(
+              repository: ReferenceRepository(projects: projects),
+            ),
+          ),
+        );
+        addTearDown(controller.dispose);
+        addTearDown(cad.dispose);
+        await cad.runtime.open('stabilization-project', directory);
+        await controller.configureProject(
+          projectId: 'stabilization-project',
+          projectDirectory: directory,
+        );
+        return (cad, controller);
+      }
+
+      final (cad, controller) = await open();
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
+      await controller.drawRectangle(
+        const SketchVector(0, 0),
+        const SketchVector(2, 2),
+      );
+      final constrainedLine = controller.sketchEntities
+          .whereType<SketchLine>()
+          .first;
+      controller.constraintApi!.builders.horizontal.build([constrainedLine.id]);
+      controller.constraintApi!.createDrivingDimension(
+        type: SketchDimensionType.linear,
+        references: [constrainedLine.id],
+        value: 2,
+      );
+      expect(controller.constraints, isNotEmpty);
+      expect(controller.dimensions, isNotEmpty);
+      expect(controller.sketchReadyForSurface, isTrue);
+      await controller.previewPlanarSurface();
+      expect(controller.surfacePreviewActive, isTrue);
+      expect(cad.runtime.scene.find('surface-preview'), isNotNull);
+      await controller.undo();
+      expect(controller.surfacePreviewActive, isFalse);
+      expect(cad.runtime.scene.find('surface-preview'), isNull);
+      await controller.redo();
+      expect(controller.surfacePreviewActive, isTrue);
+      expect(cad.runtime.scene.find('surface-preview'), isNotNull);
+      await controller.persist();
+
+      final (reopenedCad, reopened) = await open();
+      expect(reopened.activeSketch, isNotNull);
+      expect(reopened.constraints, isNotEmpty);
+      expect(reopened.dimensions, isNotEmpty);
+      expect(reopened.surfacePreviewActive, isTrue);
+      expect(reopenedCad.runtime.scene.find('surface-preview'), isNotNull);
+
+      final line = reopened.sketchEntities.whereType<SketchLine>().last;
+      await reopened.updateSketchEntityParameters(line.id, {'length': 2.05});
+      expect(reopened.surfacePreviewActive, isFalse);
+      expect(reopenedCad.runtime.scene.find('surface-preview'), isNull);
+      expect(reopened.previewPlanarSurface, throwsStateError);
+      await reopened.undo();
+      expect(reopened.surfacePreviewActive, isTrue);
+      expect(reopenedCad.runtime.scene.find('surface-preview'), isNotNull);
+      await reopened.redo();
+      expect(reopened.surfacePreviewActive, isFalse);
+      const sectionId = 'test-section';
+      await reopenedCad.runtime.mutate(
+        command: 'test.section',
+        upsert: [
+          CadDocumentEntity(
+            id: sectionId,
+            kind: CadDocumentEntityKind.section,
+            data: {
+              'name': 'Test Section',
+              'sceneKind': 'curve',
+              'sceneVisible': true,
+              'sceneGeometry': {'segments': <List<List<double>>>[]},
+            },
+          ),
+        ],
+      );
+      reopened.activeSketch!.metadata['sourceSectionId'] = sectionId;
+      await reopened.persist();
+      await reopened.toggleSourceSectionVisibility();
+      expect(
+        reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+        isFalse,
+      );
+      await reopened.undo();
+      expect(
+        reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+        isTrue,
+      );
+      await reopened.redo();
+      expect(
+        reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'surface preview uses the active closed profile when section leftovers exist',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'surface-leftovers-',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final kernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(cad.dispose);
+      await cad.runtime.open('surface-leftovers-project', directory);
+      await controller.configureProject(
+        projectId: 'surface-leftovers-project',
+        projectDirectory: directory,
+      );
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
+      await controller.drawRectangle(
+        const SketchVector(0, 0),
+        const SketchVector(4, 2),
+      );
+      final profileIds = controller.sketchEntities
+          .map((entity) => entity.id)
+          .toSet();
+      final loose = controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 20),
+        const SketchVector(21, 20),
+      );
+
+      final health = controller.sketchHealth;
+      expect(health.readyForSurface, isTrue);
+      expect(health.hasDisconnectedWarnings, isTrue);
+      expect(health.activeProfileEntityIds, profileIds);
+      expect(health.diagnosticEntityIds, contains(loose.id));
+
+      await controller.previewPlanarSurface();
+      expect(controller.surfacePreviewActive, isTrue);
+      expect(cad.runtime.scene.find('surface-preview'), isNotNull);
     },
   );
 }

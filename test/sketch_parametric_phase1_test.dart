@@ -536,4 +536,49 @@ void main() {
       expect(SketchVector.fromJson(target.parameters['end']).y, 12);
     },
   );
+
+  test('collinear constraint aligns and translates the target line', () async {
+    final reference = sketch.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    final target = sketch.builders.line.build(
+      const SketchVector(4, 5),
+      const SketchVector(4, 12),
+    );
+    final constraint = constraints.builders
+        .of(SketchConstraintType.collinear)
+        .build([reference.id, target.id]);
+
+    final result = await constraints.solve(only: [constraint.id]);
+
+    expect(result.success, isTrue);
+    expect(
+      SketchVector.fromJson(target.parameters['start']).y,
+      closeTo(0, 1e-8),
+    );
+    expect(SketchVector.fromJson(target.parameters['end']).y, closeTo(0, 1e-8));
+  });
+
+  test(
+    'directional constraints preserve the target line orientation',
+    () async {
+      final reference = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final target = sketch.builders.line.build(
+        const SketchVector(0, 5),
+        const SketchVector(-8, 5),
+      );
+      final constraint = constraints.builders
+          .of(SketchConstraintType.parallel)
+          .build([reference.id, target.id]);
+
+      final result = await constraints.solve(only: [constraint.id]);
+
+      expect(result.success, isTrue);
+      expect(SketchVector.fromJson(target.parameters['end']).x, lessThan(0));
+    },
+  );
 }

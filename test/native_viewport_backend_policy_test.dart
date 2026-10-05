@@ -53,6 +53,35 @@ void main() {
     scene.dispose();
   });
 
+  test(
+    'managed Sections remain Flutter overlays without global Canvas fallback',
+    () {
+      final scene = CadSceneGraph()
+        ..upsert(entity())
+        ..upsert(
+          const CadSceneEntity(
+            id: 'section:001',
+            kind: CadSceneEntityKind.curve,
+            geometry: {
+              'referenceCurve': true,
+              'segments': [
+                [
+                  [0.0, 0.0, 0.0],
+                  [1.0, 0.0, 0.0],
+                ],
+              ],
+            },
+          ),
+        );
+      expect(nativeSceneUnsupportedReason(scene, style: 0), isNull);
+      expect(
+        CadSceneDisplayAdapter().initial(scene).entities.map((e) => e['id']),
+        ['a'],
+      );
+      scene.dispose();
+    },
+  );
+
   test('invalid solid preview still forces categorized Canvas fallback', () {
     final scene = CadSceneGraph()
       ..upsert(entity())

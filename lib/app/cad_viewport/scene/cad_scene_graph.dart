@@ -71,12 +71,14 @@ class CadSceneGraph extends ChangeNotifier with NotificationGate {
   }
 
   void select(Set<String> ids) {
+    var changed = false;
     for (final entry in _entities.entries.toList()) {
-      _entities[entry.key] = entry.value.copyWith(
-        selected: ids.contains(entry.key),
-      );
+      final selected = ids.contains(entry.key);
+      if (entry.value.selected == selected) continue;
+      _entities[entry.key] = entry.value.copyWith(selected: selected);
+      changed = true;
     }
-    notifyListeners();
+    if (changed) notifyListeners();
   }
 
   /// Requests a display-only repaint without rebuilding or mutating geometry.

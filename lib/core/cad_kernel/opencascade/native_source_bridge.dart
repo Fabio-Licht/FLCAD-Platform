@@ -492,6 +492,21 @@ final class ManagedNativeDisplayMesh {
     }
   }
 
+  Future<KernelMeshGeometry> inspectGeometry(OpenCascadeKernelAdapter kernel) =>
+      withLease((lease) async {
+        final bridge = kernel._nativeBridge;
+        if (bridge is! OpenCascadeFFI) {
+          throw UnsupportedError(
+            'Managed mesh inspection requires OpenCascade FFI',
+          );
+        }
+        return bridge.inspectMesh(
+          lease._record.identity._token,
+          vertexCount: descriptor.vertices,
+          triangleCount: descriptor.triangles,
+        );
+      });
+
   ManagedNativeDisplayMesh transfer() {
     if (_transferred || _disposal != null) {
       throw StateError('Managed display mesh is unavailable');

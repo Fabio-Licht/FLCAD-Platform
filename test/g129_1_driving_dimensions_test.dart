@@ -304,4 +304,22 @@ void main() {
     expect(dimensions.dimensions, isEmpty);
     expect(sketch.entity(line.id)!.toJson().toString(), geometry);
   });
+
+  test('load repairs sketch membership when the root list is stale', () async {
+    final line = sketch.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    await sketch.persist();
+
+    // Reproduce projects written by the older non-atomic section conversion:
+    // the child entity exists on disk but the root list was saved empty.
+    sketch.sketches.single.entityIds.clear();
+    await sketch.persist();
+
+    final reopened = const SketchEngineFactory().create(project);
+    await reopened.load();
+    expect(reopened.sketches.single.entityIds, contains(line.id));
+    expect(reopened.entity(line.id), isNotNull);
+  });
 }

@@ -24,9 +24,8 @@ class SketchSceneAdapter {
       'showEndpoints': entity is SketchLine || entity is SketchArc,
       'displayColor': preview
           ? 'previewOrange'
-          : entity is SketchSpline
-          ? 'splineMagenta'
-          : 'sketchGreen',
+          : _reconstructionColor(entity) ??
+                (entity is SketchSpline ? 'splineMagenta' : 'sketchGreen'),
       // Screen-space width: sketch readability must not depend on zoom or on
       // the angle of its support plane.
       'strokeWidth': technicalStrokeWidth,
@@ -36,6 +35,15 @@ class SketchSceneAdapter {
     selected: entity.selectionState == SketchSelectionState.selected,
     transparent: preview,
   );
+
+  String? _reconstructionColor(SketchEntity entity) {
+    return switch (entity.metadata['reconstructionKind']) {
+      'line' => 'reconstructedLine',
+      'circle' => 'reconstructedCircle',
+      'arc' => 'reconstructedArc',
+      _ => null,
+    };
+  }
 
   List<SketchVector> _points(SketchEntity entity) => switch (entity) {
     SketchPoint() => [SketchVector.fromJson(entity.parameters['point'])],

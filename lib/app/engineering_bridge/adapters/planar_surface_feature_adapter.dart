@@ -35,7 +35,10 @@ class PlanarSurfaceFeatureAdapter {
     if (!health.readyForSurface) {
       throw StateError('Sketch Health is not Ready for Surface.');
     }
-    final sourceEntities = entities.toList(growable: false);
+    final activeIds = health.activeProfileEntityIds;
+    final sourceEntities = entities
+        .where((entity) => activeIds.isEmpty || activeIds.contains(entity.id))
+        .toList(growable: false);
     final profile = profileBuilder.buildProfile(
       entities: sourceEntities,
       coordinates: sketch.coordinates,
@@ -175,7 +178,7 @@ class PlanarSurfaceFeatureAdapter {
     final endpointGroups = <List<_BoundaryEndpoint>>[];
     final edgeDrafts = <_BoundaryEdge>[];
     for (final entity in entities.where(
-      (item) => item.visible && !item.construction,
+      (item) => item.visible && !item.construction && !item.reference,
     )) {
       final local = _sampleEntity(entity);
       if (local.length < 2) continue;

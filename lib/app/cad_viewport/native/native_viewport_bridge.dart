@@ -23,6 +23,15 @@ bool isNativeViewportOverlay(CadSceneEntity entity) => switch (entity.kind) {
   CadSceneEntityKind.point =>
     entity.geometry['type'] == 'point' || entity.id.contains(':world:'),
   CadSceneEntityKind.sketch => true,
+  // Reference Curves/Sections are analytic overlays rendered by Flutter over
+  // the native CAD texture.  They have no triangle payload; treating them as
+  // CAD curves would incorrectly trigger the global Canvas fallback.
+  CadSceneEntityKind.curve =>
+    entity.geometry['referenceCurve'] == true ||
+        (entity.geometry['displayColor'] as String?)?.startsWith(
+              'referenceCurve',
+            ) ==
+            true,
   CadSceneEntityKind.preview =>
     entity.geometry['nodes'] == null &&
         (entity.geometry['points'] is List ||

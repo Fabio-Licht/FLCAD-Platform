@@ -1551,6 +1551,23 @@ class _OfficialEngineeringWorkspaceState
           ),
         ],
         if (entity.data['sketchEntity'] case final Map raw)
+          if ((raw['metadata'] as Map?)?['reconstructionKind'] is String) ...[
+            const SizedBox(height: 8),
+            _InspectorSection(
+              title: 'Reconstrução Mesh Sketch',
+              children: [
+                _InspectorProperty(
+                  label: 'Classificação',
+                  value: (raw['metadata'] as Map)['reconstructionKind'],
+                ),
+                const _InspectorProperty(
+                  label: 'Origem',
+                  value: 'Sugestão aceita pelo Sketch Assistant',
+                ),
+              ],
+            ),
+          ],
+        if (entity.data['sketchEntity'] case final Map raw)
           if (raw['type'] == 'line') ...[
             const SizedBox(height: 8),
             _InspectorSection(
@@ -1625,6 +1642,42 @@ class _OfficialEngineeringWorkspaceState
               _InspectorProperty(
                 label: 'Anchor',
                 value: raw['anchorReference'] ?? 'Automatic',
+              ),
+            ],
+          ),
+        ],
+        if (entity.data['constraint'] case final Map raw) ...[
+          const SizedBox(height: 8),
+          _InspectorSection(
+            title: 'Constraint',
+            children: [
+              _InspectorProperty(label: 'Type', value: raw['type']),
+              _InspectorProperty(
+                label: 'Entities',
+                value: (raw['references'] as List? ?? const []).join(' → '),
+              ),
+              _InspectorProperty(label: 'State', value: raw['status']),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => operational.setConstraintVisibility(
+                        entity.id,
+                        !(raw['visible'] as bool? ?? true),
+                      ),
+                      icon: const Icon(Icons.visibility_off_outlined, size: 16),
+                      label: const Text('Hide'),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: () => operational.deleteConstraint(entity.id),
+                      icon: const Icon(Icons.delete_outline, size: 16),
+                      label: const Text('Delete'),
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -3602,6 +3655,7 @@ class _OfficialEngineeringWorkspaceState
   }
 
   Future<void> _sectionAction(Future<void> Function() action) async {
+    widget.cad.setStatus('Section operation in progress...');
     try {
       await action();
       widget.cad.setStatus('Section operation completed.');
@@ -4535,7 +4589,11 @@ class _OfficialEngineeringWorkspaceState
                   }
                   final additive = HardwareKeyboard.instance.isControlPressed;
                   geometrySelection.select(entity.id, additive: additive);
-                  if (entity.data['sceneKind'] == 'plane') {
+                  if (entity.kind == CadDocumentEntityKind.section) {
+                    // GeometrySelectionManager is the runtime selection
+                    // source; keep Section tools on that same context.
+                    widget.cad.setStatus('Reference Curve selected.');
+                  } else if (entity.data['sceneKind'] == 'plane') {
                     operational.selectDocumentPlane(entity.id);
                   } else if (entity.kind == CadDocumentEntityKind.sketch &&
                       entity.data['sketch'] is Map) {
@@ -4729,7 +4787,8 @@ class _OfficialEngineeringWorkspaceState
             padding: const EdgeInsets.symmetric(vertical: 1.5),
             child: ExpansionTile(
               key: ValueKey('workspace-group-${entry.key}'),
-              initiallyExpanded: false,
+              initiallyExpanded:
+                  entry.key == 'Reference Curves' && entry.value.isNotEmpty,
               dense: true,
               visualDensity: const VisualDensity(vertical: -3),
               leading: _CadExplorerGlyph(switch (entry.key) {
@@ -9398,6 +9457,16 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     final hud = controller.lineHud;
     final dragHud = controller.sketchDragHud;
     final health = controller.sketchHealth;
+    final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
+    final blockingIssues = health.blockingIssues.toList(growable: false);
+    final warningIssues = health.warningIssues.toList(growable: false);
+    final openEndpoints = health
+        .blockingOfType(SketchHealthIssueType.openEnd)
+        .length;
+    final looseIssue = health
+        .ofType(SketchHealthIssueType.disconnected)
+        .where((issue) => !issue.blocking)
+        .firstOrNull;
     final dimensionEntity = controller.selectedSketchEntityIds.length == 1
         ? controller.sketchApi?.entity(
             controller.selectedSketchEntityIds.single,
@@ -9434,7 +9503,11 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
           ),
           title: const Text('Sketch Health'),
           subtitle: Text(
-            health.readyForSurface ? 'Sketch Ready' : 'Sketch contains errors',
+            health.readyForSurface
+                ? warningIssues.isEmpty
+                      ? 'Active profile ready'
+                      : 'Active profile ready with warnings'
+                : 'Active profile has blocking errors',
             style: const TextStyle(fontSize: 9.5),
           ),
           children: [
@@ -9442,35 +9515,70 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               label: controller.sketchEntities.isEmpty
                   ? 'Empty Sketch'
                   : health.closedProfile
-                  ? 'Closed Profile'
-                  : 'Open Profile',
+                  ? 'Active profile closed'
+                  : openEndpoints == 0
+                  ? 'Active profile open'
+                  : 'Active profile open · $openEndpoints open endpoint(s)',
               ok: health.closedProfile,
             ),
             _SketchHealthCheck(
               label: health.hasDuplicates
-                  ? '${health.issues.where((i) => i.type == SketchHealthIssueType.duplicate || i.type == SketchHealthIssueType.overlap).length} Duplicates / Overlaps'
-                  : 'No Duplicates',
+                  ? '${health.blockingIssues.where((i) => i.type == SketchHealthIssueType.duplicate || i.type == SketchHealthIssueType.overlap).length} duplicate/overlap issue(s) in active profile'
+                  : '0 duplicates/overlaps in active profile',
               ok: !health.hasDuplicates,
             ),
             _SketchHealthCheck(
               label: health.hasGaps
-                  ? '${health.issues.where((i) => i.type == SketchHealthIssueType.gap).length} Gap(s)'
-                  : 'No Gaps',
+                  ? '${health.blockingOfType(SketchHealthIssueType.gap).length} gap(s) in active profile'
+                  : '0 gaps in active profile',
               ok: !health.hasGaps,
             ),
             _SketchHealthCheck(
               label: health.hasSelfIntersections
-                  ? 'Self Intersections'
-                  : 'No Self Intersections',
+                  ? 'Self-intersection in active profile'
+                  : '0 self-intersections',
               ok: !health.hasSelfIntersections,
             ),
             _SketchHealthCheck(
+              label: looseIssue == null
+                  ? '0 loose entities outside active profile'
+                  : '${looseIssue.entityIds.length} loose entities outside active profile',
+              ok: looseIssue == null,
+              warning: looseIssue != null,
+              onTap: looseIssue == null
+                  ? null
+                  : () => onHealthIssue(looseIssue),
+            ),
+            _SketchHealthCheck(
               label: health.hasTinyGeometry
-                  ? 'Tiny Geometry'
-                  : 'No Tiny Geometry',
+                  ? 'Tiny geometry in active profile'
+                  : '0 tiny geometry issues',
               ok: !health.hasTinyGeometry,
             ),
-            for (final issue in health.issues)
+            if (blockingIssues.isNotEmpty)
+              const _SketchHealthSectionLabel('Blocking issues'),
+            for (final issue in blockingIssues.take(8))
+              _SketchHealthIssueTile(
+                issue: issue,
+                friendlyNames: friendlyNames,
+                onTap: () => issue.canAutoHeal
+                    ? onAutoHeal(issue)
+                    : onHealthIssue(issue),
+                onAutoHeal: issue.canAutoHeal ? () => onAutoHeal(issue) : null,
+              ),
+            if (blockingIssues.length > 8)
+              _SketchHealthOverflowLabel(blockingIssues.length - 8),
+            if (warningIssues.isNotEmpty)
+              const _SketchHealthSectionLabel('Sketch warnings'),
+            for (final issue in warningIssues.take(5))
+              _SketchHealthIssueTile(
+                issue: issue,
+                friendlyNames: friendlyNames,
+                onTap: () => onHealthIssue(issue),
+              ),
+            if (warningIssues.length > 5)
+              _SketchHealthOverflowLabel(warningIssues.length - 5),
+            for (final issue in const <SketchHealthIssue>[])
               ListTile(
                 dense: true,
                 visualDensity: VisualDensity.compact,
@@ -9971,6 +10079,82 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                 style: TextStyle(fontSize: 9.5),
               ),
             ),
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              onPressed: controller.activeSketch == null
+                  ? null
+                  : controller.analyzeSketchReconstruction,
+              icon: const Icon(Icons.auto_awesome, size: 16),
+              label: const Text('Reconhecer geometria'),
+            ),
+            const SizedBox(height: 5),
+            OutlinedButton.icon(
+              onPressed: controller.beginSketchCircularSelection,
+              icon: Icon(
+                controller.sketchCircularSelectionMode
+                    ? Icons.check_box
+                    : Icons.control_point_duplicate_outlined,
+                size: 16,
+              ),
+              label: Text(
+                controller.sketchCircularSelectionMode
+                    ? 'Seleção múltipla ativa · clique nas curvas'
+                    : 'Selecionar várias curvas (Ctrl)',
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed:
+                  controller.selectedSketchEntityIds.length >= 2 &&
+                      controller.selectedSketchEntityIds.length <= 3
+                  ? controller.fitSelectedSketchCircularGeometry
+                  : null,
+              icon: const Icon(Icons.circle_outlined, size: 16),
+              label: const Text('Ajustar círculo/arco pelas linhas'),
+            ),
+            if (controller.sketchCircularFitMessage != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                child: Text(
+                  controller.sketchCircularFitMessage!,
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+            if (controller.sketchReconstructionSuggestions.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '${controller.sketchReconstructionSuggestions.length} sugestões encontradas',
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+              ...controller.sketchReconstructionSuggestions
+                  .take(8)
+                  .map(
+                    (suggestion) => ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(
+                        suggestion.label,
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                      subtitle: Text(
+                        '${suggestion.entityIds.length} entidade(s) · ${(suggestion.confidence * 100).toStringAsFixed(0)}%',
+                        style: const TextStyle(fontSize: 9),
+                      ),
+                      trailing: IconButton(
+                        tooltip: 'Aceitar sugestão',
+                        icon: const Icon(Icons.check, size: 16),
+                        onPressed: () => controller
+                            .acceptSketchReconstructionSuggestion(suggestion),
+                      ),
+                    ),
+                  ),
+              TextButton(
+                onPressed: controller.clearSketchReconstructionSuggestions,
+                child: const Text('Limpar sugestões'),
+              ),
+            ],
           ],
         ),
         ExpansionTile(
@@ -10124,6 +10308,11 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     'Perpendicular',
                     Icons.call_made,
                     SketchConstraintType.perpendicular,
+                  ),
+                  (
+                    'Collinear',
+                    Icons.align_horizontal_left,
+                    SketchConstraintType.collinear,
                   ),
                   (
                     'Concentric',
@@ -10670,25 +10859,180 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
 }
 
 class _SketchHealthCheck extends StatelessWidget {
-  const _SketchHealthCheck({required this.label, required this.ok});
+  const _SketchHealthCheck({
+    required this.label,
+    required this.ok,
+    this.warning = false,
+    this.onTap,
+  });
   final String label;
   final bool ok;
+  final bool warning;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = ok
+        ? Colors.green
+        : warning
+        ? Colors.amber
+        : Colors.redAccent;
+    final icon = ok
+        ? Icons.check_circle_outline
+        : warning
+        ? Icons.warning_amber_outlined
+        : Icons.cancel_outlined;
+    final child = Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      child: Row(
+        children: [
+          Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Expanded(child: Text(label, style: const TextStyle(fontSize: 10))),
+        ],
+      ),
+    );
+    if (onTap == null) return child;
+    return InkWell(onTap: onTap, child: child);
+  }
+}
+
+class _SketchHealthSectionLabel extends StatelessWidget {
+  const _SketchHealthSectionLabel(this.label);
+  final String label;
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-    child: Row(
-      children: [
-        Icon(
-          ok ? Icons.check_circle_outline : Icons.cancel_outlined,
-          size: 14,
-          color: ok ? Colors.green : Colors.redAccent,
+    padding: const EdgeInsets.fromLTRB(8, 8, 8, 2),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 9.5,
+          fontWeight: FontWeight.w700,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
-        const SizedBox(width: 6),
-        Expanded(child: Text(label, style: const TextStyle(fontSize: 10))),
-      ],
+      ),
     ),
   );
+}
+
+class _SketchHealthOverflowLabel extends StatelessWidget {
+  const _SketchHealthOverflowLabel(this.count);
+  final int count;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(30, 0, 8, 4),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: Text(
+        '+$count more item(s)',
+        style: TextStyle(
+          fontSize: 9,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        ),
+      ),
+    ),
+  );
+}
+
+class _SketchHealthIssueTile extends StatelessWidget {
+  const _SketchHealthIssueTile({
+    required this.issue,
+    required this.friendlyNames,
+    required this.onTap,
+    this.onAutoHeal,
+  });
+
+  final SketchHealthIssue issue;
+  final Map<String, String> friendlyNames;
+  final VoidCallback onTap;
+  final VoidCallback? onAutoHeal;
+
+  @override
+  Widget build(BuildContext context) {
+    final warning = !issue.blocking;
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      leading: Icon(
+        warning ? Icons.warning_amber_outlined : Icons.error_outline,
+        size: 15,
+        color: warning ? Colors.amber : Colors.redAccent,
+      ),
+      title: Text(issue.message, style: const TextStyle(fontSize: 10.5)),
+      subtitle: Text(
+        _friendlyIssueEntities(issue, friendlyNames),
+        style: const TextStyle(fontSize: 9),
+      ),
+      onTap: onTap,
+      trailing: onAutoHeal == null
+          ? TextButton.icon(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+              icon: const Icon(Icons.ads_click, size: 14),
+              label: Text(
+                issue.type == SketchHealthIssueType.disconnected
+                    ? 'Select'
+                    : 'Focus',
+                style: const TextStyle(fontSize: 9.5),
+              ),
+              onPressed: onTap,
+            )
+          : TextButton.icon(
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+              icon: const Icon(Icons.healing, size: 15),
+              label: const Text('Close gap', style: TextStyle(fontSize: 9.5)),
+              onPressed: onAutoHeal,
+            ),
+    );
+  }
+}
+
+Map<String, String> _friendlySketchEntityNames(
+  Iterable<SketchEntity> entities,
+) {
+  final counters = <SketchEntityType, int>{};
+  final names = <String, String>{};
+  for (final entity in entities) {
+    final next = (counters[entity.type] ?? 0) + 1;
+    counters[entity.type] = next;
+    names[entity.id] =
+        '${_friendlySketchEntityPrefix(entity)}'
+        '${next.toString().padLeft(3, '0')}';
+  }
+  return names;
+}
+
+String _friendlySketchEntityPrefix(SketchEntity entity) => switch (entity) {
+  SketchLine() => 'Line',
+  SketchCircle() => 'Circle',
+  SketchArc() => 'Arc',
+  SketchSpline() => 'Spline',
+  SketchPoint() => 'Point',
+  SketchEllipse() => 'Ellipse',
+  ConstructionGeometry() => 'Construction',
+  ReferenceGeometry() => 'Reference',
+  _ => 'Entity',
+};
+
+String _friendlyIssueEntities(
+  SketchHealthIssue issue,
+  Map<String, String> friendlyNames,
+) {
+  if (issue.entityIds.isEmpty) return 'No entities';
+  final labels = [for (final id in issue.entityIds) ?friendlyNames[id]];
+  if (labels.isEmpty) return '${issue.entityIds.length} sketch entity(s)';
+  final shown = labels.take(4).join(' - ');
+  final remaining = issue.entityIds.length - labels.take(4).length;
+  return remaining <= 0 ? shown : '$shown - +$remaining';
 }
 
 class _SketchDirectInput extends StatefulWidget {
@@ -12728,6 +13072,7 @@ class _SketchExplorerNodeState extends State<_SketchExplorerNode> {
         SketchHealthIssueType.selfIntersection,
         SketchHealthIssueType.tinyGeometry,
         SketchHealthIssueType.openEnd,
+        SketchHealthIssueType.disconnected,
       }.contains(issue.type);
     }).toList();
     return ExpansionTile(

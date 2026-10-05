@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import '../../core/cad_document/cad_document.dart';
 import '../cad_viewport/scene/cad_scene_graph.dart';
 import '../cad_viewport/rendering/kernel_display_mesh_pipeline.dart';
@@ -62,8 +64,11 @@ class CadDocumentSceneProjection {
         scene.remove(entity.id);
         continue;
       }
-      final geometry = entity.data['sceneGeometry'];
-      if (geometry is! Map) continue;
+      final geometry = _presentationGeometry(
+        entity,
+        entity.data['sceneGeometry'],
+      );
+      if (geometry == null) continue;
       scene.upsert(
         CadSceneEntity(
           id: entity.id,
@@ -101,8 +106,11 @@ class CadDocumentSceneProjection {
         scene.remove(entity.id);
         continue;
       }
-      final geometry = entity.data['sceneGeometry'];
-      if (geometry is! Map) {
+      final geometry = _presentationGeometry(
+        entity,
+        entity.data['sceneGeometry'],
+      );
+      if (geometry == null) {
         scene.remove(entity.id);
         continue;
       }
@@ -149,5 +157,34 @@ class CadDocumentSceneProjection {
       CadDocumentEntityKind.surface => CadSceneEntityKind.surface,
       CadDocumentEntityKind.recognition => CadSceneEntityKind.gizmo,
     };
+  }
+
+  Map<String, dynamic>? _presentationGeometry(
+    CadDocumentEntity entity,
+    Object? raw,
+  ) {
+    if (raw is! Map) return null;
+    final geometry = Map<String, dynamic>.from(raw);
+    final segments = geometry['segments'];
+    if (entity.kind != CadDocumentEntityKind.section || segments is! List) {
+      return geometry;
+    }
+    const maxSegments = 1000;
+    if (segments.length <= maxSegments) return geometry;
+    final stride = (segments.length / maxSegments).ceil();
+    final reduced = <Object?>[];
+    for (var start = 0; start < segments.length; start += stride) {
+      final end = math.min(start + stride - 1, segments.length - 1);
+      final first = segments[start];
+      final last = segments[end];
+      if (first is List &&
+          first.isNotEmpty &&
+          last is List &&
+          last.isNotEmpty) {
+        reduced.add([first.first, last.last]);
+      }
+    }
+    geometry['segments'] = reduced;
+    return geometry;
   }
 }

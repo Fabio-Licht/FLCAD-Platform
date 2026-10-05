@@ -30,6 +30,7 @@ class SketchEngine {
   final Map<String, SketchEntity> entities = {};
   final List<_Snapshot> _undo = [];
   final List<_Snapshot> _redo = [];
+  int _transactionDepth = 0;
   String? activeSketchId;
 
   Sketch createSketch(
@@ -117,26 +118,28 @@ class SketchEngine {
   });
 
   T transaction<T>(String label, T Function() operation) {
+    // Nested entity builders inside a higher-level operation must not capture
+    // the complete Sketch for every segment. The outer transaction remains the
+    // single undo/redo boundary and still restores atomically on failure.
+    if (_transactionDepth > 0) return operation();
+    _transactionDepth++;
     final before = _capture();
     final historyLength = history.entries.length;
-    final undoLength = _undo.length;
     final redoLength = _redo.length;
     try {
       final result = operation();
-      if (_undo.length > undoLength) {
-        _undo.removeRange(undoLength, _undo.length);
-        _undo.add(before);
-        _redo.clear();
-        history.truncate(historyLength);
-        history.record(SketchHistoryAction.modify, label);
-      }
+      _undo.add(before);
+      _redo.clear();
+      history.truncate(historyLength);
+      history.record(SketchHistoryAction.modify, label);
       return result;
     } catch (_) {
       _restore(before);
       history.truncate(historyLength);
-      _undo.removeRange(undoLength, _undo.length);
       _redo.removeRange(redoLength, _redo.length);
       rethrow;
+    } finally {
+      _transactionDepth--;
     }
   }
 
@@ -167,6 +170,7 @@ class SketchEngine {
     String target,
     T Function() operation,
   ) {
+    if (_transactionDepth > 0) return operation();
     final before = _capture(target);
     try {
       final result = operation();
@@ -198,8 +202,16 @@ class SketchEngine {
     for (final sketch in await repository.loadSketches()) {
       sketches[sketch.id] = sketch;
       graphs.sketch.addNode(sketch.id);
-      for (final entity in await repository.loadEntities(sketch.id)) {
+      // Older project versions could persist the entity files before the
+      // sketch root's entityIds list was updated.  Load the files as the
+      // source of truth and repair the root membership in memory so the
+      // editor, health checks and Explorer all see the same geometry.
+      final loadedEntities = await repository.loadEntities(sketch.id);
+      for (final entity in loadedEntities) {
         entities[entity.id] = entity;
+        if (!sketch.entityIds.contains(entity.id)) {
+          sketch.entityIds.add(entity.id);
+        }
         graphs.entities.addNode(entity.id);
         graphs.dependencies.addNode(entity.id);
       }

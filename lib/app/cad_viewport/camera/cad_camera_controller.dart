@@ -89,6 +89,7 @@ class CadCameraController extends ChangeNotifier {
   double get orthographicHeight => viewScale;
   set orthographicHeight(double value) => viewScale = value;
   CadCameraState? _preSketchState;
+  double? _preSketchModelRadius;
   double _modelRadius = 1;
 
   bool get isInSketchMode => _preSketchState != null;
@@ -118,6 +119,8 @@ class CadCameraController extends ChangeNotifier {
     double visualSize = 60,
   }) {
     _preSketchState ??= snapshot();
+    _preSketchModelRadius ??= _modelRadius;
+    _modelRadius = math.max(visualSize, .01);
     final n = normal.normalized;
     final x = xDirection.normalized;
     final y = n.cross(x).normalized;
@@ -150,6 +153,8 @@ class CadCameraController extends ChangeNotifier {
     fieldOfViewRadians = state.fieldOfViewRadians;
     nearPlane = state.nearPlane;
     farPlane = state.farPlane;
+    _modelRadius = _preSketchModelRadius ?? _modelRadius;
+    _preSketchModelRadius = null;
     presentationTranslation = state.presentationTranslation;
     presentationOffsetNdcX = state.presentationOffsetNdcX;
     presentationOffsetNdcY = state.presentationOffsetNdcY;
@@ -442,7 +447,9 @@ class CadCameraController extends ChangeNotifier {
     if (!factor.isFinite || factor <= 0) return;
     if (projectionMode == CadProjectionMode.orthographic) {
       final scale = (viewScale * factor)
-          .clamp(_modelRadius * .02, _modelRadius * 100)
+          // Sketch sections can be very small relative to the document
+          // bounds; keep enough headroom for inspecting sub-millimetric gaps.
+          .clamp(_modelRadius * .002, _modelRadius * 1000000)
           .toDouble();
       final ratio = scale / viewScale;
       if (anchor != null) {
@@ -461,8 +468,8 @@ class CadCameraController extends ChangeNotifier {
       // the model effectively impossible to recover without Fit View.
       final distance = (offset.length * factor)
           .clamp(
-            math.max(nearPlane * 4, _modelRadius * .02),
-            math.min(farPlane * .8, _modelRadius * 100),
+            math.max(nearPlane * 4, _modelRadius * .002),
+            math.min(farPlane * .8, _modelRadius * 1000000),
           )
           .toDouble();
       if (anchor == null) {
@@ -473,7 +480,7 @@ class CadCameraController extends ChangeNotifier {
         target = anchor + (target - anchor) * ratio;
       }
       viewScale = (viewScale * distance / math.max(offset.length, 1e-12))
-          .clamp(_modelRadius * .02, _modelRadius * 100)
+          .clamp(_modelRadius * .002, _modelRadius * 1000000)
           .toDouble();
     }
     notifyListeners();

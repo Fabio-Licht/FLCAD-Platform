@@ -2346,7 +2346,9 @@ class _CadScenePainter extends CustomPainter {
               : referenceCurveHighlight
               ? const Color(0xffffc857)
               : referenceCurve
-              ? const Color(0xffb56cff)
+              // Thin magenta reference line, matching the conventional
+              // reverse-engineering section display without filling the mesh.
+              ? const Color(0xffe5007d)
               : assistantSuggestion
               ? const Color(0xff4de1d2)
               : entity.kind == CadSceneEntityKind.preview
@@ -2357,7 +2359,9 @@ class _CadScenePainter extends CustomPainter {
           final paint = Paint()
             ..color = referenceColor
             ..strokeWidth = entity.selected
-                ? 2.1
+                ? 1.7
+                : referenceCurve
+                ? 0.9
                 : (entity.geometry['strokeWidth'] as num?)?.toDouble() ?? 1.35
             ..strokeCap = StrokeCap.round
             ..isAntiAlias = true;
@@ -2393,6 +2397,9 @@ class _CadScenePainter extends CustomPainter {
             'destructiveRed' => Colors.redAccent,
             'splineMagenta' => const Color(0xffd489ff),
             'sketchGreen' => const Color(0xff7cda72),
+            'reconstructedLine' => const Color(0xff5ec8ff),
+            'reconstructedCircle' => const Color(0xffffc857),
+            'reconstructedArc' => const Color(0xffff8f66),
             'previewOrange' => const Color(0xffff9f43),
             'assistantSuggestion' => const Color(0xff4de1d2),
             'sectionBlue' => const Color(0xff4cb9e8),

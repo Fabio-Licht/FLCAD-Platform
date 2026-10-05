@@ -50,4 +50,20 @@ void main() {
       throwsStateError,
     );
   });
+
+  test('uses closed profile and ignores loose section leftovers', () {
+    final profile = builder.buildProfile(
+      entities: [
+        SketchLine(const SketchVector(0, 0), const SketchVector(4, 0)),
+        SketchLine(const SketchVector(4, 0), const SketchVector(4, 2)),
+        SketchLine(const SketchVector(4, 2), const SketchVector(0, 2)),
+        SketchLine(const SketchVector(0, 2), const SketchVector(0, 0)),
+        SketchLine(const SketchVector(10, 10), const SketchVector(11, 10)),
+      ],
+      coordinates: const SketchCoordinateSystem(),
+    );
+
+    expect(profile.loops, hasLength(1));
+    expect(profile.triangles, hasLength(6));
+  });
 }
