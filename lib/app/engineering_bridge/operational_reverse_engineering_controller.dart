@@ -517,37 +517,38 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> acceptSketchReconstructionSuggestion(
+  Future<String?> acceptSketchReconstructionSuggestion(
     SketchReconstructionSuggestion suggestion, {
     bool allowLowConfidence = false,
   }) async {
     final api = sketchApi;
-    if (api == null) return;
+    if (api == null) return null;
     final entities = suggestion.entityIds
         .map(api.entity)
         .whereType<SketchEntity>()
         .toList(growable: false);
-    if (entities.length != suggestion.entityIds.length) return;
+    if (entities.length != suggestion.entityIds.length) return null;
+    final isCircularPromotion =
+        suggestion.kind == SketchReconstructionKind.circle ||
+        suggestion.kind == SketchReconstructionKind.arc;
+    String? promotedId;
     if (suggestion.kind == SketchReconstructionKind.parallel ||
         suggestion.kind == SketchReconstructionKind.perpendicular) {
       final type = suggestion.kind == SketchReconstructionKind.parallel
           ? SketchConstraintType.parallel
           : SketchConstraintType.perpendicular;
       final constraints = constraintApi;
-      if (constraints == null) return;
+      if (constraints == null) return null;
       final created = constraints.builders.of(type).build(suggestion.entityIds);
       await constraints.solve(only: [created.id]);
     } else {
-      final isCircularPromotion =
-          suggestion.kind == SketchReconstructionKind.circle ||
-          suggestion.kind == SketchReconstructionKind.arc;
       if (isCircularPromotion &&
           suggestion.confidence < .75 &&
           !allowLowConfidence) {
         error =
             'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).';
         notifyListeners();
-        return;
+        return null;
       }
       final canPromoteCurve =
           isCircularPromotion &&
@@ -571,6 +572,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                   suggestion.startAngle!,
                   suggestion.endAngle!,
                 );
+          promotedId = promoted.id;
           api.engine.modify(
             promoted.id,
             SketchHistoryAction.modify,
@@ -594,6 +596,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           }
         }
       });
+      if (promotedId != null) {
+        selectedSketchEntityIds
+          ..clear()
+          ..add(promotedId!);
+        runtime.select(selectedSketchEntityIds);
+      }
     }
     _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
         .where((item) => !identical(item, suggestion))
@@ -608,6 +616,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     await _synchronizeSketchScene();
     notifyListeners();
+    return isCircularPromotion ? promotedId : null;
   }
 
   /// Fits a native circle/arc from a short chain selected directly on the
@@ -637,10 +646,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    await acceptSketchReconstructionSuggestion(
+    final promotedId = await acceptSketchReconstructionSuggestion(
       suggestion,
       allowLowConfidence: true,
     );
+    if (promotedId == null) return;
     sketchCircularFitMessage =
         '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · raio ${suggestion.radius!.toStringAsFixed(3)} mm';
     runtime.write('sketch.circularSelectionMode', false);

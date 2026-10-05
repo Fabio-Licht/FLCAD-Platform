@@ -240,9 +240,12 @@ class SketchHealthAnalyzer {
           endpointIndicesByEntity,
           endpointIndicesByVertex,
         );
-    final validationScope = closedProfile
-        ? activeProfileIds
-        : entities.map((entity) => entity.id).toSet();
+    // Health is scoped to the active component even while it is open. Other
+    // visible section remnants remain useful diagnostics, but cannot turn an
+    // unrelated profile problem into a blocking error for the active edit.
+    final validationScope = activeProfileIds.isEmpty
+        ? entities.map((entity) => entity.id).toSet()
+        : activeProfileIds;
     final diagnosticIds = {
       for (final entity in entities)
         if (!activeProfileIds.contains(entity.id)) entity.id,
@@ -252,7 +255,7 @@ class SketchHealthAnalyzer {
     bool allInValidationScope(Iterable<String> ids) =>
         ids.every(inValidationScope);
     void addIssue(SketchHealthIssue issue) {
-      final blocking = !closedProfile || allInValidationScope(issue.entityIds);
+      final blocking = issue.entityIds.any(inValidationScope);
       issues.add(
         SketchHealthIssue(
           type: issue.type,
@@ -261,7 +264,7 @@ class SketchHealthAnalyzer {
           locations: issue.locations,
           distance: issue.distance,
           endpointReferences: issue.endpointReferences,
-          canAutoHeal: issue.canAutoHeal && blocking,
+          canAutoHeal: issue.canAutoHeal,
           severity: blocking
               ? SketchHealthIssueSeverity.error
               : SketchHealthIssueSeverity.warning,
@@ -299,9 +302,9 @@ class SketchHealthAnalyzer {
           scope: SketchHealthIssueScope.sketch,
         ),
       );
-    } else if (!closedProfile && components.length > 1) {
+    } else if (!closedProfile && diagnosticIds.isNotEmpty) {
       final disconnected = components.values
-          .skip(1)
+          .where((component) => component.any(diagnosticIds.contains))
           .expand((component) => component)
           .toList(growable: false);
       final representative = disconnected
@@ -316,14 +319,14 @@ class SketchHealthAnalyzer {
           locations: representative == null
               ? const []
               : _sample(representative).take(1).toList(),
+          severity: SketchHealthIssueSeverity.warning,
+          scope: SketchHealthIssueScope.sketch,
         ),
       );
     }
     final loose = [
       for (var i = 0; i < endpoints.length; i++)
-        if ((endpointIndicesByVertex[endpointRoot(i)]?.length ?? 0) != 2 &&
-            inValidationScope(endpoints[i].entityId))
-          i,
+        if ((endpointIndicesByVertex[endpointRoot(i)]?.length ?? 0) != 2) i,
     ];
     final gapEndpoints = <int>{};
     for (var a = 0; a < loose.length; a++) {
@@ -335,7 +338,7 @@ class SketchHealthAnalyzer {
           gapEndpoints
             ..add(loose[a])
             ..add(loose[b]);
-          issues.add(
+          addIssue(
             SketchHealthIssue(
               type: SketchHealthIssueType.gap,
               message: 'Gap ${distance.toStringAsFixed(3)} mm',
@@ -354,7 +357,7 @@ class SketchHealthAnalyzer {
       final vertex = endpointRoot(index);
       if (!reportedOpenVertices.add(vertex)) continue;
       final endpoint = endpoints[index];
-      issues.add(
+      addIssue(
         SketchHealthIssue(
           type: SketchHealthIssueType.openEnd,
           message: (endpointIndicesByVertex[vertex]?.length ?? 0) > 2
@@ -374,10 +377,9 @@ class SketchHealthAnalyzer {
     }
 
     for (var i = 0; i < entities.length; i++) {
-      if (!inValidationScope(entities[i].id)) continue;
       final selfHit = _selfIntersection(entities[i]);
       if (selfHit != null) {
-        issues.add(
+        addIssue(
           SketchHealthIssue(
             type: SketchHealthIssueType.selfIntersection,
             message: 'Profile entity crosses itself',
@@ -387,11 +389,10 @@ class SketchHealthAnalyzer {
         );
       }
       for (var j = i + 1; j < entities.length; j++) {
-        if (!inValidationScope(entities[j].id)) continue;
         if (_isDuplicatePair(issues, entities[i].id, entities[j].id)) continue;
         final intersection = _interiorIntersection(entities[i], entities[j]);
         if (intersection != null) {
-          issues.add(
+          addIssue(
             SketchHealthIssue(
               type: SketchHealthIssueType.selfIntersection,
               message: 'Profile entities cross',
@@ -400,7 +401,7 @@ class SketchHealthAnalyzer {
             ),
           );
         } else if (_overlap(entities[i], entities[j])) {
-          issues.add(
+          addIssue(
             SketchHealthIssue(
               type: SketchHealthIssueType.overlap,
               message: 'Overlapping geometry',

@@ -126,6 +126,49 @@ void main() {
         line.id,
       );
 
+      // Manual circular reconstruction replaces a connected chain while
+      // retaining its two external vertices and selecting the native arc.
+      SketchVector circularPoint(double angle) =>
+          SketchVector(100 + 5 * math.cos(angle), 5 * math.sin(angle));
+      final sourceA = controller.sketchApi!.builders.line.build(
+        circularPoint(0),
+        circularPoint(.3),
+      );
+      final sourceB = controller.sketchApi!.builders.line.build(
+        circularPoint(.3),
+        circularPoint(.6),
+      );
+      final followingSource = controller.sketchApi!.builders.line.build(
+        circularPoint(.6),
+        const SketchVector(110, 10),
+      );
+      final closingSource = controller.sketchApi!.builders.line.build(
+        const SketchVector(110, 10),
+        circularPoint(0),
+      );
+      controller.selectSketchEntity(sourceA.id);
+      controller.toggleSketchSelection(sourceB.id);
+      await controller.fitSelectedSketchCircularGeometry();
+      final fittedId = controller.selectedSketchEntityIds.single;
+      final fitted = controller.sketchApi!.entity(fittedId)! as SketchArc;
+      expect(sourceA.visible, isFalse);
+      expect(sourceB.visible, isFalse);
+      expect(controller.selectedSketchEntityIds, {fitted.id});
+      expect(
+        controller.sketchHealth
+            .ofType(SketchHealthIssueType.gap)
+            .where((issue) => issue.entityIds.contains(fitted.id)),
+        isEmpty,
+      );
+      expect(
+        controller.sketchHealth
+            .ofType(SketchHealthIssueType.openEnd)
+            .where((issue) => issue.entityIds.contains(fitted.id)),
+        isEmpty,
+      );
+      expect(followingSource.visible, isTrue);
+      expect(closingSource.visible, isTrue);
+
       await controller.updateSketchEntityParameters(line.id, {
         'angleDegrees': 45,
       });

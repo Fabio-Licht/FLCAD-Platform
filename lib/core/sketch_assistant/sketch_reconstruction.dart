@@ -14,6 +14,8 @@ class SketchReconstructionSuggestion {
     this.radius,
     this.startAngle,
     this.endAngle,
+    this.startPoint,
+    this.endPoint,
   });
 
   final SketchReconstructionKind kind;
@@ -23,6 +25,10 @@ class SketchReconstructionSuggestion {
   final double? radius;
   final double? startAngle;
   final double? endAngle;
+
+  /// Boundary points retained when a manual circular fit replaces a chain.
+  final SketchVector? startPoint;
+  final SketchVector? endPoint;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -46,6 +52,9 @@ class SketchReconstructionEngine {
     Iterable<SketchEntity> selected,
   ) {
     final entities = selected.toList(growable: false);
+    if (entities.length > 3) return null;
+    final boundary = _continuousChainBoundaries(entities);
+    if (boundary == null) return null;
     final points = <SketchVector>[];
     for (final entity in entities) {
       if (entity is SketchLine) {
@@ -70,7 +79,26 @@ class SketchReconstructionEngine {
       }
     }
     if (uniquePoints.length < 3) return null;
-    final fit = _fitCircle(uniquePoints);
+    final anchor =
+        uniquePoints
+            .where(
+              (point) =>
+                  _distance(point, boundary.start) > 1e-7 &&
+                  _distance(point, boundary.end) > 1e-7,
+            )
+            .toList(growable: false)
+          ..sort(
+            (first, second) => _distanceToLine(
+              second,
+              boundary.start,
+              boundary.end,
+            ).compareTo(_distanceToLine(first, boundary.start, boundary.end)),
+          );
+    if (anchor.isEmpty) return null;
+    // A least-squares circle can move its endpoints away from the source
+    // chain. Build from the two boundary vertices and one interior sample so
+    // the replacement arc keeps the profile connected exactly.
+    final fit = _circleThrough(boundary.start, anchor.first, boundary.end);
     if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
       return null;
     }
@@ -79,42 +107,163 @@ class SketchReconstructionEngine {
             .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
             .fold<double>(0, (sum, value) => sum + value) /
         uniquePoints.length;
-    final angles =
-        uniquePoints
-            .map((point) => math.atan2(point.y - fit.$1.y, point.x - fit.$1.x))
-            .toList()
-          ..sort();
-    var largestGap = 0.0;
-    var gapEnd = 0.0;
-    for (var index = 0; index < angles.length; index++) {
-      final next = index + 1 < angles.length
-          ? angles[index + 1]
-          : angles.first + 2 * math.pi;
-      if (next - angles[index] > largestGap) {
-        largestGap = next - angles[index];
-        gapEnd = next;
-      }
-    }
-    final sweep = 2 * math.pi - largestGap;
-    final kind = sweep >= 2 * math.pi - .5
-        ? SketchReconstructionKind.circle
-        : sweep >= .2
-        ? SketchReconstructionKind.arc
-        : null;
-    if (kind == null) return null;
+    final startAngle = math.atan2(
+      boundary.start.y - fit.$1.y,
+      boundary.start.x - fit.$1.x,
+    );
+    final endAngle = math.atan2(
+      boundary.end.y - fit.$1.y,
+      boundary.end.x - fit.$1.x,
+    );
+    final anchorAngle = math.atan2(
+      anchor.first.y - fit.$1.y,
+      anchor.first.x - fit.$1.x,
+    );
+    final ccwSweep = _positiveSweep(startAngle, endAngle);
+    final startContainsAnchor =
+        _positiveSweep(startAngle, anchorAngle) <= ccwSweep + 1e-7;
+    final arcStart = startContainsAnchor ? startAngle : endAngle;
+    final sweep = startContainsAnchor
+        ? ccwSweep
+        : _positiveSweep(endAngle, startAngle);
+    if (sweep < .2) return null;
     return SketchReconstructionSuggestion(
-      kind: kind,
+      kind: SketchReconstructionKind.arc,
       entityIds: entities.map((entity) => entity.id).toList(growable: false),
       confidence: (1 - error / math.max(math.max(.5, fit.$2 * .05), 1e-9))
           .clamp(0.0, 1.0),
       center: fit.$1,
       radius: fit.$2,
-      // The occupied angular interval is the complement of the largest gap.
-      // Using input order here can produce a nearly full-circle "giant arc"
-      // when lines were clicked in reverse order or straddle -pi/pi.
-      startAngle: gapEnd >= math.pi ? gapEnd - 2 * math.pi : gapEnd,
-      endAngle: (gapEnd >= math.pi ? gapEnd - 2 * math.pi : gapEnd) + sweep,
+      startAngle: arcStart,
+      endAngle: arcStart + sweep,
+      startPoint: startContainsAnchor ? boundary.start : boundary.end,
+      endPoint: startContainsAnchor ? boundary.end : boundary.start,
     );
+  }
+
+  ({SketchVector start, SketchVector end})? _continuousChainBoundaries(
+    List<SketchEntity> entities,
+  ) {
+    if (entities.length < 2) return null;
+    final endpoints = <({String entityId, SketchVector point})>[];
+    for (final entity in entities) {
+      if (entity is SketchLine) {
+        endpoints
+          ..add((
+            entityId: entity.id,
+            point: SketchVector.fromJson(entity.parameters['start']),
+          ))
+          ..add((
+            entityId: entity.id,
+            point: SketchVector.fromJson(entity.parameters['end']),
+          ));
+      } else if (entity is SketchSpline) {
+        final raw =
+            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
+                as List?;
+        final points =
+            raw?.whereType<List>().map(SketchVector.fromJson).toList() ??
+            const <SketchVector>[];
+        if (points.length < 2) return null;
+        endpoints
+          ..add((entityId: entity.id, point: points.first))
+          ..add((entityId: entity.id, point: points.last));
+      } else {
+        return null;
+      }
+    }
+    final groups = <List<int>>[];
+    for (var index = 0; index < endpoints.length; index++) {
+      final group = groups.firstWhere(
+        (candidate) => candidate.any(
+          (other) =>
+              _distance(endpoints[index].point, endpoints[other].point) <= 1e-7,
+        ),
+        orElse: () {
+          final created = <int>[];
+          groups.add(created);
+          return created;
+        },
+      );
+      group.add(index);
+    }
+    final external = groups.where((group) => group.length == 1).toList();
+    if (external.length != 2 || groups.any((group) => group.length > 2)) {
+      return null;
+    }
+    final adjacent = <String, Set<String>>{
+      for (final entity in entities) entity.id: <String>{},
+    };
+    for (final group in groups.where((group) => group.length == 2)) {
+      final first = endpoints[group.first].entityId;
+      final second = endpoints[group.last].entityId;
+      if (first != second) {
+        adjacent[first]!.add(second);
+        adjacent[second]!.add(first);
+      }
+    }
+    final visited = <String>{entities.first.id};
+    final pending = <String>[entities.first.id];
+    while (pending.isNotEmpty) {
+      final current = pending.removeLast();
+      for (final next in adjacent[current]!) {
+        if (visited.add(next)) pending.add(next);
+      }
+    }
+    if (visited.length != entities.length) return null;
+    return (
+      start: endpoints[external.first.single].point,
+      end: endpoints[external.last.single].point,
+    );
+  }
+
+  (SketchVector, double)? _circleThrough(
+    SketchVector first,
+    SketchVector middle,
+    SketchVector last,
+  ) {
+    final determinant =
+        2 *
+        (first.x * (middle.y - last.y) +
+            middle.x * (last.y - first.y) +
+            last.x * (first.y - middle.y));
+    if (determinant.abs() <= 1e-12) return null;
+    final first2 = first.dot(first);
+    final middle2 = middle.dot(middle);
+    final last2 = last.dot(last);
+    final center = SketchVector(
+      (first2 * (middle.y - last.y) +
+              middle2 * (last.y - first.y) +
+              last2 * (first.y - middle.y)) /
+          determinant,
+      (first2 * (last.x - middle.x) +
+              middle2 * (first.x - last.x) +
+              last2 * (middle.x - first.x)) /
+          determinant,
+    );
+    return (center, _distance(center, first));
+  }
+
+  double _distanceToLine(
+    SketchVector point,
+    SketchVector start,
+    SketchVector end,
+  ) {
+    final dx = end.x - start.x, dy = end.y - start.y;
+    final length = math.sqrt(dx * dx + dy * dy);
+    if (length <= 1e-12) return 0;
+    return ((point.x - start.x) * dy - (point.y - start.y) * dx).abs() / length;
+  }
+
+  double _positiveSweep(double start, double end) {
+    var value = end - start;
+    while (value < 0) {
+      value += 2 * math.pi;
+    }
+    while (value >= 2 * math.pi) {
+      value -= 2 * math.pi;
+    }
+    return value;
   }
 
   List<SketchReconstructionSuggestion> analyze(

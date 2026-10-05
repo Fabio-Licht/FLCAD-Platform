@@ -25,6 +25,52 @@ void main() {
     expect(fit.entityIds, containsAll([first.id, second.id]));
     expect(fit.radius, closeTo(5, 1e-5));
     expect(fit.endAngle! - fit.startAngle!, closeTo(.6, 1e-5));
+    final start = SketchVector(
+      fit.center!.x + fit.radius! * math.cos(fit.startAngle!),
+      fit.center!.y + fit.radius! * math.sin(fit.startAngle!),
+    );
+    final end = SketchVector(
+      fit.center!.x + fit.radius! * math.cos(fit.endAngle!),
+      fit.center!.y + fit.radius! * math.sin(fit.endAngle!),
+    );
+    expect(
+      [start, end].any(
+        (value) =>
+            (value.x - point(0).x).abs() < 1e-8 &&
+            (value.y - point(0).y).abs() < 1e-8,
+      ),
+      isTrue,
+    );
+    expect(
+      [start, end].any(
+        (value) =>
+            (value.x - point(.6).x).abs() < 1e-8 &&
+            (value.y - point(.6).y).abs() < 1e-8,
+      ),
+      isTrue,
+    );
+    expect(fit.startPoint, isNotNull);
+    expect(fit.endPoint, isNotNull);
+  });
+
+  test('manual fit rejects a continuous chain longer than three segments', () {
+    final fit = const SketchReconstructionEngine().fitSelectedCircular([
+      SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
+      SketchLine(const SketchVector(1, 0), const SketchVector(2, 0)),
+      SketchLine(const SketchVector(2, 0), const SketchVector(3, 0)),
+      SketchLine(const SketchVector(3, 0), const SketchVector(4, 0)),
+    ]);
+
+    expect(fit, isNull);
+  });
+
+  test('manual fit rejects selected segments that are not one chain', () {
+    final fit = const SketchReconstructionEngine().fitSelectedCircular([
+      SketchLine(const SketchVector(0, 0), const SketchVector(1, 1)),
+      SketchLine(const SketchVector(4, 0), const SketchVector(5, 1)),
+    ]);
+
+    expect(fit, isNull);
   });
 
   test(

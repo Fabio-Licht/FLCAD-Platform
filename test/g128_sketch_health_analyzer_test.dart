@@ -82,7 +82,12 @@ void main() {
     ]);
 
     expect(report.hasSelfIntersections, isTrue);
-    expect(report.hasTinyGeometry, isTrue);
+    expect(
+      report
+          .ofType(SketchHealthIssueType.tinyGeometry)
+          .any((issue) => issue.blocking),
+      isFalse,
+    );
     expect(report.hasOpenEnds, isTrue);
   });
 
@@ -257,6 +262,43 @@ void main() {
     expect(report.activeProfileEntityIds, {'open-a', 'open-b'});
     expect(report.hasOpenEnds, isTrue);
   });
+
+  test(
+    'external regions stay warnings while an active open chain is edited',
+    () {
+      final report = analyzer.analyze(
+        [
+          SketchLine(
+            const SketchVector(0, 0),
+            const SketchVector(10, 0),
+            id: 'active-a',
+          ),
+          SketchLine(
+            const SketchVector(10, 0),
+            const SketchVector(20, 0),
+            id: 'active-b',
+          ),
+          SketchLine(
+            const SketchVector(100, 0),
+            const SketchVector(101, 0),
+            id: 'external',
+          ),
+        ],
+        activeSelection: const ['active-a'],
+      );
+
+      expect(report.closedProfile, isFalse);
+      expect(report.activeProfileEntityIds, {'active-a', 'active-b'});
+      expect(
+        report.blockingIssues.every(
+          (issue) =>
+              issue.entityIds.any(report.activeProfileEntityIds.contains),
+        ),
+        isTrue,
+      );
+      expect(report.warningIssues, isNotEmpty);
+    },
+  );
 
   test(
     'construction and reference entities are ignored by active profile health',
