@@ -895,7 +895,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   SketchHealthReport get sketchHealth => _sketchHealthAnalyzer.analyze(
-    sketchEntities,
+    // Hidden reconstruction inputs must not be analysed: otherwise their
+    // endpoints keep producing openEnd/gap/disconnected after a circular
+    // fit already replaced them. The global sketchEntities getter stays
+    // untouched because other flows need the full membership.
+    sketchEntities.where((entity) => entity.visible),
     activeSelection: selectedSketchEntityIds,
   );
   SketchHealthReport healthForSketch(String sketchId) {
@@ -12567,9 +12571,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           // Explorer visibility is persisted by CadRuntime without rebuilding
           // Sketch geometry. Preserve that localized display state whenever a
           // later parametric edit republishes the Sketch document projection.
+          // Never resurrect a hidden entity from stale scene state: a false
+          // document visibility is authoritative, a true one only restores
+          // the entity when it was not hidden by reconstruction.
           final persistedVisibility =
               document.entities[id]?.data['sceneVisible'];
-          if (persistedVisibility is bool) entity.visible = persistedVisibility;
+          if (persistedVisibility == true &&
+              entity.metadata['reconstructionKind'] == null) {
+            entity.visible = true;
+          } else if (persistedVisibility == false) {
+            entity.visible = false;
+          }
           allSketchEntities.add(entity);
           sketchByEntityId[id] = sketch;
           final number = (counts[entity.type] ?? 0) + 1;

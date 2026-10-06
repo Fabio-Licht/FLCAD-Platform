@@ -169,9 +169,21 @@ void main() {
       expect(followingSource.visible, isTrue);
       expect(closingSource.visible, isTrue);
 
+      // Hidden reconstruction inputs must not keep raising health issues,
+      // and a later synchronisation must not resurrect them from stale
+      // scene state while the native arc stays the active profile.
+      for (final hidden in [sourceA.id, sourceB.id]) {
+        expect(controller.sketchHealth.issues.any((issue) =>
+            issue.entityIds.contains(hidden)), isFalse);
+      }
+      expect(controller.sketchHealth.blockingIssues,
+          everyElement(predicate<SketchHealthIssue>((issue) =>
+              issue.entityIds.contains(fitted.id))));
       await controller.updateSketchEntityParameters(line.id, {
         'angleDegrees': 45,
       });
+      expect(sourceA.visible, isFalse);
+      expect(sourceB.visible, isFalse);
       expect(edited.parameters['angleDegrees'], closeTo(45, 1e-10));
       await controller.undo();
       expect(
