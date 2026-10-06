@@ -12891,7 +12891,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ));
       }
     }
-    if (remaining.length < 3) return const {'points': <List<double>>[]};
+    if (remaining.length < 3) {
+      return const {'points': <List<double>>[], 'pickOnly': true};
+    }
     final ordered = <SketchVector>[remaining.first.$1, remaining.first.$2];
     remaining.removeAt(0);
     while (remaining.isNotEmpty) {
@@ -12911,6 +12913,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           .map(sketch.coordinates.localToGlobal)
           .map((point) => point.toJson())
           .toList(growable: false),
+      // The child curves already paint this profile. This projection exists
+      // only to give Extrude a pickable closed target, so the Flutter overlay
+      // must never paint it a second time.
+      'pickOnly': true,
       'pickOnlyClosedProfile': closed,
       'displayColor': 'sketchProfilePickTarget',
     };

@@ -1994,7 +1994,13 @@ class _CadScenePainter extends CustomPainter {
   }
 
   void _paintReference(Canvas canvas, Size size, CadSceneEntity entity) {
-    if (entity.geometry['pickOnlyClosedProfile'] == true) return;
+    // Pick-only geometry (Sketch profile targets) is published exclusively for
+    // hit testing; the owning child curves paint the visible profile. Painting
+    // it here duplicated the whole contour on every camera frame.
+    if (entity.geometry['pickOnly'] == true ||
+        entity.geometry['pickOnlyClosedProfile'] == true) {
+      return;
+    }
     Vector3 vector(Object? value) {
       final values = value as List;
       return Vector3(

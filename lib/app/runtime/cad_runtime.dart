@@ -2638,14 +2638,25 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
 
   Future<void> setEntityVisibility(String id, bool visible) =>
       _enqueue((tx) async {
+        final document = _requireDocument();
         final entity =
-            _requireDocument().entities[id] ??
+            document.entities[id] ??
             (throw StateError('Unknown document entity: $id'));
         if (entity.kind == CadDocumentEntityKind.collection) {
           await _updateCollection(tx, id, visible: visible);
           return;
         }
-        if ((entity.data['sceneVisible'] ?? true) == visible) return;
+        // A Sketch root owns its curves and sampled points. Hiding or showing
+        // the root must move the whole overlay, otherwise the green curves and
+        // endpoints stay painted above the native texture.
+        final children = document.entities.values
+            .where((child) => child.data['parentSketchId'] == id)
+            .toList(growable: false);
+        final alreadyVisible = (entity.data['sceneVisible'] ?? true) == visible;
+        final childrenMatch = children.every(
+          (child) => (child.data['sceneVisible'] ?? true) == visible,
+        );
+        if (alreadyVisible && childrenMatch) return;
         await _mutateDocument(
           tx,
           command: 'display.visibility',
@@ -2659,6 +2670,15 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               mesh: entity.mesh,
               data: {...entity.data, 'sceneVisible': visible},
             ),
+            for (final child in children)
+              CadDocumentEntity(
+                id: child.id,
+                kind: child.kind,
+                placement: child.placement,
+                shape: child.shape,
+                mesh: child.mesh,
+                data: {...child.data, 'sceneVisible': visible},
+              ),
           ],
         );
       });
