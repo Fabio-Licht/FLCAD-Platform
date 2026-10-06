@@ -101,6 +101,17 @@ void main() {
             .every((entity) => entity?.data['sceneVisible'] == true),
         isTrue,
       );
+      // A Section-derived Sketch is a regular Sketch root for Hide/Show.
+      await controller.toggleActiveSketchVisibility();
+      expect(
+        cad.runtime.document!.entities[sketch.id]!.data['sceneVisible'],
+        isFalse,
+      );
+      await controller.toggleActiveSketchVisibility();
+      expect(
+        cad.runtime.document!.entities[sketch.id]!.data['sceneVisible'],
+        isTrue,
+      );
       final health = controller.sketchHealth;
       expect(health.readyForSurface, controller.sketchReadyForSurface);
       if (!health.readyForSurface) {

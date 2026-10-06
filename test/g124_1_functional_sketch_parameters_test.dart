@@ -146,8 +146,13 @@ void main() {
         circularPoint(-.3),
         circularPoint(0),
       );
+      // This follows the viewport's multi-selection flow rather than writing
+      // directly to the selection set: both picked section curves must reach
+      // the fit command in insertion order.
+      controller.beginSketchCircularSelection();
       controller.selectSketchEntity(sourceA.id);
-      controller.toggleSketchSelection(sourceB.id);
+      controller.selectSketchEntity(sourceB.id);
+      expect(controller.selectedSketchEntityIds, {sourceA.id, sourceB.id});
       await controller.fitSelectedSketchCircularGeometry();
       final fittedId = controller.selectedSketchEntityIds.single;
       final fitted = controller.sketchApi!.entity(fittedId)! as SketchArc;
@@ -213,6 +218,7 @@ void main() {
       expect(sourceA.visible, isFalse);
       expect(sourceB.visible, isFalse);
       expect(edited.parameters['angleDegrees'], closeTo(45, 1e-10));
+
       await controller.undo();
       expect(
         controller.sketchApi!.entity(line.id)!.parameters['angleDegrees'],
@@ -222,6 +228,129 @@ void main() {
       expect(
         controller.sketchApi!.entity(line.id)!.parameters['angleDegrees'],
         closeTo(45, 1e-10),
+      );
+
+      // A root toggle must restore the promoted arc after a synchronization,
+      // without resurrecting the source curves hidden by reconstruction.
+      // Remove the new marker to simulate a project persisted before this
+      // migration.  The sources retain reconstructionKind + visible=false.
+      final legacySourceA = controller.sketchApi!.entity(sourceA.id)!;
+      final legacySourceB = controller.sketchApi!.entity(sourceB.id)!;
+      legacySourceA.metadata.remove('reconstructionHidden');
+      legacySourceB.metadata.remove('reconstructionHidden');
+      await cad.runtime.setEntityVisibility(line.id, false);
+      await controller.toggleActiveSketchVisibility();
+      await controller.updateSketchEntityParameters(line.id, {
+        'angleDegrees': 44,
+      });
+      await controller.toggleActiveSketchVisibility();
+      expect(fitted.visible, isTrue);
+      expect(sourceA.visible, isFalse);
+      expect(sourceB.visible, isFalse);
+      expect(
+        controller.sketchApi!
+            .entity(sourceA.id)!
+            .metadata['reconstructionHidden'],
+        isTrue,
+      );
+      expect(
+        controller.sketchApi!
+            .entity(sourceB.id)!
+            .metadata['reconstructionHidden'],
+        isTrue,
+      );
+      expect(
+        controller.sketchApi!
+            .entity(fitted.id)!
+            .metadata['reconstructionHidden'],
+        isNull,
+      );
+      expect(
+        controller.sketchApi!.entity(line.id)!.metadata['reconstructionHidden'],
+        isNull,
+      );
+      expect(
+        cad.runtime.document!.entities[fitted.id]!.data['sceneVisible'],
+        isTrue,
+      );
+      expect(
+        cad.runtime.document!.entities[sourceA.id]!.data['sceneVisible'],
+        isFalse,
+      );
+      await controller.toggleActiveSketchVisibility();
+      await controller.toggleActiveSketchVisibility();
+      expect(fitted.visible, isTrue);
+      expect(sourceA.visible, isFalse);
+      // Repeating synchronization preserves the migrated marker without
+      // converting a manually hidden normal Sketch entity into a source.
+      await controller.updateSketchEntityParameters(line.id, {
+        'angleDegrees': 43,
+      });
+      expect(
+        controller.sketchApi!
+            .entity(sourceA.id)!
+            .metadata['reconstructionHidden'],
+        isTrue,
+      );
+      expect(
+        controller.sketchApi!
+            .entity(fitted.id)!
+            .metadata['reconstructionHidden'],
+        isNull,
+      );
+      expect(
+        controller.sketchApi!.entity(line.id)!.metadata['reconstructionHidden'],
+        isNull,
+      );
+
+      // Three real viewport-style selections also reach the fit command and
+      // create the native arc before C1 is evaluated by the reconstruction.
+      SketchVector threePoint(double angle) =>
+          SketchVector(200 + 5 * math.cos(angle), 5 * math.sin(angle));
+      final threeA = controller.sketchApi!.builders.line.build(
+        threePoint(0),
+        threePoint(.2),
+      );
+      final threeB = controller.sketchApi!.builders.line.build(
+        threePoint(.2),
+        threePoint(.4),
+      );
+      final threeC = controller.sketchApi!.builders.line.build(
+        threePoint(.4),
+        threePoint(.6),
+      );
+      controller.beginSketchCircularSelection();
+      for (final selected in [threeA, threeB, threeC]) {
+        controller.selectSketchEntity(selected.id);
+      }
+      expect(controller.selectedSketchEntityIds, {
+        threeA.id,
+        threeB.id,
+        threeC.id,
+      });
+      await controller.fitSelectedSketchCircularGeometry();
+      final threeFit = controller.sketchApi!.entity(
+        controller.selectedSketchEntityIds.single,
+      );
+      expect(threeFit, isA<SketchArc>());
+
+      // A rejected disconnected chain leaves its diagnostic available to the
+      // panel instead of looking like a failed/cleared selection.
+      final invalidA = controller.sketchApi!.builders.line.build(
+        const SketchVector(300, 0),
+        const SketchVector(301, 0),
+      );
+      final invalidB = controller.sketchApi!.builders.line.build(
+        const SketchVector(304, 0),
+        const SketchVector(305, 0),
+      );
+      controller.beginSketchCircularSelection();
+      controller.selectSketchEntity(invalidA.id);
+      controller.selectSketchEntity(invalidB.id);
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(
+        controller.sketchCircularFitMessage,
+        contains('cadeia selecionada'),
       );
 
       controller.beginCircleCommand();

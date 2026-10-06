@@ -599,15 +599,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                   suggestion.endAngle!,
                 );
           promotedId = promoted.id;
-          api.engine.modify(
-            promoted.id,
-            SketchHistoryAction.modify,
-            (value) =>
-                value.metadata['reconstructionKind'] = suggestion.kind.name,
-          );
+          api.engine.modify(promoted.id, SketchHistoryAction.modify, (value) {
+            value.metadata['reconstructionKind'] = suggestion.kind.name;
+            value.metadata.remove('reconstructionHidden');
+          });
           for (final entity in entities) {
             api.engine.modify(entity.id, SketchHistoryAction.modify, (value) {
               value.metadata['reconstructionKind'] = suggestion.kind.name;
+              // This distinguishes source curves replaced by a reconstruction
+              // from the newly promoted arc/circle.  Root Hide/Show may hide
+              // both temporarily, but only sources stay hidden on Show.
+              value.metadata['reconstructionHidden'] = true;
               value.visible = false;
             });
           }
@@ -1896,10 +1898,22 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           )
           .map((item) => item.id),
     ];
-    final ids = [sketch.id, ...sketch.entityIds, ...overlayIds];
-    for (final id in ids) {
-      await runtime.setEntityVisibility(id, !visible);
+    await runtime.setEntityVisibility(sketch.id, !visible);
+    if (!visible) {
+      _migrateLegacyReconstructionSources(sketch, rootVisible: true);
     }
+    // CadRuntime propagates the root visibility to its children.  Restore the
+    // normal sketch entities explicitly, while keeping only reconstruction
+    // sources hidden after a Show.  A promoted arc/circle is not a source.
+    for (final id in [...sketch.entityIds, ...overlayIds]) {
+      final entity = sketchApi?.entity(id);
+      final shouldShow =
+          !visible && entity?.metadata['reconstructionHidden'] != true;
+      await runtime.setEntityVisibility(id, shouldShow);
+    }
+    // Publish a legacy-source marker with the same document synchronization
+    // used for all Sketch geometry, so reopening the project is idempotent.
+    if (!visible) await _synchronizeSketchScene();
     await sketchApi?.persist();
     notifyListeners();
   }
@@ -12711,6 +12725,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final sketchEntityNames = <String, String>{};
     for (final sketch in allSketches) {
       _reconcileSketchEntityMembership(sketch);
+      final rootVisible =
+          document.entities[sketch.id]?.data['sceneVisible'] as bool? ??
+          (sketch.metadata['visible'] as bool? ?? true);
+      _migrateLegacyReconstructionSources(sketch, rootVisible: rootVisible);
       final counts = <SketchEntityType, int>{};
       for (final id in sketch.entityIds) {
         final entity = sketchApi?.entity(id);
@@ -12724,7 +12742,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           final persistedVisibility =
               document.entities[id]?.data['sceneVisible'];
           if (persistedVisibility == true &&
-              entity.metadata['reconstructionKind'] == null) {
+              entity.metadata['reconstructionHidden'] != true) {
             entity.visible = true;
           } else if (persistedVisibility == false) {
             entity.visible = false;
@@ -12905,6 +12923,30 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           ? selectedConstraintIds
           : _selectionWithDimensions(),
     );
+  }
+
+  /// Pre-marker projects stored only `reconstructionKind`.  A hidden line or
+  /// spline beneath a visible Sketch root is therefore a replaced source.  A
+  /// promoted arc/circle is deliberately excluded: it must become visible
+  /// again after root Show.  Once written, the marker makes this migration
+  /// idempotent and prevents the source from re-entering picking or health.
+  void _migrateLegacyReconstructionSources(
+    Sketch sketch, {
+    required bool rootVisible,
+  }) {
+    if (!rootVisible) return;
+    for (final id in sketch.entityIds) {
+      final entity = sketchApi?.entity(id);
+      if (entity == null ||
+          entity.metadata['reconstructionKind'] == null ||
+          entity.metadata['reconstructionHidden'] == true ||
+          entity.visible ||
+          entity is SketchArc ||
+          entity is SketchCircle) {
+        continue;
+      }
+      entity.metadata['reconstructionHidden'] = true;
+    }
   }
 
   Map<String, dynamic> _sketchProfilePickGeometry(Sketch sketch) {
