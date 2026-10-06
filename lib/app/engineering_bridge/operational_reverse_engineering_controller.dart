@@ -1400,6 +1400,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> createSketchFromSelectedSection({
     bool convertToSpline = false,
     double tolerance = 0.05,
+    bool forceNew = false,
   }) async {
     final section =
         selectedOrActiveSketchSourceSection ??
@@ -1407,6 +1408,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final api =
         sketchApi ??
         (throw StateError('The project SketchEngine is unavailable.'));
+    // A Section already projected into a Sketch must reuse that root instead of
+    // persisting a second "Sketch 00N" in the tree.
+    if (!forceNew) {
+      final existing = _sketchForSection(section.id);
+      if (existing != null) {
+        api.openSketch(existing.id);
+        activeSketch = existing;
+        stage = SketchSurfaceStage.sketchActive;
+        await _synchronizeSketchScene();
+        await runtime.setEntityVisibility(section.id, false);
+        runtime.select({existing.id});
+        notifyListeners();
+        return;
+      }
+    }
     final definition = Map<String, dynamic>.from(
       section.data['section'] as Map,
     );
@@ -2510,6 +2526,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return 'Sketch${index.toString().padLeft(3, '0')}';
   }
 
+  /// Sketch already persisted for [supportId], if any. Re-entering the Sketch
+  /// module for the same support must reopen this root instead of persisting a
+  /// second one.
+  Sketch? _sketchForSupport(String supportId) {
+    final api = sketchApi;
+    if (api == null) return null;
+    bool matches(Sketch sketch) =>
+        sketch.metadata['supportEntityId'] == supportId ||
+        sketch.plane.parameters['referenceId'] == supportId;
+    final active = activeSketch;
+    if (active != null && matches(active)) return active;
+    return api.sketches.where(matches).firstOrNull;
+  }
+
+  /// Sketch already derived from [sectionId], if any. Rebuilding a Section must
+  /// reuse that root instead of persisting a second "Sketch 00N".
+  Sketch? _sketchForSection(String sectionId) {
+    final api = sketchApi;
+    if (api == null) return null;
+    bool matches(Sketch sketch) =>
+        sketch.metadata['sourceSectionId'] == sectionId;
+    final active = activeSketch;
+    if (active != null && matches(active)) return active;
+    return api.sketches.where(matches).firstOrNull;
+  }
+
   bool get _commandsRegistered =>
       _operationalCommandsRegistered ||
       (runtime.read<bool>('commands.registered') ?? false);
@@ -3092,8 +3134,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> createPoint() => _run('reverse.reference.point');
   Future<void> createCoordinateSystem() =>
       _run('reverse.reference.coordinateSystem');
-  Future<void> openSketch() async {
-    await _run('reverse.sketch.open');
+
+  /// Opens the Sketch workspace for the selected support.
+  ///
+  /// [forceNew] is only used by the explicit "New Sketch" affordances; the
+  /// default reuses the Sketch already bound to that support so returning to
+  /// the Sketch module cannot persist a duplicate root.
+  Future<void> openSketch({bool forceNew = false}) async {
+    await _run('reverse.sketch.open', {'forceNew': forceNew});
     if (error != null) throw StateError(error!);
   }
 
@@ -11474,10 +11522,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       },
     );
 
-    Sketch? sketchCommandValue;
+    Sketch? createdSketch;
     register(
       id: 'reverse.sketch.open',
-      execute: (_) async {
+      execute: (parameters) async {
         final planeId = activeSketchPlaneId;
         if (planeId == null) {
           throw StateError('Select a plane before opening Sketch.');
@@ -11486,6 +11534,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         // source may have been removed or replaced after it was selected.
         final plane = _resolveSketchSupport(planeId);
         runtime.write('sketch.selectedPlane', plane);
+        // Re-entering the Sketch module for a support that already owns a
+        // Sketch must reopen that root. Persisting another Sketch here is what
+        // produced the duplicate "Sketch 00N" roots in the tree.
+        if (parameters['forceNew'] != true) {
+          final existing = _sketchForSupport(planeId);
+          if (existing != null) {
+            createdSketch = null;
+            sketchApi!.openSketch(existing.id);
+            activeSketch = existing;
+            stage = SketchSurfaceStage.sketchActive;
+            await _synchronizeSketchScene();
+            runtime.select({planeId, existing.id});
+            return existing.id;
+          }
+        }
         final supportEntity = runtime.document?.entities[planeId];
         final planeType = switch (supportEntity?.data['name']) {
           'XY Plane' => SketchPlaneType.xy,
@@ -11493,28 +11556,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'XZ Plane' => SketchPlaneType.zx,
           _ => SketchPlaneType.faceReference,
         };
-        sketchCommandValue = SketchBridge(sketchApi!).openOnSupport(
+        final sketch = SketchBridge(sketchApi!).openOnSupport(
           referenceId: planeId,
           geometry: plane,
           name: _nextSketchName(),
           planeType: planeType,
         );
-        sketchCommandValue!.metadata.addAll({
+        createdSketch = sketch;
+        sketch.metadata.addAll({
           'supportEntityId': planeId,
           'supportKind': supportEntity?.kind.name ?? 'reference',
           'meshIndependent': true,
         });
-        activeSketch = sketchCommandValue;
+        activeSketch = sketch;
         stage = SketchSurfaceStage.sketchActive;
         await _synchronizeSketchScene();
         // The support remains visibly active for the entire Sketch session.
-        runtime.select({planeId, sketchCommandValue!.id});
-        return sketchCommandValue!.id;
+        runtime.select({planeId, sketch.id});
+        return sketch.id;
       },
       undo: (_) async {
-        if (sketchCommandValue != null) {
-          SketchBridge(sketchApi!).undo(sketchCommandValue!);
-        }
+        final created = createdSketch;
+        // Reopening an existing root is not a destructive edit: only undo the
+        // command that actually persisted a new Sketch.
+        if (created == null) return 'sketch reopened';
+        SketchBridge(sketchApi!).undo(created);
         activeSketch = null;
         stage = SketchSurfaceStage.referenceReady;
         await _synchronizeSketchScene();

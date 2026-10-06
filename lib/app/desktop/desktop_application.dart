@@ -1051,6 +1051,10 @@ class _OfficialEngineeringWorkspaceState
   bool automaticSplinePreview = true;
   bool advancedInspector = false;
   bool choosingSketchSupport = false;
+
+  /// True only when the operator explicitly asked for a new Sketch. A plain
+  /// return to the Sketch module reuses the root already bound to the support.
+  bool forceNewSketchOnSupportPick = false;
   static const modules = [
     'Reverse Engineering',
     'AI Engineering',
@@ -2849,12 +2853,13 @@ class _OfficialEngineeringWorkspaceState
     });
   }
 
-  void _beginDirectSketchSupportSelection() {
+  void _beginDirectSketchSupportSelection({bool forceNew = false}) {
     if (mounted) {
       setState(() {
         module = 'Sketch';
         openToolWindows.add('Sketch');
         choosingSketchSupport = widget.cad.runtime.document != null;
+        forceNewSketchOnSupportPick = forceNew;
       });
     }
     if (widget.cad.runtime.document == null) {
@@ -2983,14 +2988,14 @@ class _OfficialEngineeringWorkspaceState
     }
   }
 
-  Future<void> _activateSelectedSketchSupport() async {
+  Future<void> _activateSelectedSketchSupport({bool forceNew = false}) async {
     final plane = operational.activeSketchPlane;
     final planeId = operational.activeSketchPlaneId;
     if (plane == null || planeId == null) {
       widget.cad.setStatus('Choose a planar Sketch support in the viewport.');
       return;
     }
-    await operational.openSketch();
+    await operational.openSketch(forceNew: forceNew);
     final sketch = operational.activeSketch!;
     final support = widget.cad.runtime.document?.entities[planeId];
     final rawSize = support?.data['sceneGeometry'] is Map
@@ -3032,6 +3037,7 @@ class _OfficialEngineeringWorkspaceState
     if (mounted) {
       setState(() {
         choosingSketchSupport = false;
+        forceNewSketchOnSupportPick = false;
         openToolWindows.add('Sketch');
       });
     }
@@ -3055,7 +3061,9 @@ class _OfficialEngineeringWorkspaceState
     }
     try {
       operational.selectSketchSupport(entity.id);
-      await _activateSelectedSketchSupport();
+      await _activateSelectedSketchSupport(
+        forceNew: forceNewSketchOnSupportPick,
+      );
     } catch (error) {
       widget.cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
     }
@@ -4991,7 +4999,8 @@ class _OfficialEngineeringWorkspaceState
         key: ValueKey('surface-tool-${toolbarSurfaceTool?.name ?? 'home'}'),
         controller: operational,
         initialSurfaceTool: toolbarSurfaceTool,
-        onOpenSketch: () async => _beginDirectSketchSupportSelection(),
+        onOpenSketch: () async =>
+            _beginDirectSketchSupportSelection(forceNew: true),
         onFinishSketch: _finishSketch,
       ),
       'Solids' => _ProfessionalExtrudePanel(controller: operational),

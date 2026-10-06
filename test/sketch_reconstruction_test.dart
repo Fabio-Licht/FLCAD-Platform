@@ -86,7 +86,7 @@ void main() {
   });
 
   test(
-    'manual fit rejects a chain when neighboring line tangencies disagree',
+    'manual fit falls back to the three point circle when tangencies disagree',
     () {
       final first = SketchLine(
         const SketchVector(0, 0),
@@ -105,13 +105,18 @@ void main() {
         const SketchVector(3, 0),
       );
 
-      expect(
-        const SketchReconstructionEngine().fitSelectedCircular(
-          [first, second],
-          context: [before, first, second, after],
-        ),
-        isNull,
+      // No circle can stay C1 with both neighbours, but the chain still
+      // defines a valid circular arc: refusing to build it left the operator
+      // without any result at all.
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(
+        [first, second],
+        context: [before, first, second, after],
       );
+
+      expect(fit, isNotNull);
+      expect(fit!.center!.x, closeTo(1, 1e-9));
+      expect(fit.center!.y, closeTo(0, 1e-9));
+      expect(fit.radius, closeTo(1, 1e-9));
     },
   );
 

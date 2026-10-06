@@ -5,13 +5,6 @@ import '../sketch_engine/models/sketch_models.dart';
 
 enum SketchReconstructionKind { line, circle, arc, parallel, perpendicular }
 
-class _TangentFit {
-  const _TangentFit({this.fit, this.invalid = false});
-
-  final (SketchVector, double)? fit;
-  final bool invalid;
-}
-
 class SketchReconstructionSuggestion {
   const SketchReconstructionSuggestion({
     required this.kind,
@@ -106,16 +99,16 @@ class SketchReconstructionEngine {
     // A least-squares circle can move its endpoints away from the source
     // chain. When the chain has two neighboring lines, their normals define
     // the only circle that can remain C1 at both retained boundary vertices.
-    // Do not silently fall back to a three-point fit in that case: it would
-    // preserve G0 while breaking the profile tangent continuity.
+    // Real scan data rarely satisfies that condition exactly, so an absent or
+    // inconsistent tangency must fall back to the historical three-point fit:
+    // refusing to build the arc left the operator without any result at all.
     final tangentFit = _tangentFit(
       boundary,
       entities.map((entity) => entity.id).toSet(),
       context,
     );
-    if (tangentFit.invalid) return null;
     final fit =
-        tangentFit.fit ??
+        tangentFit ??
         _circleThrough(boundary.start, anchor.first, boundary.end);
     if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
       return null;
@@ -159,7 +152,9 @@ class SketchReconstructionEngine {
     );
   }
 
-  _TangentFit _tangentFit(
+  /// Circle that stays C1 with both neighbouring lines, or null when the chain
+  /// has fewer than two neighbours or they define no consistent solution.
+  (SketchVector, double)? _tangentFit(
     ({SketchVector start, SketchVector end}) boundary,
     Set<String> selectedIds,
     Iterable<SketchEntity> context,
@@ -187,8 +182,8 @@ class SketchReconstructionEngine {
     if (startNeighbor == null || endNeighbor == null) {
       // A C1 constraint is only defined when both extremities continue into a
       // neighboring line. With none or a single neighbor the historical three
-      // point fit stays valid, so do not reject a chain that used to fit.
-      return const _TangentFit();
+      // point fit stays valid.
+      return null;
     }
     final startDirection = SketchVector(
       boundary.start.x - startNeighbor.x,
@@ -204,7 +199,7 @@ class SketchReconstructionEngine {
     final dx = boundary.end.x - boundary.start.x;
     final dy = boundary.end.y - boundary.start.y;
     final cross = startNormal.x * endNormal.y - startNormal.y * endNormal.x;
-    if (cross.abs() <= 1e-10) return const _TangentFit(invalid: true);
+    if (cross.abs() <= 1e-10) return null;
     final u = (dx * endNormal.y - dy * endNormal.x) / cross;
     final center = SketchVector(
       boundary.start.x + u * startNormal.x,
@@ -216,9 +211,9 @@ class SketchReconstructionEngine {
     if (!startRadius.isFinite ||
         startRadius <= 1e-9 ||
         (startRadius - endRadius).abs() > tolerance) {
-      return const _TangentFit(invalid: true);
+      return null;
     }
-    return _TangentFit(fit: (center, startRadius));
+    return (center, startRadius);
   }
 
   ({SketchVector start, SketchVector end})? _continuousChainBoundaries(
