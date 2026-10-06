@@ -89,6 +89,18 @@ void main() {
       expect(controller.sketchApi!.sketches, hasLength(1));
       expect(controller.stage, SketchSurfaceStage.sketchActive);
       expect(controller.sketchEntities, isNotEmpty);
+      final sketch = controller.activeSketch!;
+      expect(
+        cad.runtime.document!.entities[sketch.id]!.data['sceneVisible'],
+        isTrue,
+        reason: 'A newly projected Section must enter editable Sketch mode',
+      );
+      expect(
+        sketch.entityIds
+            .map((id) => cad.runtime.document!.entities[id])
+            .every((entity) => entity?.data['sceneVisible'] == true),
+        isTrue,
+      );
       final health = controller.sketchHealth;
       expect(health.readyForSurface, controller.sketchReadyForSurface);
       if (!health.readyForSurface) {

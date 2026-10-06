@@ -670,10 +670,26 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (suggestion == null ||
         suggestion.center == null ||
         suggestion.radius == null) {
-      sketchCircularFitMessage =
-          'Esses trechos não definem um raio estável. Selecione segmentos com curvatura visível.';
-      error =
-          'Não foi possível ajustar um círculo/arco às entidades selecionadas.';
+      final failure = _sketchReconstruction.diagnoseSelectedCircular(
+        selected,
+        context: activeSketch!.entityIds
+            .map((id) => sketchApi?.entity(id))
+            .whereType<SketchEntity>(),
+      );
+      final message = switch (failure) {
+        SketchCircularFitFailure.invalidChain =>
+          'A cadeia selecionada é inválida. Selecione dois ou três segmentos conectados.',
+        SketchCircularFitFailure.insufficientPoints =>
+          'Faltam pontos distintos para definir o arco. Selecione uma cadeia com curvatura.',
+        SketchCircularFitFailure.unstableRadius =>
+          'O raio calculado é instável. Selecione segmentos com curvatura mais evidente.',
+        SketchCircularFitFailure.ambiguousBranch =>
+          'Há mais de uma curva vizinha em uma extremidade. Selecione uma cadeia sem ramificações.',
+        SketchCircularFitFailure.incompatibleTangency =>
+          'Não existe arco tangente C1 válido nas duas extremidades. Verifique as curvas vizinhas e a orientação dos endpoints.',
+      };
+      sketchCircularFitMessage = message;
+      error = 'Ajuste circular rejeitado: $message';
       notifyListeners();
       return;
     }
@@ -1537,6 +1553,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     // from the Sketch tab and created a second persisted Sketch.
     stage = SketchSurfaceStage.sketchActive;
     await _synchronizeSketchScene();
+    // A section-derived sketch is a new editing result, not a reconstruction
+    // of an existing hidden sketch.  Make only this root and its children
+    // visible after their first publication.  Existing sketch roots retain
+    // their document visibility in _synchronizeSketchScene.
+    await runtime.setEntityVisibility(sketch.id, true);
     // The generated Sketch is the active result. Keep the source Section
     // durable but hidden to avoid drawing the dense intersection twice; the
     // Sections panel can restore it with Toggle Section.
@@ -12754,7 +12775,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'authoringWorkspace': 'Sketch',
               'group': 'Sketches',
               'sceneKind': 'sketch',
-              'sceneVisible': sketch.metadata['visible'] as bool? ?? true,
+              // Explorer Hide/Show is document state.  Synchronizing a later
+              // sketch edit must not silently resurrect a root the user hid.
+              // A new sketch has no persisted value and therefore starts
+              // visible (its caller publishes that root explicitly once).
+              'sceneVisible':
+                  document.entities[sketch.id]?.data['sceneVisible'] as bool? ??
+                  (sketch.metadata['visible'] as bool? ?? true),
               'sceneGeometry': _sketchProfilePickGeometry(sketch),
               'revision': sketch.version,
               'sourceSectionId': sketch.metadata['sourceSectionId'],

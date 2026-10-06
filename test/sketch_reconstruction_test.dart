@@ -83,10 +83,123 @@ void main() {
     );
     expect(dot(startRadius, beforeDirection).abs(), lessThan(1e-7));
     expect(dot(endRadius, afterDirection).abs(), lessThan(1e-7));
+    final startTangent = SketchVector(
+      -math.sin(fit.startAngle!),
+      math.cos(fit.startAngle!),
+    );
+    final endTangent = SketchVector(
+      -math.sin(fit.endAngle!),
+      math.cos(fit.endAngle!),
+    );
+    double normalizedDot(SketchVector a, SketchVector b) =>
+        dot(a, b) / math.sqrt(dot(a, a) * dot(b, b));
+    expect(normalizedDot(startTangent, beforeDirection), closeTo(1, 1e-6));
+    expect(normalizedDot(endTangent, afterDirection), closeTo(1, 1e-6));
+  });
+
+  test('manual fit recognizes an arc then a line as real C1 neighbours', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    SketchVector tangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    final before = SketchArc(const SketchVector(0, 0), 5, -.3, 0);
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final after = SketchLine(point(.6), point(.6) + tangent(.6).scale(2));
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
+  });
+
+  test('manual fit recognizes a line then an arc as real C1 neighbours', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    SketchVector tangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    final before = SketchLine(point(0) - tangent(0).scale(2), point(0));
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final after = SketchArc(const SketchVector(0, 0), 5, .6, .9);
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
+  });
+
+  test('manual fit honors a clockwise arc at its final endpoint', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    SketchVector tangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    // This arc ends clockwise at point(0), but its analytical derivative at
+    // that endpoint still enters the selected CCW replacement tangent.
+    final before = SketchArc(
+      const SketchVector(10, 0),
+      5,
+      math.pi + .3,
+      math.pi,
+    );
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final after = SketchLine(point(.6), point(.6) + tangent(.6).scale(2));
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
+  });
+
+  test('manual fit honors a clockwise arc at its initial endpoint', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    SketchVector tangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    final before = SketchLine(point(0) - tangent(0).scale(2), point(0));
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final endCenter =
+        point(.6) + SketchVector(2 * math.cos(.6), 2 * math.sin(.6));
+    final after = SketchArc(endCenter, 2, math.pi + .6, math.pi + .3);
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
+  });
+
+  test('manual fit uses a sampled spline tangent as a real neighbour', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    final before = SketchSpline([point(-.3), point(0)]);
+    before.parameters['sampledPoints'] = [
+      point(-.3).toJson(),
+      point(0).toJson(),
+    ];
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final after = SketchLine(point(.6), point(.9));
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
   });
 
   test(
-    'manual fit falls back to the three point circle when tangencies disagree',
+    'manual fit rejects a chain whose real neighbours have no C1 solution',
     () {
       final first = SketchLine(
         const SketchVector(0, 0),
@@ -105,20 +218,68 @@ void main() {
         const SketchVector(3, 0),
       );
 
-      // No circle can stay C1 with both neighbours, but the chain still
-      // defines a valid circular arc: refusing to build it left the operator
-      // without any result at all.
+      // Endpoints alone define a circle, but no arc can preserve C1 with both
+      // real neighbours.  A three-point fallback would hide that defect.
       final fit = const SketchReconstructionEngine().fitSelectedCircular(
         [first, second],
         context: [before, first, second, after],
       );
 
-      expect(fit, isNotNull);
-      expect(fit!.center!.x, closeTo(1, 1e-9));
-      expect(fit.center!.y, closeTo(0, 1e-9));
-      expect(fit.radius, closeTo(1, 1e-9));
+      expect(fit, isNull);
+      expect(
+        const SketchReconstructionEngine().diagnoseSelectedCircular(
+          [first, second],
+          context: [before, first, second, after],
+        ),
+        SketchCircularFitFailure.incompatibleTangency,
+      );
     },
   );
+
+  test('invalid chains are diagnosed without a tangency failure', () {
+    final engine = const SketchReconstructionEngine();
+    final failure = engine.diagnoseSelectedCircular([
+      SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
+      SketchLine(const SketchVector(4, 0), const SketchVector(5, 0)),
+    ]);
+
+    expect(failure, SketchCircularFitFailure.invalidChain);
+  });
+
+  test('an ambiguous branch never falls back when the other end is open', () {
+    final first = SketchLine(
+      const SketchVector(0, 0),
+      const SketchVector(1, 1),
+    );
+    final second = SketchLine(
+      const SketchVector(1, 1),
+      const SketchVector(2, 0),
+    );
+    final branchA = SketchLine(
+      const SketchVector(-1, 0),
+      const SketchVector(0, 0),
+    );
+    final branchB = SketchLine(
+      const SketchVector(0, -1),
+      const SketchVector(0, 0),
+    );
+    final engine = const SketchReconstructionEngine();
+
+    expect(
+      engine.fitSelectedCircular(
+        [first, second],
+        context: [branchA, branchB, first, second],
+      ),
+      isNull,
+    );
+    expect(
+      engine.diagnoseSelectedCircular(
+        [first, second],
+        context: [branchA, branchB, first, second],
+      ),
+      SketchCircularFitFailure.ambiguousBranch,
+    );
+  });
 
   test(
     'manual fit keeps the three point fallback when only one end has a neighbor',
