@@ -140,10 +140,10 @@ void main() {
       );
       final followingSource = controller.sketchApi!.builders.line.build(
         circularPoint(.6),
-        const SketchVector(110, 10),
+        circularPoint(.9),
       );
       final closingSource = controller.sketchApi!.builders.line.build(
-        const SketchVector(110, 10),
+        circularPoint(-.3),
         circularPoint(0),
       );
       controller.selectSketchEntity(sourceA.id);
@@ -173,12 +173,40 @@ void main() {
       // and a later synchronisation must not resurrect them from stale
       // scene state while the native arc stays the active profile.
       for (final hidden in [sourceA.id, sourceB.id]) {
-        expect(controller.sketchHealth.issues.any((issue) =>
-            issue.entityIds.contains(hidden)), isFalse);
+        expect(
+          controller.sketchHealth.issues.any(
+            (issue) => issue.entityIds.contains(hidden),
+          ),
+          isFalse,
+        );
       }
-      expect(controller.sketchHealth.blockingIssues,
-          everyElement(predicate<SketchHealthIssue>((issue) =>
-              issue.entityIds.contains(fitted.id))));
+      // Blocking issues belong to the active profile only; entities outside
+      // it (for example the unrelated edited line) may surface as warnings
+      // but must never become blocking errors for the active edit.
+      final health = controller.sketchHealth;
+      final activeProfileIds = health.activeProfileEntityIds;
+      expect(activeProfileIds, contains(fitted.id));
+      for (final issue in health.issues) {
+        final insideActiveProfile = issue.entityIds.any(
+          activeProfileIds.contains,
+        );
+        expect(
+          issue.blocking,
+          insideActiveProfile,
+          reason: '${issue.type.name}: ${issue.entityIds}',
+        );
+        expect(
+          issue.scope,
+          insideActiveProfile
+              ? SketchHealthIssueScope.activeProfile
+              : SketchHealthIssueScope.sketch,
+        );
+      }
+      final externalIssues = health.issues.where(
+        (issue) => issue.entityIds.contains(line.id),
+      );
+      expect(externalIssues, isNotEmpty);
+      expect(externalIssues.every((issue) => !issue.blocking), isTrue);
       await controller.updateSketchEntityParameters(line.id, {
         'angleDegrees': 45,
       });

@@ -100,6 +100,13 @@ import 'selection/geometry_selection_manager.dart';
 import '../runtime/cad_runtime.dart';
 import '../runtime/world_coordinate_system.dart';
 
+/// Distance below which two Sketch samples are treated as the same point.
+///
+/// The profile resolver and the native Wire builder must share this value:
+/// accepting a loop as closed at one tolerance and materializing it as an
+/// open wire at a stricter one turns a healthy profile into a kernel failure.
+const double _sketchPointTolerance = 1e-4;
+
 enum RecognitionDecision { pending, accepted, rejected }
 
 /// A transient closed loop resolved exclusively from the profile entities the
@@ -118,6 +125,25 @@ class _ExtrudeProfileLoop {
 
   /// Circles and ellipses already have an individual closed-profile route.
   final String? directProfileEntityId;
+}
+
+class _SketchProfileEdge {
+  const _SketchProfileEdge({
+    required this.id,
+    required this.start,
+    required this.end,
+    required this.points,
+    required this.closed,
+  });
+
+  final String id;
+  final SketchVector start;
+  final SketchVector end;
+  final List<SketchVector> points;
+
+  /// True when the entity's own samples form a closed ring (a closed spline or
+  /// a full 360° arc). Such an edge legitimately has start == end.
+  final bool closed;
 }
 
 enum SketchSurfaceStage {
@@ -635,7 +661,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    final suggestion = _sketchReconstruction.fitSelectedCircular(selected);
+    final suggestion = _sketchReconstruction.fitSelectedCircular(
+      selected,
+      context: activeSketch!.entityIds
+          .map((id) => sketchApi?.entity(id))
+          .whereType<SketchEntity>(),
+    );
     if (suggestion == null ||
         suggestion.center == null ||
         suggestion.radius == null) {
@@ -1485,7 +1516,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       },
     });
     activeSketch = sketch;
-    stage = SketchSurfaceStage.sketchFinished;
+    // The SketchEngine is already open above. Keep the section-derived
+    // result in that editing session; a finished state offered a new support
+    // from the Sketch tab and created a second persisted Sketch.
+    stage = SketchSurfaceStage.sketchActive;
     await _synchronizeSketchScene();
     // The generated Sketch is the active result. Keep the source Section
     // durable but hidden to avoid drawing the dense intersection twice; the
@@ -5235,7 +5269,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   bool _sameSketchPoint(SketchVector first, SketchVector second) {
     final delta = first - second;
-    return delta.dot(delta) <= 1e-8;
+    return delta.dot(delta) <= _sketchPointTolerance * _sketchPointTolerance;
   }
 
   Future<void> setSketchEntityVisibility(String id, bool visible) async {
@@ -6845,60 +6879,288 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (entity == null || !sketch.entityIds.contains(entityId)) {
       throw StateError('O perfil selecionado não pertence ao Sketch ativo.');
     }
-    if (entity.construction || entity.reference) {
+    if (entity.construction || entity.reference || !entity.visible) {
       throw StateError('O perfil selecionado não está disponível.');
     }
     if (entity is SketchCircle || entity is SketchEllipse) return [entityId];
-    if (entity is! SketchLine) {
-      throw StateError('Selecione uma linha, círculo ou elipse de Sketch.');
-    }
-    final lines = sketch.entityIds
+    final edges = sketch.entityIds
         .map(api.entity)
-        .whereType<SketchLine>()
-        .where((line) => !line.construction && !line.reference)
-        .map(
-          (line) => (
-            id: line.id,
-            start: SketchVector.fromJson(line.parameters['start']),
-            end: SketchVector.fromJson(line.parameters['end']),
-          ),
-        )
+        .whereType<SketchEntity>()
+        .where((item) => item.visible && !item.construction && !item.reference)
+        .map(_sketchProfileEdge)
+        .whereType<_SketchProfileEdge>()
         .toList(growable: false);
-    final component = _connectedSketchLineComponent(lines, entityId);
-    final resolved = _resolveSelectedOpenOrClosedWires(component);
+    final component = _connectedSketchProfileComponent(edges, entityId);
+    final resolved = _resolveSketchProfileEdges(
+      component,
+      requireClosed: false,
+    );
     if (resolved.length != 1) {
       throw StateError('O perfil possui topologia ambígua.');
     }
     return resolved.single.entityIds;
   }
 
-  List<({String id, SketchVector start, SketchVector end})>
-  _connectedSketchLineComponent(
-    List<({String id, SketchVector start, SketchVector end})> lines,
+  List<_SketchProfileEdge> _connectedSketchProfileComponent(
+    List<_SketchProfileEdge> edges,
     String seedId,
   ) {
-    final seed = lines.where((line) => line.id == seedId).firstOrNull;
+    final seed = edges.where((edge) => edge.id == seedId).firstOrNull;
     if (seed == null) {
       throw StateError('A linha selecionada não está disponível.');
     }
-    final component = <({String id, SketchVector start, SketchVector end})>[];
-    final pending = <({String id, SketchVector start, SketchVector end})>[seed];
+    final component = <_SketchProfileEdge>[];
+    final pending = <_SketchProfileEdge>[seed];
     final seen = <String>{};
     while (pending.isNotEmpty) {
-      final line = pending.removeLast();
-      if (!seen.add(line.id)) continue;
-      component.add(line);
-      for (final candidate in lines) {
+      final edge = pending.removeLast();
+      if (!seen.add(edge.id)) continue;
+      component.add(edge);
+      for (final candidate in edges) {
         if (seen.contains(candidate.id)) continue;
-        if (_sameSketchPoint(line.start, candidate.start) ||
-            _sameSketchPoint(line.start, candidate.end) ||
-            _sameSketchPoint(line.end, candidate.start) ||
-            _sameSketchPoint(line.end, candidate.end)) {
+        if (_sameSketchPoint(edge.start, candidate.start) ||
+            _sameSketchPoint(edge.start, candidate.end) ||
+            _sameSketchPoint(edge.end, candidate.start) ||
+            _sameSketchPoint(edge.end, candidate.end)) {
           pending.add(candidate);
         }
       }
     }
     return component;
+  }
+
+  _SketchProfileEdge? _sketchProfileEdge(SketchEntity entity) {
+    if (entity is SketchCircle ||
+        entity is SketchEllipse ||
+        entity is SketchPoint) {
+      return null;
+    }
+    final points = _surfaceInputPoints(entity);
+    if (points.length < 2) return null;
+    // A closed spline or a full 360° arc samples back onto its start point.
+    // That ring is a valid profile; only an all-coincident sample is
+    // degenerate, which the resolver rejects with a clear diagnostic.
+    final closed =
+        points.length >= 3 &&
+        _sameSketchPoint(points.first, points.last) &&
+        points.any((point) => !_sameSketchPoint(point, points.first));
+    return _SketchProfileEdge(
+      id: entity.id,
+      start: points.first,
+      end: points.last,
+      points: points,
+      closed: closed,
+    );
+  }
+
+  /// Deterministic ordering of Sketch entity ids following the Sketch tree, so
+  /// a persisted contract.profileEntityIds never depends on a Set iteration.
+  List<String> _orderedSketchEntityIds(Sketch sketch, Iterable<String> ids) {
+    final order = <String, int>{};
+    for (var index = 0; index < sketch.entityIds.length; index++) {
+      order[sketch.entityIds[index]] = index;
+    }
+    final values = ids.toSet().toList();
+    values.sort(
+      (first, second) =>
+          (order[first] ?? 1 << 30).compareTo(order[second] ?? 1 << 30),
+    );
+    return values;
+  }
+
+  /// A legacy Extrude contract may persist only a single [profileEntityId]
+  /// (the first entity of the loop). Expand that lone seed to its visible
+  /// connected component, exactly like a click, so re-entry keeps working.
+  List<String>? _expandLoneExtrudeSeed(Sketch sketch, String seedId) {
+    final api = sketchApi;
+    if (api == null) return null;
+    final seed = api.entity(seedId);
+    if (seed == null ||
+        seed is SketchCircle ||
+        seed is SketchEllipse ||
+        !seed.visible ||
+        seed.construction ||
+        seed.reference) {
+      return null;
+    }
+    final edges = sketch.entityIds
+        .map(api.entity)
+        .whereType<SketchEntity>()
+        .where((item) => item.visible && !item.construction && !item.reference)
+        .map(_sketchProfileEdge)
+        .whereType<_SketchProfileEdge>()
+        .toList(growable: false);
+    final component = _connectedSketchProfileComponent(edges, seedId);
+    final resolved = _resolveSketchProfileEdges(
+      component,
+      requireClosed: false,
+    );
+    if (resolved.length != 1) return null;
+    return _orderedSketchEntityIds(sketch, resolved.single.entityIds);
+  }
+
+  /// Maps a lower-level profile/topology failure to an output-aware, localized
+  /// diagnostic. The original geometry reason is preserved so it is never
+  /// relabelled as a Draft failure downstream.
+  String _extrudeProfileDiagnostic(
+    ProfessionalExtrudeOutput output,
+    String message,
+  ) {
+    final normalized = message.toLowerCase();
+    final isProfileProblem =
+        normalized.contains('perfil') ||
+        normalized.contains('curva') ||
+        normalized.contains('abert') ||
+        normalized.contains('fechado') ||
+        normalized.contains('gap') ||
+        normalized.contains('incompleto') ||
+        normalized.contains('ramific') ||
+        normalized.contains('intersect') ||
+        normalized.contains('degenerad') ||
+        normalized.contains('wire');
+    if (!isProfileProblem) return message;
+    if (output == ProfessionalExtrudeOutput.solid) {
+      final open =
+          normalized.contains('abert') ||
+          normalized.contains('incompleto') ||
+          normalized.contains('gap');
+      return open
+          ? 'Solid / Cylinder exige um perfil fechado. Complete o loop antes do Preview. $message'
+          : 'Solid / Cylinder exige um perfil fechado, conectado e sem auto-interseções. $message';
+    }
+    return 'Surface / Walls exige uma cadeia ativa, conectada e visível. $message';
+  }
+
+  List<_ExtrudeProfileLoop> _resolveSketchProfileEdges(
+    List<_SketchProfileEdge> edges, {
+    required bool requireClosed,
+  }) {
+    if (edges.isEmpty) {
+      throw StateError(
+        'O perfil selecionado não possui curvas visíveis utilizáveis.',
+      );
+    }
+    final nodes = <SketchVector>[];
+    int nodeFor(SketchVector point) {
+      final existing = nodes.indexWhere(
+        (item) => _sameSketchPoint(item, point),
+      );
+      if (existing >= 0) return existing;
+      nodes.add(point);
+      return nodes.length - 1;
+    }
+
+    final endpoints = <({int start, int end})>[];
+    for (final edge in edges) {
+      final start = nodeFor(edge.start);
+      final end = nodeFor(edge.end);
+      if (start == end && !edge.closed) {
+        throw StateError(
+          'O perfil selecionado contém uma curva degenerada (início e fim coincidentes).',
+        );
+      }
+      endpoints.add((start: start, end: end));
+    }
+    final adjacency = List.generate(nodes.length, (_) => <int>[]);
+    for (var index = 0; index < endpoints.length; index++) {
+      adjacency[endpoints[index].start].add(index);
+      adjacency[endpoints[index].end].add(index);
+    }
+    final pending = <int>{
+      for (var index = 0; index < edges.length; index++) index,
+    };
+    final result = <_ExtrudeProfileLoop>[];
+    while (pending.isNotEmpty) {
+      final seed = pending.first;
+      final component = <int>{};
+      final queue = <int>[seed];
+      while (queue.isNotEmpty) {
+        final edge = queue.removeLast();
+        if (!component.add(edge)) continue;
+        pending.remove(edge);
+        final ends = endpoints[edge];
+        for (final node in [ends.start, ends.end]) {
+          for (final linked in adjacency[node]) {
+            if (!component.contains(linked)) queue.add(linked);
+          }
+        }
+      }
+      final degrees = <int, int>{};
+      for (final edge in component) {
+        final ends = endpoints[edge];
+        degrees.update(ends.start, (value) => value + 1, ifAbsent: () => 1);
+        degrees.update(ends.end, (value) => value + 1, ifAbsent: () => 1);
+      }
+      if (degrees.values.any((degree) => degree > 2)) {
+        throw StateError(
+          'O perfil selecionado possui ramificações ou topologia ambígua.',
+        );
+      }
+      final openEnds = degrees.entries
+          .where((entry) => entry.value == 1)
+          .map((entry) => entry.key)
+          .toList(growable: false);
+      if (openEnds.isNotEmpty && openEnds.length != 2) {
+        throw StateError(
+          'O perfil selecionado possui conectividade incompleta.',
+        );
+      }
+      final closed = openEnds.isEmpty;
+      if (requireClosed && !closed) {
+        throw StateError(
+          'O perfil selecionado está aberto. Complete o loop antes do Extrude.',
+        );
+      }
+      var current = closed ? endpoints[seed].start : openEnds.first;
+      final firstNode = current;
+      final visited = <int>{};
+      final ids = <String>[];
+      final points = <SketchVector>[nodes[current]];
+      while (true) {
+        final candidates = (closed && visited.isEmpty
+            ? <int>[seed]
+            : adjacency[current]
+                  .where(
+                    (edge) =>
+                        component.contains(edge) && !visited.contains(edge),
+                  )
+                  .toList(growable: false));
+        if (candidates.isEmpty) break;
+        if (candidates.length != 1) {
+          throw StateError('O perfil selecionado possui topologia ambígua.');
+        }
+        final edgeIndex = candidates.single;
+        visited.add(edgeIndex);
+        final edge = edges[edgeIndex];
+        final ends = endpoints[edgeIndex];
+        final forward = ends.start == current;
+        final sampled = forward ? edge.points : edge.points.reversed.toList();
+        points.addAll(sampled.skip(1));
+        ids.add(edge.id);
+        current = forward ? ends.end : ends.start;
+        if (closed && current == firstNode) break;
+      }
+      if (visited.length != component.length ||
+          (closed && current != firstNode)) {
+        throw StateError(
+          'O perfil selecionado possui conectividade incompleta.',
+        );
+      }
+      if (_selectedLoopSelfIntersects(points, closed: closed)) {
+        throw StateError('O perfil selecionado é auto-intersectante.');
+      }
+      result.add(
+        _ExtrudeProfileLoop(
+          entityIds: ids,
+          points: points,
+          closed: closed,
+          // Route the loop through the official Sketch wire cache so single
+          // and multi profile re-entry reuse `_ensureSketchWire`.
+          directProfileEntityId: ids.first,
+        ),
+      );
+    }
+    return result;
   }
 
   String? _sketchProfileAtWorldPoint(String sketchId, List<double>? worldHit) {
@@ -6918,7 +7180,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     var closestDistance = double.infinity;
     for (final id in sketch.entityIds) {
       final entity = sketchApi?.entity(id);
-      if (entity == null || entity.construction || entity.reference) continue;
+      if (entity == null ||
+          entity.construction ||
+          entity.reference ||
+          !entity.visible) {
+        continue;
+      }
       final points = _surfaceInputPoints(entity);
       if (points.length < 2) continue;
       for (var index = 0; index + 1 < points.length; index++) {
@@ -6973,8 +7240,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (profile == null ||
         profile.construction ||
         profile.reference ||
-        profile is SketchArc ||
-        profile is SketchSpline ||
+        !profile.visible ||
         profile is SketchPoint) {
       error =
           'A seleção contém entidades abertas. Selecione um perfil fechado ou complete o loop.';
@@ -7020,10 +7286,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.document?.entities[id]?.data['name'] as String? ?? id;
 
   String extrudeProfileGroupLabel(List<String> ids) {
+    if (ids.isEmpty) return 'Perfil';
     if (ids.length == 1) {
       final entity = sketchApi?.entity(ids.single);
       if (entity is SketchCircle) return 'círculo';
       if (entity is SketchEllipse) return 'elipse';
+      if (entity is SketchArc) {
+        final edge = _sketchProfileEdge(entity);
+        return edge == null || !edge.closed
+            ? 'arco — 1 segmento'
+            : 'arco fechado — 1 segmento';
+      }
+      if (entity is SketchSpline) {
+        final edge = _sketchProfileEdge(entity);
+        return edge == null || !edge.closed
+            ? 'spline — 1 segmento'
+            : 'spline fechada — 1 segmento';
+      }
       return 'cadeia aberta — 1 segmento';
     }
     final sourceId = selectedExtrudeSourceId;
@@ -7032,18 +7311,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .firstOrNull;
     if (sketch == null) return 'Perfil — ${ids.length} segmentos';
     try {
-      final lines = ids
-          .map((id) => sketchApi?.entity(id))
-          .whereType<SketchLine>()
-          .map(
-            (line) => (
-              id: line.id,
-              start: SketchVector.fromJson(line.parameters['start']),
-              end: SketchVector.fromJson(line.parameters['end']),
-            ),
-          )
-          .toList(growable: false);
-      final closed = _resolveSelectedOpenOrClosedWires(lines).single.closed;
+      // Reuse the same resolver as Preview so arcs, splines and mixed groups
+      // are labelled from the real topology instead of lines only.
+      final closed = _resolveSelectedSurfaceWires(sketch, ids).single.closed;
       return '${closed ? 'loop fechado' : 'cadeia aberta'} — ${ids.length} segmentos';
     } on StateError {
       return 'Perfil inválido — ${ids.length} segmentos';
@@ -7181,76 +7451,78 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final sourceKind = source.kind == CadDocumentEntityKind.sketch
           ? ProfessionalExtrudeSourceKind.sketch
           : ProfessionalExtrudeSourceKind.surface;
+      final sketchHealth = sourceKind == ProfessionalExtrudeSourceKind.sketch
+          ? healthForSketch(source.id)
+          : null;
       if (sourceKind == ProfessionalExtrudeSourceKind.sketch &&
           output == ProfessionalExtrudeOutput.solid &&
-          !healthForSketch(source.id).readyForSurface) {
+          !sketchHealth!.readyForSurface) {
         throw StateError(
           'Solid / Cylinder exige um perfil fechado e saudável.',
         );
       }
-      final profileIds = sourceKind == ProfessionalExtrudeSourceKind.sketch
+      final List<String> profileIds =
+          sourceKind == ProfessionalExtrudeSourceKind.sketch
           ? selectedExtrudeProfileEntityIds
           : const <String>[];
+      List<String> effectiveProfileIds = profileIds;
       final sourceHandles = <ShapeHandle>[];
       var resolvedLoops = const <_ExtrudeProfileLoop>[];
       if (sourceKind == ProfessionalExtrudeSourceKind.sketch) {
         final sketch = sketchApi!.sketches.firstWhere(
           (item) => item.id == source.id,
         );
-        final validateTransientProfiles =
-            featureId == null ||
-            profileIds.length > 1 ||
-            professionalExtrudePreview?['multiProfilePreview'] == true;
-        if (profileIds.isNotEmpty && validateTransientProfiles) {
+        // An implicit Extrude uses the Health-selected component, never the
+        // whole Sketch. Hidden reconstruction inputs and unrelated section
+        // leftovers must not reach the native Wire. The Health set is ordered
+        // by the Sketch tree so persisted profileEntityIds stay deterministic.
+        final List<String> activeProfileIds = profileIds.isEmpty
+            ? _orderedSketchEntityIds(
+                sketch,
+                sketchHealth!.activeProfileEntityIds,
+              )
+            : profileIds;
+        try {
+          // A legacy contract may persist only a single profileEntityId (the
+          // first entity of the loop). Expand that lone seed to its visible
+          // connected component instead of treating it as an isolated edge.
+          final expandedIds = activeProfileIds.length == 1
+              ? _expandLoneExtrudeSeed(sketch, activeProfileIds.single)
+              : null;
+          effectiveProfileIds = expandedIds ?? activeProfileIds;
           // Validate only the selected subset. Solids require closed loops;
           // Surface/Walls deliberately accepts connected open wires.
-          try {
+          if (effectiveProfileIds.isNotEmpty) {
             resolvedLoops = output == ProfessionalExtrudeOutput.solid
-                ? _resolveSelectedExtrudeLoops(sketch, profileIds)
-                : _resolveSelectedSurfaceWires(sketch, profileIds);
-          } on StateError catch (value) {
-            final message = value.message.toString();
-            if (output == ProfessionalExtrudeOutput.solid &&
-                (message.contains('abert') ||
-                    message.contains('gap') ||
-                    message.contains('incompleto'))) {
-              throw StateError(
-                'Solid / Cylinder exige um perfil fechado. Complete o loop antes do Preview.',
-              );
-            }
-            rethrow;
+                ? _resolveSelectedExtrudeLoops(sketch, effectiveProfileIds)
+                : _resolveSelectedSurfaceWires(sketch, effectiveProfileIds);
           }
+        } on StateError catch (value) {
+          // Geometry/topology problems are local. Classify them by output so a
+          // Draft angle can never relabel an open, branched or self-crossing
+          // profile as a generic kernel/Draft failure.
+          throw StateError(
+            _extrudeProfileDiagnostic(output, value.message.toString()),
+          );
         }
-        // The OCCT adapter serializes native tasks. Build wires in order so
-        // a multi-loop preview cannot start concurrent native transactions.
+        // The OCCT adapter serializes native tasks. Build the official Sketch
+        // wires in order so a multi-loop preview cannot start concurrent
+        // native transactions.
         if (resolvedLoops.isEmpty) {
-          sourceHandles.add(
-            await _ensureSketchWire(
-              sketch,
-              profileEntityId: selectedExtrudeProfileEntityId,
-            ),
+          throw StateError(
+            output == ProfessionalExtrudeOutput.solid
+                ? 'Solid / Cylinder exige um loop fechado ativo. Selecione ou feche o perfil antes do Preview.'
+                : 'Surface / Walls exige uma cadeia ativa visível. Selecione ou crie um perfil antes do Preview.',
           );
         } else {
           for (final loop in resolvedLoops) {
-            if (loop.directProfileEntityId != null) {
-              sourceHandles.add(
-                await _ensureSketchWire(
-                  sketch,
-                  profileEntityId: loop.directProfileEntityId,
-                ),
-              );
-            } else {
-              sourceHandles.add(
-                await _createWireFromPoints(
-                  sourceId: '${sketch.id}:loop:${loop.entityIds.join(':')}',
-                  sourceName: sketch.name,
-                  sourceRevision: sketch.version,
-                  points: loop.points,
-                  curveType: ProfessionalCurveType.composite,
-                  color: 'polylineBlue',
-                ),
-              );
-            }
+            sourceHandles.add(
+              await _ensureSketchWire(
+                sketch,
+                profileEntityId: loop.directProfileEntityId,
+                profilePoints: loop.points,
+              ),
+            );
           }
         }
       } else {
@@ -7265,12 +7537,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sourceShapeId: sourceHandle.persistentId,
         distance: distance,
         profileEntityId: sourceKind == ProfessionalExtrudeSourceKind.sketch
-            ? (profileIds.isEmpty
+            ? (effectiveProfileIds.isEmpty
                   ? selectedExtrudeProfileEntityId
-                  : profileIds.first)
+                  : effectiveProfileIds.first)
             : null,
         profileEntityIds: sourceKind == ProfessionalExtrudeSourceKind.sketch
-            ? profileIds
+            ? effectiveProfileIds
             : const [],
         draftAngleDegrees: draftAngleDegrees,
         directionSourceId: directionSourceId,
@@ -7429,9 +7701,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       selectedExtrudeProfileEntityIds =
           (current['profileSelectionEntityIds'] as List?)?.cast<String>() ??
           (current['profileEntityIds'] as List?)?.cast<String>() ??
-          (contract.profileEntityId == null
-              ? const []
-              : [contract.profileEntityId!]);
+          (contract.profileEntityIds.isNotEmpty
+              ? contract.profileEntityIds
+              : (contract.profileEntityId == null
+                    ? const []
+                    : [contract.profileEntityId!]));
     }
     selectedExtrudeSourceId = sourceId;
     runtime.hideTransient('preview:${current['id']}');
@@ -9192,6 +9466,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<ShapeHandle> _ensureSketchWire(
     Sketch sketch, {
     String? profileEntityId,
+    List<SketchVector>? profilePoints,
   }) async {
     final profileSuffix = profileEntityId == null ? '' : ':$profileEntityId';
     final sourceId = '${sketch.id}$profileSuffix';
@@ -9208,10 +9483,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         existing.metadata['sourceEntityId'] == sourceId) {
       return runtime.loadShape(existing);
     }
-    final points = _globalSketchProfilePoints(
-      sketch,
-      profileEntityId: profileEntityId,
-    );
+    // Prefer the loop's own ordered samples: that keeps arcs, splines and
+    // mixed loops in the official Sketch wire instead of a lines-only chain.
+    // When absent, fall back to the historical profile resolution.
+    final points = profilePoints != null
+        ? profilePoints
+              .map(sketch.coordinates.localToGlobal)
+              .toList(growable: false)
+        : _globalSketchProfilePoints(sketch, profileEntityId: profileEntityId);
     if (points.length < 2) {
       throw StateError('${sketch.name} does not contain a usable curve.');
     }
@@ -9272,13 +9551,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final api =
         sketchApi ?? (throw StateError('Sketch runtime is unavailable.'));
     final loops = <_ExtrudeProfileLoop>[];
-    final lines = <({String id, SketchVector start, SketchVector end})>[];
+    final edges = <_SketchProfileEdge>[];
     for (final id in profileIds) {
       if (!sketch.entityIds.contains(id)) {
         throw StateError('O perfil selecionado não pertence ao Sketch ativo.');
       }
       final entity = api.entity(id);
-      if (entity == null || entity.construction || entity.reference) {
+      if (entity == null ||
+          entity.construction ||
+          entity.reference ||
+          !entity.visible) {
         throw StateError('O perfil selecionado não está disponível.');
       }
       if (entity is SketchCircle || entity is SketchEllipse) {
@@ -9290,20 +9572,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             directProfileEntityId: id,
           ),
         );
-      } else if (entity is SketchLine) {
-        lines.add((
-          id: id,
-          start: SketchVector.fromJson(entity.parameters['start']),
-          end: SketchVector.fromJson(entity.parameters['end']),
-        ));
+      } else if (_sketchProfileEdge(entity) case final edge?) {
+        edges.add(edge);
       } else {
         throw StateError(
           'A seleção contém entidades abertas. Selecione um perfil fechado ou complete o loop.',
         );
       }
     }
-    if (lines.isNotEmpty) {
-      loops.addAll(_resolveSelectedLineLoops(lines));
+    if (edges.isNotEmpty) {
+      loops.addAll(_resolveSketchProfileEdges(edges, requireClosed: true));
     }
     loops.sort(
       (first, second) => profileIds
@@ -9323,13 +9601,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final api =
         sketchApi ?? (throw StateError('Sketch runtime is unavailable.'));
     final wires = <_ExtrudeProfileLoop>[];
-    final lines = <({String id, SketchVector start, SketchVector end})>[];
+    final edges = <_SketchProfileEdge>[];
     for (final id in profileIds) {
       if (!sketch.entityIds.contains(id)) {
         throw StateError('O perfil selecionado não pertence ao Sketch ativo.');
       }
       final entity = api.entity(id);
-      if (entity == null || entity.construction || entity.reference) {
+      if (entity == null ||
+          entity.construction ||
+          entity.reference ||
+          !entity.visible) {
         throw StateError('O perfil selecionado não está disponível.');
       }
       if (entity is SketchCircle || entity is SketchEllipse) {
@@ -9341,18 +9622,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             directProfileEntityId: id,
           ),
         );
-      } else if (entity is SketchLine) {
-        lines.add((
-          id: id,
-          start: SketchVector.fromJson(entity.parameters['start']),
-          end: SketchVector.fromJson(entity.parameters['end']),
-        ));
+      } else if (_sketchProfileEdge(entity) case final edge?) {
+        edges.add(edge);
       } else {
         throw StateError('Surface / Walls aceita somente linhas ou wires.');
       }
     }
-    if (lines.isNotEmpty) {
-      wires.addAll(_resolveSelectedOpenOrClosedWires(lines));
+    if (edges.isNotEmpty) {
+      wires.addAll(_resolveSketchProfileEdges(edges, requireClosed: false));
     }
     if (wires.any((wire) => wire.closed) && wires.any((wire) => !wire.closed)) {
       throw StateError(
@@ -9367,227 +9644,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return wires;
   }
 
-  List<_ExtrudeProfileLoop> _resolveSelectedOpenOrClosedWires(
-    List<({String id, SketchVector start, SketchVector end})> lines,
-  ) {
-    final nodes = <SketchVector>[];
-    int nodeFor(SketchVector point) {
-      final existing = nodes.indexWhere(
-        (item) => _sameSketchPoint(item, point),
-      );
-      if (existing >= 0) return existing;
-      nodes.add(point);
-      return nodes.length - 1;
-    }
-
-    final endpoints = <({int start, int end})>[];
-    for (final line in lines) {
-      final start = nodeFor(line.start), end = nodeFor(line.end);
-      if (start == end) {
-        throw StateError('A seleção contém segmento degenerado.');
-      }
-      endpoints.add((start: start, end: end));
-    }
-    final adjacency = List.generate(nodes.length, (_) => <int>[]);
-    for (var index = 0; index < endpoints.length; index++) {
-      adjacency[endpoints[index].start].add(index);
-      adjacency[endpoints[index].end].add(index);
-    }
-    final pending = <int>{
-      for (var index = 0; index < lines.length; index++) index,
-    };
-    final result = <_ExtrudeProfileLoop>[];
-    while (pending.isNotEmpty) {
-      final seed = pending.first;
-      final component = <int>{};
-      final queue = <int>[seed];
-      while (queue.isNotEmpty) {
-        final edge = queue.removeLast();
-        if (!component.add(edge)) continue;
-        pending.remove(edge);
-        final ends = endpoints[edge];
-        for (final node in [ends.start, ends.end]) {
-          for (final linked in adjacency[node]) {
-            if (!component.contains(linked)) queue.add(linked);
-          }
-        }
-      }
-      final degrees = <int, int>{};
-      for (final edge in component) {
-        final ends = endpoints[edge];
-        degrees.update(ends.start, (value) => value + 1, ifAbsent: () => 1);
-        degrees.update(ends.end, (value) => value + 1, ifAbsent: () => 1);
-      }
-      if (degrees.values.any((degree) => degree > 2)) {
-        throw StateError('O wire possui ramificações ou topologia ambígua.');
-      }
-      final openEnds = degrees.entries
-          .where((entry) => entry.value == 1)
-          .map((entry) => entry.key)
-          .toList(growable: false);
-      if (openEnds.isNotEmpty && openEnds.length != 2) {
-        throw StateError('O wire contém gap ou conectividade incompleta.');
-      }
-      final closed = openEnds.isEmpty;
-      if (closed) {
-        result.addAll(
-          _resolveSelectedLineLoops(
-            component.map((index) => lines[index]).toList(growable: false),
-          ),
-        );
-        continue;
-      }
-      var current = openEnds.first;
-      final visited = <int>{};
-      final orderedIds = <String>[];
-      final points = <SketchVector>[nodes[current]];
-      while (true) {
-        final candidates = adjacency[current]
-            .where(
-              (edge) => component.contains(edge) && !visited.contains(edge),
-            )
-            .toList(growable: false);
-        if (candidates.isEmpty) break;
-        if (candidates.length != 1) {
-          throw StateError('O wire possui ramificações ou topologia ambígua.');
-        }
-        final edge = candidates.single;
-        visited.add(edge);
-        orderedIds.add(lines[edge].id);
-        final ends = endpoints[edge];
-        current = ends.start == current ? ends.end : ends.start;
-        points.add(nodes[current]);
-      }
-      if (visited.length != component.length || !openEnds.contains(current)) {
-        throw StateError('O wire contém gap ou conectividade incompleta.');
-      }
-      if (_selectedLoopSelfIntersects(points, closed: false)) {
-        throw StateError('O wire é auto-intersectante.');
-      }
-      result.add(
-        _ExtrudeProfileLoop(
-          entityIds: orderedIds,
-          points: points,
-          closed: false,
-        ),
-      );
-    }
-    return result;
-  }
-
-  List<_ExtrudeProfileLoop> _resolveSelectedLineLoops(
-    List<({String id, SketchVector start, SketchVector end})> lines,
-  ) {
-    final nodes = <SketchVector>[];
-    int nodeFor(SketchVector point) {
-      final existing = nodes.indexWhere(
-        (item) => _sameSketchPoint(item, point),
-      );
-      if (existing >= 0) return existing;
-      nodes.add(point);
-      return nodes.length - 1;
-    }
-
-    final endpoints = <({int start, int end})>[];
-    for (final line in lines) {
-      final start = nodeFor(line.start);
-      final end = nodeFor(line.end);
-      if (start == end) {
-        throw StateError('A seleção contém um segmento degenerado.');
-      }
-      endpoints.add((start: start, end: end));
-    }
-    final adjacency = List.generate(nodes.length, (_) => <int>[]);
-    for (var index = 0; index < endpoints.length; index++) {
-      adjacency[endpoints[index].start].add(index);
-      adjacency[endpoints[index].end].add(index);
-    }
-    final pending = <int>{
-      for (var index = 0; index < lines.length; index++) index,
-    };
-    final loops = <_ExtrudeProfileLoop>[];
-    while (pending.isNotEmpty) {
-      final first = pending.first;
-      final component = <int>{};
-      final queue = <int>[first];
-      while (queue.isNotEmpty) {
-        final edge = queue.removeLast();
-        if (!component.add(edge)) continue;
-        pending.remove(edge);
-        final ends = endpoints[edge];
-        for (final node in [ends.start, ends.end]) {
-          for (final linked in adjacency[node]) {
-            if (!component.contains(linked)) queue.add(linked);
-          }
-        }
-      }
-      if (component.isEmpty) {
-        throw StateError(
-          'A seleção contém perfil duplicado ou loop degenerado.',
-        );
-      }
-      final degrees = <int, int>{};
-      for (final edge in component) {
-        final ends = endpoints[edge];
-        degrees.update(ends.start, (value) => value + 1, ifAbsent: () => 1);
-        degrees.update(ends.end, (value) => value + 1, ifAbsent: () => 1);
-      }
-      if (degrees.values.any((degree) => degree < 2)) {
-        throw StateError(
-          'A seleção contém entidades abertas: há gap entre segmentos. Complete o loop.',
-        );
-      }
-      if (degrees.values.any((degree) => degree != 2)) {
-        throw StateError(
-          'O perfil é auto-intersectante ou possui ramificações.',
-        );
-      }
-      final firstEnds = endpoints[first];
-      var currentNode = firstEnds.start;
-      final orderedPoints = <SketchVector>[nodes[currentNode]];
-      final orderedIds = <String>[lines[first].id];
-      final visited = <int>{first};
-      currentNode = firstEnds.end;
-      orderedPoints.add(nodes[currentNode]);
-      while (true) {
-        final candidates = adjacency[currentNode]
-            .where(
-              (edge) => component.contains(edge) && !visited.contains(edge),
-            )
-            .toList(growable: false);
-        if (candidates.length != 1) {
-          throw StateError(
-            'O perfil é auto-intersectante ou topologicamente ambíguo.',
-          );
-        }
-        final edge = candidates.single;
-        visited.add(edge);
-        orderedIds.add(lines[edge].id);
-        final ends = endpoints[edge];
-        currentNode = ends.start == currentNode ? ends.end : ends.start;
-        orderedPoints.add(nodes[currentNode]);
-        if (currentNode == firstEnds.start) break;
-      }
-      if (visited.length != component.length || orderedPoints.length < 4) {
-        throw StateError('A seleção contém loop incompleto.');
-      }
-      if (_selectedLoopSelfIntersects(orderedPoints)) {
-        throw StateError('O perfil é auto-intersectante.');
-      }
-      loops.add(
-        _ExtrudeProfileLoop(
-          entityIds: orderedIds,
-          points: orderedPoints,
-          closed: true,
-          // The subset has been proven closed; reuse the established Sketch
-          // wire materialization for this exact loop.
-          directProfileEntityId: orderedIds.first,
-        ),
-      );
-    }
-    return loops;
-  }
-
   bool _selectedLoopSelfIntersects(
     List<SketchVector> points, {
     bool closed = true,
@@ -9598,12 +9654,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             (closed && first == 0 && second == points.length - 2)) {
           continue;
         }
-        if (_sketchSegmentsIntersect(
-          points[first],
-          points[first + 1],
-          points[second],
-          points[second + 1],
-        )) {
+        final a = points[first], b = points[first + 1];
+        final c = points[second], d = points[second + 1];
+        // A densely sampled ring duplicates its start point, so the two
+        // segments that meet there can appear collinear. Segments that merely
+        // share an endpoint are a valid connection, not a self-intersection.
+        if (_sameSketchPoint(a, c) ||
+            _sameSketchPoint(a, d) ||
+            _sameSketchPoint(b, c) ||
+            _sameSketchPoint(b, d)) {
+          continue;
+        }
+        if (_sketchSegmentsCross(a, b, c, d)) {
           return true;
         }
       }
@@ -9611,7 +9673,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return false;
   }
 
-  bool _sketchSegmentsIntersect(
+  bool _sketchSegmentsCross(
     SketchVector a,
     SketchVector b,
     SketchVector c,
@@ -9622,15 +9684,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         (second.y - first.y) * (third.x - first.x);
     bool spans(double first, double second) =>
         (first > 1e-9 && second < -1e-9) || (first < -1e-9 && second > 1e-9);
-    final abC = cross(a, b, c);
-    final abD = cross(a, b, d);
-    final cdA = cross(c, d, a);
-    final cdB = cross(c, d, b);
-    if (spans(abC, abD) && spans(cdA, cdB)) return true;
-    return abC.abs() <= 1e-9 ||
-        abD.abs() <= 1e-9 ||
-        cdA.abs() <= 1e-9 ||
-        cdB.abs() <= 1e-9;
+    // Only a proper transversal crossing is a self-intersection. Endpoint
+    // contact and collinear tangency are handled by the topology checks.
+    return spans(cross(a, b, c), cross(a, b, d)) &&
+        spans(cross(c, d, a), cross(c, d, b));
   }
 
   List<SketchVector> _closedLineProfilePoints(
@@ -9779,9 +9836,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       // A geometrically repeated final point is not enough for OCCT to call a
       // Wire closed: the final edge must reference the first TopoDS_Vertex.
       // Reuse that vertex rather than creating a coincident duplicate.
+      // The same tolerance the profile resolver uses decides closure here, so
+      // a loop accepted as closed can never be materialized as an open wire.
       final closed =
           points.length > 2 &&
-          _sketchDistance(points.first, points.last) <= 1e-7;
+          _sketchDistance(points.first, points.last) <= _sketchPointTolerance;
       final vertexPoints = closed
           ? points.sublist(0, points.length - 1)
           : points;
@@ -9934,7 +9993,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         vertexIds: vertexTopologyIds,
         edgeIds: edgeTopologyIds,
         supportGeometryId: curve.id,
-        closed: _sketchDistance(points.first, points.last) <= 1e-7,
+        closed:
+            _sketchDistance(points.first, points.last) <= _sketchPointTolerance,
         manifold: true,
         tolerance: 1e-7,
         createdAt: now,

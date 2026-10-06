@@ -5,6 +5,13 @@ import '../sketch_engine/models/sketch_models.dart';
 
 enum SketchReconstructionKind { line, circle, arc, parallel, perpendicular }
 
+class _TangentFit {
+  const _TangentFit({this.fit, this.invalid = false});
+
+  final (SketchVector, double)? fit;
+  final bool invalid;
+}
+
 class SketchReconstructionSuggestion {
   const SketchReconstructionSuggestion({
     required this.kind,
@@ -49,8 +56,9 @@ class SketchReconstructionEngine {
   /// automatic pass, the selected entities do not need to form one connected
   /// component; small scan gaps are expected in this manual workflow.
   SketchReconstructionSuggestion? fitSelectedCircular(
-    Iterable<SketchEntity> selected,
-  ) {
+    Iterable<SketchEntity> selected, {
+    Iterable<SketchEntity> context = const <SketchEntity>[],
+  }) {
     final entities = selected.toList(growable: false);
     if (entities.length > 3) return null;
     final boundary = _continuousChainBoundaries(entities);
@@ -96,9 +104,19 @@ class SketchReconstructionEngine {
           );
     if (anchor.isEmpty) return null;
     // A least-squares circle can move its endpoints away from the source
-    // chain. Build from the two boundary vertices and one interior sample so
-    // the replacement arc keeps the profile connected exactly.
-    final fit = _circleThrough(boundary.start, anchor.first, boundary.end);
+    // chain. When the chain has two neighboring lines, their normals define
+    // the only circle that can remain C1 at both retained boundary vertices.
+    // Do not silently fall back to a three-point fit in that case: it would
+    // preserve G0 while breaking the profile tangent continuity.
+    final tangentFit = _tangentFit(
+      boundary,
+      entities.map((entity) => entity.id).toSet(),
+      context,
+    );
+    if (tangentFit.invalid) return null;
+    final fit =
+        tangentFit.fit ??
+        _circleThrough(boundary.start, anchor.first, boundary.end);
     if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
       return null;
     }
@@ -139,6 +157,68 @@ class SketchReconstructionEngine {
       startPoint: startContainsAnchor ? boundary.start : boundary.end,
       endPoint: startContainsAnchor ? boundary.end : boundary.start,
     );
+  }
+
+  _TangentFit _tangentFit(
+    ({SketchVector start, SketchVector end}) boundary,
+    Set<String> selectedIds,
+    Iterable<SketchEntity> context,
+  ) {
+    SketchVector? neighboringDirection(SketchVector endpoint) {
+      final candidates = context
+          .whereType<SketchLine>()
+          .where((line) => !selectedIds.contains(line.id) && line.visible)
+          .map((line) {
+            final start = SketchVector.fromJson(line.parameters['start']);
+            final end = SketchVector.fromJson(line.parameters['end']);
+            if (_distance(start, endpoint) <= 1e-7) return end;
+            if (_distance(end, endpoint) <= 1e-7) return start;
+            return null;
+          })
+          .whereType<SketchVector>()
+          .toList(growable: false);
+      // A branch is ambiguous: choosing one would create a tangent that the
+      // operator did not ask for.
+      return candidates.length == 1 ? candidates.single : null;
+    }
+
+    final startNeighbor = neighboringDirection(boundary.start);
+    final endNeighbor = neighboringDirection(boundary.end);
+    if (startNeighbor == null || endNeighbor == null) {
+      // A C1 constraint is only defined when both extremities continue into a
+      // neighboring line. With none or a single neighbor the historical three
+      // point fit stays valid, so do not reject a chain that used to fit.
+      return const _TangentFit();
+    }
+    final startDirection = SketchVector(
+      boundary.start.x - startNeighbor.x,
+      boundary.start.y - startNeighbor.y,
+    );
+    final endDirection = SketchVector(
+      boundary.end.x - endNeighbor.x,
+      boundary.end.y - endNeighbor.y,
+    );
+    // Center = start + u * normal(startDirection) = end + v * normal(end).
+    final startNormal = SketchVector(-startDirection.y, startDirection.x);
+    final endNormal = SketchVector(-endDirection.y, endDirection.x);
+    final dx = boundary.end.x - boundary.start.x;
+    final dy = boundary.end.y - boundary.start.y;
+    final cross = startNormal.x * endNormal.y - startNormal.y * endNormal.x;
+    if (cross.abs() <= 1e-10) return const _TangentFit(invalid: true);
+    final u = (dx * endNormal.y - dy * endNormal.x) / cross;
+    final center = SketchVector(
+      boundary.start.x + u * startNormal.x,
+      boundary.start.y + u * startNormal.y,
+    );
+    final startRadius = _distance(center, boundary.start);
+    final endRadius = _distance(center, boundary.end);
+    final tolerance = math.max(1e-7, math.max(startRadius, endRadius) * 1e-6);
+    if (!startRadius.isFinite ||
+        startRadius <= 1e-9 ||
+        (startRadius - endRadius).abs() > tolerance) {
+      return const _TangentFit(invalid: true);
+    }
+    return _TangentFit(fit: (center, startRadius));
   }
 
   ({SketchVector start, SketchVector end})? _continuousChainBoundaries(

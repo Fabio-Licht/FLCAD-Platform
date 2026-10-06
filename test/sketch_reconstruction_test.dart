@@ -53,6 +53,98 @@ void main() {
     expect(fit.endPoint, isNotNull);
   });
 
+  test('manual fit uses the neighboring lines for C1 tangent endpoints', () {
+    SketchVector point(double angle) =>
+        SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
+    final before = SketchLine(point(-.3), point(0));
+    final first = SketchLine(point(0), point(.3));
+    final second = SketchLine(point(.3), point(.6));
+    final after = SketchLine(point(.6), point(.9));
+
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(
+      [first, second],
+      context: [before, first, second, after],
+    );
+
+    expect(fit, isNotNull);
+    final center = fit!.center!;
+    SketchVector radiusAt(SketchVector point) =>
+        SketchVector(point.x - center.x, point.y - center.y);
+    double dot(SketchVector a, SketchVector b) => a.x * b.x + a.y * b.y;
+    final startRadius = radiusAt(fit.startPoint!);
+    final endRadius = radiusAt(fit.endPoint!);
+    final beforeDirection = SketchVector(
+      point(0).x - point(-.3).x,
+      point(0).y - point(-.3).y,
+    );
+    final afterDirection = SketchVector(
+      point(.9).x - point(.6).x,
+      point(.9).y - point(.6).y,
+    );
+    expect(dot(startRadius, beforeDirection).abs(), lessThan(1e-7));
+    expect(dot(endRadius, afterDirection).abs(), lessThan(1e-7));
+  });
+
+  test(
+    'manual fit rejects a chain when neighboring line tangencies disagree',
+    () {
+      final first = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(1, 1),
+      );
+      final second = SketchLine(
+        const SketchVector(1, 1),
+        const SketchVector(2, 0),
+      );
+      final before = SketchLine(
+        const SketchVector(-1, 0),
+        const SketchVector(0, 0),
+      );
+      final after = SketchLine(
+        const SketchVector(2, 0),
+        const SketchVector(3, 0),
+      );
+
+      expect(
+        const SketchReconstructionEngine().fitSelectedCircular(
+          [first, second],
+          context: [before, first, second, after],
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'manual fit keeps the three point fallback when only one end has a neighbor',
+    () {
+      final first = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(1, 1),
+      );
+      final second = SketchLine(
+        const SketchVector(1, 1),
+        const SketchVector(2, 0),
+      );
+      final before = SketchLine(
+        const SketchVector(-1, 0),
+        const SketchVector(0, 0),
+      );
+
+      // Only boundary.start continues into another line, so a C1 fit is
+      // underdetermined: the pre-existing three point fit must stay available
+      // instead of rejecting a chain that used to be reconstructed.
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(
+        [first, second],
+        context: [before, first, second],
+      );
+
+      expect(fit, isNotNull);
+      expect(fit!.center, isNotNull);
+      expect(fit.radius, closeTo(1, 1e-9));
+    },
+  );
+
   test('manual fit rejects a continuous chain longer than three segments', () {
     final fit = const SketchReconstructionEngine().fitSelectedCircular([
       SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),

@@ -86,6 +86,8 @@ void main() {
       expect((section.data['section'] as Map)['segments'], isNotEmpty);
       await controller.createSketchFromSelectedSection();
       expect(controller.activeSketch!.metadata['sourceSectionId'], section.id);
+      expect(controller.sketchApi!.sketches, hasLength(1));
+      expect(controller.stage, SketchSurfaceStage.sketchActive);
       expect(controller.sketchEntities, isNotEmpty);
       final health = controller.sketchHealth;
       expect(health.readyForSurface, controller.sketchReadyForSurface);
@@ -108,6 +110,7 @@ void main() {
       expect(cad.runtime.document!.entities[imported.id], isNotNull);
       expect(cad.runtime.document!.entities[section.id], isNotNull);
       expect(controller.activeSketch!.metadata['sourceSectionId'], section.id);
+      expect(controller.sketchApi!.sketches, hasLength(1));
       expect(controller.sketchEntities, isNotEmpty);
       expect(
         cad.runtime.document!.entities[section.id]!.data['sceneVisible'],
