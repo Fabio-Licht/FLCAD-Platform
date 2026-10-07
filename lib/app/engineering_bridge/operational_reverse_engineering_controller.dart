@@ -851,6 +851,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     for (final id in usedIds) {
       await runtime.setEntityVisibility(id, false);
     }
+    // Report the *effective* hiding state of each region: the panel has to tell
+    // a temporary selection drawing apart from a source curve that stayed
+    // visible after confirmation.
+    final document = runtime.document;
+    final hiddenCount = usedIds
+        .where(
+          (id) =>
+              document?.entities[id]?.data['sceneVisible'] == false &&
+              runtime.scene.find(id)?.visible == false,
+        )
+        .length;
     final continuity = switch (suggestion.circularFitQuality) {
       SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
       SketchCircularFitQuality.c1Partial =>
@@ -863,7 +874,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .map((id) => id.length > 6 ? id.substring(id.length - 6) : id)
         .join(', ');
     final measurements = <String>[
-      '${usedIds.length} região(ões) usada(s): $usedLabel',
+      '${usedIds.length} região(ões) usada(s) [$usedLabel] · ocultas $hiddenCount/${usedIds.length}',
       if (suggestion.maxGapMillimeters != null &&
           suggestion.maxGapMillimeters! > 0)
         'gap máx ${suggestion.maxGapMillimeters!.toStringAsFixed(3)} mm',

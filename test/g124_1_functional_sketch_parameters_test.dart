@@ -1169,6 +1169,7 @@ void main() {
       expect(cad.runtime.scene.find(arcId)!.selected, isTrue);
       expect(controller.sketchCircularFitMessage, contains('confirmado'));
       expect(controller.sketchCircularFitMessage, contains('usada(s)'));
+      expect(controller.sketchCircularFitMessage, contains('ocultas 5/5'));
 
       // 4. Tangency measured on the FINAL arc against the reference lines: both
       //    junctions must be below the 1 deg tolerance.
