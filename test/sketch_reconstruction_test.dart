@@ -53,7 +53,11 @@ void main() {
     expect(fit.endPoint, isNotNull);
   });
 
-  test('manual fit uses the neighboring lines for C1 tangent endpoints', () {
+  test('manual fit follows the selected samples, not the chord neighbours', () {
+    // Chord neighbours of a Section are not reliable tangents, so the
+    // automatic path fits the sample cloud and keeps both external endpoints;
+    // the neighbours only label the continuity (see the manual tangency
+    // group for the explicit C1 contract).
     SketchVector point(double angle) =>
         SketchVector(5 * math.cos(angle), 5 * math.sin(angle));
     final before = SketchLine(point(-.3), point(0));
@@ -67,35 +71,14 @@ void main() {
     );
 
     expect(fit, isNotNull);
-    expect(fit!.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
-    final center = fit.center!;
-    SketchVector radiusAt(SketchVector point) =>
-        SketchVector(point.x - center.x, point.y - center.y);
-    double dot(SketchVector a, SketchVector b) => a.x * b.x + a.y * b.y;
-    final startRadius = radiusAt(fit.startPoint!);
-    final endRadius = radiusAt(fit.endPoint!);
-    final beforeDirection = SketchVector(
-      point(0).x - point(-.3).x,
-      point(0).y - point(-.3).y,
-    );
-    final afterDirection = SketchVector(
-      point(.9).x - point(.6).x,
-      point(.9).y - point(.6).y,
-    );
-    expect(dot(startRadius, beforeDirection).abs(), lessThan(1e-7));
-    expect(dot(endRadius, afterDirection).abs(), lessThan(1e-7));
-    final startTangent = SketchVector(
-      -math.sin(fit.startAngle!),
-      math.cos(fit.startAngle!),
-    );
-    final endTangent = SketchVector(
-      -math.sin(fit.endAngle!),
-      math.cos(fit.endAngle!),
-    );
-    double normalizedDot(SketchVector a, SketchVector b) =>
-        dot(a, b) / math.sqrt(dot(a, a) * dot(b, b));
-    expect(normalizedDot(startTangent, beforeDirection), closeTo(1, 1e-6));
-    expect(normalizedDot(endTangent, afterDirection), closeTo(1, 1e-6));
+    expect(fit!.radius, closeTo(5, 1e-6));
+    expect(fit.center!.x, closeTo(0, 1e-6));
+    expect(fit.center!.y, closeTo(0, 1e-6));
+    expect(_distance(fit.startPoint!, point(0)), lessThan(1e-9));
+    expect(_distance(fit.endPoint!, point(.6)), lessThan(1e-9));
+    // The chord neighbours are not tangent to the point fit, and that is
+    // reported as a warning instead of rejecting the arc.
+    expect(fit.circularFitQuality, SketchCircularFitQuality.geometricFallback);
   });
 
   test('manual fit recognizes an arc then a line as real C1 neighbours', () {
@@ -236,14 +219,14 @@ void main() {
     },
   );
 
-  test('invalid chains are diagnosed without a tangency failure', () {
+  test('regions too far apart are diagnosed as a gap', () {
     final engine = const SketchReconstructionEngine();
     final failure = engine.diagnoseSelectedCircular([
       SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
       SketchLine(const SketchVector(4, 0), const SketchVector(5, 0)),
     ]);
 
-    expect(failure, SketchCircularFitFailure.invalidChain);
+    expect(failure, SketchCircularFitFailure.gapAboveTolerance);
   });
 
   test('an ambiguous branch never falls back when the other end is open', () {
@@ -623,11 +606,11 @@ void main() {
       expect(fit, isNull);
     });
 
-    test('chord neighbours stay C1 with preserved endpoints', () {
+    test('chord neighbours keep the endpoints without driving the arc', () {
       // Regression: a Section polyline replaces the real curve with chords, so
-      // the neighbour directions are only approximately tangent.  The automatic
-      // arc must still be bilateral C1 and must not drift into the three point
-      // fallback that produced the visible break at both extremities.
+      // the neighbour directions are only approximately tangent.  The arc must
+      // follow the selected samples - all of them - while keeping both external
+      // endpoints, instead of collapsing onto a chord tangent interpretation.
       const radius = 1.5;
       const stepDeg = 5.0;
       final step = stepDeg * math.pi / 180;
@@ -650,28 +633,17 @@ void main() {
       );
 
       expect(fit, isNotNull);
-      expect(fit!.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
+      // The sample cloud is a real arc of the source circle.
+      expect(fit!.radius, closeTo(radius, 1e-6));
       expect(_distance(fit.startPoint!, vertices[1]), lessThan(1e-9));
       expect(_distance(fit.endPoint!, vertices[4]), lessThan(1e-9));
-      // The neighbour chords are not exactly tangent, so a small residual is
-      // expected.  It is balanced between the two extremities and must stay
-      // well inside the accepted 1 deg C1 budget, far from the visible break
-      // the three point fallback produced.
-      final residuals = <double>[];
-      for (final endpoint in <(SketchVector, SketchVector)>[
-        (fit.startPoint!, vertices[0] - vertices[1]),
-        (fit.endPoint!, vertices[5] - vertices[4]),
-      ]) {
-        final radiusVector = endpoint.$1 - fit.center!;
-        final sine =
-            (radiusVector.dot(endpoint.$2) /
-                    (_norm(radiusVector) * _norm(endpoint.$2)))
-                .abs();
-        residuals.add(math.asin(sine.clamp(0.0, 1.0)) * 180 / math.pi);
-      }
-      expect(residuals.every((value) => value < 0.8), isTrue);
-      // Neither junction carries the whole break.
-      expect((residuals.first - residuals.last).abs(), lessThan(0.35));
+      // Chord neighbours cannot be C1 with the point fit, and that is reported
+      // as a non-blocking quality instead of a rejection or a visible break.
+      expect(fit.circularFitQuality, isNotNull);
+      expect(
+        fit.circularFitQuality,
+        isNot(SketchCircularFitQuality.c1Bilateral),
+      );
     });
   });
 
@@ -882,43 +854,40 @@ void main() {
       expect(named.center!.y, closeTo(automatic.center!.y, 1e-9));
     });
 
-    test('a shallow chain rejects the manual pair instead of falling back', () {
-      // Span below the 0.2 rad arc gate: the three point fallback could still
-      // build a circle here, but an explicit pair of references is a strict
-      // contract and must never be downgraded to that arc.
-      const radius = 10.0;
-      const a0 = 0.5;
-      final span = 11 * math.pi / 180;
-      final chain = _chainOnCircle(radius, a0, a0 + span);
-      final p0 = _circlePoint(radius, a0);
-      final p1 = _circlePoint(radius, a0 + span);
-      final startReference = SketchLine(p0 - _circleTangent(a0).scale(2), p0);
-      final endReference = SketchLine(
-        p1,
-        p1 + _circleTangent(a0 + span).scale(2),
-      );
-      final context = [startReference, ...chain, endReference];
-      final engine = const SketchReconstructionEngine();
+    test(
+      'a shallow chain is accepted instead of a radius/length rejection',
+      () {
+        // An 11 degree span on a 10 mm radius used to be discarded because the
+        // radius is large next to the arc length.  It is a legitimate arc: only
+        // the sagitta, sweep and fit error gates decide now.
+        const radius = 10.0;
+        const a0 = 0.5;
+        final span = 11 * math.pi / 180;
+        final chain = _chainOnCircle(radius, a0, a0 + span);
+        final p0 = _circlePoint(radius, a0);
+        final p1 = _circlePoint(radius, a0 + span);
+        final startReference = SketchLine(p0 - _circleTangent(a0).scale(2), p0);
+        final endReference = SketchLine(
+          p1,
+          p1 + _circleTangent(a0 + span).scale(2),
+        );
+        final context = [startReference, ...chain, endReference];
+        final engine = const SketchReconstructionEngine();
 
-      expect(
-        engine.fitSelectedCircular(
+        final fit = engine.fitSelectedCircular(
           chain,
           context: context,
           startTangencyId: startReference.id,
           endTangencyId: endReference.id,
-        ),
-        isNull,
-      );
-      expect(
-        engine.diagnoseSelectedCircular(
-          chain,
-          context: context,
-          startTangencyId: startReference.id,
-          endTangencyId: endReference.id,
-        ),
-        SketchCircularFitFailure.incompatibleTangency,
-      );
-    });
+        );
+
+        expect(fit, isNotNull);
+        expect(fit!.radius, closeTo(radius, 1e-6));
+        expect(fit.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
+        expect(_distance(fit.startPoint!, p0), lessThan(1e-9));
+        expect(_distance(fit.endPoint!, p1), lessThan(1e-9));
+      },
+    );
 
     test('a clockwise chain keeps C1 with two named references', () {
       // Concave profile: the chain is walked clockwise about the fitted centre.
@@ -965,6 +934,312 @@ void main() {
       expect(automatic.radius, closeTo(radius, 1e-6));
     });
   });
+
+  group('multi region section selection', () {
+    test('4, 5 and 10 connected regions estimate the same arc', () {
+      for (final regions in <int>[4, 5, 10]) {
+        const radius = 12.0;
+        final chain = _regionChain(radius, 0.4, 1.4, regions);
+        final fit = const SketchReconstructionEngine().fitSelectedCircular(
+          chain,
+        );
+
+        expect(fit, isNotNull, reason: '$regions regions');
+        expect(fit!.radius, closeTo(radius, 1e-6), reason: '$regions regions');
+        expect(
+          _distance(fit.startPoint!, _circlePoint(radius, 0.4)),
+          lessThan(1e-9),
+        );
+        expect(
+          _distance(fit.endPoint!, _circlePoint(radius, 1.4)),
+          lessThan(1e-9),
+        );
+        expect(fit.warnings, isEmpty);
+      }
+    });
+
+    test('small gaps are accepted and reported as warnings', () {
+      const radius = 20.0;
+      final regions = _gappedChain(
+        radius: radius,
+        start: 0.3,
+        end: 1.1,
+        count: 4,
+        gapMillimeters: 0.2,
+      );
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(
+        regions,
+      );
+
+      expect(fit, isNotNull);
+      expect(fit!.warnings, isNotEmpty);
+      expect(fit.warnings.first, contains('gap'));
+      expect(
+        _distance(fit.startPoint!, _circlePoint(radius, 0.3)),
+        lessThan(1e-9),
+      );
+      expect(fit.radius, closeTo(radius, 0.2));
+    });
+
+    test('two nearby groups are accepted as one arc', () {
+      const radius = 25.0;
+      final first = _regionChain(radius, 0.2, 0.6, 2);
+      final second = _regionChain(radius, 0.6 + 0.35 / radius, 1.0, 2);
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular([
+        ...first,
+        ...second,
+      ]);
+
+      expect(fit, isNotNull);
+      expect(fit!.radius, closeTo(radius, 0.2));
+      expect(fit.entityIds, hasLength(4));
+    });
+
+    test('selection order does not matter', () {
+      const radius = 30.0;
+      final chain = _regionChain(radius, 0.1, 1.2, 4);
+      final engine = const SketchReconstructionEngine();
+
+      final ordered = engine.fitSelectedCircular(chain);
+      final shuffled = engine.fitSelectedCircular([
+        chain[2],
+        chain[0],
+        chain[3],
+        chain[1],
+      ]);
+
+      expect(ordered, isNotNull);
+      expect(shuffled, isNotNull);
+      expect(shuffled!.radius, closeTo(ordered!.radius!, 1e-9));
+      expect(shuffled.center!.x, closeTo(ordered.center!.x, 1e-9));
+      expect(
+        _distance(shuffled.startPoint!, ordered.startPoint!),
+        lessThan(1e-9),
+      );
+      expect(_distance(shuffled.endPoint!, ordered.endPoint!), lessThan(1e-9));
+    });
+
+    test('line, arc and spline regions share one fit', () {
+      const radius = 8.0;
+      const a0 = 0.2, a1 = 1.2;
+      final third = (a1 - a0) / 3;
+      final line = SketchLine(
+        _circlePoint(radius, a0),
+        _circlePoint(radius, a0 + third),
+      );
+      final arc = SketchArc(
+        const SketchVector(0, 0),
+        radius,
+        a0 + third,
+        a0 + 2 * third,
+      );
+      final spline = SketchSpline([
+        for (var index = 0; index <= 6; index++)
+          _circlePoint(radius, a0 + 2 * third + third * index / 6),
+      ]);
+      spline.parameters['sampledPoints'] = [
+        for (var index = 0; index <= 6; index++)
+          _circlePoint(radius, a0 + 2 * third + third * index / 6).toJson(),
+      ];
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular([
+        spline,
+        line,
+        arc,
+      ]);
+
+      expect(fit, isNotNull);
+      expect(fit!.radius, closeTo(radius, 1e-6));
+      expect(fit.center!.x, closeTo(0, 1e-6));
+      expect(
+        _distance(fit.startPoint!, _circlePoint(radius, a0)),
+        lessThan(1e-9),
+      );
+      expect(
+        _distance(fit.endPoint!, _circlePoint(radius, a1)),
+        lessThan(1e-9),
+      );
+    });
+
+    test('a large radius over a short span is accepted', () {
+      // The old guard rejected any radius larger than 8x the selection
+      // diagonal; at 1500 mm over a 60 mm span that is a perfectly good arc.
+      const radius = 1500.0;
+      final span = 60.0 / radius;
+      final chain = _regionChain(radius, 0.1, 0.1 + span, 3);
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
+
+      expect(fit, isNotNull);
+      expect(fit!.radius, closeTo(radius, 1e-3));
+      expect(fit.circularFitQuality, isNotNull);
+    });
+
+    test('a non monotonic U selection keeps the real external endpoints', () {
+      // A 240 degree arc is U shaped.  With six 40 degree regions the farthest
+      // endpoint pair is the diagonal P(0)-P(160) at 1.970R, while the real
+      // external endpoint P(240) sits at 1.732R: strictly shorter, so the
+      // diagonal can never be mistaken for the chain end by rounding noise.
+      // The external endpoints must be the free ends, never the diagonal.
+      const radius = 10.0;
+      const regions = 6;
+      final a1 = 240 * math.pi / 180;
+      final chain = _regionChain(radius, 0, a1, regions);
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
+
+      expect(fit, isNotNull);
+      expect(fit!.radius, closeTo(radius, 1e-6));
+      expect(
+        _distance(fit.startPoint!, _circlePoint(radius, 0)),
+        lessThan(1e-9),
+      );
+      expect(
+        _distance(fit.endPoint!, _circlePoint(radius, a1)),
+        lessThan(1e-9),
+      );
+      // Diagonal picked by the farthest pair search: P(0)-P(160) at 1.970R,
+      // which is strictly longer than the 1.732R chord to the real end.
+      final diagonal = _circlePoint(radius, 160 * math.pi / 180);
+      expect(
+        _distance(_circlePoint(radius, 0), diagonal) -
+            _distance(_circlePoint(radius, 0), _circlePoint(radius, a1)),
+        greaterThan(1e-3),
+      );
+      expect(_distance(fit.endPoint!, diagonal), greaterThan(1e-3));
+    });
+
+    test('a long selection accepts a proportionally small gap', () {
+      // 200 mm of arc on a 2000 mm radius with a 1.5 mm miss: above the 0.5 mm
+      // absolute floor, inside 1% of the span.
+      const radius = 2000.0;
+      final chain = _gappedChain(
+        radius: radius,
+        start: 0.2,
+        end: 0.3,
+        count: 4,
+        gapMillimeters: 1.5,
+      );
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
+
+      expect(fit, isNotNull);
+      expect(fit!.radius, closeTo(radius, 1.0));
+      expect(fit.warnings, isNotEmpty);
+    });
+
+    test('a small part keeps the absolute gap floor', () {
+      // Same 0.8 mm miss on a 2 mm selection stays above the absolute floor and
+      // is rejected, so small parts are not loosened by the relative share.
+      const radius = 5.0;
+      final chain = _gappedChain(
+        radius: radius,
+        start: 0.2,
+        end: 0.6,
+        count: 2,
+        gapMillimeters: 0.8,
+      );
+      final engine = const SketchReconstructionEngine();
+
+      expect(engine.fitSelectedCircular(chain), isNull);
+      expect(
+        engine.diagnoseSelectedCircular(chain),
+        SketchCircularFitFailure.gapAboveTolerance,
+      );
+    });
+
+    test('manual tangency accepts nearby references without contact', () {
+      const radius = 6.0;
+      const a0 = 0.5, a1 = 1.3;
+      final chain = _regionChain(radius, a0, a1, 3);
+      final p0 = _circlePoint(radius, a0);
+      final p1 = _circlePoint(radius, a1);
+      // Offset 0.2 mm away from the endpoints, as a mesh cut with a small gap
+      // produces.  The reference is not connected to the chain at all and the
+      // direction points forward along the walk.
+      final startReference = SketchLine(
+        p0 - _circleTangent(a0).scale(3) + _circleTangent(a0).scale(0.2),
+        p0 + _circleTangent(a0).scale(0.2),
+      );
+      final endReference = SketchLine(
+        p1 + _circleTangent(a1).scale(0.2),
+        p1 + _circleTangent(a1).scale(3) + _circleTangent(a1).scale(0.2),
+      );
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(
+        chain,
+        context: [startReference, ...chain, endReference],
+        startTangencyId: startReference.id,
+        endTangencyId: endReference.id,
+      );
+
+      expect(fit, isNotNull);
+      expect(fit!.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
+      expect(fit.radius, closeTo(radius, 0.2));
+    });
+
+    test('really collinear points are rejected', () {
+      final chain = <SketchEntity>[
+        SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
+        SketchLine(const SketchVector(1, 0), const SketchVector(2, 0)),
+        SketchLine(const SketchVector(2, 0), const SketchVector(3, 0)),
+      ];
+      final engine = const SketchReconstructionEngine();
+
+      expect(engine.fitSelectedCircular(chain), isNull);
+      expect(
+        engine.diagnoseSelectedCircular(chain),
+        SketchCircularFitFailure.collinearPoints,
+      );
+    });
+
+    test('each rejection has its own diagnostic', () {
+      final engine = const SketchReconstructionEngine();
+      // Too few samples.
+      expect(
+        engine.diagnoseSelectedCircular([
+          SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
+        ]),
+        SketchCircularFitFailure.insufficientPoints,
+      );
+      // Split selection: a gap far above the tolerance.
+      expect(
+        engine.diagnoseSelectedCircular([
+          SketchLine(const SketchVector(0, 0), const SketchVector(1, 0.2)),
+          SketchLine(const SketchVector(1, 0.2), const SketchVector(2, 0.6)),
+          SketchLine(const SketchVector(9, 0), const SketchVector(10, 0.6)),
+        ]),
+        SketchCircularFitFailure.gapAboveTolerance,
+      );
+      // Noisy samples no single circle follows (a zig-zag staircase).
+      expect(
+        engine.diagnoseSelectedCircular([
+          SketchLine(const SketchVector(0, 0), const SketchVector(1, 1)),
+          SketchLine(const SketchVector(1, 1), const SketchVector(2, 0)),
+          SketchLine(const SketchVector(2, 0), const SketchVector(3, 1)),
+          SketchLine(const SketchVector(3, 1), const SketchVector(4, 0)),
+        ]),
+        SketchCircularFitFailure.fitErrorAboveTolerance,
+      );
+      // Manual reference far from the endpoint.
+      final chain = _regionChain(12.0, 0.2, 1.2, 3);
+      final stray = SketchLine(
+        const SketchVector(80, 80),
+        const SketchVector(81, 80),
+      );
+      expect(
+        engine.diagnoseSelectedCircular(
+          chain,
+          context: [...chain, stray],
+          startTangencyId: stray.id,
+          endTangencyId: chain.last.id,
+        ),
+        SketchCircularFitFailure.disconnectedTangency,
+      );
+    });
+  });
 }
 
 SketchVector _circlePoint(double radius, double angle) =>
@@ -972,6 +1247,41 @@ SketchVector _circlePoint(double radius, double angle) =>
 
 SketchVector _circleTangent(double angle) =>
     SketchVector(-math.sin(angle), math.cos(angle));
+
+/// [regions] consecutive chords of the circle, sharing their endpoints.
+List<SketchLine> _regionChain(
+  double radius,
+  double a0,
+  double a1,
+  int regions,
+) => <SketchLine>[
+  for (var index = 0; index < regions; index++)
+    SketchLine(
+      _circlePoint(radius, a0 + (a1 - a0) * index / regions),
+      _circlePoint(radius, a0 + (a1 - a0) * (index + 1) / regions),
+    ),
+];
+
+/// [count] chords of the circle separated by [gapMillimeters] along the arc,
+/// which is what a mesh Section cut with small misses produces.
+List<SketchLine> _gappedChain({
+  required double radius,
+  required double start,
+  required double end,
+  required int count,
+  required double gapMillimeters,
+}) {
+  final gap = gapMillimeters / radius;
+  final usable = (end - start) - gap * (count - 1);
+  final step = usable / count;
+  return <SketchLine>[
+    for (var index = 0; index < count; index++)
+      SketchLine(
+        _circlePoint(radius, start + index * (step + gap)),
+        _circlePoint(radius, start + index * (step + gap) + step),
+      ),
+  ];
+}
 
 /// Two chord chain on a circle plus a correct tangency curve at each endpoint.
 ///

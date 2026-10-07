@@ -10115,8 +10115,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
             ),
             OutlinedButton.icon(
               onPressed:
-                  controller.selectedSketchEntityIds.length >= 2 &&
-                      controller.selectedSketchEntityIds.length <= 3
+                  controller.selectedSketchEntityIds.isNotEmpty &&
+                      controller.selectedSketchEntityIds.length <=
+                          controller.sketchCircularMaxRegions
                   ? controller.fitSelectedSketchCircularGeometry
                   : null,
               icon: const Icon(Icons.circle_outlined, size: 16),

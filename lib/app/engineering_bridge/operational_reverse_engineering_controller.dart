@@ -663,10 +663,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// Fits a native circle/arc from a short chain selected directly on the
   /// section profile, matching the Geomagic-style manual reconstruction flow.
   ///
-  /// The automatic tangency inference stays the default.  When the user names a
-  /// curve in "Tangência inicial" / "Tangência final" those explicit references
-  /// drive the C1 solution instead, which is what makes the command reliable on
-  /// a Section built from chords.
+  /// The whole selected set drives one arc: every region contributes its
+  /// samples, the regions are ordered by proximity, small Section gaps are
+  /// tolerated and the two external endpoints are preserved.  When the user
+  /// names a curve in "Tangência inicial" / "Tangência final" those explicit
+  /// references drive the tangency instead.
   Future<void> fitSelectedSketchCircularGeometry() async {
     sketchCircularFitMessage = null;
     final api = sketchApi;
@@ -679,13 +680,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .where(
           (entity) =>
               selectedSketchEntityIds.contains(entity.id) &&
-              (entity is SketchLine || entity is SketchSpline),
+              (entity is SketchLine ||
+                  entity is SketchArc ||
+                  entity is SketchSpline),
         )
         .toList(growable: false);
-    if (selected.length < 2 || selected.length > 3) {
+    if (selected.isEmpty) {
       sketchCircularFitMessage =
-          'Selecione duas ou três linhas/segmentos da seção.';
-      error = 'Selecione duas ou três linhas/segmentos da seção.';
+          'Selecione as regiões da seção (linhas, arcos ou splines) que formam o arco.';
+      error = 'Selecione as regiões da seção que formam o arco.';
+      notifyListeners();
+      return;
+    }
+    if (selected.length > SketchCircularFitTolerance.maxRegions) {
+      sketchCircularFitMessage =
+          'Seleção grande demais (${selected.length} regiões). O limite é '
+          '${SketchCircularFitTolerance.maxRegions} regiões por ajuste.';
+      error = sketchCircularFitMessage;
       notifyListeners();
       return;
     }
@@ -742,17 +753,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       );
       final message = switch (failure) {
         SketchCircularFitFailure.invalidChain =>
-          'A cadeia selecionada é inválida. Selecione dois ou três segmentos conectados.',
+          'A seleção não forma um arco: selecione regiões com curvatura suficiente.',
         SketchCircularFitFailure.insufficientPoints =>
-          'Faltam pontos distintos para definir o arco. Selecione uma cadeia com curvatura.',
+          'Faltam pontos distintos para definir o arco. Selecione mais regiões da seção.',
+        SketchCircularFitFailure.collinearPoints =>
+          'Os pontos selecionados são praticamente colineares: não há arco a ajustar.',
+        SketchCircularFitFailure.gapAboveTolerance =>
+          'Há um vão entre regiões acima da tolerância. Aproxime a seleção ou ajuste a tolerância de vão.',
+        SketchCircularFitFailure.fitErrorAboveTolerance =>
+          'O erro de ajuste ficou acima da tolerância. Selecione regiões que pertençam ao mesmo arco.',
+        SketchCircularFitFailure.invalidSweep =>
+          'O arco resultante tem abertura inválida. Selecione regiões que cubram uma abertura maior.',
         SketchCircularFitFailure.unstableRadius =>
-          'O raio calculado é instável. Selecione segmentos com curvatura mais evidente.',
+          'O raio calculado não é utilizável (não finito ou menor que a tolerância geométrica).',
         SketchCircularFitFailure.ambiguousBranch =>
           'Há mais de uma curva vizinha em uma extremidade. Selecione uma cadeia sem ramificações.',
         SketchCircularFitFailure.incompatibleTangency =>
-          'A geometria selecionada não permite um arco estável. Verifique curvatura e endpoints.',
+          'A tangência manual é incompatível com as regiões selecionadas. Revise as referências ou o sentido do arco.',
         SketchCircularFitFailure.disconnectedTangency =>
-          'A curva de tangência precisa estar conectada ao endpoint correspondente e ser distinta das curvas substituídas.',
+          'A curva de tangência precisa estar próxima do endpoint correspondente e ser distinta das regiões substituídas.',
         SketchCircularFitFailure.reversedTangency =>
           'A curva de tangência está invertida: ela aponta para dentro da cadeia. Selecione a curva que continua o perfil.',
       };
@@ -769,13 +788,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final continuity = switch (suggestion.circularFitQuality) {
       SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
       SketchCircularFitQuality.c1Partial =>
-        'advertência: C1 parcial aplicado; demais pontos ajustados geometricamente',
-      SketchCircularFitQuality.geometricFallback ||
-      null => 'advertência: fallback geométrico sem tangência bilateral',
+        'advertência: C1 parcial aplicado; ajuste pelos pontos nas demais extremidades',
+      SketchCircularFitQuality.geometricFallback || null =>
+        'ajuste por mínimos quadrados dos pontos, sem tangência bilateral',
     };
     final manualTangency = startTangencyId != null || endTangencyId != null;
+    final warnings = suggestion.warnings.isEmpty
+        ? ''
+        : ' · ${suggestion.warnings.join(' · ')}';
     sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}';
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}$warnings';
     runtime.write('sketch.circularSelectionMode', false);
     runtime.write('sketch.tangency.pickTarget', null);
     notifyListeners();
@@ -1098,6 +1120,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.readOrCreate('sketch.selectedIds', () => <String>{});
   bool get sketchCircularSelectionMode =>
       runtime.read<bool>('sketch.circularSelectionMode') ?? false;
+
+  /// Upper bound of regions accepted by one circular adjustment, so the panel
+  /// can gate the command without importing the reconstruction engine.
+  int get sketchCircularMaxRegions => SketchCircularFitTolerance.maxRegions;
 
   /// Explicit tangency references for the circular adjustment.
   ///

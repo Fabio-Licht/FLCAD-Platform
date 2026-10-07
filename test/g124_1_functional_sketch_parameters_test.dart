@@ -176,9 +176,15 @@ void main() {
       await controller.fitSelectedSketchCircularGeometry();
       final fittedId = controller.selectedSketchEntityIds.single;
       final fitted = controller.sketchApi!.entity(fittedId)! as SketchArc;
+      // Chord neighbours of a Section are not reliable tangents: the arc now
+      // follows the selected samples and reports the continuity honestly.
       expect(
         controller.sketchCircularFitMessage,
-        contains('C1 bilateral aplicado'),
+        contains('mínimos quadrados'),
+      );
+      expect(
+        controller.sketchApi!.entity(fittedId)!.parameters['radius'],
+        closeTo(5, 1e-6),
       );
       expect(sourceA.visible, isFalse);
       expect(sourceB.visible, isFalse);
@@ -398,7 +404,7 @@ void main() {
       );
       expect(
         controller.sketchCircularFitMessage,
-        contains('fallback geométrico'),
+        contains('mínimos quadrados'),
       );
       expect(fallbackA.visible, isFalse);
       expect(fallbackB.visible, isFalse);
@@ -421,7 +427,7 @@ void main() {
       await controller.fitSelectedSketchCircularGeometry();
       expect(
         controller.sketchCircularFitMessage,
-        contains('cadeia selecionada'),
+        contains('vão entre regiões'),
       );
 
       controller.beginCircleCommand();
@@ -933,7 +939,10 @@ void main() {
     controller.beginSketchTangencyPick('start');
     controller.selectSketchEntity(stray.id);
     await controller.fitSelectedSketchCircularGeometry();
-    expect(controller.sketchCircularFitMessage, contains('conectada'));
+    expect(
+      controller.sketchCircularFitMessage,
+      contains('próxima do endpoint'),
+    );
     expect(chainA.visible, isFalse, reason: 'rejection must not replace');
 
     // Clearing the fields restores the automatic mode for the next fit.
@@ -959,6 +968,101 @@ void main() {
     expect(controller.sketchCircularFitMessage, contains('não existe mais'));
     expect(controller.sketchTangencyStartId, isNull);
     expect(controller.sketchTangencyPickActive, isFalse);
+  });
+
+  test('multi region selection drives one arc through the command', () async {
+    final directory = await Directory.systemTemp.createTemp('g124_1_regions_');
+    addTearDown(() => directory.delete(recursive: true));
+    final kernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final cad = DesktopCadController(
+      kernels: kernels,
+      projects: ProjectManager.instance,
+    );
+    final commands = DesktopCommandCoordinator(
+      cad: cad,
+      projects: ProjectManager.instance,
+    );
+    final projects = ProjectRepository(
+      storage: LocalStorageService(rootDirectory: directory),
+    );
+    final controller = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: commands,
+      runtime: cad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: projects),
+        ),
+      ),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(cad.dispose);
+    await cad.runtime.open('g124-regions', directory);
+    await controller.configureProject(
+      projectId: 'g124-regions',
+      projectDirectory: directory,
+    );
+    controller.selectWorldSketchPlane(SketchPlaneType.xy);
+    await controller.openSketch();
+
+    const radius = 40.0;
+    const a0 = 0.3;
+    const a1 = 1.5;
+    SketchVector point(double angle) =>
+        SketchVector(200 + radius * math.cos(angle), radius * math.sin(angle));
+    final sources = <SketchLine>[
+      for (var index = 0; index < 5; index++)
+        controller.sketchApi!.builders.line.build(
+          point(a0 + (a1 - a0) * index / 5),
+          point(a0 + (a1 - a0) * (index + 1) / 5),
+        ),
+    ];
+
+    controller.beginSketchCircularSelection();
+    // Deliberately out of order, like real viewport picking.
+    for (final entity in [
+      sources[2],
+      sources[0],
+      sources[4],
+      sources[1],
+      sources[3],
+    ]) {
+      controller.selectSketchEntity(entity.id);
+    }
+    expect(controller.selectedSketchEntityIds, hasLength(5));
+    expect(controller.sketchCircularMaxRegions, greaterThanOrEqualTo(5));
+
+    await controller.fitSelectedSketchCircularGeometry();
+    final fitted = controller.sketchApi!.entity(
+      controller.selectedSketchEntityIds.single,
+    );
+    expect(fitted, isA<SketchArc>());
+    expect((fitted! as SketchArc).parameters['radius'], closeTo(radius, 1e-6));
+    expect(controller.sketchCircularFitMessage, contains('raio 40.000 mm'));
+    for (final source in sources) {
+      expect(source.visible, isFalse);
+    }
+    expect(cad.runtime.scene.find(fitted.id)!.selected, isTrue);
+
+    // A rejected selection never replaces the sources.
+    final collinear = [
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(300, 0),
+        const SketchVector(301, 0),
+      ),
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(301, 0),
+        const SketchVector(302, 0),
+      ),
+    ];
+    controller.beginSketchCircularSelection();
+    for (final entity in collinear) {
+      controller.selectSketchEntity(entity.id);
+    }
+    await controller.fitSelectedSketchCircularGeometry();
+    expect(controller.sketchCircularFitMessage, contains('colineares'));
+    expect(collinear.every((entity) => entity.visible), isTrue);
   });
 }
 

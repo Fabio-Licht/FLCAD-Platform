@@ -8,6 +8,23 @@ enum SketchReconstructionKind { line, circle, arc, parallel, perpendicular }
 enum SketchCircularFitFailure {
   invalidChain,
   insufficientPoints,
+
+  /// The selected samples can be covered by a straight line within the
+  /// absolute tolerance, so no arc is recoverable from them.
+  collinearPoints,
+
+  /// Two consecutive regions are farther apart than
+  /// [SketchCircularFitTolerance.maxGapMillimeters].
+  gapAboveTolerance,
+
+  /// The radial error of the fitted circle is larger than the combined
+  /// absolute/relative tolerance.
+  fitErrorAboveTolerance,
+
+  /// The fitted arc sweep is not a usable positive angle.
+  invalidSweep,
+
+  /// The radius is not finite, or is smaller than the geometric tolerance.
   unstableRadius,
   ambiguousBranch,
   incompatibleTangency,
@@ -25,6 +42,62 @@ enum SketchCircularFitFailure {
 /// The geometry is always usable; callers use this to present a non-blocking
 /// warning when the source chain cannot satisfy bilateral C1.
 enum SketchCircularFitQuality { c1Bilateral, c1Partial, geometricFallback }
+
+/// Absolute and relative tolerances for the circular adjustment.
+///
+/// Distances are millimetres.  [relativeToRadius] is dimensionless and is
+/// multiplied by the fitted radius, so the effective radial budget is
+/// `max(absoluteMillimeters, relativeToRadius * radius)` - an absolute floor
+/// for small arcs and a relative share for large ones.
+class SketchCircularFitTolerance {
+  const SketchCircularFitTolerance({
+    this.absoluteMillimeters = 0.25,
+    this.relativeToRadius = 0.01,
+    this.maxGapMillimeters = 0.5,
+    this.gapRelativeToSpan = 0.01,
+    this.minRadiusMillimeters = 0.01,
+    this.collinearMillimeters = 1e-4,
+    this.collinearRelativeToSpan = 1e-3,
+  });
+
+  /// Largest radial error accepted when [relativeToRadius] * radius is
+  /// smaller than this.
+  final double absoluteMillimeters;
+
+  /// Relative part of the radial budget.
+  final double relativeToRadius;
+
+  /// Largest distance allowed between two consecutive selected regions before
+  /// the selection is considered split.
+  final double maxGapMillimeters;
+
+  /// Relative part of the gap budget: the effective gap is
+  /// `max(maxGapMillimeters, gapRelativeToSpan * span)`, so small parts keep
+  /// the absolute floor while a long selection tolerates a proportionally
+  /// small gap.
+  final double gapRelativeToSpan;
+
+  /// Smallest radius that still describes a usable arc.
+  final double minRadiusMillimeters;
+
+  /// Absolute floor of the sagitta below which the selection counts as a
+  /// straight segment.
+  final double collinearMillimeters;
+
+  /// Relative part of the collinearity threshold: the sagitta is compared to
+  /// the span of the selection, which keeps the test independent of size.  The
+  /// default rejects only arcs spanning less than about half a degree.
+  final double collinearRelativeToSpan;
+
+  /// Performance guards for a mesh Section selection.  The command is used on
+  /// hand picked regions, so these only stop a pathological whole-profile
+  /// selection from reaching the least squares solve.
+  static const int maxRegions = 64;
+  static const int maxSamples = 4096;
+
+  double radialFor(double radius) =>
+      math.max(absoluteMillimeters, relativeToRadius * radius);
+}
 
 /// Maximum angle between the arc tangent and the oriented neighbour tangent
 /// accepted for a bilateral C1 solution.
@@ -64,6 +137,35 @@ class _NeighborProbe {
   final SketchCircularFitFailure? failure;
 }
 
+/// Selected regions ordered by proximity, with the external endpoints kept and
+/// the gaps measured between consecutive regions.
+class _OrderedSelection {
+  const _OrderedSelection({
+    required this.regions,
+    required this.start,
+    required this.end,
+    required this.gaps,
+  });
+
+  final List<List<SketchVector>> regions;
+  final SketchVector start;
+  final SketchVector end;
+  final List<double> gaps;
+
+  /// Every sample of every selected region, in walk order.  The arc is fitted
+  /// on this whole cloud, never on an artificial connector.
+  List<SketchVector> get points => <SketchVector>[
+    for (final region in regions) ...region,
+  ];
+}
+
+class _SelectionOrder {
+  const _SelectionOrder(this.selection, [this.failure]);
+
+  final _OrderedSelection? selection;
+  final SketchCircularFitFailure? failure;
+}
+
 class SketchReconstructionSuggestion {
   const SketchReconstructionSuggestion({
     required this.kind,
@@ -76,6 +178,7 @@ class SketchReconstructionSuggestion {
     this.startPoint,
     this.endPoint,
     this.circularFitQuality,
+    this.warnings = const <String>[],
   });
 
   final SketchReconstructionKind kind;
@@ -91,6 +194,10 @@ class SketchReconstructionSuggestion {
   final SketchVector? endPoint;
 
   final SketchCircularFitQuality? circularFitQuality;
+
+  /// Non-blocking findings of the adjustment, for example the gaps measured
+  /// between partially disconnected Section regions.
+  final List<String> warnings;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -120,178 +227,170 @@ class SketchReconstructionEngine {
     Iterable<SketchEntity> context = const <SketchEntity>[],
     String? startTangencyId,
     String? endTangencyId,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final entities = selected.toList(growable: false);
-    if (entities.length > 3) return null;
-    final boundary = _continuousChainBoundaries(entities);
-    if (boundary == null) return null;
-    final points = <SketchVector>[];
-    for (final entity in entities) {
-      if (entity is SketchLine) {
-        points
-          ..add(SketchVector.fromJson(entity.parameters['start']))
-          ..add(SketchVector.fromJson(entity.parameters['end']));
-      } else if (entity is SketchSpline) {
-        final raw =
-            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
-                as List?;
-        if (raw != null) {
-          points.addAll(raw.whereType<List>().map(SketchVector.fromJson));
-        }
-      }
+    if (entities.isEmpty ||
+        entities.length > SketchCircularFitTolerance.maxRegions) {
+      return null;
     }
-    // Adjacent section lines share an endpoint. Two selected lines therefore
-    // provide three distinct samples, which are enough to define an arc.
-    final uniquePoints = <SketchVector>[];
-    for (final point in points) {
-      if (!uniquePoints.any((other) => _distance(other, point) <= 1e-7)) {
-        uniquePoints.add(point);
-      }
-    }
-    if (uniquePoints.length < 3) return null;
-    final anchor =
-        uniquePoints
-            .where(
-              (point) =>
-                  _distance(point, boundary.start) > 1e-7 &&
-                  _distance(point, boundary.end) > 1e-7,
-            )
-            .toList(growable: false)
-          ..sort(
-            (first, second) => _distanceToLine(
-              second,
-              boundary.start,
-              boundary.end,
-            ).compareTo(_distanceToLine(first, boundary.start, boundary.end)),
-          );
-    if (anchor.isEmpty) return null;
-    // Retain the external endpoints throughout. Prefer C1 at both ends, then
-    // one end, then the existing three-point geometric fit. A continuous,
-    // usable chain must not be discarded merely because bilateral C1 is
-    // impossible; the quality is reported to the caller as a warning.
-    final tangent = _tangentFit(
-      boundary,
-      entities.map((entity) => entity.id).toSet(),
-      context,
-      manualStartId: startTangencyId,
-      manualEndId: endTangencyId,
-      startForward: _chainDirectionInto(entities, boundary.start),
-      endForward: _chainDirectionInto(entities, boundary.end)?.scale(-1),
-    );
+    // 1. Order whatever the user picked by proximity and find the ends of the
+    //    whole set; gaps are measured, never bridged with a segment.
+    final order = _orderSelection(entities, tolerance);
+    final selection = order.selection;
+    if (selection == null || order.failure != null) return null;
+    final points = selection.points;
+    if (points.length < 3) return null;
+    final start = selection.start;
+    final end = selection.end;
+    final boundary = (start: start, end: end);
+    final selectedIds = entities.map((entity) => entity.id).toSet();
     final manualBoth = startTangencyId != null && endTangencyId != null;
-    if (tangent.failure == SketchCircularFitFailure.ambiguousBranch) {
-      return null;
-    }
-    // An explicit pair of references is a user contract: reject instead of
-    // silently downgrading to a one sided or three point arc.
-    if (manualBoth &&
-        tangent.failure != null &&
-        tangent.failure != SketchCircularFitFailure.incompatibleTangency) {
-      return null;
-    }
-    if (manualBoth && tangent.fit == null) return null;
-    var fit = tangent.fit;
-    var quality = SketchCircularFitQuality.c1Bilateral;
-    if (fit != null) {
-      final angles = _arcDefinition(boundary, anchor.first, fit.$1);
-      if (angles == null ||
-          !_hasC1Tangency(
-            context,
-            selectedIds: entities.map((entity) => entity.id).toSet(),
-            center: fit.$1,
-            startPoint: boundary.start,
-            endPoint: boundary.end,
-            startTangencyId: startTangencyId,
-            endTangencyId: endTangencyId,
-          )) {
-        // An explicit pair of references is a strict contract: reject instead
-        // of downgrading to a one sided or three point arc.
-        if (manualBoth) return null;
-        fit = null;
-        quality = SketchCircularFitQuality.geometricFallback;
+    final warnings = <String>[
+      for (final gap in selection.gaps)
+        if (gap > 0)
+          'gap de ${gap.toStringAsFixed(3)} mm entre regiões da seção',
+    ];
+    // Anchor on the side of the chain: the sample farthest from the external
+    // chord.
+    var anchor = points.first;
+    var anchorDistance = _distanceToLine(anchor, start, end);
+    for (final point in points) {
+      final distance = _distanceToLine(point, start, end);
+      if (distance > anchorDistance) {
+        anchor = point;
+        anchorDistance = distance;
       }
     }
-    // Defensive: with an explicit pair of references a null fit at this point
-    // can only come from the C1 validation above.
-    if (manualBoth && fit == null) return null;
-    if (fit == null && tangent.required) {
-      fit = _partialTangentFit(
+    if (anchorDistance <= 1e-7) return null;
+
+    (SketchVector, double)? fit;
+    var quality = SketchCircularFitQuality.geometricFallback;
+    if (manualBoth) {
+      // 2a. Two explicit references are a strict contract: the tangency drives
+      //     the centre and the preserved endpoints anchor it.
+      final tangent = _tangentFit(
         boundary,
-        entities.map((entity) => entity.id).toSet(),
+        selectedIds,
         context,
-        uniquePoints,
+        manualStartId: startTangencyId,
+        manualEndId: endTangencyId,
+        startForward: _chainDirectionInto(entities, start),
+        endForward: _chainDirectionInto(entities, end)?.scale(-1),
+        tolerance: tolerance,
       );
-      if (fit != null) {
-        final angles = _arcDefinition(boundary, anchor.first, fit.$1);
-        if (angles == null ||
-            !_hasAnyC1Tangency(
-              context,
-              selectedIds: entities.map((entity) => entity.id).toSet(),
-              center: fit.$1,
-              startPoint: boundary.start,
-              endPoint: boundary.end,
-              startTangencyId: startTangencyId,
-              endTangencyId: endTangencyId,
-            )) {
-          fit = null;
-        } else {
-          quality = SketchCircularFitQuality.c1Partial;
-        }
+      final solved = tangent.fit;
+      if (tangent.failure != null || solved == null) return null;
+      final angles = _arcDefinition(boundary, anchor, solved.$1);
+      if (angles == null) return null;
+      if (!_hasC1Tangency(
+        context,
+        selectedIds: selectedIds,
+        center: solved.$1,
+        startPoint: start,
+        endPoint: end,
+        startTangencyId: startTangencyId,
+        endTangencyId: endTangencyId,
+        tolerance: tolerance,
+      )) {
+        return null;
+      }
+      final failure = _circularFitFailure(
+        points: points,
+        center: solved.$1,
+        radius: solved.$2,
+        start: start,
+        end: end,
+        sweep: angles.endAngle - angles.startAngle,
+        tolerance: tolerance,
+      );
+      if (failure != null) return null;
+      final deviation = _radialError(points, solved.$1, solved.$2);
+      if (deviation > tolerance.radialFor(solved.$2)) {
+        warnings.add(
+          'tangência manual desvia ${deviation.toStringAsFixed(3)} mm das regiões selecionadas',
+        );
+      }
+      fit = solved;
+      quality = SketchCircularFitQuality.c1Bilateral;
+    } else {
+      // 2b. Otherwise the whole selected cloud estimates one arc that still
+      //     passes through both external endpoints.  Tangency only labels the
+      //     continuity; it never rejects an otherwise valid fit.
+      final primary = _fitThroughEndpoints(points, start, end);
+      if (primary == null) return null;
+      final tangent = _tangentFit(
+        boundary,
+        selectedIds,
+        context,
+        manualStartId: startTangencyId,
+        manualEndId: endTangencyId,
+        startForward: _chainDirectionInto(entities, start),
+        endForward: _chainDirectionInto(entities, end)?.scale(-1),
+        tolerance: tolerance,
+      );
+      if (tangent.failure == SketchCircularFitFailure.ambiguousBranch) {
+        return null;
+      }
+      fit = primary;
+      if (_hasC1Tangency(
+        context,
+        selectedIds: selectedIds,
+        center: primary.$1,
+        startPoint: start,
+        endPoint: end,
+        startTangencyId: startTangencyId,
+        endTangencyId: endTangencyId,
+        tolerance: tolerance,
+      )) {
+        quality = SketchCircularFitQuality.c1Bilateral;
+      } else if (_hasAnyC1Tangency(
+        context,
+        selectedIds: selectedIds,
+        center: primary.$1,
+        startPoint: start,
+        endPoint: end,
+        startTangencyId: startTangencyId,
+        endTangencyId: endTangencyId,
+        tolerance: tolerance,
+      )) {
+        quality = SketchCircularFitQuality.c1Partial;
       }
     }
-    fit ??= _circleThrough(boundary.start, anchor.first, boundary.end);
-    if (fit == null) return null;
-    if (quality == SketchCircularFitQuality.c1Bilateral &&
-        tangent.fit == null) {
-      quality = SketchCircularFitQuality.geometricFallback;
-    }
+
     final circularFit = fit;
-    if (!_isSaneCircularFit(uniquePoints, circularFit.$1, circularFit.$2)) {
-      return null;
-    }
-    final error =
-        uniquePoints
-            .map(
-              (point) =>
-                  (_distance(point, circularFit.$1) - circularFit.$2).abs(),
-            )
-            .fold<double>(0, (sum, value) => sum + value) /
-        uniquePoints.length;
-    final startAngle = math.atan2(
-      boundary.start.y - circularFit.$1.y,
-      boundary.start.x - circularFit.$1.x,
+    final angles = _arcDefinition(boundary, anchor, circularFit.$1);
+    if (angles == null) return null;
+    final failure = _circularFitFailure(
+      points: points,
+      center: circularFit.$1,
+      radius: circularFit.$2,
+      start: start,
+      end: end,
+      sweep: angles.endAngle - angles.startAngle,
+      tolerance: tolerance,
     );
-    final endAngle = math.atan2(
-      boundary.end.y - circularFit.$1.y,
-      boundary.end.x - circularFit.$1.x,
-    );
-    final anchorAngle = math.atan2(
-      anchor.first.y - circularFit.$1.y,
-      anchor.first.x - circularFit.$1.x,
-    );
-    final ccwSweep = _positiveSweep(startAngle, endAngle);
-    final startContainsAnchor =
-        _positiveSweep(startAngle, anchorAngle) <= ccwSweep + 1e-7;
-    final arcStart = startContainsAnchor ? startAngle : endAngle;
-    final sweep = startContainsAnchor
-        ? ccwSweep
-        : _positiveSweep(endAngle, startAngle);
-    if (sweep < .2) return null;
-    final arcStartPoint = startContainsAnchor ? boundary.start : boundary.end;
-    final arcEndPoint = startContainsAnchor ? boundary.end : boundary.start;
+    if (failure != null) return null;
+    final error = _radialError(points, circularFit.$1, circularFit.$2);
     return SketchReconstructionSuggestion(
       kind: SketchReconstructionKind.arc,
       entityIds: entities.map((entity) => entity.id).toList(growable: false),
       confidence:
-          (1 - error / math.max(math.max(.5, circularFit.$2 * .05), 1e-9))
+          (1 -
+                  error /
+                      math.max(
+                        tolerance.radialFor(circularFit.$2),
+                        tolerance.absoluteMillimeters,
+                      ))
               .clamp(0.0, 1.0),
       center: circularFit.$1,
       radius: circularFit.$2,
-      startAngle: arcStart,
-      endAngle: arcStart + sweep,
-      startPoint: arcStartPoint,
-      endPoint: arcEndPoint,
+      startAngle: angles.startAngle,
+      endAngle: angles.endAngle,
+      startPoint: angles.startPoint,
+      endPoint: angles.endPoint,
       circularFitQuality: quality,
+      warnings: warnings,
     );
   }
 
@@ -303,20 +402,22 @@ class SketchReconstructionEngine {
     Iterable<SketchEntity> context = const <SketchEntity>[],
     String? startTangencyId,
     String? endTangencyId,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final entities = selected.toList(growable: false);
-    if (entities.length < 2 || entities.length > 3) {
+    if (entities.isEmpty ||
+        entities.length > SketchCircularFitTolerance.maxRegions) {
       return SketchCircularFitFailure.invalidChain;
     }
-    final boundary = _continuousChainBoundaries(entities);
-    if (boundary == null) return SketchCircularFitFailure.invalidChain;
-    final points = _fitPoints(entities);
-    final uniquePoints = _uniquePoints(points);
-    if (uniquePoints.length < 3) {
-      return SketchCircularFitFailure.insufficientPoints;
-    }
-    final anchor = _fitAnchor(uniquePoints, boundary);
-    if (anchor == null) return SketchCircularFitFailure.invalidChain;
+    final order = _orderSelection(entities, tolerance);
+    if (order.failure != null) return order.failure!;
+    final selection = order.selection;
+    if (selection == null) return SketchCircularFitFailure.invalidChain;
+    final points = selection.points;
+    if (points.length < 3) return SketchCircularFitFailure.insufficientPoints;
+    final start = selection.start;
+    final end = selection.end;
+    final boundary = (start: start, end: end);
     final selectedIds = entities.map((entity) => entity.id).toSet();
     final tangent = _tangentFit(
       boundary,
@@ -324,89 +425,490 @@ class SketchReconstructionEngine {
       context,
       manualStartId: startTangencyId,
       manualEndId: endTangencyId,
-      startForward: _chainDirectionInto(entities, boundary.start),
-      endForward: _chainDirectionInto(entities, boundary.end)?.scale(-1),
+      startForward: _chainDirectionInto(entities, start),
+      endForward: _chainDirectionInto(entities, end)?.scale(-1),
+      tolerance: tolerance,
     );
     if (tangent.failure != null) {
       return tangent.failure!;
     }
-    // With two explicit references the fit is strict: mirror the same gates the
-    // command applies, so the panel always receives an incompatibility reason
-    // instead of the generic invalid-chain default.
-    if (startTangencyId != null && endTangencyId != null) {
-      final circular = tangent.fit;
-      if (circular == null) {
-        return SketchCircularFitFailure.incompatibleTangency;
+    var anchor = points.first;
+    var anchorDistance = _distanceToLine(anchor, start, end);
+    for (final point in points) {
+      final distance = _distanceToLine(point, start, end);
+      if (distance > anchorDistance) {
+        anchor = point;
+        anchorDistance = distance;
       }
-      if (_arcDefinition(boundary, anchor, circular.$1) == null) {
-        return SketchCircularFitFailure.incompatibleTangency;
-      }
-      if (!_isSaneCircularFit(uniquePoints, circular.$1, circular.$2)) {
-        return SketchCircularFitFailure.unstableRadius;
-      }
+    }
+    if (anchorDistance <= 1e-7) {
+      return SketchCircularFitFailure.collinearPoints;
+    }
+    final manualBoth = startTangencyId != null && endTangencyId != null;
+    final fit = manualBoth
+        ? tangent.fit
+        : _fitThroughEndpoints(points, start, end);
+    if (fit == null) {
+      return manualBoth
+          ? SketchCircularFitFailure.incompatibleTangency
+          : SketchCircularFitFailure.fitErrorAboveTolerance;
+    }
+    final angles = _arcDefinition(boundary, anchor, fit.$1);
+    if (angles == null) return SketchCircularFitFailure.invalidSweep;
+    final failure = _circularFitFailure(
+      points: points,
+      center: fit.$1,
+      radius: fit.$2,
+      start: start,
+      end: end,
+      sweep: angles.endAngle - angles.startAngle,
+      tolerance: tolerance,
+    );
+    if (failure != null) return failure;
+    if (manualBoth &&
+        !_hasC1Tangency(
+          context,
+          selectedIds: selectedIds,
+          center: fit.$1,
+          startPoint: start,
+          endPoint: end,
+          startTangencyId: startTangencyId,
+          endTangencyId: endTangencyId,
+          tolerance: tolerance,
+        )) {
       return SketchCircularFitFailure.incompatibleTangency;
     }
-    // When both neighbours are present the tangent circle is mandatory: report
-    // the geometric reason instead of the generic invalid-chain default.
-    if (tangent.required && tangent.fit == null) {
-      return tangent.failure ?? SketchCircularFitFailure.incompatibleTangency;
-    }
-    final fit = _circleThrough(boundary.start, anchor, boundary.end);
-    if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
-      return SketchCircularFitFailure.unstableRadius;
-    }
+    // Nothing is wrong: this entry point only explains a rejected fit.
     return SketchCircularFitFailure.invalidChain;
   }
 
-  List<SketchVector> _fitPoints(List<SketchEntity> entities) {
-    final points = <SketchVector>[];
+  /// Ordered samples of one selected region, following the entity's own
+  /// direction: line endpoints, analytic arc samples that respect the
+  /// clockwise/counter-clockwise sweep, or the spline sampled points.
+  List<SketchVector> _entitySamples(SketchEntity entity) {
+    if (entity is SketchLine) {
+      return <SketchVector>[
+        SketchVector.fromJson(entity.parameters['start']),
+        SketchVector.fromJson(entity.parameters['end']),
+      ];
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final startAngle = (entity.parameters['startAngle'] as num).toDouble();
+      final endAngle = (entity.parameters['endAngle'] as num).toDouble();
+      if (!radius.isFinite || radius <= 0) return const <SketchVector>[];
+      final sweep = endAngle - startAngle;
+      final steps = (sweep.abs() / 0.1).ceil().clamp(2, 64);
+      return <SketchVector>[
+        for (var index = 0; index <= steps; index++)
+          SketchVector(
+            center.x + radius * math.cos(startAngle + sweep * index / steps),
+            center.y + radius * math.sin(startAngle + sweep * index / steps),
+          ),
+      ];
+    }
+    if (entity is SketchSpline) {
+      final samples = _splinePoints(entity);
+      if (samples.length >= 2) return samples;
+      final raw = entity.parameters['points'];
+      if (raw is! List) return const <SketchVector>[];
+      return raw.whereType<List>().map(SketchVector.fromJson).toList();
+    }
+    return const <SketchVector>[];
+  }
+
+  /// Orders [entities] by proximity and returns the external endpoints of the
+  /// whole set.
+  ///
+  /// The two farthest region endpoints anchor the walk, then every remaining
+  /// region is appended from the closest free endpoint.  Consecutive gaps are
+  /// reported so callers can warn about (or reject) a split selection; the
+  /// regions are never joined with an artificial segment.
+  _SelectionOrder _orderSelection(
+    List<SketchEntity> entities,
+    SketchCircularFitTolerance tolerance,
+  ) {
+    final regions = <List<SketchVector>>[];
+    var total = 0;
     for (final entity in entities) {
-      if (entity is SketchLine) {
-        points
-          ..add(SketchVector.fromJson(entity.parameters['start']))
-          ..add(SketchVector.fromJson(entity.parameters['end']));
-      } else if (entity is SketchSpline) {
-        final raw =
-            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
-                as List?;
-        if (raw != null) {
-          points.addAll(raw.whereType<List>().map(SketchVector.fromJson));
+      final samples = _entitySamples(entity);
+      if (samples.length < 2) continue;
+      total += samples.length;
+      if (total > SketchCircularFitTolerance.maxSamples) {
+        return const _SelectionOrder(
+          null,
+          SketchCircularFitFailure.invalidChain,
+        );
+      }
+      regions.add(samples);
+    }
+    if (regions.isEmpty) {
+      return const _SelectionOrder(null, SketchCircularFitFailure.invalidChain);
+    }
+    if (regions.length == 1) {
+      final only = regions.single;
+      return _SelectionOrder(
+        _OrderedSelection(
+          regions: regions,
+          start: only.first,
+          end: only.last,
+          gaps: const <double>[],
+        ),
+      );
+    }
+
+    // Farthest pair among the region endpoints: it gives the span that sizes
+    // the relative gap budget and is the fallback for the external extremes.
+    var startRegion = 0;
+    var startAtLast = false;
+    var endRegion = 1;
+    var endAtLast = true;
+    var farthest = -1.0;
+    for (var first = 0; first < regions.length; first++) {
+      for (var firstLast = 0; firstLast < 2; firstLast++) {
+        final firstPoint = firstLast == 0
+            ? regions[first].first
+            : regions[first].last;
+        for (var second = first + 1; second < regions.length; second++) {
+          for (var secondLast = 0; secondLast < 2; secondLast++) {
+            final secondPoint = secondLast == 0
+                ? regions[second].first
+                : regions[second].last;
+            final distance = _distance(firstPoint, secondPoint);
+            if (distance > farthest) {
+              farthest = distance;
+              startRegion = first;
+              startAtLast = firstLast == 1;
+              endRegion = second;
+              endAtLast = secondLast == 1;
+            }
+          }
         }
       }
     }
-    return points;
-  }
+    // The farthest pair can be a diagonal of a U shaped selection.  A real
+    // external endpoint is a region end with no other region end within the
+    // effective gap, which identifies the two free ends of the walk.  When
+    // exactly two of those exist they win over the diagonal.
+    final effectiveGap = math.max(
+      tolerance.maxGapMillimeters,
+      tolerance.gapRelativeToSpan * math.max(farthest, 0),
+    );
+    final ends = <({int region, bool atLast, SketchVector point})>[
+      for (var index = 0; index < regions.length; index++) ...[
+        (region: index, atLast: false, point: regions[index].first),
+        (region: index, atLast: true, point: regions[index].last),
+      ],
+    ];
+    final freeEnds = <({int region, bool atLast, SketchVector point})>[];
+    for (var index = 0; index < ends.length; index++) {
+      var connected = false;
+      for (var other = 0; other < ends.length; other++) {
+        if (other == index) continue;
+        if (ends[other].region == ends[index].region) continue;
+        if (_distance(ends[index].point, ends[other].point) <= effectiveGap) {
+          connected = true;
+          break;
+        }
+      }
+      if (!connected) freeEnds.add(ends[index]);
+    }
+    if (freeEnds.length == 2 && freeEnds.first.region != freeEnds.last.region) {
+      startRegion = freeEnds.first.region;
+      startAtLast = freeEnds.first.atLast;
+      endRegion = freeEnds.last.region;
+      endAtLast = freeEnds.last.atLast;
+    } else if (endRegion == startRegion) {
+      // Degenerate fallback: keep the farthest pair on different regions.
+      endRegion = startRegion == 0 ? 1 : 0;
+      endAtLast = false;
+    }
 
-  List<SketchVector> _uniquePoints(List<SketchVector> points) {
-    final unique = <SketchVector>[];
-    for (final point in points) {
-      if (!unique.any((other) => _distance(other, point) <= 1e-7)) {
-        unique.add(point);
+    List<SketchVector> orient(
+      List<SketchVector> region, {
+      required bool atLast,
+    }) {
+      if (!atLast) return region;
+      return region.reversed.toList(growable: false);
+    }
+
+    final ordered = <List<SketchVector>>[
+      orient(regions[startRegion], atLast: startAtLast),
+    ];
+    // The far extreme is pinned, so the walk can never end somewhere else.
+    final endSamples = orient(regions[endRegion], atLast: !endAtLast);
+    final pending = <int>[
+      for (var index = 0; index < regions.length; index++)
+        if (index != startRegion && index != endRegion) index,
+    ];
+    final gaps = <double>[];
+    while (pending.isNotEmpty) {
+      final tail = ordered.last.last;
+      var bestIndex = 0;
+      var bestAtLast = false;
+      var bestDistance = double.infinity;
+      for (var slot = 0; slot < pending.length; slot++) {
+        final region = regions[pending[slot]];
+        final headDistance = _distance(tail, region.first);
+        if (headDistance < bestDistance) {
+          bestDistance = headDistance;
+          bestIndex = slot;
+          bestAtLast = false;
+        }
+        final tailDistance = _distance(tail, region.last);
+        if (tailDistance < bestDistance) {
+          bestDistance = tailDistance;
+          bestIndex = slot;
+          bestAtLast = true;
+        }
+      }
+      gaps.add(bestDistance);
+      ordered.add(
+        orient(regions[pending.removeAt(bestIndex)], atLast: bestAtLast),
+      );
+      if (bestDistance > effectiveGap) {
+        return _SelectionOrder(
+          null,
+          SketchCircularFitFailure.gapAboveTolerance,
+        );
       }
     }
-    return unique;
+    // Close the chain on the far extreme found by the initial search.
+    final lastGap = _distance(ordered.last.last, endSamples.first);
+    if (lastGap > effectiveGap) {
+      return const _SelectionOrder(
+        null,
+        SketchCircularFitFailure.gapAboveTolerance,
+      );
+    }
+    gaps.add(lastGap);
+    ordered.add(endSamples);
+    return _SelectionOrder(
+      _OrderedSelection(
+        regions: ordered,
+        start: ordered.first.first,
+        end: ordered.last.last,
+        gaps: gaps,
+      ),
+    );
   }
 
-  SketchVector? _fitAnchor(
+  /// Circle through both preserved endpoints that best fits every sample.
+  ///
+  /// The centre is searched along the perpendicular bisector of the external
+  /// endpoints, so the two external endpoints stay exactly on the arc while the
+  /// interior samples of all selected regions drive the radius.  The algebraic
+  /// least squares circle seeds the search.
+  (SketchVector, double)? _fitThroughEndpoints(
     List<SketchVector> points,
-    ({SketchVector start, SketchVector end}) boundary,
+    SketchVector start,
+    SketchVector end,
   ) {
-    final anchors =
-        points
-            .where(
-              (point) =>
-                  _distance(point, boundary.start) > 1e-7 &&
-                  _distance(point, boundary.end) > 1e-7,
-            )
-            .toList(growable: false)
-          ..sort(
-            (first, second) => _distanceToLine(
-              second,
-              boundary.start,
-              boundary.end,
-            ).compareTo(_distanceToLine(first, boundary.start, boundary.end)),
-          );
-    return anchors.firstOrNull;
+    final axis = end - start;
+    final axisLength = math.sqrt(axis.dot(axis));
+    if (!axisLength.isFinite || axisLength <= 1e-9) return null;
+    final bisector = SketchVector(-axis.y / axisLength, axis.x / axisLength);
+    final midpoint = start + axis.scale(.5);
+    final d0 = axisLength * axisLength / 4;
+    final seed = _fitCircle(points);
+    final preferred = seed == null ? 0.0 : (seed.$1 - midpoint).dot(bisector);
+    var extent = 1.0;
+    for (final point in points) {
+      extent = math.max(extent, _distance(point, midpoint));
+    }
+    final offset = _bestBisectorOffset(
+      points: points,
+      midpoint: midpoint,
+      bisector: bisector,
+      d0: d0,
+      preferred: preferred,
+      span: 4 * (math.max(extent, preferred.abs()) + 1),
+    );
+    final center = midpoint + bisector.scale(offset);
+    final radius = math.sqrt(d0 + offset * offset);
+    if (!radius.isFinite || radius <= 0) return null;
+    return (center, radius);
+  }
+
+  /// Offset along the bisector that minimises the squared radial error of
+  /// [points] about the circle `center(t) = midpoint + t * bisector` with
+  /// `radius(t) = sqrt(d0 + t^2)`.
+  ///
+  /// A coarse scan brackets the global minimum (the family has two mirror
+  /// branches) and a golden section refines it.
+  double _bestBisectorOffset({
+    required List<SketchVector> points,
+    required SketchVector midpoint,
+    required SketchVector bisector,
+    required double d0,
+    required double preferred,
+    required double span,
+  }) {
+    double error(double t) {
+      final center = midpoint + bisector.scale(t);
+      final radius = math.sqrt(d0 + t * t);
+      var sum = 0.0;
+      for (final point in points) {
+        final delta = _distance(point, center) - radius;
+        sum += delta * delta;
+      }
+      return sum;
+    }
+
+    const steps = 48;
+    var best = preferred;
+    var bestError = error(best);
+    for (var index = -steps; index <= steps; index++) {
+      final candidate = preferred + span * index / steps;
+      final value = error(candidate);
+      if (value < bestError) {
+        bestError = value;
+        best = candidate;
+      }
+    }
+    var low = best - span / steps;
+    var high = best + span / steps;
+    const ratio = 0.6180339887498949;
+    var left = high - (high - low) * ratio;
+    var right = low + (high - low) * ratio;
+    var leftError = error(left);
+    var rightError = error(right);
+    for (var iteration = 0; iteration < 48; iteration++) {
+      if (leftError < rightError) {
+        high = right;
+        right = left;
+        rightError = leftError;
+        left = high - (high - low) * ratio;
+        leftError = error(left);
+      } else {
+        low = left;
+        left = right;
+        leftError = rightError;
+        right = low + (high - low) * ratio;
+        rightError = error(right);
+      }
+    }
+    return (low + high) / 2;
+  }
+
+  /// Root mean square radial error of [points] about the fitted circle.
+  double _radialError(
+    List<SketchVector> points,
+    SketchVector center,
+    double radius,
+  ) {
+    if (points.isEmpty) return double.infinity;
+    var sum = 0.0;
+    for (final point in points) {
+      final delta = _distance(point, center) - radius;
+      sum += delta * delta;
+    }
+    return math.sqrt(sum / points.length);
+  }
+
+  /// Largest perpendicular distance of [points] from the chord
+  /// [start] -> [end]: the empirical sagitta that tells an arc from a line.
+  double _sagitta(
+    List<SketchVector> points,
+    SketchVector start,
+    SketchVector end,
+  ) {
+    var value = 0.0;
+    for (final point in points) {
+      value = math.max(value, _distanceToLine(point, start, end));
+    }
+    return value;
+  }
+
+  /// Acceptance gates for a fitted arc, split so the caller can report the
+  /// exact cause instead of a generic unstable radius.
+  SketchCircularFitFailure? _circularFitFailure({
+    required List<SketchVector> points,
+    required SketchVector center,
+    required double radius,
+    required SketchVector start,
+    required SketchVector end,
+    required double sweep,
+    required SketchCircularFitTolerance tolerance,
+  }) {
+    if (!center.x.isFinite ||
+        !center.y.isFinite ||
+        !radius.isFinite ||
+        radius <= 0) {
+      return SketchCircularFitFailure.unstableRadius;
+    }
+    // Radius shorter than the geometric tolerance is not a usable arc.
+    if (radius < tolerance.minRadiusMillimeters) {
+      return SketchCircularFitFailure.unstableRadius;
+    }
+    if (!sweep.isFinite || sweep <= 1e-4 || sweep > 2 * math.pi + 1e-6) {
+      return SketchCircularFitFailure.invalidSweep;
+    }
+    // A straight selection can always be covered by an enormous circle; only
+    // the sagitta decides, never the radius/length ratio.
+    final span = _distance(start, end);
+    final collinearThreshold = math.max(
+      tolerance.collinearMillimeters,
+      span * tolerance.collinearRelativeToSpan,
+    );
+    if (_sagitta(points, start, end) <= collinearThreshold) {
+      return SketchCircularFitFailure.collinearPoints;
+    }
+    if (_radialError(points, center, radius) > tolerance.radialFor(radius)) {
+      return SketchCircularFitFailure.fitErrorAboveTolerance;
+    }
+    return null;
+  }
+
+  /// Tangent of [entity] at its point closest to [endpoint], oriented away
+  /// from that endpoint.  Used for manual references that are near the arc end
+  /// without being topologically connected to it.
+  SketchVector? _proximityTangent(
+    SketchEntity entity,
+    SketchVector endpoint,
+    double tolerance,
+  ) {
+    final samples = _entitySamples(entity);
+    if (samples.length < 2) return null;
+    var bestIndex = 0;
+    var bestDistance = double.infinity;
+    for (var index = 0; index < samples.length; index++) {
+      final distance = _distance(samples[index], endpoint);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestIndex = index;
+      }
+    }
+    if (!bestDistance.isFinite || bestDistance > tolerance) return null;
+    // Local direction along the entity at the closest sample.
+    SketchVector direction;
+    if (bestIndex == 0) {
+      direction = samples[1] - samples[0];
+    } else if (bestIndex == samples.length - 1) {
+      direction = samples[samples.length - 1] - samples[samples.length - 2];
+    } else {
+      direction = samples[bestIndex + 1] - samples[bestIndex - 1];
+    }
+    if (direction.dot(direction) <= 1e-20) {
+      // Fall back to any non degenerate step of the entity.
+      for (var index = 0; index + 1 < samples.length; index++) {
+        final step = samples[index + 1] - samples[index];
+        if (step.dot(step) > 1e-20) {
+          direction = step;
+          break;
+        }
+      }
+    }
+    if (direction.dot(direction) <= 1e-20) return null;
+    // Point it away from the arc endpoint into the neighbouring curve, so it
+    // plays the same role as a connected neighbour tangent.  The bulk of the
+    // reference decides, which also works for a reference offset sideways.
+    final bulk = (samples.first + samples.last).scale(.5);
+    if ((bulk - endpoint).dot(direction) < 0) {
+      direction = direction.scale(-1);
+    }
+    return direction;
   }
 
   ({
@@ -436,7 +938,10 @@ class SketchReconstructionEngine {
     final sweep = startContainsAnchor
         ? ccwSweep
         : _positiveSweep(endAngle, startAngle);
-    if (sweep < .2) return null;
+    // Only a degenerate sweep is invalid here; the span check that used to
+    // reject shallow arcs now lives in the sagitta/error gates, which do not
+    // care about the radius/length ratio.
+    if (!sweep.isFinite || sweep <= 1e-4) return null;
     return (
       startAngle: arcStart,
       endAngle: arcStart + sweep,
@@ -529,26 +1034,13 @@ class SketchReconstructionEngine {
     SketchVector point,
   ) {
     for (final entity in entities) {
-      if (entity is SketchLine) {
-        final start = SketchVector.fromJson(entity.parameters['start']);
-        final end = SketchVector.fromJson(entity.parameters['end']);
-        if (_distance(start, point) <= 1e-7) return end - start;
-        if (_distance(end, point) <= 1e-7) return start - end;
-      } else if (entity is SketchSpline) {
-        final raw =
-            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
-                as List?;
-        final samples =
-            raw?.whereType<List>().map(SketchVector.fromJson).toList() ??
-            const <SketchVector>[];
-        if (samples.length >= 2) {
-          if (_distance(samples.first, point) <= 1e-7) {
-            return samples[1] - samples.first;
-          }
-          if (_distance(samples.last, point) <= 1e-7) {
-            return samples[samples.length - 2] - samples.last;
-          }
-        }
+      final samples = _entitySamples(entity);
+      if (samples.length < 2) continue;
+      if (_distance(samples.first, point) <= 1e-7) {
+        return samples[1] - samples.first;
+      }
+      if (_distance(samples.last, point) <= 1e-7) {
+        return samples[samples.length - 2] - samples.last;
       }
     }
     return null;
@@ -565,6 +1057,7 @@ class SketchReconstructionEngine {
     Set<String> selectedIds,
     Iterable<SketchEntity> context, {
     String? manualId,
+    double proximity = 0.5,
   }) {
     if (manualId != null) {
       SketchEntity? reference;
@@ -588,7 +1081,12 @@ class SketchReconstructionEngine {
           SketchCircularFitFailure.disconnectedTangency,
         );
       }
-      final direction = _endpointTangent(reference, endpoint);
+      // A reference connected to the endpoint keeps the exact endpoint
+      // tangent; a nearby reference only has to be close enough to the
+      // corresponding extreme, which is what mesh Section gaps look like.
+      final direction =
+          _endpointTangent(reference, endpoint) ??
+          _proximityTangent(reference, endpoint, proximity);
       if (direction == null) {
         return const _NeighborProbe(
           <SketchVector>[],
@@ -617,12 +1115,14 @@ class SketchReconstructionEngine {
     String? manualEndId,
     SketchVector? startForward,
     SketchVector? endForward,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final startProbe = _neighborTangents(
       boundary.start,
       selectedIds,
       context,
       manualId: manualStartId,
+      proximity: tolerance.maxGapMillimeters,
     );
     if (startProbe.failure != null) {
       return _TangentFitResult(required: true, failure: startProbe.failure);
@@ -632,6 +1132,7 @@ class SketchReconstructionEngine {
       selectedIds,
       context,
       manualId: manualEndId,
+      proximity: tolerance.maxGapMillimeters,
     );
     if (endProbe.failure != null) {
       return _TangentFitResult(required: true, failure: endProbe.failure);
@@ -926,58 +1427,6 @@ class SketchReconstructionEngine {
     return null;
   }
 
-  /// Returns the least radial-error circle that preserves both chain boundary
-  /// points and is tangent to exactly one real continuation. This is the
-  /// middle step between bilateral C1 and the unconstrained three-point fit.
-  (SketchVector, double)? _partialTangentFit(
-    ({SketchVector start, SketchVector end}) boundary,
-    Set<String> selectedIds,
-    Iterable<SketchEntity> context,
-    List<SketchVector> samples,
-  ) {
-    final candidates = <(SketchVector, double)>[];
-    void addFor(
-      SketchVector point,
-      SketchVector other,
-      SketchVector direction,
-    ) {
-      final normal = SketchVector(-direction.y, direction.x);
-      final chord = other - point;
-      final denominator = normal.dot(chord);
-      if (denominator.abs() <= 1e-10) return;
-      final center = point + normal.scale(chord.dot(chord) / (2 * denominator));
-      final radius = _distance(center, point);
-      if (!radius.isFinite || radius <= 1e-9) return;
-      final tolerance = math.max(1e-7, radius * 1e-6);
-      if ((_distance(center, other) - radius).abs() > tolerance) return;
-      candidates.add((center, radius));
-    }
-
-    final start = _neighborTangents(
-      boundary.start,
-      selectedIds,
-      context,
-    ).directions;
-    final end = _neighborTangents(
-      boundary.end,
-      selectedIds,
-      context,
-    ).directions;
-    if (start.length == 1) {
-      addFor(boundary.start, boundary.end, start.single.scale(-1));
-    }
-    if (end.length == 1) addFor(boundary.end, boundary.start, end.single);
-    if (candidates.isEmpty) return null;
-    candidates.sort((first, second) {
-      double error((SketchVector, double) fit) => samples
-          .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
-          .fold<double>(0, (sum, value) => sum + value);
-      return error(first).compareTo(error(second));
-    });
-    final best = candidates.first;
-    return _isSaneCircularFit(samples, best.$1, best.$2) ? best : null;
-  }
-
   bool _hasC1Tangency(
     Iterable<SketchEntity> context, {
     required Set<String> selectedIds,
@@ -986,18 +1435,21 @@ class SketchReconstructionEngine {
     required SketchVector endPoint,
     String? startTangencyId,
     String? endTangencyId,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final startCandidates = _neighborTangents(
       startPoint,
       selectedIds,
       context,
       manualId: startTangencyId,
+      proximity: tolerance.maxGapMillimeters,
     ).directions;
     final endCandidates = _neighborTangents(
       endPoint,
       selectedIds,
       context,
       manualId: endTangencyId,
+      proximity: tolerance.maxGapMillimeters,
     ).directions;
     if (startCandidates.length != 1 || endCandidates.length != 1) return false;
     // [center] is deliberately an argument: the tangents are evaluated on the
@@ -1023,18 +1475,21 @@ class SketchReconstructionEngine {
     required SketchVector endPoint,
     String? startTangencyId,
     String? endTangencyId,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final startCandidates = _neighborTangents(
       startPoint,
       selectedIds,
       context,
       manualId: startTangencyId,
+      proximity: tolerance.maxGapMillimeters,
     ).directions;
     final endCandidates = _neighborTangents(
       endPoint,
       selectedIds,
       context,
       manualId: endTangencyId,
+      proximity: tolerance.maxGapMillimeters,
     ).directions;
     // One sided fallback: accept the arc when it is a real tangent line of the
     // circle at that endpoint.  The traversal sense is taken from the same
@@ -1048,109 +1503,6 @@ class SketchReconstructionEngine {
     return (startCandidates.length == 1 &&
             follows(startPoint, startCandidates.single.scale(-1))) ||
         (endCandidates.length == 1 && follows(endPoint, endCandidates.single));
-  }
-
-  ({SketchVector start, SketchVector end})? _continuousChainBoundaries(
-    List<SketchEntity> entities,
-  ) {
-    if (entities.length < 2) return null;
-    final endpoints = <({String entityId, SketchVector point})>[];
-    for (final entity in entities) {
-      if (entity is SketchLine) {
-        endpoints
-          ..add((
-            entityId: entity.id,
-            point: SketchVector.fromJson(entity.parameters['start']),
-          ))
-          ..add((
-            entityId: entity.id,
-            point: SketchVector.fromJson(entity.parameters['end']),
-          ));
-      } else if (entity is SketchSpline) {
-        final raw =
-            (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
-                as List?;
-        final points =
-            raw?.whereType<List>().map(SketchVector.fromJson).toList() ??
-            const <SketchVector>[];
-        if (points.length < 2) return null;
-        endpoints
-          ..add((entityId: entity.id, point: points.first))
-          ..add((entityId: entity.id, point: points.last));
-      } else {
-        return null;
-      }
-    }
-    final groups = <List<int>>[];
-    for (var index = 0; index < endpoints.length; index++) {
-      final group = groups.firstWhere(
-        (candidate) => candidate.any(
-          (other) =>
-              _distance(endpoints[index].point, endpoints[other].point) <= 1e-7,
-        ),
-        orElse: () {
-          final created = <int>[];
-          groups.add(created);
-          return created;
-        },
-      );
-      group.add(index);
-    }
-    final external = groups.where((group) => group.length == 1).toList();
-    if (external.length != 2 || groups.any((group) => group.length > 2)) {
-      return null;
-    }
-    final adjacent = <String, Set<String>>{
-      for (final entity in entities) entity.id: <String>{},
-    };
-    for (final group in groups.where((group) => group.length == 2)) {
-      final first = endpoints[group.first].entityId;
-      final second = endpoints[group.last].entityId;
-      if (first != second) {
-        adjacent[first]!.add(second);
-        adjacent[second]!.add(first);
-      }
-    }
-    final visited = <String>{entities.first.id};
-    final pending = <String>[entities.first.id];
-    while (pending.isNotEmpty) {
-      final current = pending.removeLast();
-      for (final next in adjacent[current]!) {
-        if (visited.add(next)) pending.add(next);
-      }
-    }
-    if (visited.length != entities.length) return null;
-    return (
-      start: endpoints[external.first.single].point,
-      end: endpoints[external.last.single].point,
-    );
-  }
-
-  (SketchVector, double)? _circleThrough(
-    SketchVector first,
-    SketchVector middle,
-    SketchVector last,
-  ) {
-    final determinant =
-        2 *
-        (first.x * (middle.y - last.y) +
-            middle.x * (last.y - first.y) +
-            last.x * (first.y - middle.y));
-    if (determinant.abs() <= 1e-12) return null;
-    final first2 = first.dot(first);
-    final middle2 = middle.dot(middle);
-    final last2 = last.dot(last);
-    final center = SketchVector(
-      (first2 * (middle.y - last.y) +
-              middle2 * (last.y - first.y) +
-              last2 * (first.y - middle.y)) /
-          determinant,
-      (first2 * (last.x - middle.x) +
-              middle2 * (first.x - last.x) +
-              last2 * (middle.x - first.x)) /
-          determinant,
-    );
-    return (center, _distance(center, first));
   }
 
   double _distanceToLine(
