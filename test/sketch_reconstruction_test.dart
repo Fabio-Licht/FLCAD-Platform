@@ -219,14 +219,20 @@ void main() {
     },
   );
 
-  test('regions too far apart are diagnosed as a gap', () {
-    final engine = const SketchReconstructionEngine();
-    final failure = engine.diagnoseSelectedCircular([
-      SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
-      SketchLine(const SketchVector(4, 0), const SketchVector(5, 0)),
-    ]);
+  test('regions far apart still take part in the global fit', () {
+    // Two arcs of the same circle separated by a big gap must be accepted:
+    // the gap is only reported, never a rejection.
+    const radius = 10.0;
+    final chain = <SketchEntity>[
+      SketchLine(_circlePoint(radius, 0.2), _circlePoint(radius, 0.4)),
+      SketchLine(_circlePoint(radius, 1.2), _circlePoint(radius, 1.4)),
+    ];
+    final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
 
-    expect(failure, SketchCircularFitFailure.gapAboveTolerance);
+    expect(fit, isNotNull);
+    expect(fit!.radius, closeTo(radius, 0.05));
+    expect(fit.warnings.any((warning) => warning.contains('gap')), isTrue);
+    expect(fit.maxGapMillimeters, greaterThan(1));
   });
 
   test('an ambiguous branch never falls back when the other end is open', () {
@@ -576,7 +582,7 @@ void main() {
       expect(fit.radius, closeTo(5, 1e-5));
     });
 
-    test('incompatible neighbours are rejected with a diagnostic', () {
+    test('a straight selection is rejected as collinear', () {
       final first = SketchLine(
         const SketchVector(0, 0),
         const SketchVector(1, 0.0004),
@@ -585,8 +591,8 @@ void main() {
         const SketchVector(1, 0.0004),
         const SketchVector(2, 0),
       );
-      // Parallel neighbour lines cannot bound a tangent circle; the chain is
-      // also too straight for the three point fallback.
+      // The neighbours do not matter for the geometry any more: what rejects
+      // this selection is that it is a straight line, not an arc.
       final before = SketchLine(
         const SketchVector(-1, 0),
         const SketchVector(0, 0),
@@ -600,7 +606,7 @@ void main() {
 
       expect(
         engine.diagnoseSelectedCircular([first, second], context: context),
-        SketchCircularFitFailure.incompatibleTangency,
+        SketchCircularFitFailure.collinearPoints,
       );
       final fit = engine.fitSelectedCircular([first, second], context: context);
       expect(fit, isNull);
@@ -1111,28 +1117,40 @@ void main() {
       expect(_distance(fit.endPoint!, diagonal), greaterThan(1e-3));
     });
 
-    test('a long selection accepts a proportionally small gap', () {
-      // 200 mm of arc on a 2000 mm radius with a 1.5 mm miss: above the 0.5 mm
-      // absolute floor, inside 1% of the span.
-      const radius = 2000.0;
-      final chain = _gappedChain(
-        radius: radius,
-        start: 0.2,
-        end: 0.3,
-        count: 4,
-        gapMillimeters: 1.5,
-      );
+    test('independent regions with 1, 5 and 20 mm gaps are all accepted', () {
+      // Geomagic style: the selected regions are independent samples, so a big
+      // miss between them is reported but never blocks the global fit.
+      const radius = 200.0;
+      for (final gap in <double>[1, 5, 20]) {
+        final chain = _gappedChain(
+          radius: radius,
+          start: 0.2,
+          end: 0.6,
+          count: 3,
+          gapMillimeters: gap,
+        );
+        final fit = const SketchReconstructionEngine().fitSelectedCircular(
+          chain,
+        );
 
-      final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
-
-      expect(fit, isNotNull);
-      expect(fit!.radius, closeTo(radius, 1.0));
-      expect(fit.warnings, isNotEmpty);
+        expect(fit, isNotNull, reason: 'gap $gap mm');
+        expect(fit!.radius, closeTo(radius, 1.0), reason: 'gap $gap mm');
+        expect(
+          fit.maxGapMillimeters,
+          closeTo(gap, math.max(0.05, gap * 0.05)),
+          reason: 'gap $gap mm',
+        );
+        expect(
+          fit.warnings.any((warning) => warning.contains('gap')),
+          isTrue,
+          reason: 'gap $gap mm',
+        );
+        // Every selected region still contributes to the fit.
+        expect(fit.entityIds, hasLength(3));
+      }
     });
 
-    test('a small part keeps the absolute gap floor', () {
-      // Same 0.8 mm miss on a 2 mm selection stays above the absolute floor and
-      // is rejected, so small parts are not loosened by the relative share.
+    test('a large gap on a small part only warns', () {
       const radius = 5.0;
       final chain = _gappedChain(
         radius: radius,
@@ -1141,13 +1159,10 @@ void main() {
         count: 2,
         gapMillimeters: 0.8,
       );
-      final engine = const SketchReconstructionEngine();
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(chain);
 
-      expect(engine.fitSelectedCircular(chain), isNull);
-      expect(
-        engine.diagnoseSelectedCircular(chain),
-        SketchCircularFitFailure.gapAboveTolerance,
-      );
+      expect(fit, isNotNull);
+      expect(fit!.warnings.any((warning) => warning.contains('gap')), isTrue);
     });
 
     test('manual tangency accepts nearby references without contact', () {
@@ -1180,6 +1195,71 @@ void main() {
       expect(fit.radius, closeTo(radius, 0.2));
     });
 
+    test('compatible manual tangencies report near zero angular errors', () {
+      const radius = 8.0;
+      const a0 = 0.4, a1 = 1.2;
+      final chain = _regionChain(radius, a0, a1, 3);
+      final p0 = _circlePoint(radius, a0);
+      final p1 = _circlePoint(radius, a1);
+      final startReference = SketchLine(p0 - _circleTangent(a0).scale(4), p0);
+      final endReference = SketchLine(p1, p1 + _circleTangent(a1).scale(4));
+
+      final fit = const SketchReconstructionEngine().fitSelectedCircular(
+        chain,
+        context: [startReference, ...chain, endReference],
+        startTangencyId: startReference.id,
+        endTangencyId: endReference.id,
+      );
+
+      expect(fit, isNotNull);
+      expect(fit!.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
+      expect(fit.radius, closeTo(radius, 1e-3));
+      // Both junctions are real C1: the measured angles are essentially zero.
+      expect(fit.tangencyStartDegrees, isNotNull);
+      expect(fit.tangencyEndDegrees, isNotNull);
+      expect(fit.tangencyStartDegrees!, lessThan(0.05));
+      expect(fit.tangencyEndDegrees!, lessThan(0.05));
+      // The arc still meets the preserved endpoints.
+      expect(_distance(fit.startPoint!, p0), lessThan(1e-3));
+      expect(_distance(fit.endPoint!, p1), lessThan(1e-3));
+    });
+
+    test('incompatible manual tangencies are rejected with the angles', () {
+      const radius = 8.0;
+      const a0 = 0.4, a1 = 1.2;
+      final chain = _regionChain(radius, a0, a1, 3);
+      final p0 = _circlePoint(radius, a0);
+      final p1 = _circlePoint(radius, a1);
+      final startReference = SketchLine(p0 - _circleTangent(a0).scale(4), p0);
+      // End reference rotated 25 degrees away from the true tangent: no circle
+      // can be C1 with both references while keeping the endpoints.
+      final rotated = _rotate(_circleTangent(a1), 25 * math.pi / 180);
+      final endReference = SketchLine(p1, p1 + rotated.scale(4));
+      final context = [startReference, ...chain, endReference];
+      final engine = const SketchReconstructionEngine();
+
+      expect(
+        engine.fitSelectedCircular(
+          chain,
+          context: context,
+          startTangencyId: startReference.id,
+          endTangencyId: endReference.id,
+        ),
+        isNull,
+      );
+      final diagnosis = engine.diagnoseSelectedCircularDetailed(
+        chain,
+        context: context,
+        startTangencyId: startReference.id,
+        endTangencyId: endReference.id,
+      );
+      expect(diagnosis.failure, SketchCircularFitFailure.incompatibleTangency);
+      expect(diagnosis.tangencyStartDegrees, isNotNull);
+      expect(diagnosis.tangencyEndDegrees, isNotNull);
+      expect(diagnosis.tangencyEndDegrees!, greaterThan(1));
+      expect(diagnosis.radius, isNotNull);
+    });
+
     test('really collinear points are rejected', () {
       final chain = <SketchEntity>[
         SketchLine(const SketchVector(0, 0), const SketchVector(1, 0)),
@@ -1204,14 +1284,17 @@ void main() {
         ]),
         SketchCircularFitFailure.insufficientPoints,
       );
-      // Split selection: a gap far above the tolerance.
+      // A large gap between independent regions is no longer a failure: it is
+      // a warning and the fit still succeeds.
+      final gapped = <SketchEntity>[
+        SketchLine(_circlePoint(20, 0.2), _circlePoint(20, 0.5)),
+        SketchLine(_circlePoint(20, 1.5), _circlePoint(20, 1.8)),
+      ];
+      final gappedFit = engine.fitSelectedCircular(gapped);
+      expect(gappedFit, isNotNull);
       expect(
-        engine.diagnoseSelectedCircular([
-          SketchLine(const SketchVector(0, 0), const SketchVector(1, 0.2)),
-          SketchLine(const SketchVector(1, 0.2), const SketchVector(2, 0.6)),
-          SketchLine(const SketchVector(9, 0), const SketchVector(10, 0.6)),
-        ]),
-        SketchCircularFitFailure.gapAboveTolerance,
+        gappedFit!.warnings.any((warning) => warning.contains('gap')),
+        isTrue,
       );
       // Noisy samples no single circle follows (a zig-zag staircase).
       expect(
@@ -1247,6 +1330,11 @@ SketchVector _circlePoint(double radius, double angle) =>
 
 SketchVector _circleTangent(double angle) =>
     SketchVector(-math.sin(angle), math.cos(angle));
+
+SketchVector _rotate(SketchVector vector, double angle) => SketchVector(
+  vector.x * math.cos(angle) - vector.y * math.sin(angle),
+  vector.x * math.sin(angle) + vector.y * math.cos(angle),
+);
 
 /// [regions] consecutive chords of the circle, sharing their endpoints.
 List<SketchLine> _regionChain(

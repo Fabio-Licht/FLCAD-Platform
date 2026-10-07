@@ -745,12 +745,24 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (suggestion == null ||
         suggestion.center == null ||
         suggestion.radius == null) {
-      final failure = _sketchReconstruction.diagnoseSelectedCircular(
+      final diagnosis = _sketchReconstruction.diagnoseSelectedCircularDetailed(
         selected,
         context: context,
         startTangencyId: startTangencyId,
         endTangencyId: endTangencyId,
       );
+      final failure = diagnosis.failure;
+      final numbers = <String>[
+        if (diagnosis.maxGapMillimeters != null)
+          'gap máx ${diagnosis.maxGapMillimeters!.toStringAsFixed(3)} mm',
+        if (diagnosis.tangencyStartDegrees != null)
+          'erro angular inicial ${diagnosis.tangencyStartDegrees!.toStringAsFixed(2)}°',
+        if (diagnosis.tangencyEndDegrees != null)
+          'erro angular final ${diagnosis.tangencyEndDegrees!.toStringAsFixed(2)}°',
+        if (diagnosis.radius != null)
+          'raio ${diagnosis.radius!.toStringAsFixed(3)} mm',
+      ].join(' · ');
+      final detail = numbers.isEmpty ? '' : ' ($numbers)';
       final message = switch (failure) {
         SketchCircularFitFailure.invalidChain =>
           'A seleção não forma um arco: selecione regiões com curvatura suficiente.',
@@ -758,10 +770,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'Faltam pontos distintos para definir o arco. Selecione mais regiões da seção.',
         SketchCircularFitFailure.collinearPoints =>
           'Os pontos selecionados são praticamente colineares: não há arco a ajustar.',
-        SketchCircularFitFailure.gapAboveTolerance =>
-          'Há um vão entre regiões acima da tolerância. Aproxime a seleção ou ajuste a tolerância de vão.',
         SketchCircularFitFailure.fitErrorAboveTolerance =>
-          'O erro de ajuste ficou acima da tolerância. Selecione regiões que pertençam ao mesmo arco.',
+          'Falha de ajuste radial: o erro ficou acima da tolerância. Selecione regiões que pertençam ao mesmo arco.',
         SketchCircularFitFailure.invalidSweep =>
           'O arco resultante tem abertura inválida. Selecione regiões que cubram uma abertura maior.',
         SketchCircularFitFailure.unstableRadius =>
@@ -769,13 +779,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         SketchCircularFitFailure.ambiguousBranch =>
           'Há mais de uma curva vizinha em uma extremidade. Selecione uma cadeia sem ramificações.',
         SketchCircularFitFailure.incompatibleTangency =>
-          'A tangência manual é incompatível com as regiões selecionadas. Revise as referências ou o sentido do arco.',
+          'Tangência incompatível com as regiões selecionadas. Revise as referências ou o sentido do arco.',
         SketchCircularFitFailure.disconnectedTangency =>
           'A curva de tangência precisa estar próxima do endpoint correspondente e ser distinta das regiões substituídas.',
         SketchCircularFitFailure.reversedTangency =>
           'A curva de tangência está invertida: ela aponta para dentro da cadeia. Selecione a curva que continua o perfil.',
       };
-      sketchCircularFitMessage = message;
+      sketchCircularFitMessage = '$message$detail';
       error = 'Ajuste circular rejeitado: $message';
       notifyListeners();
       return;
@@ -793,11 +803,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'ajuste por mínimos quadrados dos pontos, sem tangência bilateral',
     };
     final manualTangency = startTangencyId != null || endTangencyId != null;
-    final warnings = suggestion.warnings.isEmpty
-        ? ''
-        : ' · ${suggestion.warnings.join(' · ')}';
+    final measurements = <String>[
+      if (suggestion.maxGapMillimeters != null &&
+          suggestion.maxGapMillimeters! > 0)
+        'gap máx ${suggestion.maxGapMillimeters!.toStringAsFixed(3)} mm',
+      if (suggestion.tangencyStartDegrees != null)
+        'erro angular inicial ${suggestion.tangencyStartDegrees!.toStringAsFixed(2)}°',
+      if (suggestion.tangencyEndDegrees != null)
+        'erro angular final ${suggestion.tangencyEndDegrees!.toStringAsFixed(2)}°',
+    ];
+    final warnings = <String>[...measurements, ...suggestion.warnings];
     sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}$warnings';
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
     runtime.write('sketch.circularSelectionMode', false);
     runtime.write('sketch.tangency.pickTarget', null);
     notifyListeners();

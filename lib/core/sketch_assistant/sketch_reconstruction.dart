@@ -13,10 +13,6 @@ enum SketchCircularFitFailure {
   /// absolute tolerance, so no arc is recoverable from them.
   collinearPoints,
 
-  /// Two consecutive regions are farther apart than
-  /// [SketchCircularFitTolerance.maxGapMillimeters].
-  gapAboveTolerance,
-
   /// The radial error of the fitted circle is larger than the combined
   /// absolute/relative tolerance.
   fitErrorAboveTolerance,
@@ -58,6 +54,8 @@ class SketchCircularFitTolerance {
     this.minRadiusMillimeters = 0.01,
     this.collinearMillimeters = 1e-4,
     this.collinearRelativeToSpan = 1e-3,
+    this.endpointCoincidenceMillimeters = 0.05,
+    this.tangencyAngleRadians = _maxTangencyAngle,
   });
 
   /// Largest radial error accepted when [relativeToRadius] * radius is
@@ -95,6 +93,16 @@ class SketchCircularFitTolerance {
   static const int maxRegions = 64;
   static const int maxSamples = 4096;
 
+  /// Distance below which two region endpoints count as the same point when
+  /// looking for the free ends of the selection.  It is a numerical
+  /// coincidence test, not a gap budget: regions separated by real gaps stay
+  /// independent and are all still used by the fit.
+  final double endpointCoincidenceMillimeters;
+
+  /// Largest angle, in radians, between the arc tangent and the oriented
+  /// reference tangent for the fit to be reported as tangente.
+  final double tangencyAngleRadians;
+
   double radialFor(double radius) =>
       math.max(absoluteMillimeters, relativeToRadius * radius);
 }
@@ -117,16 +125,6 @@ const double _maxTangencyAngle = 0.0175;
 /// only has to separate "same way" from "opposite way" (~180 deg) and not act
 /// as a precision test.
 const double _invertedReferenceCosine = -0.5;
-
-class _TangentFitResult {
-  const _TangentFitResult({required this.required, this.fit, this.failure});
-
-  /// True when both real neighbours exist.  In that case a three-point arc is
-  /// not an authorised substitute for an invalid C1 solution.
-  final bool required;
-  final (SketchVector, double)? fit;
-  final SketchCircularFitFailure? failure;
-}
 
 /// Directions supplied by the curves that touch one chain boundary, plus the
 /// reason an explicit manual reference could not be used.
@@ -166,6 +164,42 @@ class _SelectionOrder {
   final SketchCircularFitFailure? failure;
 }
 
+/// Tangency of a candidate circle at both preserved endpoints, in degrees.
+class _TangencyMeasurement {
+  const _TangencyMeasurement({
+    required this.startDegrees,
+    required this.endDegrees,
+    this.failure,
+  });
+
+  final double startDegrees;
+  final double endDegrees;
+  final SketchCircularFitFailure? failure;
+}
+
+/// Why a circular adjustment was rejected, with the numbers the panel has to
+/// show: largest gap, measured tangency angles and the fitted radius.
+class SketchCircularFitDiagnosis {
+  const SketchCircularFitDiagnosis(
+    this.failure, {
+    this.maxGapMillimeters,
+    this.tangencyStartDegrees,
+    this.tangencyEndDegrees,
+    this.radius,
+    this.endpointDeviationMillimeters,
+  });
+
+  final SketchCircularFitFailure failure;
+  final double? maxGapMillimeters;
+  final double? tangencyStartDegrees;
+  final double? tangencyEndDegrees;
+  final double? radius;
+
+  /// Largest distance between the fitted arc and the preserved external
+  /// endpoints.
+  final double? endpointDeviationMillimeters;
+}
+
 class SketchReconstructionSuggestion {
   const SketchReconstructionSuggestion({
     required this.kind,
@@ -179,6 +213,9 @@ class SketchReconstructionSuggestion {
     this.endPoint,
     this.circularFitQuality,
     this.warnings = const <String>[],
+    this.maxGapMillimeters,
+    this.tangencyStartDegrees,
+    this.tangencyEndDegrees,
   });
 
   final SketchReconstructionKind kind;
@@ -198,6 +235,14 @@ class SketchReconstructionSuggestion {
   /// Non-blocking findings of the adjustment, for example the gaps measured
   /// between partially disconnected Section regions.
   final List<String> warnings;
+
+  /// Largest distance measured between two consecutive selected regions.
+  final double? maxGapMillimeters;
+
+  /// Angle between the arc tangent and the oriented reference tangent at each
+  /// preserved endpoint, in degrees.  Zero means a real C1 junction.
+  final double? tangencyStartDegrees;
+  final double? tangencyEndDegrees;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -266,49 +311,115 @@ class SketchReconstructionEngine {
 
     (SketchVector, double)? fit;
     var quality = SketchCircularFitQuality.geometricFallback;
+    double? tangencyStartDegrees;
+    double? tangencyEndDegrees;
     if (manualBoth) {
-      // 2a. Two explicit references are a strict contract: the tangency drives
-      //     the centre and the preserved endpoints anchor it.
-      final tangent = _tangentFit(
-        boundary,
+      // 2a. The two named references are geometric constraints, not hints: the
+      //     oriented tangents give two normals, their intersection is the C1
+      //     centre, and the weighted best fit refines it when noise keeps the
+      //     endpoints off that circle.
+      final startProbe = _neighborTangents(
+        start,
         selectedIds,
         context,
-        manualStartId: startTangencyId,
-        manualEndId: endTangencyId,
-        startForward: _chainDirectionInto(entities, start),
-        endForward: _chainDirectionInto(entities, end)?.scale(-1),
-        tolerance: tolerance,
+        manualId: startTangencyId,
+        proximity: tolerance.maxGapMillimeters,
       );
-      final solved = tangent.fit;
-      if (tangent.failure != null || solved == null) return null;
-      final angles = _arcDefinition(boundary, anchor, solved.$1);
-      if (angles == null) return null;
-      if (!_hasC1Tangency(
-        context,
-        selectedIds: selectedIds,
-        center: solved.$1,
-        startPoint: start,
-        endPoint: end,
-        startTangencyId: startTangencyId,
-        endTangencyId: endTangencyId,
-        tolerance: tolerance,
-      )) {
+      if (startProbe.failure != null || startProbe.directions.length != 1) {
         return null;
       }
+      final endProbe = _neighborTangents(
+        end,
+        selectedIds,
+        context,
+        manualId: endTangencyId,
+        proximity: tolerance.maxGapMillimeters,
+      );
+      if (endProbe.failure != null || endProbe.directions.length != 1) {
+        return null;
+      }
+      final startDirection = startProbe.directions.single.scale(-1);
+      final endDirection = endProbe.directions.single;
+      // A reference running back over the chain is rejected before solving.
+      final startFlow = _chainDirectionInto(entities, start);
+      if (startFlow != null && _isAntiAligned(startDirection, startFlow)) {
+        return null;
+      }
+      final endFlow = _chainDirectionInto(entities, end)?.scale(-1);
+      if (endFlow != null && _isAntiAligned(endDirection, endFlow)) {
+        return null;
+      }
+      // Exact C1 centre: intersection of the two endpoint normals.
+      final startNormal = SketchVector(-startDirection.y, startDirection.x);
+      final endNormal = SketchVector(-endDirection.y, endDirection.x);
+      final cross = startNormal.x * endNormal.y - startNormal.y * endNormal.x;
+      final chord = end - start;
+      final seeds = <(SketchVector, double)>[];
+      if (cross.abs() > 1e-10) {
+        final u = (chord.x * endNormal.y - chord.y * endNormal.x) / cross;
+        final intersection = start + startNormal.scale(u);
+        seeds.add((intersection, _distance(intersection, start)));
+      }
+      final endpointFit = _fitThroughEndpoints(points, start, end);
+      if (endpointFit != null) seeds.add(endpointFit);
+      final cloud = _fitCircle(points);
+      if (cloud != null) seeds.add(cloud);
+      if (seeds.isEmpty) return null;
+      // Traversal sense of the arc, taken from the chain flow so a clockwise or
+      // concave profile is measured exactly like a counter-clockwise one.
+      final seedCenter = seeds.first.$1;
+      var sense = 0.0;
+      if (startFlow != null) {
+        sense = _traversalSense(start, seedCenter, startFlow);
+      }
+      if (sense == 0 && endFlow != null) {
+        sense = _traversalSense(end, seedCenter, endFlow);
+      }
+      if (sense == 0) sense = 1.0;
+      final solved = _bestTangencyFit(
+        points: points,
+        start: start,
+        startDirection: startDirection,
+        end: end,
+        endDirection: endDirection,
+        sense: sense,
+        seeds: seeds,
+        tolerance: tolerance,
+      );
+      final measurement = _measureTangency(
+        center: solved.$1,
+        start: start,
+        startDirection: startDirection,
+        end: end,
+        endDirection: endDirection,
+        sense: sense,
+        tolerance: tolerance,
+      );
+      tangencyStartDegrees = measurement.startDegrees;
+      tangencyEndDegrees = measurement.endDegrees;
+      if (measurement.failure != null) return null;
+      final solvedAngles = _arcDefinition(boundary, anchor, solved.$1);
+      if (solvedAngles == null) return null;
       final failure = _circularFitFailure(
         points: points,
         center: solved.$1,
         radius: solved.$2,
         start: start,
         end: end,
-        sweep: angles.endAngle - angles.startAngle,
+        sweep: solvedAngles.endAngle - solvedAngles.startAngle,
         tolerance: tolerance,
       );
-      if (failure != null) return null;
+      // Only degenerate geometry rejects here.  A poor radial agreement with
+      // the selected regions is reported, because the tangency is the
+      // constraint the user asked for.
+      if (failure != null &&
+          failure != SketchCircularFitFailure.fitErrorAboveTolerance) {
+        return null;
+      }
       final deviation = _radialError(points, solved.$1, solved.$2);
       if (deviation > tolerance.radialFor(solved.$2)) {
         warnings.add(
-          'tangência manual desvia ${deviation.toStringAsFixed(3)} mm das regiões selecionadas',
+          'ajuste radial de ${deviation.toStringAsFixed(3)} mm acima da tolerância',
         );
       }
       fit = solved;
@@ -319,43 +430,45 @@ class SketchReconstructionEngine {
       //     continuity; it never rejects an otherwise valid fit.
       final primary = _fitThroughEndpoints(points, start, end);
       if (primary == null) return null;
-      final tangent = _tangentFit(
-        boundary,
+      fit = primary;
+      final startProbe = _neighborTangents(
+        start,
         selectedIds,
         context,
-        manualStartId: startTangencyId,
-        manualEndId: endTangencyId,
-        startForward: _chainDirectionInto(entities, start),
-        endForward: _chainDirectionInto(entities, end)?.scale(-1),
-        tolerance: tolerance,
+        manualId: startTangencyId,
+        proximity: tolerance.maxGapMillimeters,
       );
-      if (tangent.failure == SketchCircularFitFailure.ambiguousBranch) {
+      final endProbe = _neighborTangents(
+        end,
+        selectedIds,
+        context,
+        manualId: endTangencyId,
+        proximity: tolerance.maxGapMillimeters,
+      );
+      // A branch on either extreme is a real ambiguity: two continuations
+      // claim the same endpoint.
+      if (startProbe.directions.length > 1 || endProbe.directions.length > 1) {
         return null;
       }
-      fit = primary;
-      if (_hasC1Tangency(
-        context,
-        selectedIds: selectedIds,
+      final sides = _endpointTangency(
         center: primary.$1,
-        startPoint: start,
-        endPoint: end,
-        startTangencyId: startTangencyId,
-        endTangencyId: endTangencyId,
-        tolerance: tolerance,
-      )) {
-        quality = SketchCircularFitQuality.c1Bilateral;
-      } else if (_hasAnyC1Tangency(
-        context,
-        selectedIds: selectedIds,
-        center: primary.$1,
-        startPoint: start,
-        endPoint: end,
-        startTangencyId: startTangencyId,
-        endTangencyId: endTangencyId,
-        tolerance: tolerance,
-      )) {
-        quality = SketchCircularFitQuality.c1Partial;
-      }
+        start: start,
+        startDirections: startProbe.directions,
+        end: end,
+        endDirections: endProbe.directions,
+      );
+      tangencyStartDegrees = sides.startDegrees;
+      tangencyEndDegrees = sides.endDegrees;
+      final limitDegrees = tolerance.tangencyAngleRadians * 180 / math.pi;
+      final startTouches =
+          sides.startDegrees != null && sides.startDegrees! <= limitDegrees;
+      final endTouches =
+          sides.endDegrees != null && sides.endDegrees! <= limitDegrees;
+      quality = startTouches && endTouches
+          ? SketchCircularFitQuality.c1Bilateral
+          : (startTouches || endTouches
+                ? SketchCircularFitQuality.c1Partial
+                : SketchCircularFitQuality.geometricFallback);
     }
 
     final circularFit = fit;
@@ -391,6 +504,45 @@ class SketchReconstructionEngine {
       endPoint: angles.endPoint,
       circularFitQuality: quality,
       warnings: warnings,
+      maxGapMillimeters: selection.gaps.isEmpty
+          ? 0.0
+          : selection.gaps.reduce(math.max),
+      tangencyStartDegrees: tangencyStartDegrees,
+      tangencyEndDegrees: tangencyEndDegrees,
+    );
+  }
+
+  /// Tangency angle, in degrees, of the circle at each endpoint that has a
+  /// reference direction.  Both sides share the traversal sense of the arc.
+  ({double? startDegrees, double? endDegrees}) _endpointTangency({
+    required SketchVector center,
+    required SketchVector start,
+    required List<SketchVector> startDirections,
+    required SketchVector end,
+    required List<SketchVector> endDirections,
+  }) {
+    var sense = 0.0;
+    if (startDirections.length == 1) {
+      // The required departure at the start is the opposite of the neighbour
+      // outward direction, and that is what fixes the traversal sense.
+      sense = _traversalSense(start, center, startDirections.single.scale(-1));
+    }
+    if (sense == 0 && endDirections.length == 1) {
+      sense = _traversalSense(end, center, endDirections.single);
+    }
+    if (sense == 0) sense = 1.0;
+    double? degrees(SketchVector point, SketchVector direction) {
+      final radians = _tangencyAngleRadians(point, center, direction, sense);
+      return radians == null ? null : radians * 180 / math.pi;
+    }
+
+    return (
+      startDegrees: startDirections.length == 1
+          ? degrees(start, startDirections.single.scale(-1))
+          : null,
+      endDegrees: endDirections.length == 1
+          ? degrees(end, endDirections.single)
+          : null,
     );
   }
 
@@ -403,35 +555,54 @@ class SketchReconstructionEngine {
     String? startTangencyId,
     String? endTangencyId,
     SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) => diagnoseSelectedCircularDetailed(
+    selected,
+    context: context,
+    startTangencyId: startTangencyId,
+    endTangencyId: endTangencyId,
+    tolerance: tolerance,
+  ).failure;
+
+  /// Same diagnosis as [diagnoseSelectedCircular], plus the measured numbers
+  /// the panel has to display: largest gap, tangency angles and radius.
+  SketchCircularFitDiagnosis diagnoseSelectedCircularDetailed(
+    Iterable<SketchEntity> selected, {
+    Iterable<SketchEntity> context = const <SketchEntity>[],
+    String? startTangencyId,
+    String? endTangencyId,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
   }) {
     final entities = selected.toList(growable: false);
     if (entities.isEmpty ||
         entities.length > SketchCircularFitTolerance.maxRegions) {
-      return SketchCircularFitFailure.invalidChain;
+      return const SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.invalidChain,
+      );
     }
     final order = _orderSelection(entities, tolerance);
-    if (order.failure != null) return order.failure!;
+    if (order.failure != null) {
+      return SketchCircularFitDiagnosis(order.failure!);
+    }
     final selection = order.selection;
-    if (selection == null) return SketchCircularFitFailure.invalidChain;
+    if (selection == null) {
+      return const SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.invalidChain,
+      );
+    }
     final points = selection.points;
-    if (points.length < 3) return SketchCircularFitFailure.insufficientPoints;
+    final maxGap = selection.gaps.isEmpty
+        ? 0.0
+        : selection.gaps.reduce(math.max);
+    if (points.length < 3) {
+      return SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.insufficientPoints,
+        maxGapMillimeters: maxGap,
+      );
+    }
     final start = selection.start;
     final end = selection.end;
     final boundary = (start: start, end: end);
     final selectedIds = entities.map((entity) => entity.id).toSet();
-    final tangent = _tangentFit(
-      boundary,
-      selectedIds,
-      context,
-      manualStartId: startTangencyId,
-      manualEndId: endTangencyId,
-      startForward: _chainDirectionInto(entities, start),
-      endForward: _chainDirectionInto(entities, end)?.scale(-1),
-      tolerance: tolerance,
-    );
-    if (tangent.failure != null) {
-      return tangent.failure!;
-    }
     var anchor = points.first;
     var anchorDistance = _distanceToLine(anchor, start, end);
     for (final point in points) {
@@ -442,19 +613,83 @@ class SketchReconstructionEngine {
       }
     }
     if (anchorDistance <= 1e-7) {
-      return SketchCircularFitFailure.collinearPoints;
+      return SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.collinearPoints,
+        maxGapMillimeters: maxGap,
+      );
     }
     final manualBoth = startTangencyId != null && endTangencyId != null;
-    final fit = manualBoth
-        ? tangent.fit
-        : _fitThroughEndpoints(points, start, end);
+    final startProbe = _neighborTangents(
+      start,
+      selectedIds,
+      context,
+      manualId: startTangencyId,
+      proximity: tolerance.maxGapMillimeters,
+    );
+    final endProbe = _neighborTangents(
+      end,
+      selectedIds,
+      context,
+      manualId: endTangencyId,
+      proximity: tolerance.maxGapMillimeters,
+    );
+    if (startProbe.failure != null) {
+      return SketchCircularFitDiagnosis(
+        startProbe.failure!,
+        maxGapMillimeters: maxGap,
+      );
+    }
+    if (endProbe.failure != null) {
+      return SketchCircularFitDiagnosis(
+        endProbe.failure!,
+        maxGapMillimeters: maxGap,
+      );
+    }
+    // A branch on either extreme is a real ambiguity: two continuations claim
+    // the same endpoint, so no single tangent circle is defined.
+    if (startProbe.directions.length > 1 || endProbe.directions.length > 1) {
+      return SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.ambiguousBranch,
+        maxGapMillimeters: maxGap,
+      );
+    }
+    if (manualBoth &&
+        startProbe.directions.length == 1 &&
+        endProbe.directions.length == 1) {
+      // A reference running back over the chain is inverted, not a tangency
+      // mismatch: report it as such before measuring angles.
+      final startFlow = _chainDirectionInto(entities, start);
+      final startDirection = startProbe.directions.single.scale(-1);
+      if (startFlow != null && _isAntiAligned(startDirection, startFlow)) {
+        return SketchCircularFitDiagnosis(
+          SketchCircularFitFailure.reversedTangency,
+          maxGapMillimeters: maxGap,
+        );
+      }
+      final endFlow = _chainDirectionInto(entities, end)?.scale(-1);
+      if (endFlow != null &&
+          _isAntiAligned(endProbe.directions.single, endFlow)) {
+        return SketchCircularFitDiagnosis(
+          SketchCircularFitFailure.reversedTangency,
+          maxGapMillimeters: maxGap,
+        );
+      }
+    }
+    final fit = _fitThroughEndpoints(points, start, end);
     if (fit == null) {
-      return manualBoth
-          ? SketchCircularFitFailure.incompatibleTangency
-          : SketchCircularFitFailure.fitErrorAboveTolerance;
+      return SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.fitErrorAboveTolerance,
+        maxGapMillimeters: maxGap,
+      );
     }
     final angles = _arcDefinition(boundary, anchor, fit.$1);
-    if (angles == null) return SketchCircularFitFailure.invalidSweep;
+    if (angles == null) {
+      return SketchCircularFitDiagnosis(
+        SketchCircularFitFailure.invalidSweep,
+        maxGapMillimeters: maxGap,
+        radius: fit.$2,
+      );
+    }
     final failure = _circularFitFailure(
       points: points,
       center: fit.$1,
@@ -464,22 +699,46 @@ class SketchReconstructionEngine {
       sweep: angles.endAngle - angles.startAngle,
       tolerance: tolerance,
     );
-    if (failure != null) return failure;
-    if (manualBoth &&
-        !_hasC1Tangency(
-          context,
-          selectedIds: selectedIds,
-          center: fit.$1,
-          startPoint: start,
-          endPoint: end,
-          startTangencyId: startTangencyId,
-          endTangencyId: endTangencyId,
-          tolerance: tolerance,
-        )) {
-      return SketchCircularFitFailure.incompatibleTangency;
+    final sides = _endpointTangency(
+      center: fit.$1,
+      start: start,
+      startDirections: startProbe.directions,
+      end: end,
+      endDirections: endProbe.directions,
+    );
+    final limitDegrees = tolerance.tangencyAngleRadians * 180 / math.pi;
+    if (manualBoth) {
+      final startTouches =
+          sides.startDegrees != null && sides.startDegrees! <= limitDegrees;
+      final endTouches =
+          sides.endDegrees != null && sides.endDegrees! <= limitDegrees;
+      if (!startTouches || !endTouches) {
+        return SketchCircularFitDiagnosis(
+          SketchCircularFitFailure.incompatibleTangency,
+          maxGapMillimeters: maxGap,
+          tangencyStartDegrees: sides.startDegrees,
+          tangencyEndDegrees: sides.endDegrees,
+          radius: fit.$2,
+        );
+      }
+    }
+    if (failure != null) {
+      return SketchCircularFitDiagnosis(
+        failure,
+        maxGapMillimeters: maxGap,
+        tangencyStartDegrees: sides.startDegrees,
+        tangencyEndDegrees: sides.endDegrees,
+        radius: fit.$2,
+      );
     }
     // Nothing is wrong: this entry point only explains a rejected fit.
-    return SketchCircularFitFailure.invalidChain;
+    return SketchCircularFitDiagnosis(
+      SketchCircularFitFailure.invalidChain,
+      maxGapMillimeters: maxGap,
+      tangencyStartDegrees: sides.startDegrees,
+      tangencyEndDegrees: sides.endDegrees,
+      radius: fit.$2,
+    );
   }
 
   /// Ordered samples of one selected region, following the entity's own
@@ -591,9 +850,13 @@ class SketchReconstructionEngine {
     // external endpoint is a region end with no other region end within the
     // effective gap, which identifies the two free ends of the walk.  When
     // exactly two of those exist they win over the diagonal.
-    final effectiveGap = math.max(
-      tolerance.maxGapMillimeters,
-      tolerance.gapRelativeToSpan * math.max(farthest, 0),
+    // Gaps are measured, never blocking: a selected region that is far from
+    // its neighbours still contributes its samples to the global fit.  Only
+    // the endpoint coincidence test below uses a distance, and it is a
+    // numerical threshold, not a gap budget.
+    final coincidence = math.max(
+      tolerance.endpointCoincidenceMillimeters,
+      1e-6,
     );
     final ends = <({int region, bool atLast, SketchVector point})>[
       for (var index = 0; index < regions.length; index++) ...[
@@ -607,7 +870,7 @@ class SketchReconstructionEngine {
       for (var other = 0; other < ends.length; other++) {
         if (other == index) continue;
         if (ends[other].region == ends[index].region) continue;
-        if (_distance(ends[index].point, ends[other].point) <= effectiveGap) {
+        if (_distance(ends[index].point, ends[other].point) <= coincidence) {
           connected = true;
           break;
         }
@@ -667,21 +930,9 @@ class SketchReconstructionEngine {
       ordered.add(
         orient(regions[pending.removeAt(bestIndex)], atLast: bestAtLast),
       );
-      if (bestDistance > effectiveGap) {
-        return _SelectionOrder(
-          null,
-          SketchCircularFitFailure.gapAboveTolerance,
-        );
-      }
     }
     // Close the chain on the far extreme found by the initial search.
     final lastGap = _distance(ordered.last.last, endSamples.first);
-    if (lastGap > effectiveGap) {
-      return const _SelectionOrder(
-        null,
-        SketchCircularFitFailure.gapAboveTolerance,
-      );
-    }
     gaps.add(lastGap);
     ordered.add(endSamples);
     return _SelectionOrder(
@@ -1104,406 +1355,220 @@ class SketchReconstructionEngine {
     );
   }
 
-  /// Circle that stays C1 with both supported neighbouring curves, or a
-  /// failure when the chain has fewer than two valid neighbours, they branch,
-  /// or the two neighbour tangents are geometrically incompatible.
-  _TangentFitResult _tangentFit(
-    ({SketchVector start, SketchVector end}) boundary,
-    Set<String> selectedIds,
-    Iterable<SketchEntity> context, {
-    String? manualStartId,
-    String? manualEndId,
-    SketchVector? startForward,
-    SketchVector? endForward,
-    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
-  }) {
-    final startProbe = _neighborTangents(
-      boundary.start,
-      selectedIds,
-      context,
-      manualId: manualStartId,
-      proximity: tolerance.maxGapMillimeters,
-    );
-    if (startProbe.failure != null) {
-      return _TangentFitResult(required: true, failure: startProbe.failure);
-    }
-    final endProbe = _neighborTangents(
-      boundary.end,
-      selectedIds,
-      context,
-      manualId: manualEndId,
-      proximity: tolerance.maxGapMillimeters,
-    );
-    if (endProbe.failure != null) {
-      return _TangentFitResult(required: true, failure: endProbe.failure);
-    }
-    final startCandidates = startProbe.directions;
-    final endCandidates = endProbe.directions;
-    // A branch is ambiguous even when the opposite boundary has no neighbour;
-    // it must never silently downgrade to the three-point fallback.
-    if (startCandidates.length > 1 || endCandidates.length > 1) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.ambiguousBranch,
-      );
-    }
-    if (startCandidates.isEmpty || endCandidates.isEmpty) {
-      // A C1 constraint is only defined when both extremities continue into a
-      // neighboring line. With none or a single neighbor the historical three
-      // point fit stays valid.
-      return const _TangentFitResult(required: false);
-    }
-    // At the first boundary the neighbour arrives at the selected chain, so
-    // reverse its outward endpoint tangent.  At the final boundary it departs
-    // from the replacement arc and keeps its outward orientation.
-    final startDirection = startCandidates.single.scale(-1);
-    final endDirection = endCandidates.single;
-    // An explicit reference attached to the endpoint but running back over the
-    // chain is inverted: the requested departure/arrival would be anti-parallel
-    // to the chain itself.  Only a named reference is classified this way, so
-    // the automatic diagnostics stay untouched.
-    if (manualStartId != null &&
-        startForward != null &&
-        _isAntiAligned(startDirection, startForward)) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.reversedTangency,
-      );
-    }
-    if (manualEndId != null &&
-        endForward != null &&
-        _isAntiAligned(endDirection, endForward)) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.reversedTangency,
-      );
-    }
-    // The centre of a circle tangent to both neighbours lies where the two
-    // endpoint normals meet:
-    //   center = start + u * normal(startDirection)
-    //          = end   + v * normal(endDirection)
-    // Solve the 2x2 system for u and derive the radius from that centre.
-    final startNormal = SketchVector(-startDirection.y, startDirection.x);
-    final endNormal = SketchVector(-endDirection.y, endDirection.x);
-    final dx = boundary.end.x - boundary.start.x;
-    final dy = boundary.end.y - boundary.start.y;
-    final cross = startNormal.x * endNormal.y - startNormal.y * endNormal.x;
-    if (cross.abs() <= 1e-10) {
-      // Parallel normals cannot bound a finite tangent circle.
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.incompatibleTangency,
-      );
-    }
-    final u = (dx * endNormal.y - dy * endNormal.x) / cross;
-    final intersection = SketchVector(
-      boundary.start.x + u * startNormal.x,
-      boundary.start.y + u * startNormal.y,
-    );
-    // The intersection is exactly C1 only when both neighbour tangents belong
-    // to one circle.  Section polylines approximate the real curve with chords,
-    // so a small mismatch is expected and must not discard the tangent
-    // solution.  Instead of dropping it (or snapping it heuristically), solve
-    // for the circle that passes exactly through both preserved endpoints and
-    // balances the C1 residual of the two extremities, so neither junction
-    // carries a visible break.
-    //
-    // A circle through both endpoints has its centre on the perpendicular
-    // bisector:  center(t) = midpoint + t * bisector, radius(t) = sqrt(D0+t^2)
-    // with D0 = (|end - start| / 2)^2 and unit neighbour tangents p and q.  The
-    // two tangent residuals are (start - center).p and (end - center).q, so
-    // [_bilateralTangentOffset] picks the offset that minimises the worst of
-    // the two (with the least-squares solution as a safety net).
-    final axis = boundary.end - boundary.start;
-    final axisLength = math.sqrt(axis.dot(axis));
-    if (!axisLength.isFinite || axisLength <= 1e-7) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.unstableRadius,
-      );
-    }
-    final bisector = SketchVector(-axis.y / axisLength, axis.x / axisLength);
-    final midpoint = boundary.start + axis.scale(.5);
-    final offset = _bilateralTangentOffset(
-      start: boundary.start,
-      end: boundary.end,
-      startDirection: startDirection,
-      endDirection: endDirection,
-      bisector: bisector,
-      axisLength: axisLength,
-      preferredSide: (intersection - midpoint).dot(bisector),
-    );
-    if (offset == null) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.unstableRadius,
-      );
-    }
-    final center = midpoint + bisector.scale(offset);
-    final radius = _distance(center, boundary.start);
-    if (!radius.isFinite || radius <= 1e-9) {
-      return const _TangentFitResult(
-        required: true,
-        failure: SketchCircularFitFailure.unstableRadius,
-      );
-    }
-    // Coincident endpoints are not enough: the arc tangent must follow the
-    // oriented neighbour tangent at both extremities.  A named reference that
-    // is attached but points the other way is reported as reversed so the UI
-    // can explain that the wrong curve was picked.
-    final tangencyFailure = _bilateralTangencyFailure(
-      center: center,
-      start: boundary.start,
-      startDirection: startDirection,
-      end: boundary.end,
-      endDirection: endDirection,
-    );
-    if (tangencyFailure != null) {
-      return _TangentFitResult(required: true, failure: tangencyFailure);
-    }
-    return _TangentFitResult(required: true, fit: (center, radius));
-  }
-
-  /// Offset along the perpendicular bisector of the preserved endpoints for
-  /// the circle that balances the bilateral C1 residual.
+  /// Traversal sense of the arc about [center] implied by [flow] at [point]:
+  /// `1` counter-clockwise, `-1` clockwise, `0` when undefined.
   ///
-  /// For the parametrisation described in [_tangentFit] the two residuals are
-  /// `u0(t) = A - tB` and `u1(t) = G - tD`, so the worst-case (minimax) optimum
-  /// sits where they cross, `u0(t) = +-u1(t)`.  The least-squares root of the
-  /// quadratic `F t^2 + (E D0 - G) t - F D0 = 0` is kept as a fallback for the
-  /// pathologically asymmetric case.  [preferredSide] keeps the arc bulging on
-  /// the same side as the normal intersection, so a fully consistent chain
-  /// returns that exact intersection.  `null` means the system is degenerate.
-  double? _bilateralTangentOffset({
-    required SketchVector start,
-    required SketchVector end,
-    required SketchVector startDirection,
-    required SketchVector endDirection,
-    required SketchVector bisector,
-    required double axisLength,
-    required double preferredSide,
-  }) {
-    final startLength = math.sqrt(startDirection.dot(startDirection));
-    final endLength = math.sqrt(endDirection.dot(endDirection));
-    if (startLength <= 1e-12 || endLength <= 1e-12) return null;
-    final p = startDirection.scale(1 / startLength);
-    final q = endDirection.scale(1 / endLength);
-    final half = (end - start).scale(.5);
-    final d0 = axisLength * axisLength / 4;
-    final a = -half.dot(p);
-    final b = bisector.dot(p);
-    final c = half.dot(q);
-    final d = bisector.dot(q);
-    final e = b * b + d * d;
-    final f = a * b + c * d;
-    final g = a * a + c * c;
-
-    double worstResidual(double t) {
-      final u0 = a - t * b;
-      final u1 = c - t * d;
-      return math.max(u0 * u0, u1 * u1) / (d0 + t * t);
-    }
-
-    final candidates = <double>[];
-    // Minimax crossing points.
-    if ((b + d).abs() > 1e-12) candidates.add((a + c) / (b + d));
-    if ((b - d).abs() > 1e-12) candidates.add((a - c) / (b - d));
-    // Least-squares roots as a safety net.
-    if (f.abs() > 1e-12) {
-      final linear = e * d0 - g;
-      final discriminant = linear * linear + 4 * f * f * d0;
-      if (discriminant >= 0) {
-        final root = math.sqrt(discriminant);
-        candidates
-          ..add((-linear + root) / (2 * f))
-          ..add((-linear - root) / (2 * f));
-      }
-    } else if ((e * d0 - g).abs() > 1e-12) {
-      candidates.add(0);
-    }
-    candidates.removeWhere((value) => !value.isFinite);
-    if (candidates.isEmpty) return null;
-    final matchesSide = candidates
-        .where((value) => value.sign == preferredSide.sign)
-        .toList();
-    final pool = matchesSide.isEmpty ? candidates : matchesSide;
-    pool.sort(
-      (first, second) => worstResidual(first).compareTo(worstResidual(second)),
-    );
-    return pool.first;
-  }
-
-  /// True when the arc centred at [center] leaves [start] along
-  /// [startDirection] and arrives at [end] along [endDirection] within
-  /// [_maxTangencyAngle].  The check is the dot product between the arc tangent
-  /// and the oriented neighbour tangent, so perpendicularity *and* traversal
-  /// sense must both hold: an arc sharing only the endpoints, or running
-  /// backwards, is never accepted.
-  /// Sine of the angle between the radius at [point] and [direction].
-  ///
-  /// Zero means [direction] is a tangent line of the circle centred at
-  /// [center].  `null` when either vector is degenerate.
-  double? _tangentLineSine(
+  /// The sense comes from the chain (or from the reference direction), never
+  /// from an assumed counter-clockwise arc, which is what lets concave and
+  /// clockwise profiles validate exactly like counter-clockwise ones.
+  double _traversalSense(
     SketchVector point,
     SketchVector center,
-    SketchVector direction,
+    SketchVector flow,
   ) {
     final radius = point - center;
     final radiusLength = math.sqrt(radius.dot(radius));
-    final directionLength = math.sqrt(direction.dot(direction));
-    if (radiusLength <= 1e-10 || directionLength <= 1e-10) return null;
-    return radius.dot(direction).abs() / (radiusLength * directionLength);
-  }
-
-  /// Traversal sense about [center] implied by an oriented tangent [direction]
-  /// at [point]: `1` counter-clockwise, `-1` clockwise, `0` when the direction
-  /// is not a tangent of that circle.
-  ///
-  /// This is what lets a concave profile, or any chain walked clockwise around
-  /// its centre, validate exactly like a counter-clockwise one: the sense is
-  /// taken from the chain, never assumed.
-  double _arcSense(
-    SketchVector point,
-    SketchVector center,
-    SketchVector direction,
-  ) {
-    final sine = _tangentLineSine(point, center, direction);
-    if (sine == null || sine > math.sin(_maxTangencyAngle)) return 0;
-    final radius = point - center;
-    final radiusLength = math.sqrt(radius.dot(radius));
-    final directionLength = math.sqrt(direction.dot(direction));
+    final flowLength = math.sqrt(flow.dot(flow));
+    if (radiusLength <= 1e-10 || flowLength <= 1e-10) return 0;
     final ccw = SketchVector(-radius.y / radiusLength, radius.x / radiusLength);
-    final projection = ccw.dot(direction) / directionLength;
+    final projection = ccw.dot(flow) / flowLength;
+    if (projection.abs() <= 1e-9) return 0;
     return projection.sign;
   }
 
-  /// True when the circle centred at [center] follows the oriented
-  /// [direction] at [point] for the given traversal [sense].
-  bool _followsTangentAt(
+  /// Angle in radians between the arc tangent at [point] and the oriented
+  /// [direction], for the given traversal [sense].
+  ///
+  /// This is the real tangency measure: zero means the arc leaves (or arrives
+  /// at) the endpoint exactly along the reference curve, which is what C1
+  /// requires.  `null` when either vector is degenerate.
+  double? _tangencyAngleRadians(
     SketchVector point,
     SketchVector center,
     SketchVector direction,
     double sense,
   ) {
-    if (sense == 0) return false;
-    final sine = _tangentLineSine(point, center, direction);
-    if (sine == null || sine > math.sin(_maxTangencyAngle)) return false;
     final radius = point - center;
     final radiusLength = math.sqrt(radius.dot(radius));
     final directionLength = math.sqrt(direction.dot(direction));
-    final ccw = SketchVector(-radius.y / radiusLength, radius.x / radiusLength);
-    return (ccw.dot(direction) / directionLength) * sense >=
-        math.cos(_maxTangencyAngle);
+    if (radiusLength <= 1e-10 || directionLength <= 1e-10) return null;
+    final tangent = SketchVector(
+      -radius.y / radiusLength * sense,
+      radius.x / radiusLength * sense,
+    );
+    final cosine = (tangent.dot(direction) / directionLength).clamp(-1.0, 1.0);
+    return math.acos(cosine);
   }
 
-  /// Validates the C1 condition of the tangent circle, returning the precise
-  /// failure or `null` when both extremities are satisfied.
-  ///
-  /// The tangent line at each endpoint has to be parallel to the oriented
-  /// neighbour and the traversal sense has to be the same on both sides, which
-  /// is derived from the chain instead of assuming counter-clockwise.  An arc
-  /// sharing only the endpoints, or walked the wrong way, is never accepted.
-  SketchCircularFitFailure? _bilateralTangencyFailure({
+  /// Tangency of a candidate circle at both preserved endpoints, in degrees.
+  _TangencyMeasurement _measureTangency({
     required SketchVector center,
     required SketchVector start,
     required SketchVector startDirection,
     required SketchVector end,
     required SketchVector endDirection,
+    required double sense,
+    required SketchCircularFitTolerance tolerance,
   }) {
-    if (!center.x.isFinite || !center.y.isFinite) {
-      return SketchCircularFitFailure.unstableRadius;
-    }
-    if (_tangentLineSine(start, center, startDirection) == null ||
-        _tangentLineSine(end, center, endDirection) == null) {
-      return SketchCircularFitFailure.unstableRadius;
-    }
-    var sense = _arcSense(start, center, startDirection);
-    if (sense == 0) sense = _arcSense(end, center, endDirection);
-    if (sense == 0) return SketchCircularFitFailure.incompatibleTangency;
-    if (!_followsTangentAt(start, center, startDirection, sense) ||
-        !_followsTangentAt(end, center, endDirection, sense)) {
-      return SketchCircularFitFailure.incompatibleTangency;
-    }
-    return null;
+    final usedSense = sense == 0
+        ? (_traversalSense(start, center, startDirection) != 0
+              ? _traversalSense(start, center, startDirection)
+              : (_traversalSense(end, center, endDirection) != 0
+                    ? _traversalSense(end, center, endDirection)
+                    : 1.0))
+        : sense;
+    final startRadians =
+        _tangencyAngleRadians(start, center, startDirection, usedSense) ??
+        math.pi;
+    final endRadians =
+        _tangencyAngleRadians(end, center, endDirection, usedSense) ?? math.pi;
+    final limit = tolerance.tangencyAngleRadians;
+    return _TangencyMeasurement(
+      startDegrees: startRadians * 180 / math.pi,
+      endDegrees: endRadians * 180 / math.pi,
+      failure: startRadians > limit || endRadians > limit
+          ? SketchCircularFitFailure.incompatibleTangency
+          : null,
+    );
   }
 
-  bool _hasC1Tangency(
-    Iterable<SketchEntity> context, {
-    required Set<String> selectedIds,
-    required SketchVector center,
-    required SketchVector startPoint,
-    required SketchVector endPoint,
-    String? startTangencyId,
-    String? endTangencyId,
-    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  /// Best fit circle when the exact normal intersection cannot satisfy both
+  /// endpoints and both tangency angles.
+  ///
+  /// The cost is the weighted sum of the three errors the command has to trade
+  /// off, normalised by their tolerances so the endpoint position and the
+  /// tangency angles dominate the radial agreement with the selected regions:
+  ///   (a) endpoint position error: (|c-start|-r)² + (|c-end|-r)²
+  ///   (b) tangency angular error: θ(start)² + θ(end)²
+  ///   (c) radial error against every selected sample
+  ///
+  /// For a fixed centre the optimal radius has a closed form, so only the
+  /// centre is searched, with a deterministic compass search from the given
+  /// seeds.
+  (SketchVector, double) _bestTangencyFit({
+    required List<SketchVector> points,
+    required SketchVector start,
+    required SketchVector startDirection,
+    required SketchVector end,
+    required SketchVector endDirection,
+    required double sense,
+    required Iterable<(SketchVector, double)> seeds,
+    required SketchCircularFitTolerance tolerance,
   }) {
-    final startCandidates = _neighborTangents(
-      startPoint,
-      selectedIds,
-      context,
-      manualId: startTangencyId,
-      proximity: tolerance.maxGapMillimeters,
-    ).directions;
-    final endCandidates = _neighborTangents(
-      endPoint,
-      selectedIds,
-      context,
-      manualId: endTangencyId,
-      proximity: tolerance.maxGapMillimeters,
-    ).directions;
-    if (startCandidates.length != 1 || endCandidates.length != 1) return false;
-    // [center] is deliberately an argument: the tangents are evaluated on the
-    // fitted arc endpoints, not on a source segment that happens to share those
-    // points.  The neighbour at the start arrives at the chain, so the arc has
-    // to leave it in the opposite direction; the arrival at the end keeps the
-    // neighbour orientation.
-    return _bilateralTangencyFailure(
-          center: center,
-          start: startPoint,
-          startDirection: startCandidates.single.scale(-1),
-          end: endPoint,
-          endDirection: endCandidates.single,
-        ) ==
-        null;
-  }
+    final positionTolerance = math.max(
+      tolerance.absoluteMillimeters * 0.04,
+      1e-9,
+    );
+    final angleTolerance = math.max(tolerance.tangencyAngleRadians, 1e-9);
+    final positionWeight = 1 / (positionTolerance * positionTolerance);
+    final angleWeight = 1 / (angleTolerance * angleTolerance);
 
-  bool _hasAnyC1Tangency(
-    Iterable<SketchEntity> context, {
-    required Set<String> selectedIds,
-    required SketchVector center,
-    required SketchVector startPoint,
-    required SketchVector endPoint,
-    String? startTangencyId,
-    String? endTangencyId,
-    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
-  }) {
-    final startCandidates = _neighborTangents(
-      startPoint,
-      selectedIds,
-      context,
-      manualId: startTangencyId,
-      proximity: tolerance.maxGapMillimeters,
-    ).directions;
-    final endCandidates = _neighborTangents(
-      endPoint,
-      selectedIds,
-      context,
-      manualId: endTangencyId,
-      proximity: tolerance.maxGapMillimeters,
-    ).directions;
-    // One sided fallback: accept the arc when it is a real tangent line of the
-    // circle at that endpoint.  The traversal sense is taken from the same
-    // direction, so a clockwise or concave continuation is accepted too.
-    if (!center.x.isFinite || !center.y.isFinite) return false;
-    bool follows(SketchVector point, SketchVector direction) {
-      final sense = _arcSense(point, center, direction);
-      return sense != 0 && _followsTangentAt(point, center, direction, sense);
+    double optimalRadius(SketchVector center, double radialWeight) {
+      final first = _distance(center, start);
+      final last = _distance(center, end);
+      var sum = 0.0;
+      for (final point in points) {
+        sum += _distance(center, point);
+      }
+      final mean = points.isEmpty ? 0.0 : sum / points.length;
+      final denominator = 2 * positionWeight + radialWeight;
+      if (!denominator.isFinite || denominator <= 0) return first;
+      return (positionWeight * (first + last) + radialWeight * mean) /
+          denominator;
     }
 
-    return (startCandidates.length == 1 &&
-            follows(startPoint, startCandidates.single.scale(-1))) ||
-        (endCandidates.length == 1 && follows(endPoint, endCandidates.single));
+    double cost(SketchVector center) {
+      final radialWeight =
+          1 /
+          _squared(
+            math.max(tolerance.radialFor(_distance(center, start)), 1e-9),
+          );
+      final radius = optimalRadius(center, radialWeight);
+      var value = 0.0;
+      value += positionWeight * _squared(_distance(center, start) - radius);
+      value += positionWeight * _squared(_distance(center, end) - radius);
+      final startAngle =
+          _tangencyAngleRadians(start, center, startDirection, sense) ??
+          math.pi;
+      final endAngle =
+          _tangencyAngleRadians(end, center, endDirection, sense) ?? math.pi;
+      value += angleWeight * startAngle * startAngle;
+      value += angleWeight * endAngle * endAngle;
+      if (points.isNotEmpty) {
+        var radial = 0.0;
+        for (final point in points) {
+          radial += _squared(_distance(point, center) - radius);
+        }
+        value += radialWeight * radial / points.length;
+      }
+      return value;
+    }
+
+    var bestCenter = start;
+    var bestRadius = 0.0;
+    var bestCost = double.infinity;
+    for (final seed in seeds) {
+      if (!seed.$1.x.isFinite || !seed.$1.y.isFinite) continue;
+      final value = cost(seed.$1);
+      if (value < bestCost) {
+        bestCost = value;
+        bestCenter = seed.$1;
+        bestRadius = seed.$2;
+      }
+    }
+    for (final seed in seeds) {
+      var center = seed.$1;
+      if (!center.x.isFinite || !center.y.isFinite) continue;
+      var value = cost(center);
+      var step = math.max(1.0, seed.$2 * 0.25);
+      for (var iteration = 0; iteration < 72; iteration++) {
+        var improved = false;
+        for (final move in const <List<double>>[
+          <double>[1, 0],
+          <double>[-1, 0],
+          <double>[0, 1],
+          <double>[0, -1],
+          <double>[1, 1],
+          <double>[-1, 1],
+          <double>[1, -1],
+          <double>[-1, -1],
+        ]) {
+          final candidate = SketchVector(
+            center.x + move[0] * step,
+            center.y + move[1] * step,
+          );
+          final candidateCost = cost(candidate);
+          if (candidateCost < value - 1e-12) {
+            value = candidateCost;
+            center = candidate;
+            improved = true;
+          }
+        }
+        if (!improved) {
+          step *= 0.5;
+          if (step <= 1e-7) break;
+        }
+      }
+      if (value < bestCost) {
+        bestCost = value;
+        bestCenter = center;
+        bestRadius = optimalRadius(
+          center,
+          1 /
+              _squared(
+                math.max(tolerance.radialFor(_distance(center, start)), 1e-9),
+              ),
+        );
+      }
+    }
+
+    if (bestRadius <= 0 || !bestRadius.isFinite) {
+      bestRadius = _distance(bestCenter, start);
+    }
+    return (bestCenter, bestRadius);
   }
+
+  double _squared(double value) => value * value;
 
   double _distanceToLine(
     SketchVector point,

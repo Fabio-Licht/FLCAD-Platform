@@ -425,10 +425,9 @@ void main() {
       controller.selectSketchEntity(invalidA.id);
       controller.selectSketchEntity(invalidB.id);
       await controller.fitSelectedSketchCircularGeometry();
-      expect(
-        controller.sketchCircularFitMessage,
-        contains('vão entre regiões'),
-      );
+      expect(controller.sketchCircularFitMessage, contains('colineares'));
+      // The measured gap is reported with the diagnostic.
+      expect(controller.sketchCircularFitMessage, contains('gap máx'));
 
       controller.beginCircleCommand();
       expect(controller.selectedSketchEntityIds, isEmpty);
