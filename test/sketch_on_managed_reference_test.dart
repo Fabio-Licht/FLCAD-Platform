@@ -698,6 +698,7 @@ void main() {
       expect(committedContract['draftAngleDegrees'], -4);
       expect(committedContract['direction'], 'reverse');
       expect(nativeSceneUnsupportedReason(cad.runtime.scene, style: 0), isNull);
+      _expectExtrudeNativeEdgeModes(controller, extrudeId);
 
       await cad.runtime.undoDocument();
       expect(cad.runtime.document!.entities[extrudeId], isNull);
@@ -834,6 +835,7 @@ void main() {
       expect(persisted['distance'], 10);
       expect(persisted['draftAngleDegrees'], 3);
       expect(persisted['direction'], 'reverse');
+      _expectExtrudeNativeEdgeModes(controller, extrudeId);
 
       await cad.runtime.undoDocument();
       expect(cad.runtime.document!.entities[extrudeId], isNull);
@@ -1629,7 +1631,31 @@ Future<String> _extrudeSketchProfile(
     nativeSceneUnsupportedReason(controller.runtime.scene, style: 0),
     isNull,
   );
+  _expectExtrudeNativeEdgeModes(controller, id);
   return id;
+}
+
+void _expectExtrudeNativeEdgeModes(
+  OperationalReverseEngineeringController controller,
+  String id,
+) {
+  final solid = controller.runtime.document!.entities[id]!;
+  final scene = controller.runtime.scene.find(id)!;
+  final handle = scene.geometry['handle'] as Map;
+  expect(solid.shape!.persistentId, handle['persistentId']);
+  final brepPresentation = scene.geometry['brepPresentation'];
+  expect(brepPresentation, isA<Map>());
+  final edges = scene.geometry['topologicalEdges'];
+  expect(edges, isA<List>());
+  expect(edges, isNotEmpty);
+  expect((brepPresentation as Map)['topologicalEdges'], same(edges));
+  for (final style in [0, 1, 2, 3]) {
+    expect(
+      nativeSceneUnsupportedReason(controller.runtime.scene, style: style),
+      isNull,
+      reason: 'Extrude $id must remain eligible for Native GPU style $style',
+    );
+  }
 }
 
 void _selectClosedSketchProfile(

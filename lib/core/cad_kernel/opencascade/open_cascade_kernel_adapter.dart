@@ -23,6 +23,7 @@ class OpenCascadeKernelAdapter
     implements
         InterchangeGeometryKernelAPI,
         PersistentGeometryKernelAPI,
+        BrepPresentationGeometryKernelAPI,
         ShapeTransformGeometryKernelAPI,
         MeshGeometryKernelAPI,
         SurfaceTopologyKernelAPI,
@@ -450,6 +451,15 @@ class OpenCascadeKernelAdapter
     }),
     runInIsolate: false,
   );
+
+  @override
+  Future<Map<String, dynamic>?> inspectBrepPresentation(
+    ShapeHandle handle,
+  ) => _legacyOperation(() async {
+    final bridge = _nativeBridge;
+    if (bridge is! OpenCascadeFFI) return null;
+    return bridge.inspectDisplayGeometry(_resolve(handle));
+  });
   @override
   Future<ShapeHandle> create(
     String operation,

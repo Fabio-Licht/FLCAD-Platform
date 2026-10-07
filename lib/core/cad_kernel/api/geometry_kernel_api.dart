@@ -58,6 +58,15 @@ abstract interface class PersistentGeometryKernelAPI
   });
 }
 
+/// Optional native BREP presentation used by renderers that need real
+/// topological edges rather than tessellation-derived contours.
+abstract interface class BrepPresentationGeometryKernelAPI
+    implements GeometryKernelAPI {
+  /// Returns the native display payload for [handle], or null when the active
+  /// host cannot expose an OCCT BREP presentation.
+  Future<Map<String, dynamic>?> inspectBrepPresentation(ShapeHandle handle);
+}
+
 /// Official kernel contract for real BRep transformations.
 /// Implementations must return a new kernel-owned shape; callers decide
 /// whether it replaces the document entity or becomes a Working Copy.

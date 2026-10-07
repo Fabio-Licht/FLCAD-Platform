@@ -100,6 +100,44 @@ class KernelDisplayMeshPipeline {
         deflection: deflection,
       );
       final existing = presentation ?? scene.find(entityId);
+      // The STL display mesh is only a tessellation transport. Keep its
+      // triangles for ordinary rendering, but obtain real OCCT topological
+      // edges from the source BREP for Native GPU edge modes. Reuse a valid
+      // resident presentation during incremental rebuilds.
+      Map<String, dynamic>? brepPresentation;
+      final cachedPresentation = existing?.geometry['brepPresentation'];
+      if (_isValidBrepPresentationCache(
+        cachedPresentation,
+        existing?.geometry['brepPresentationHandle'],
+        effectiveShape,
+      )) {
+        brepPresentation = Map<String, dynamic>.from(cachedPresentation);
+      } else if (kernel is BrepPresentationGeometryKernelAPI) {
+        try {
+          brepPresentation =
+              await (kernel as BrepPresentationGeometryKernelAPI)
+                  .inspectBrepPresentation(effectiveShape);
+        } catch (_) {
+          // BREP presentation enriches the STL display transport; it must
+          // never make a mesh that was already generated undisplayable.
+          brepPresentation = null;
+        }
+      }
+      if (brepPresentation != null &&
+          !_validTopologicalEdges(brepPresentation['topologicalEdges'])) {
+        brepPresentation = null;
+      }
+      final topologicalEdges = _validTopologicalEdges(
+        brepPresentation?['topologicalEdges'],
+      )
+          ? brepPresentation!['topologicalEdges'] as List
+          : null;
+      final retainedGeometry = Map<String, dynamic>.from(
+        existing?.geometry ?? const <String, dynamic>{},
+      )
+        ..remove('brepPresentation')
+        ..remove('brepPresentationHandle')
+        ..remove('topologicalEdges');
       scene.upsert(
         CadSceneEntity(
           id: entityId,
@@ -108,13 +146,21 @@ class KernelDisplayMeshPipeline {
           selected: existing?.selected ?? false,
           transparent: existing?.transparent ?? false,
           geometry: {
-            ...?existing?.geometry,
+            ...retainedGeometry,
             'handle': effectiveShape.toJson(),
             'nodes': geometry.nodes,
             'triangles': geometry.triangles,
             'bounds': mesh.bounds.toJson(),
             'displayMeshPath': result.payloadPath,
             'displayDeflection': deflection,
+            ...(brepPresentation == null
+                ? const <String, dynamic>{}
+                : {
+                    'brepPresentation': brepPresentation,
+                    'brepPresentationHandle': effectiveShape.toJson(),
+                  }),
+            if (topologicalEdges case final List edges)
+              'topologicalEdges': edges,
           },
         ),
       );
@@ -122,5 +168,30 @@ class KernelDisplayMeshPipeline {
     } finally {
       await meshKernel.closeMesh(mesh);
     }
+  }
+
+  static bool _isValidBrepPresentationCache(
+    Object? presentation,
+    Object? cachedHandle,
+    ShapeHandle shape,
+  ) {
+    if (presentation is! Map || cachedHandle is! Map) return false;
+    if (cachedHandle['persistentId'] != shape.persistentId) return false;
+    final revision = cachedHandle['revision'];
+    if (revision != null && revision != shape.revision) return false;
+    final fingerprint = cachedHandle['fingerprint'];
+    if (fingerprint != shape.fingerprint) return false;
+    return _validTopologicalEdges(presentation['topologicalEdges']);
+  }
+
+  static bool _validTopologicalEdges(Object? value) {
+    if (value is! List || value.isEmpty) return false;
+    return value.every(
+      (edge) =>
+          edge is List &&
+          edge.length >= 6 &&
+          edge.length % 3 == 0 &&
+          edge.every((coordinate) => coordinate is num && coordinate.isFinite),
+    );
   }
 }
