@@ -412,7 +412,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (sketch == null) return false;
     final sceneVisible = runtime.scene.find(sketch.id)?.visible;
     if (sceneVisible != null) return sceneVisible;
-    return runtime.document?.entities[sketch.id]?.data['sceneVisible'] as bool? ??
+    return runtime.document?.entities[sketch.id]?.data['sceneVisible']
+            as bool? ??
         (sketch.metadata['visible'] as bool? ?? true);
   }
 
@@ -661,12 +662,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   /// Fits a native circle/arc from a short chain selected directly on the
   /// section profile, matching the Geomagic-style manual reconstruction flow.
+  ///
+  /// The automatic tangency inference stays the default.  When the user names a
+  /// curve in "Tangência inicial" / "Tangência final" those explicit references
+  /// drive the C1 solution instead, which is what makes the command reliable on
+  /// a Section built from chords.
   Future<void> fitSelectedSketchCircularGeometry() async {
     sketchCircularFitMessage = null;
-    final selected = selectedSketchEntityIds
-        .map((id) => sketchApi?.entity(id))
+    final api = sketchApi;
+    if (api == null || activeSketch == null) return;
+    final context = activeSketch!.entityIds
+        .map(api.entity)
         .whereType<SketchEntity>()
-        .where((entity) => entity is SketchLine || entity is SketchSpline)
+        .toList(growable: false);
+    final selected = context
+        .where(
+          (entity) =>
+              selectedSketchEntityIds.contains(entity.id) &&
+              (entity is SketchLine || entity is SketchSpline),
+        )
         .toList(growable: false);
     if (selected.length < 2 || selected.length > 3) {
       sketchCircularFitMessage =
@@ -675,20 +689,56 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    // A reference whose entity was deleted must not silently fall back to the
+    // automatic mode: clear the stale field and say so.
+    var startTangencyId = sketchTangencyStartId;
+    var endTangencyId = sketchTangencyEndId;
+    final staleStart =
+        startTangencyId != null && api.entity(startTangencyId) == null;
+    final staleEnd = endTangencyId != null && api.entity(endTangencyId) == null;
+    if (staleStart || staleEnd) {
+      if (staleStart) {
+        runtime.write('sketch.tangency.startId', null);
+        startTangencyId = null;
+      }
+      if (staleEnd) {
+        runtime.write('sketch.tangency.endId', null);
+        endTangencyId = null;
+      }
+      runtime.write('sketch.tangency.pickTarget', null);
+      const message =
+          'A curva de tangência selecionada não existe mais neste sketch; o campo foi limpo para o modo automático.';
+      sketchCircularFitMessage = message;
+      error = 'Ajuste circular: $message';
+      notifyListeners();
+      return;
+    }
+    final replacedIds = selected.map((entity) => entity.id).toSet();
+    if ((startTangencyId != null && replacedIds.contains(startTangencyId)) ||
+        (endTangencyId != null && replacedIds.contains(endTangencyId))) {
+      // The tangency references and the curves replaced by the arc are two
+      // distinct roles and must never be the same entity.
+      const message =
+          'A curva de tangência deve ser vizinha da cadeia, não uma das curvas substituídas pelo arco.';
+      sketchCircularFitMessage = message;
+      error = 'Ajuste circular rejeitado: $message';
+      notifyListeners();
+      return;
+    }
     final suggestion = _sketchReconstruction.fitSelectedCircular(
       selected,
-      context: activeSketch!.entityIds
-          .map((id) => sketchApi?.entity(id))
-          .whereType<SketchEntity>(),
+      context: context,
+      startTangencyId: startTangencyId,
+      endTangencyId: endTangencyId,
     );
     if (suggestion == null ||
         suggestion.center == null ||
         suggestion.radius == null) {
       final failure = _sketchReconstruction.diagnoseSelectedCircular(
         selected,
-        context: activeSketch!.entityIds
-            .map((id) => sketchApi?.entity(id))
-            .whereType<SketchEntity>(),
+        context: context,
+        startTangencyId: startTangencyId,
+        endTangencyId: endTangencyId,
       );
       final message = switch (failure) {
         SketchCircularFitFailure.invalidChain =>
@@ -701,6 +751,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'Há mais de uma curva vizinha em uma extremidade. Selecione uma cadeia sem ramificações.',
         SketchCircularFitFailure.incompatibleTangency =>
           'A geometria selecionada não permite um arco estável. Verifique curvatura e endpoints.',
+        SketchCircularFitFailure.disconnectedTangency =>
+          'A curva de tangência precisa estar conectada ao endpoint correspondente e ser distinta das curvas substituídas.',
+        SketchCircularFitFailure.reversedTangency =>
+          'A curva de tangência está invertida: ela aponta para dentro da cadeia. Selecione a curva que continua o perfil.',
       };
       sketchCircularFitMessage = message;
       error = 'Ajuste circular rejeitado: $message';
@@ -716,12 +770,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
       SketchCircularFitQuality.c1Partial =>
         'advertência: C1 parcial aplicado; demais pontos ajustados geometricamente',
-      SketchCircularFitQuality.geometricFallback || null =>
-        'advertência: fallback geométrico sem tangência bilateral',
+      SketchCircularFitQuality.geometricFallback ||
+      null => 'advertência: fallback geométrico sem tangência bilateral',
     };
+    final manualTangency = startTangencyId != null || endTangencyId != null;
     sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm';
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}';
     runtime.write('sketch.circularSelectionMode', false);
+    runtime.write('sketch.tangency.pickTarget', null);
     notifyListeners();
   }
 
@@ -1042,6 +1098,110 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.readOrCreate('sketch.selectedIds', () => <String>{});
   bool get sketchCircularSelectionMode =>
       runtime.read<bool>('sketch.circularSelectionMode') ?? false;
+
+  /// Explicit tangency references for the circular adjustment.
+  ///
+  /// They are stored in the runtime map under stable keys so a panel rebuild -
+  /// or a project reopen - keeps the user's choice, and so an explicit
+  /// reference is never mixed up with the 2-3 curves that the arc replaces.
+  String? get sketchTangencyStartId =>
+      runtime.read<String>('sketch.tangency.startId');
+  String? get sketchTangencyEndId =>
+      runtime.read<String>('sketch.tangency.endId');
+
+  /// Field currently waiting for a viewport pick: 'start', 'end' or null.
+  String? get sketchTangencyPickTarget =>
+      runtime.read<String>('sketch.tangency.pickTarget');
+  bool get sketchTangencyPickActive => sketchTangencyPickTarget != null;
+
+  String get sketchTangencyPickHint {
+    final target = sketchTangencyPickTarget;
+    if (target == null) return '';
+    final which = target == 'start' ? 'inicial' : 'final';
+    return 'Clique na linha, arco ou spline que define a tangência $which.';
+  }
+
+  String? get sketchTangencyStartLabel =>
+      _sketchTangencyReferenceLabel(sketchTangencyStartId);
+  String? get sketchTangencyEndLabel =>
+      _sketchTangencyReferenceLabel(sketchTangencyEndId);
+
+  String? _sketchTangencyReferenceLabel(String? id) {
+    if (id == null) return null;
+    final entity = sketchApi?.entity(id);
+    if (entity == null) return null;
+    final type = switch (entity) {
+      SketchLine() => 'Linha',
+      SketchArc() => 'Arco',
+      SketchSpline() => 'Spline',
+      _ => 'Curva',
+    };
+    final suffix = id.length > 6 ? id.substring(id.length - 6) : id;
+    return '$type $suffix';
+  }
+
+  /// Starts capturing the next viewport pick into [target] ('start' or 'end').
+  void beginSketchTangencyPick(String target) {
+    if (target != 'start' && target != 'end') return;
+    sketchCircularFitMessage = null;
+    runtime.write('sketch.tangency.pickTarget', target);
+    notifyListeners();
+  }
+
+  void cancelSketchTangencyPick() {
+    if (!sketchTangencyPickActive) return;
+    runtime.write('sketch.tangency.pickTarget', null);
+    notifyListeners();
+  }
+
+  void clearSketchTangencyReference(String target) {
+    if (target != 'start' && target != 'end') return;
+    runtime.write(
+      target == 'start' ? 'sketch.tangency.startId' : 'sketch.tangency.endId',
+      null,
+    );
+    if (sketchTangencyPickTarget == target) {
+      runtime.write('sketch.tangency.pickTarget', null);
+    }
+    sketchCircularFitMessage = null;
+    notifyListeners();
+  }
+
+  void clearSketchTangencyReferences() {
+    runtime.write('sketch.tangency.startId', null);
+    runtime.write('sketch.tangency.endId', null);
+    runtime.write('sketch.tangency.pickTarget', null);
+    sketchCircularFitMessage = null;
+    notifyListeners();
+  }
+
+  /// Routes a picked sketch entity into the pending tangency field.
+  ///
+  /// Returns true when the pick belonged to the tangency capture, so the normal
+  /// multi selection used by the fit is left untouched.
+  bool _captureSketchTangencyReference(String entityId) {
+    final target = sketchTangencyPickTarget;
+    if (target == null) return false;
+    final entity = sketchApi?.entity(entityId);
+    if (entity == null) return false;
+    if (entity is! SketchLine &&
+        entity is! SketchArc &&
+        entity is! SketchSpline) {
+      sketchCircularFitMessage =
+          'A tangência só pode ser definida por linha, arco ou spline.';
+      notifyListeners();
+      return true;
+    }
+    runtime.write(
+      target == 'start' ? 'sketch.tangency.startId' : 'sketch.tangency.endId',
+      entity.id,
+    );
+    runtime.write('sketch.tangency.pickTarget', null);
+    sketchCircularFitMessage = null;
+    notifyListeners();
+    return true;
+  }
+
   void beginSketchCircularSelection() {
     sketchCircularFitMessage = null;
     runtime.write('sketch.circularSelectionMode', true);
@@ -2868,6 +3028,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     activeSelection = null;
     previewPoints = const [];
     selectedSketchEntityIds.clear();
+    // Explicit tangency references belong to the sketch being detached.
+    runtime.write('sketch.tangency.startId', null);
+    runtime.write('sketch.tangency.endId', null);
+    runtime.write('sketch.tangency.pickTarget', null);
     sketchApi = null;
     editorApi = null;
     constraintApi = null;
@@ -5225,7 +5389,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'sketch.drag.hud',
       SketchDragHud(anchor.x, anchor.y, lineSnapType?.name ?? 'Free'),
     );
-    selectSketchEntity(entityId);
+    // Dragging a curve always performs a normal selection, even while a
+    // tangency field is capturing.
+    _applySketchSelection(entityId);
   }
 
   void updateSketchEntityDrag(Offset position, CadCameraController camera) {
@@ -6448,6 +6614,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void selectSketchEntity(String id, {bool additive = false}) {
+    // While a tangency field is capturing, the pick names a neighbour curve and
+    // must not disturb the 2-3 curve selection that will be replaced.
+    if (_captureSketchTangencyReference(id)) return;
+    _applySketchSelection(id, additive: additive);
+  }
+
+  /// Plain sketch selection used by the viewport, the explorer and the tools.
+  void _applySketchSelection(String id, {bool additive = false}) {
     if (sketchApi?.entity(id) == null) return;
     additive = additive || sketchCircularSelectionMode;
     selectedConstraintIds.clear();

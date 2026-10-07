@@ -10122,6 +10122,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               icon: const Icon(Icons.circle_outlined, size: 16),
               label: const Text('Ajustar círculo/arco pelas linhas'),
             ),
+            const SizedBox(height: 5),
+            _SketchTangencyReferences(controller: controller),
             if (controller.sketchCircularFitMessage != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
@@ -13988,4 +13990,125 @@ class _AboutRow extends StatelessWidget {
       ],
     ),
   );
+}
+
+/// Optional tangency references for "Ajustar círculo/arco pelas linhas".
+///
+/// Empty fields keep the automatic inference from the Section neighbours; a
+/// filled field makes the named curve drive the tangency at that endpoint.
+class _SketchTangencyReferences extends StatelessWidget {
+  const _SketchTangencyReferences({required this.controller});
+
+  final OperationalReverseEngineeringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Tangência (opcional)',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+              ),
+            ),
+            TextButton(
+              onPressed:
+                  controller.sketchTangencyStartId == null &&
+                      controller.sketchTangencyEndId == null
+                  ? null
+                  : controller.clearSketchTangencyReferences,
+              child: const Text('Limpar', style: TextStyle(fontSize: 10)),
+            ),
+          ],
+        ),
+        _SketchTangencyReferenceField(
+          controller: controller,
+          label: 'Tangência inicial',
+          target: 'start',
+          reference: controller.sketchTangencyStartLabel,
+        ),
+        _SketchTangencyReferenceField(
+          controller: controller,
+          label: 'Tangência final',
+          target: 'end',
+          reference: controller.sketchTangencyEndLabel,
+        ),
+        if (controller.sketchTangencyPickActive)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(2, 0, 2, 4),
+            child: Text(
+              controller.sketchTangencyPickHint,
+              style: const TextStyle(fontSize: 9.5),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _SketchTangencyReferenceField extends StatelessWidget {
+  const _SketchTangencyReferenceField({
+    required this.controller,
+    required this.label,
+    required this.target,
+    required this.reference,
+  });
+
+  final OperationalReverseEngineeringController controller;
+  final String label;
+  final String target;
+  final String? reference;
+
+  @override
+  Widget build(BuildContext context) {
+    final picking = controller.sketchTangencyPickTarget == target;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(label, style: const TextStyle(fontSize: 10)),
+                Text(
+                  reference ?? 'automático (inferida da seção)',
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: reference == null
+                        ? Theme.of(context).disabledColor
+                        : null,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            tooltip: picking
+                ? 'Cancelar seleção'
+                : 'Selecionar curva na viewport',
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            onPressed: picking
+                ? controller.cancelSketchTangencyPick
+                : () => controller.beginSketchTangencyPick(target),
+            icon: Icon(picking ? Icons.close : Icons.touch_app_outlined),
+          ),
+          IconButton(
+            tooltip: 'Usar modo automático',
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            onPressed: reference == null
+                ? null
+                : () => controller.clearSketchTangencyReference(target),
+            icon: const Icon(Icons.backspace_outlined),
+          ),
+        ],
+      ),
+    );
+  }
 }

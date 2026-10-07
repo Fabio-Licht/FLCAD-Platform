@@ -176,7 +176,10 @@ void main() {
       await controller.fitSelectedSketchCircularGeometry();
       final fittedId = controller.selectedSketchEntityIds.single;
       final fitted = controller.sketchApi!.entity(fittedId)! as SketchArc;
-      expect(controller.sketchCircularFitMessage, contains('C1 bilateral aplicado'));
+      expect(
+        controller.sketchCircularFitMessage,
+        contains('C1 bilateral aplicado'),
+      );
       expect(sourceA.visible, isFalse);
       expect(sourceB.visible, isFalse);
       expect(controller.selectedSketchEntityIds, {fitted.id});
@@ -263,7 +266,10 @@ void main() {
       await controller.toggleActiveSketchVisibility();
       expect(controller.activeSketchVisible, isFalse);
       expect(
-        cad.runtime.document!.entities[controller.activeSketch!.id]!
+        cad
+            .runtime
+            .document!
+            .entities[controller.activeSketch!.id]!
             .data['sceneVisible'],
         isFalse,
       );
@@ -390,7 +396,10 @@ void main() {
         controller.sketchApi!.entity(controller.selectedSketchEntityIds.single),
         isA<SketchArc>(),
       );
-      expect(controller.sketchCircularFitMessage, contains('fallback geométrico'));
+      expect(
+        controller.sketchCircularFitMessage,
+        contains('fallback geométrico'),
+      );
       expect(fallbackA.visible, isFalse);
       expect(fallbackB.visible, isFalse);
       expect(fallbackBefore.visible, isTrue);
@@ -795,6 +804,162 @@ void main() {
       expect(cad.runtime.scene.find('surface-preview'), isNotNull);
     },
   );
+
+  test('explicit tangency references drive the circular adjustment', () async {
+    final directory = await Directory.systemTemp.createTemp('g124_1_tangency_');
+    addTearDown(() => directory.delete(recursive: true));
+    final kernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final cad = DesktopCadController(
+      kernels: kernels,
+      projects: ProjectManager.instance,
+    );
+    final commands = DesktopCommandCoordinator(
+      cad: cad,
+      projects: ProjectManager.instance,
+    );
+    final projects = ProjectRepository(
+      storage: LocalStorageService(rootDirectory: directory),
+    );
+    final controller = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: commands,
+      runtime: cad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: projects),
+        ),
+      ),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(cad.dispose);
+    await cad.runtime.open('g124-tangency', directory);
+    await controller.configureProject(
+      projectId: 'g124-tangency',
+      projectDirectory: directory,
+    );
+    controller.selectWorldSketchPlane(SketchPlaneType.xy);
+    await controller.openSketch();
+
+    const radius = 8.0;
+    const a0 = 0.9;
+    const a1 = 1.5;
+    SketchVector point(double angle) =>
+        SketchVector(radius * math.cos(angle), radius * math.sin(angle));
+    SketchVector tangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    final middle = (a0 + a1) / 2;
+    final chainA = controller.sketchApi!.builders.line.build(
+      point(a0),
+      point(middle),
+    );
+    final chainB = controller.sketchApi!.builders.line.build(
+      point(middle),
+      point(a1),
+    );
+    final startReference = controller.sketchApi!.builders.line.build(
+      point(a0) - tangent(a0).scale(4),
+      point(a0),
+    );
+    final endReference = controller.sketchApi!.builders.line.build(
+      point(a1),
+      point(a1) + tangent(a1).scale(4),
+    );
+    // Radial decoy on the start endpoint: the automatic inference would see a
+    // branch, so the explicit reference is what makes the fit reliable.
+    final decoy = controller.sketchApi!.builders.line.build(
+      point(a0),
+      point(a0) + SketchVector(math.cos(a0), math.sin(a0)).scale(3),
+    );
+
+    controller.beginSketchCircularSelection();
+    controller.selectSketchEntity(chainA.id);
+    controller.selectSketchEntity(chainB.id);
+    expect(controller.selectedSketchEntityIds, {chainA.id, chainB.id});
+
+    // Capturing a reference must not disturb the 2-3 curves being replaced.
+    controller.beginSketchTangencyPick('start');
+    expect(controller.sketchTangencyPickActive, isTrue);
+    controller.selectSketchEntity(startReference.id);
+    expect(controller.sketchTangencyStartId, startReference.id);
+    expect(controller.sketchTangencyPickActive, isFalse);
+    expect(controller.selectedSketchEntityIds, {chainA.id, chainB.id});
+    controller.beginSketchTangencyPick('end');
+    controller.selectSketchEntity(endReference.id);
+    expect(controller.sketchTangencyEndId, endReference.id);
+    expect(controller.selectedSketchEntityIds, {chainA.id, chainB.id});
+
+    await controller.fitSelectedSketchCircularGeometry();
+    final fitted = controller.sketchApi!.entity(
+      controller.selectedSketchEntityIds.single,
+    );
+    expect(fitted, isA<SketchArc>());
+    expect((fitted! as SketchArc).parameters['radius'], closeTo(radius, 1e-6));
+    expect(
+      controller.sketchCircularFitMessage,
+      contains('C1 bilateral aplicado'),
+    );
+    expect(controller.sketchCircularFitMessage, contains('tangência manual'));
+    expect(chainA.visible, isFalse);
+    expect(chainB.visible, isFalse);
+    expect(startReference.visible, isTrue);
+    expect(endReference.visible, isTrue);
+    expect(decoy.visible, isTrue);
+    expect(cad.runtime.scene.find(fitted.id)!.selected, isTrue);
+
+    // The promotion is still recorded as a single sketch transaction, which is
+    // the undo/redo boundary the command had before the manual references.
+    expect(
+      controller.sketchApi!.engine.history.entries
+          .where((entry) => entry.targetId == 'sketch.reconstruction.accept')
+          .isNotEmpty,
+      isTrue,
+    );
+
+    // Toggle Sketch keeps hiding and showing the promoted arc root.
+    await controller.toggleActiveSketchVisibility();
+    expect(controller.activeSketchVisible, isFalse);
+    await controller.toggleActiveSketchVisibility();
+    expect(controller.activeSketchVisible, isTrue);
+
+    // A reference that is not attached to the endpoint is rejected clearly.
+    final stray = controller.sketchApi!.builders.line.build(
+      const SketchVector(60, 60),
+      const SketchVector(62, 60),
+    );
+    controller.beginSketchCircularSelection();
+    controller.selectSketchEntity(chainA.id);
+    controller.selectSketchEntity(chainB.id);
+    controller.beginSketchTangencyPick('start');
+    controller.selectSketchEntity(stray.id);
+    await controller.fitSelectedSketchCircularGeometry();
+    expect(controller.sketchCircularFitMessage, contains('conectada'));
+    expect(chainA.visible, isFalse, reason: 'rejection must not replace');
+
+    // Clearing the fields restores the automatic mode for the next fit.
+    controller.clearSketchTangencyReferences();
+    expect(controller.sketchTangencyStartId, isNull);
+    expect(controller.sketchTangencyEndId, isNull);
+    expect(controller.sketchTangencyPickActive, isFalse);
+
+    // A reference whose curve is deleted is cleared with a specific message
+    // instead of silently dropping back to the automatic inference.
+    controller.beginSketchCircularSelection();
+    controller.selectSketchEntity(chainA.id);
+    controller.selectSketchEntity(chainB.id);
+    final doomed = controller.sketchApi!.builders.line.build(
+      const SketchVector(70, 70),
+      const SketchVector(72, 70),
+    );
+    controller.beginSketchTangencyPick('start');
+    controller.selectSketchEntity(doomed.id);
+    expect(controller.sketchTangencyStartId, doomed.id);
+    controller.sketchApi!.deleteEntity(doomed.id);
+    await controller.fitSelectedSketchCircularGeometry();
+    expect(controller.sketchCircularFitMessage, contains('não existe mais'));
+    expect(controller.sketchTangencyStartId, isNull);
+    expect(controller.sketchTangencyPickActive, isFalse);
+  });
 }
 
 class _HealthySurfaceKernel
