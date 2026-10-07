@@ -107,9 +107,23 @@ void main() {
         cad.runtime.document!.entities[sketch.id]!.data['sceneVisible'],
         isFalse,
       );
+      expect(cad.runtime.scene.find(sketch.id)!.visible, isFalse);
+      expect(
+        sketch.entityIds
+            .map((id) => cad.runtime.scene.find(id)?.visible)
+            .every((visible) => visible == false),
+        isTrue,
+      );
       await controller.toggleActiveSketchVisibility();
       expect(
         cad.runtime.document!.entities[sketch.id]!.data['sceneVisible'],
+        isTrue,
+      );
+      expect(cad.runtime.scene.find(sketch.id)!.visible, isTrue);
+      expect(
+        sketch.entityIds
+            .map((id) => cad.runtime.scene.find(id)?.visible)
+            .every((visible) => visible == true),
         isTrue,
       );
       final health = controller.sketchHealth;

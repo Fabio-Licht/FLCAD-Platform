@@ -410,6 +410,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   bool get activeSketchVisible {
     final sketch = activeSketch;
     if (sketch == null) return false;
+    final sceneVisible = runtime.scene.find(sketch.id)?.visible;
+    if (sceneVisible != null) return sceneVisible;
     return runtime.document?.entities[sketch.id]?.data['sceneVisible'] as bool? ??
         (sketch.metadata['visible'] as bool? ?? true);
   }

@@ -126,6 +126,26 @@ void main() {
         line.id,
       );
 
+      // The controller must toggle from the effective scene state.  Exercise
+      // both directions on a normal new Sketch and repair a stale scene root
+      // without changing its already-correct persisted visibility.
+      final newSketchId = controller.activeSketch!.id;
+      expect(controller.activeSketchVisible, isTrue);
+      await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isFalse);
+      expect(cad.runtime.scene.find(newSketchId)!.visible, isFalse);
+      expect(cad.runtime.scene.find(line.id)!.visible, isFalse);
+      await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isTrue);
+      expect(cad.runtime.scene.find(newSketchId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(line.id)!.visible, isTrue);
+      final rootScene = cad.runtime.scene.find(newSketchId)!;
+      cad.runtime.scene.upsert(rootScene.copyWith(visible: false));
+      expect(controller.activeSketchVisible, isFalse);
+      await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isTrue);
+      expect(cad.runtime.scene.find(newSketchId)!.visible, isTrue);
+
       // Manual circular reconstruction replaces a connected chain while
       // retaining its two external vertices and selecting the native arc.
       SketchVector circularPoint(double angle) =>

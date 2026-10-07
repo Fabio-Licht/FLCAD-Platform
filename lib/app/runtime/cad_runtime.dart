@@ -2656,7 +2656,32 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
         final childrenMatch = children.every(
           (child) => (child.data['sceneVisible'] ?? true) == visible,
         );
-        if (alreadyVisible && childrenMatch) return;
+        if (alreadyVisible && childrenMatch) {
+          // A display-only synchronization can leave a stale scene entry even
+          // though the persisted root and child flags are already correct.
+          // Reconcile that presentation state instead of treating a Show as a
+          // second Hide on the next controller toggle.
+          final collection = document.entities[entity.data['collectionId']];
+          final effectiveVisible =
+              visible &&
+              collection?.data['visible'] != false &&
+              collection?.data['deleted'] != true;
+          var repaired = false;
+          void repair(String entityId) {
+            final sceneEntity = scene.find(entityId);
+            if (sceneEntity != null && sceneEntity.visible != effectiveVisible) {
+              scene.upsert(sceneEntity.copyWith(visible: effectiveVisible));
+              repaired = true;
+            }
+          }
+
+          repair(entity.id);
+          for (final child in children) {
+            repair(child.id);
+          }
+          if (repaired) notifyListeners();
+          return;
+        }
         await _mutateDocument(
           tx,
           command: 'display.visibility',
