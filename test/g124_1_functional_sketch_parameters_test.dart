@@ -1063,6 +1063,218 @@ void main() {
     expect(controller.sketchCircularFitMessage, contains('colineares'));
     expect(collinear.every((entity) => entity.visible), isTrue);
   });
+
+  test(
+    'confirmation hides every used region and keeps the rest visible',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('g124_1_visib_');
+      addTearDown(() => directory.delete(recursive: true));
+      final kernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(controller.dispose);
+      addTearDown(cad.dispose);
+      await cad.runtime.open('g124-visibility', directory);
+      await controller.configureProject(
+        projectId: 'g124-visibility',
+        projectDirectory: directory,
+      );
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
+
+      const radius = 30.0;
+      const a0 = 0.4;
+      const a1 = 1.6;
+      SketchVector point(double angle) => SketchVector(
+        150 + radius * math.cos(angle),
+        radius * math.sin(angle),
+      );
+      SketchVector tangent(double angle) =>
+          SketchVector(-math.sin(angle), math.cos(angle));
+      final sources = <SketchLine>[
+        for (var index = 0; index < 5; index++)
+          controller.sketchApi!.builders.line.build(
+            point(a0 + (a1 - a0) * index / 5),
+            point(a0 + (a1 - a0) * (index + 1) / 5),
+          ),
+      ];
+      // A curve that is NOT part of the selection must stay visible.
+      final untouched = controller.sketchApi!.builders.line.build(
+        const SketchVector(400, 200),
+        const SketchVector(430, 210),
+      );
+      final startReference = controller.sketchApi!.builders.line.build(
+        point(a0) - tangent(a0).scale(6),
+        point(a0),
+      );
+      final endReference = controller.sketchApi!.builders.line.build(
+        point(a1),
+        point(a1) + tangent(a1).scale(6),
+      );
+
+      controller.beginSketchCircularSelection();
+      for (final entity in sources) {
+        controller.selectSketchEntity(entity.id);
+      }
+      controller.beginSketchTangencyPick('start');
+      controller.selectSketchEntity(startReference.id);
+      controller.beginSketchTangencyPick('end');
+      controller.selectSketchEntity(endReference.id);
+      expect(controller.selectedSketchEntityIds, hasLength(5));
+
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(controller.sketchCircularFitConfirmed, isTrue);
+      final arcId = controller.selectedSketchEntityIds.single;
+      final arc = controller.sketchApi!.entity(arcId);
+      expect(arc, isA<SketchArc>());
+
+      // 1. Every selected region that took part in the fit is hidden, in the
+      //    engine and in the document/scene state.
+      for (final source in sources) {
+        expect(source.visible, isFalse, reason: source.id);
+        expect(cad.runtime.scene.find(source.id)!.visible, isFalse);
+        expect(
+          cad.runtime.document!.entities[source.id]!.data['sceneVisible'],
+          isFalse,
+        );
+      }
+      // 2. Geometry outside the selection, including the tangent references,
+      //    keeps its visibility.
+      expect(untouched.visible, isTrue);
+      expect(cad.runtime.scene.find(untouched.id)!.visible, isTrue);
+      expect(startReference.visible, isTrue);
+      expect(endReference.visible, isTrue);
+      // 3. The new arc is the only active geometry on that stretch.
+      expect(cad.runtime.scene.find(arcId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(arcId)!.selected, isTrue);
+      expect(controller.sketchCircularFitMessage, contains('confirmado'));
+      expect(controller.sketchCircularFitMessage, contains('usada(s)'));
+
+      // 4. Tangency measured on the FINAL arc against the reference lines: both
+      //    junctions must be below the 1 deg tolerance.
+      final arcEntity = arc! as SketchArc;
+      final center = SketchVector.fromJson(arcEntity.parameters['center']);
+      final arcRadius = (arcEntity.parameters['radius'] as num).toDouble();
+      double lineAngleDegrees(
+        double angle,
+        SketchVector referenceStart,
+        SketchVector referenceEnd,
+      ) {
+        final arcTangent = SketchVector(-math.sin(angle), math.cos(angle));
+        final reference = referenceEnd - referenceStart;
+        final cosine =
+            (arcTangent.dot(reference) /
+                    (math.sqrt(arcTangent.dot(arcTangent)) *
+                        math.sqrt(reference.dot(reference))))
+                .abs()
+                .clamp(0.0, 1.0);
+        return math.acos(cosine) * 180 / math.pi;
+      }
+
+      final startAngle = (arcEntity.parameters['startAngle'] as num).toDouble();
+      final endAngle = (arcEntity.parameters['endAngle'] as num).toDouble();
+      expect(
+        lineAngleDegrees(
+          startAngle,
+          point(a0) - tangent(a0).scale(6),
+          point(a0),
+        ),
+        lessThan(1.0),
+      );
+      expect(
+        lineAngleDegrees(endAngle, point(a1), point(a1) + tangent(a1).scale(6)),
+        lessThan(1.0),
+      );
+      // The preserved endpoints are where the arc meets the references.
+      final startPoint = SketchVector(
+        center.x + arcRadius * math.cos(startAngle),
+        center.y + arcRadius * math.sin(startAngle),
+      );
+      final endPoint = SketchVector(
+        center.x + arcRadius * math.cos(endAngle),
+        center.y + arcRadius * math.sin(endAngle),
+      );
+      expect(
+        [startPoint, endPoint].any(
+          (candidate) =>
+              (candidate.x - point(a0).x).abs() < 1e-3 &&
+              (candidate.y - point(a0).y).abs() < 1e-3,
+        ),
+        isTrue,
+      );
+      expect(
+        [startPoint, endPoint].any(
+          (candidate) =>
+              (candidate.x - point(a1).x).abs() < 1e-3 &&
+              (candidate.y - point(a1).y).abs() < 1e-3,
+        ),
+        isTrue,
+      );
+
+      // 5. Undo/Redo and Toggle Sketch keep working with the hidden sources.
+      final engine = controller.sketchApi!.engine;
+      expect(engine.undo(), isTrue);
+      // Undo/Redo restore deserialized entities, so re-read them by id.
+      bool sourcesVisible() => sources.every(
+        (entity) => controller.sketchApi!.entity(entity.id)?.visible == true,
+      );
+      expect(sourcesVisible(), isTrue);
+      expect(engine.redo(), isTrue);
+      expect(
+        sources.every(
+          (entity) => controller.sketchApi!.entity(entity.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isFalse);
+      await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isTrue);
+      expect(
+        sources.every(
+          (entity) => controller.sketchApi!.entity(entity.id)?.visible == false,
+        ),
+        isTrue,
+      );
+
+      // A new attempt that fails must drop the confirmed state (without going
+      // through a fresh multi selection first) while keeping its own message.
+      final flatA = controller.sketchApi!.builders.line.build(
+        const SketchVector(600, 0),
+        const SketchVector(601, 0),
+      );
+      final flatB = controller.sketchApi!.builders.line.build(
+        const SketchVector(601, 0),
+        const SketchVector(602, 0),
+      );
+      controller.toggleSketchSelection(arcId);
+      controller.toggleSketchSelection(flatA.id);
+      controller.toggleSketchSelection(flatB.id);
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(controller.sketchCircularFitConfirmed, isFalse);
+      expect(controller.sketchCircularFitMessage, contains('colineares'));
+    },
+  );
 }
 
 class _HealthySurfaceKernel

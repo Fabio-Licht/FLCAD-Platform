@@ -143,12 +143,16 @@ class _OrderedSelection {
     required this.start,
     required this.end,
     required this.gaps,
+    required this.usedEntityIds,
   });
 
   final List<List<SketchVector>> regions;
   final SketchVector start;
   final SketchVector end;
   final List<double> gaps;
+
+  /// Entities that actually contributed samples, in walk order.
+  final List<String> usedEntityIds;
 
   /// Every sample of every selected region, in walk order.  The arc is fitted
   /// on this whole cloud, never on an artificial connector.
@@ -216,6 +220,7 @@ class SketchReconstructionSuggestion {
     this.maxGapMillimeters,
     this.tangencyStartDegrees,
     this.tangencyEndDegrees,
+    this.usedEntityIds = const <String>[],
   });
 
   final SketchReconstructionKind kind;
@@ -243,6 +248,9 @@ class SketchReconstructionSuggestion {
   /// preserved endpoint, in degrees.  Zero means a real C1 junction.
   final double? tangencyStartDegrees;
   final double? tangencyEndDegrees;
+
+  /// Regions that actually contributed samples to the fit, in walk order.
+  final List<String> usedEntityIds;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -509,6 +517,7 @@ class SketchReconstructionEngine {
           : selection.gaps.reduce(math.max),
       tangencyStartDegrees: tangencyStartDegrees,
       tangencyEndDegrees: tangencyEndDegrees,
+      usedEntityIds: selection.usedEntityIds,
     );
   }
 
@@ -544,6 +553,57 @@ class SketchReconstructionEngine {
           ? degrees(end, endDirections.single)
           : null,
     );
+  }
+
+  /// Real tangency of the *final* arc geometry against the two named
+  /// references, in degrees.
+  ///
+  /// It is deliberately measured on the created [SketchArc] (its stored centre
+  /// and angles) and against the reference curves themselves, so a fit can
+  /// never be reported as tangente just because the solver received the
+  /// references.  The angle is the line angle, so the traversal sense does not
+  /// hide a visible break.
+  ({double startDegrees, double endDegrees})? measureCreatedArcTangency({
+    required SketchArc arc,
+    required SketchEntity startReference,
+    required SketchEntity endReference,
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) {
+    final center = SketchVector.fromJson(arc.parameters['center']);
+    final radius = (arc.parameters['radius'] as num).toDouble();
+    final startAngle = (arc.parameters['startAngle'] as num).toDouble();
+    final endAngle = (arc.parameters['endAngle'] as num).toDouble();
+    if (!radius.isFinite || radius <= 0 || !center.x.isFinite) return null;
+    SketchVector pointAt(double angle) => SketchVector(
+      center.x + radius * math.cos(angle),
+      center.y + radius * math.sin(angle),
+    );
+
+    SketchVector tangentAt(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    double? degrees(double angle, SketchEntity reference, SketchVector point) {
+      final direction =
+          _endpointTangent(reference, point) ??
+          _proximityTangent(reference, point, tolerance.maxGapMillimeters);
+      if (direction == null) return null;
+      final tangent = tangentAt(angle);
+      final cosine =
+          (tangent.dot(direction) /
+                  (math.sqrt(tangent.dot(tangent)) *
+                      math.sqrt(direction.dot(direction))))
+              .abs()
+              .clamp(0.0, 1.0);
+      return math.acos(cosine) * 180 / math.pi;
+    }
+
+    final startDegrees = degrees(
+      startAngle,
+      startReference,
+      pointAt(startAngle),
+    );
+    final endDegrees = degrees(endAngle, endReference, pointAt(endAngle));
+    if (startDegrees == null || endDegrees == null) return null;
+    return (startDegrees: startDegrees, endDegrees: endDegrees);
   }
 
   /// Explains why a manual circular fit could not be proposed.  This mirrors
@@ -790,6 +850,7 @@ class SketchReconstructionEngine {
   ) {
     final regions = <List<SketchVector>>[];
     var total = 0;
+    final ids = <String>[];
     for (final entity in entities) {
       final samples = _entitySamples(entity);
       if (samples.length < 2) continue;
@@ -800,6 +861,7 @@ class SketchReconstructionEngine {
           SketchCircularFitFailure.invalidChain,
         );
       }
+      ids.add(entity.id);
       regions.add(samples);
     }
     if (regions.isEmpty) {
@@ -813,6 +875,7 @@ class SketchReconstructionEngine {
           start: only.first,
           end: only.last,
           gaps: const <double>[],
+          usedEntityIds: ids,
         ),
       );
     }
@@ -899,6 +962,7 @@ class SketchReconstructionEngine {
     final ordered = <List<SketchVector>>[
       orient(regions[startRegion], atLast: startAtLast),
     ];
+    final usedIds = <String>[ids[startRegion]];
     // The far extreme is pinned, so the walk can never end somewhere else.
     final endSamples = orient(regions[endRegion], atLast: !endAtLast);
     final pending = <int>[
@@ -927,20 +991,22 @@ class SketchReconstructionEngine {
         }
       }
       gaps.add(bestDistance);
-      ordered.add(
-        orient(regions[pending.removeAt(bestIndex)], atLast: bestAtLast),
-      );
+      final nextRegion = pending.removeAt(bestIndex);
+      ordered.add(orient(regions[nextRegion], atLast: bestAtLast));
+      usedIds.add(ids[nextRegion]);
     }
     // Close the chain on the far extreme found by the initial search.
     final lastGap = _distance(ordered.last.last, endSamples.first);
     gaps.add(lastGap);
     ordered.add(endSamples);
+    usedIds.add(ids[endRegion]);
     return _SelectionOrder(
       _OrderedSelection(
         regions: ordered,
         start: ordered.first.first,
         end: ordered.last.last,
         gaps: gaps,
+        usedEntityIds: usedIds,
       ),
     );
   }

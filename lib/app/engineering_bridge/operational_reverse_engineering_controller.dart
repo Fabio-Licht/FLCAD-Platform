@@ -596,7 +596,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           suggestion.startAngle != null &&
           suggestion.endAngle != null &&
           entities.any(
-            (entity) => entity is SketchLine || entity is SketchSpline,
+            (entity) =>
+                entity is SketchLine ||
+                entity is SketchArc ||
+                entity is SketchSpline,
           );
       api.engine.transaction('sketch.reconstruction.accept', () {
         if (canPromoteCurve) {
@@ -670,6 +673,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// references drive the tangency instead.
   Future<void> fitSelectedSketchCircularGeometry() async {
     sketchCircularFitMessage = null;
+    // A new attempt is no longer a confirmed result: the previous arc (if any)
+    // must not keep claiming the panel state, while the diagnostic produced by
+    // this attempt still replaces the message below.
+    runtime.write('sketch.circularFit.confirmed', false);
     final api = sketchApi;
     if (api == null || activeSketch == null) return;
     final context = activeSketch!.entityIds
@@ -795,6 +802,55 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       allowLowConfidence: true,
     );
     if (promotedId == null) return;
+    final promotedEntity = api.entity(promotedId);
+    final toleranceLimitDegrees =
+        const SketchCircularFitTolerance().tangencyAngleRadians * 180 / math.pi;
+    var measuredStart = suggestion.tangencyStartDegrees;
+    var measuredEnd = suggestion.tangencyEndDegrees;
+    // The tangency is validated on the *created* arc, not on the solver input:
+    // if the final geometry breaks either junction, the promotion is rolled
+    // back instead of leaving a visible kink on screen.
+    if (startTangencyId != null &&
+        endTangencyId != null &&
+        promotedEntity is SketchArc) {
+      final startReference = api.entity(startTangencyId);
+      final endReference = api.entity(endTangencyId);
+      final angles = startReference == null || endReference == null
+          ? null
+          : _sketchReconstruction.measureCreatedArcTangency(
+              arc: promotedEntity,
+              startReference: startReference,
+              endReference: endReference,
+            );
+      if (angles == null ||
+          angles.startDegrees > toleranceLimitDegrees ||
+          angles.endDegrees > toleranceLimitDegrees) {
+        api.engine.undo();
+        await _synchronizeSketchScene();
+        selectedSketchEntityIds.clear();
+        runtime.select(const <String>{});
+        final message = angles == null
+            ? 'Tangência incompatível: não foi possível medir o arco final.'
+            : 'Tangência incompatível: inicial ${angles.startDegrees.toStringAsFixed(2)}°, final ${angles.endDegrees.toStringAsFixed(2)}°';
+        sketchCircularFitMessage = message;
+        error = message;
+        runtime.write('sketch.circularFit.confirmed', false);
+        notifyListeners();
+        return;
+      }
+      measuredStart = angles.startDegrees;
+      measuredEnd = angles.endDegrees;
+    }
+    // Every region that took part in the fit is hidden through the document
+    // state as well, so the promoted arc is the only active geometry on that
+    // stretch.  Regions and reference curves outside the selection keep their
+    // visibility.
+    final usedIds = suggestion.usedEntityIds.isEmpty
+        ? suggestion.entityIds
+        : suggestion.usedEntityIds;
+    for (final id in usedIds) {
+      await runtime.setEntityVisibility(id, false);
+    }
     final continuity = switch (suggestion.circularFitQuality) {
       SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
       SketchCircularFitQuality.c1Partial =>
@@ -803,20 +859,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'ajuste por mínimos quadrados dos pontos, sem tangência bilateral',
     };
     final manualTangency = startTangencyId != null || endTangencyId != null;
+    final usedLabel = usedIds
+        .map((id) => id.length > 6 ? id.substring(id.length - 6) : id)
+        .join(', ');
     final measurements = <String>[
+      '${usedIds.length} região(ões) usada(s): $usedLabel',
       if (suggestion.maxGapMillimeters != null &&
           suggestion.maxGapMillimeters! > 0)
         'gap máx ${suggestion.maxGapMillimeters!.toStringAsFixed(3)} mm',
-      if (suggestion.tangencyStartDegrees != null)
-        'erro angular inicial ${suggestion.tangencyStartDegrees!.toStringAsFixed(2)}°',
-      if (suggestion.tangencyEndDegrees != null)
-        'erro angular final ${suggestion.tangencyEndDegrees!.toStringAsFixed(2)}°',
+      if (measuredStart != null)
+        'erro angular inicial ${measuredStart.toStringAsFixed(2)}°',
+      if (measuredEnd != null)
+        'erro angular final ${measuredEnd.toStringAsFixed(2)}°',
     ];
     final warnings = <String>[...measurements, ...suggestion.warnings];
     sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} confirmado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
     runtime.write('sketch.circularSelectionMode', false);
     runtime.write('sketch.tangency.pickTarget', null);
+    runtime.write('sketch.circularFit.confirmed', true);
     notifyListeners();
   }
 
@@ -1142,6 +1203,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// can gate the command without importing the reconstruction engine.
   int get sketchCircularMaxRegions => SketchCircularFitTolerance.maxRegions;
 
+  /// True once the last circular adjustment was confirmed and published.
+  ///
+  /// The command creates the arc in one action, so the panel uses this to
+  /// distinguish "nothing created yet / still selecting" from "arc confirmed",
+  /// which is what tells a temporary selection drawing from a source curve
+  /// that was not hidden after confirmation.
+  bool get sketchCircularFitConfirmed =>
+      runtime.read<bool>('sketch.circularFit.confirmed') ?? false;
+
   /// Explicit tangency references for the circular adjustment.
   ///
   /// They are stored in the runtime map under stable keys so a panel rebuild -
@@ -1247,6 +1317,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void beginSketchCircularSelection() {
     sketchCircularFitMessage = null;
+    runtime.write('sketch.circularFit.confirmed', false);
     runtime.write('sketch.circularSelectionMode', true);
     selectedSketchEntityIds.clear();
     selectedConstraintIds.clear();
