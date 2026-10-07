@@ -156,6 +156,7 @@ void main() {
       await controller.fitSelectedSketchCircularGeometry();
       final fittedId = controller.selectedSketchEntityIds.single;
       final fitted = controller.sketchApi!.entity(fittedId)! as SketchArc;
+      expect(controller.sketchCircularFitMessage, contains('C1 bilateral aplicado'));
       expect(sourceA.visible, isFalse);
       expect(sourceB.visible, isFalse);
       expect(controller.selectedSketchEntityIds, {fitted.id});
@@ -240,10 +241,17 @@ void main() {
       legacySourceB.metadata.remove('reconstructionHidden');
       await cad.runtime.setEntityVisibility(line.id, false);
       await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isFalse);
+      expect(
+        cad.runtime.document!.entities[controller.activeSketch!.id]!
+            .data['sceneVisible'],
+        isFalse,
+      );
       await controller.updateSketchEntityParameters(line.id, {
         'angleDegrees': 44,
       });
       await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isTrue);
       expect(fitted.visible, isTrue);
       expect(sourceA.visible, isFalse);
       expect(sourceB.visible, isFalse);
@@ -278,7 +286,9 @@ void main() {
         isFalse,
       );
       await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isFalse);
       await controller.toggleActiveSketchVisibility();
+      expect(controller.activeSketchVisible, isTrue);
       expect(fitted.visible, isTrue);
       expect(sourceA.visible, isFalse);
       // Repeating synchronization preserves the migrated marker without
@@ -333,6 +343,38 @@ void main() {
         controller.selectedSketchEntityIds.single,
       );
       expect(threeFit, isA<SketchArc>());
+
+      // A continuous chain with real but incompatible continuations still
+      // replaces the selected sources and exposes a non-blocking warning.
+      final fallbackBefore = controller.sketchApi!.builders.line.build(
+        const SketchVector(399, 0),
+        const SketchVector(400, 0),
+      );
+      final fallbackA = controller.sketchApi!.builders.line.build(
+        const SketchVector(400, 0),
+        const SketchVector(401, 1),
+      );
+      final fallbackB = controller.sketchApi!.builders.line.build(
+        const SketchVector(401, 1),
+        const SketchVector(402, 0),
+      );
+      final fallbackAfter = controller.sketchApi!.builders.line.build(
+        const SketchVector(402, 0),
+        const SketchVector(403, 0),
+      );
+      controller.beginSketchCircularSelection();
+      controller.selectSketchEntity(fallbackA.id);
+      controller.selectSketchEntity(fallbackB.id);
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(
+        controller.sketchApi!.entity(controller.selectedSketchEntityIds.single),
+        isA<SketchArc>(),
+      );
+      expect(controller.sketchCircularFitMessage, contains('fallback geométrico'));
+      expect(fallbackA.visible, isFalse);
+      expect(fallbackB.visible, isFalse);
+      expect(fallbackBefore.visible, isTrue);
+      expect(fallbackAfter.visible, isTrue);
 
       // A rejected disconnected chain leaves its diagnostic available to the
       // panel instead of looking like a failed/cleared selection.

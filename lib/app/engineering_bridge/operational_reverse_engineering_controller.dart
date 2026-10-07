@@ -404,6 +404,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return canonical ?? cached;
   }
 
+  /// Visibility read from the CAD scene, rather than from stale persisted
+  /// metadata. The command label and the next toggle must describe what is
+  /// actually rendered.
+  bool get activeSketchVisible {
+    final sketch = activeSketch;
+    if (sketch == null) return false;
+    return runtime.document?.entities[sketch.id]?.data['sceneVisible'] as bool? ??
+        (sketch.metadata['visible'] as bool? ?? true);
+  }
+
   set activeSketch(Sketch? value) => runtime.write('sketch.active', value);
   SurfacePlan? get surfacePlan => runtime.read('surface.plan');
   set surfacePlan(SurfacePlan? value) => runtime.write('surface.plan', value);
@@ -688,7 +698,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         SketchCircularFitFailure.ambiguousBranch =>
           'Há mais de uma curva vizinha em uma extremidade. Selecione uma cadeia sem ramificações.',
         SketchCircularFitFailure.incompatibleTangency =>
-          'Não existe arco tangente C1 válido nas duas extremidades. Verifique as curvas vizinhas e a orientação dos endpoints.',
+          'A geometria selecionada não permite um arco estável. Verifique curvatura e endpoints.',
       };
       sketchCircularFitMessage = message;
       error = 'Ajuste circular rejeitado: $message';
@@ -700,8 +710,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       allowLowConfidence: true,
     );
     if (promotedId == null) return;
+    final continuity = switch (suggestion.circularFitQuality) {
+      SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
+      SketchCircularFitQuality.c1Partial =>
+        'advertência: C1 parcial aplicado; demais pontos ajustados geometricamente',
+      SketchCircularFitQuality.geometricFallback || null =>
+        'advertência: fallback geométrico sem tangência bilateral',
+    };
     sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · raio ${suggestion.radius!.toStringAsFixed(3)} mm';
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} criado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm';
     runtime.write('sketch.circularSelectionMode', false);
     notifyListeners();
   }
@@ -1872,8 +1889,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> toggleActiveSketchVisibility() async {
     final sketch = activeSketch ?? (throw StateError('No active Sketch.'));
-    final visible = sketch.metadata['visible'] as bool? ?? true;
-    sketch.metadata['visible'] = !visible;
+    // CadRuntime owns the effective root state and propagates it to children.
+    // Metadata is persisted state; using it here could turn Show into a second
+    // Hide after a scene synchronization.
+    final visible = activeSketchVisible;
+    final targetVisible = !visible;
+    sketch.metadata['visible'] = targetVisible;
     final entityIds = sketch.entityIds.toSet();
     final overlayIds = <String>[
       ...constraints
@@ -1898,8 +1919,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           )
           .map((item) => item.id),
     ];
-    await runtime.setEntityVisibility(sketch.id, !visible);
-    if (!visible) {
+    await runtime.setEntityVisibility(sketch.id, targetVisible);
+    if (targetVisible) {
       _migrateLegacyReconstructionSources(sketch, rootVisible: true);
     }
     // CadRuntime propagates the root visibility to its children.  Restore the
@@ -1908,12 +1929,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     for (final id in [...sketch.entityIds, ...overlayIds]) {
       final entity = sketchApi?.entity(id);
       final shouldShow =
-          !visible && entity?.metadata['reconstructionHidden'] != true;
+          targetVisible && entity?.metadata['reconstructionHidden'] != true;
       await runtime.setEntityVisibility(id, shouldShow);
     }
     // Publish a legacy-source marker with the same document synchronization
     // used for all Sketch geometry, so reopening the project is idempotent.
-    if (!visible) await _synchronizeSketchScene();
+    if (targetVisible) await _synchronizeSketchScene();
     await sketchApi?.persist();
     notifyListeners();
   }

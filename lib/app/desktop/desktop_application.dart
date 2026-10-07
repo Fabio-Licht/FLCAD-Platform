@@ -3814,7 +3814,9 @@ class _OfficialEngineeringWorkspaceState
       ),
       OutlinedButton.icon(
         icon: const Icon(Icons.edit_outlined),
-        label: const Text('Toggle Sketch'),
+        label: Text(
+          operational.activeSketchVisible ? 'Hide Sketch' : 'Show Sketch',
+        ),
         onPressed: () =>
             _sectionAction(operational.toggleActiveSketchVisibility),
       ),

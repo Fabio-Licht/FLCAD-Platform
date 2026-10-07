@@ -67,7 +67,8 @@ void main() {
     );
 
     expect(fit, isNotNull);
-    final center = fit!.center!;
+    expect(fit!.circularFitQuality, SketchCircularFitQuality.c1Bilateral);
+    final center = fit.center!;
     SketchVector radiusAt(SketchVector point) =>
         SketchVector(point.x - center.x, point.y - center.y);
     double dot(SketchVector a, SketchVector b) => a.x * b.x + a.y * b.y;
@@ -199,7 +200,7 @@ void main() {
   });
 
   test(
-    'manual fit rejects a chain whose real neighbours have no C1 solution',
+    'manual fit keeps a continuous chain when bilateral C1 is unavailable',
     () {
       final first = SketchLine(
         const SketchVector(0, 0),
@@ -218,21 +219,17 @@ void main() {
         const SketchVector(3, 0),
       );
 
-      // Endpoints alone define a circle, but no arc can preserve C1 with both
-      // real neighbours.  A three-point fallback would hide that defect.
+      // The real neighbours cannot both be C1. The external chain endpoints
+      // still define a usable geometric arc, which must be promoted with a
+      // non-blocking warning instead of leaving the selection without result.
       final fit = const SketchReconstructionEngine().fitSelectedCircular(
         [first, second],
         context: [before, first, second, after],
       );
 
-      expect(fit, isNull);
-      expect(
-        const SketchReconstructionEngine().diagnoseSelectedCircular(
-          [first, second],
-          context: [before, first, second, after],
-        ),
-        SketchCircularFitFailure.incompatibleTangency,
-      );
+      expect(fit, isNotNull);
+      expect(fit!.circularFitQuality, SketchCircularFitQuality.geometricFallback);
+      expect({fit.startPoint!.x, fit.endPoint!.x}, {0.0, 2.0});
     },
   );
 

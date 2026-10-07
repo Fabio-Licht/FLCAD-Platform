@@ -13,6 +13,11 @@ enum SketchCircularFitFailure {
   incompatibleTangency,
 }
 
+/// How much continuity was retained by an explicit circular reconstruction.
+/// The geometry is always usable; callers use this to present a non-blocking
+/// warning when the source chain cannot satisfy bilateral C1.
+enum SketchCircularFitQuality { c1Bilateral, c1Partial, geometricFallback }
+
 class _TangentFitResult {
   const _TangentFitResult({required this.required, this.fit, this.failure});
 
@@ -34,6 +39,7 @@ class SketchReconstructionSuggestion {
     this.endAngle,
     this.startPoint,
     this.endPoint,
+    this.circularFitQuality,
   });
 
   final SketchReconstructionKind kind;
@@ -47,6 +53,8 @@ class SketchReconstructionSuggestion {
   /// Boundary points retained when a manual circular fit replaces a chain.
   final SketchVector? startPoint;
   final SketchVector? endPoint;
+
+  final SketchCircularFitQuality? circularFitQuality;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -114,40 +122,89 @@ class SketchReconstructionEngine {
             ).compareTo(_distanceToLine(first, boundary.start, boundary.end)),
           );
     if (anchor.isEmpty) return null;
-    // A least-squares circle can move its endpoints away from the source
-    // chain. When the chain has two neighboring lines, their normals define
-    // the only circle that can remain C1 at both retained boundary vertices.
-    // A three-point fallback is valid only when C1 is underdetermined (one or
-    // both real neighbours are absent).  If both neighbours exist, an
-    // inconsistent tangent solution is a diagnostic failure, not a fit.
+    // Retain the external endpoints throughout. Prefer C1 at both ends, then
+    // one end, then the existing three-point geometric fit. A continuous,
+    // usable chain must not be discarded merely because bilateral C1 is
+    // impossible; the quality is reported to the caller as a warning.
     final tangent = _tangentFit(
       boundary,
       entities.map((entity) => entity.id).toSet(),
       context,
     );
-    if (tangent.required && tangent.fit == null) return null;
-    final fit =
-        tangent.fit ??
-        _circleThrough(boundary.start, anchor.first, boundary.end);
-    if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
+    if (tangent.failure == SketchCircularFitFailure.ambiguousBranch) {
+      return null;
+    }
+    var fit = tangent.fit;
+    var quality = SketchCircularFitQuality.c1Bilateral;
+    if (fit != null) {
+      final angles = _arcDefinition(boundary, anchor.first, fit.$1);
+      if (angles == null ||
+          !_hasC1Tangency(
+            context,
+            selectedIds: entities.map((entity) => entity.id).toSet(),
+            center: fit.$1,
+            startAngle: angles.startAngle,
+            endAngle: angles.endAngle,
+            startPoint: angles.startPoint,
+            endPoint: angles.endPoint,
+          )) {
+        fit = null;
+        quality = SketchCircularFitQuality.geometricFallback;
+      }
+    }
+    if (fit == null && tangent.required) {
+      fit = _partialTangentFit(
+        boundary,
+        entities.map((entity) => entity.id).toSet(),
+        context,
+        uniquePoints,
+      );
+      if (fit != null) {
+        final angles = _arcDefinition(boundary, anchor.first, fit.$1);
+        if (angles == null ||
+            !_hasAnyC1Tangency(
+              context,
+              selectedIds: entities.map((entity) => entity.id).toSet(),
+              center: fit.$1,
+              startAngle: angles.startAngle,
+              endAngle: angles.endAngle,
+              startPoint: angles.startPoint,
+              endPoint: angles.endPoint,
+            )) {
+          fit = null;
+        } else {
+          quality = SketchCircularFitQuality.c1Partial;
+        }
+      }
+    }
+    fit ??= _circleThrough(boundary.start, anchor.first, boundary.end);
+    if (fit == null) return null;
+    if (quality == SketchCircularFitQuality.c1Bilateral && tangent.fit == null) {
+      quality = SketchCircularFitQuality.geometricFallback;
+    }
+    final circularFit = fit;
+    if (!_isSaneCircularFit(uniquePoints, circularFit.$1, circularFit.$2)) {
       return null;
     }
     final error =
         uniquePoints
-            .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
+            .map(
+              (point) =>
+                  (_distance(point, circularFit.$1) - circularFit.$2).abs(),
+            )
             .fold<double>(0, (sum, value) => sum + value) /
         uniquePoints.length;
     final startAngle = math.atan2(
-      boundary.start.y - fit.$1.y,
-      boundary.start.x - fit.$1.x,
+      boundary.start.y - circularFit.$1.y,
+      boundary.start.x - circularFit.$1.x,
     );
     final endAngle = math.atan2(
-      boundary.end.y - fit.$1.y,
-      boundary.end.x - fit.$1.x,
+      boundary.end.y - circularFit.$1.y,
+      boundary.end.x - circularFit.$1.x,
     );
     final anchorAngle = math.atan2(
-      anchor.first.y - fit.$1.y,
-      anchor.first.x - fit.$1.x,
+      anchor.first.y - circularFit.$1.y,
+      anchor.first.x - circularFit.$1.x,
     );
     final ccwSweep = _positiveSweep(startAngle, endAngle);
     final startContainsAnchor =
@@ -159,33 +216,19 @@ class SketchReconstructionEngine {
     if (sweep < .2) return null;
     final arcStartPoint = startContainsAnchor ? boundary.start : boundary.end;
     final arcEndPoint = startContainsAnchor ? boundary.end : boundary.start;
-    // Intersecting normals proves only G1 up to sign.  The selected chain has
-    // an actual traversal direction, so verify the arc leaves/arrives in the
-    // same direction as its real neighbouring curves.  This prevents a
-    // geometrically coincident arc from reversing at either endpoint.
-    if (tangent.required &&
-        !_hasC1Tangency(
-          context,
-          selectedIds: entities.map((entity) => entity.id).toSet(),
-          center: fit.$1,
-          startAngle: arcStart,
-          endAngle: arcStart + sweep,
-          startPoint: arcStartPoint,
-          endPoint: arcEndPoint,
-        )) {
-      return null;
-    }
     return SketchReconstructionSuggestion(
       kind: SketchReconstructionKind.arc,
       entityIds: entities.map((entity) => entity.id).toList(growable: false),
-      confidence: (1 - error / math.max(math.max(.5, fit.$2 * .05), 1e-9))
+      confidence: (1 -
+              error / math.max(math.max(.5, circularFit.$2 * .05), 1e-9))
           .clamp(0.0, 1.0),
-      center: fit.$1,
-      radius: fit.$2,
+      center: circularFit.$1,
+      radius: circularFit.$2,
       startAngle: arcStart,
       endAngle: arcStart + sweep,
       startPoint: arcStartPoint,
       endPoint: arcEndPoint,
+      circularFitQuality: quality,
     );
   }
 
@@ -211,27 +254,12 @@ class SketchReconstructionEngine {
     if (anchor == null) return SketchCircularFitFailure.invalidChain;
     final selectedIds = entities.map((entity) => entity.id).toSet();
     final tangent = _tangentFit(boundary, selectedIds, context);
-    if (tangent.required && tangent.fit == null) {
-      return tangent.failure ?? SketchCircularFitFailure.incompatibleTangency;
+    if (tangent.failure == SketchCircularFitFailure.ambiguousBranch) {
+      return SketchCircularFitFailure.ambiguousBranch;
     }
-    final fit =
-        tangent.fit ?? _circleThrough(boundary.start, anchor, boundary.end);
+    final fit = _circleThrough(boundary.start, anchor, boundary.end);
     if (fit == null || !_isSaneCircularFit(uniquePoints, fit.$1, fit.$2)) {
       return SketchCircularFitFailure.unstableRadius;
-    }
-    final angles = _arcDefinition(boundary, anchor, fit.$1);
-    if (angles == null) return SketchCircularFitFailure.unstableRadius;
-    if (tangent.required &&
-        !_hasC1Tangency(
-          context,
-          selectedIds: selectedIds,
-          center: fit.$1,
-          startAngle: angles.startAngle,
-          endAngle: angles.endAngle,
-          startPoint: angles.startPoint,
-          endPoint: angles.endPoint,
-        )) {
-      return SketchCircularFitFailure.incompatibleTangency;
     }
     return SketchCircularFitFailure.invalidChain;
   }
@@ -448,6 +476,44 @@ class SketchReconstructionEngine {
     return _TangentFitResult(required: true, fit: (center, startRadius));
   }
 
+  /// Returns the least radial-error circle that preserves both chain boundary
+  /// points and is tangent to exactly one real continuation. This is the
+  /// middle step between bilateral C1 and the unconstrained three-point fit.
+  (SketchVector, double)? _partialTangentFit(
+    ({SketchVector start, SketchVector end}) boundary,
+    Set<String> selectedIds,
+    Iterable<SketchEntity> context,
+    List<SketchVector> samples,
+  ) {
+    final candidates = <(SketchVector, double)>[];
+    void addFor(SketchVector point, SketchVector other, SketchVector direction) {
+      final normal = SketchVector(-direction.y, direction.x);
+      final chord = other - point;
+      final denominator = normal.dot(chord);
+      if (denominator.abs() <= 1e-10) return;
+      final center = point + normal.scale(chord.dot(chord) / (2 * denominator));
+      final radius = _distance(center, point);
+      if (!radius.isFinite || radius <= 1e-9) return;
+      final tolerance = math.max(1e-7, radius * 1e-6);
+      if ((_distance(center, other) - radius).abs() > tolerance) return;
+      candidates.add((center, radius));
+    }
+
+    final start = _neighborTangents(boundary.start, selectedIds, context);
+    final end = _neighborTangents(boundary.end, selectedIds, context);
+    if (start.length == 1) addFor(boundary.start, boundary.end, start.single.scale(-1));
+    if (end.length == 1) addFor(boundary.end, boundary.start, end.single);
+    if (candidates.isEmpty) return null;
+    candidates.sort((first, second) {
+      double error((SketchVector, double) fit) => samples
+          .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
+          .fold<double>(0, (sum, value) => sum + value);
+      return error(first).compareTo(error(second));
+    });
+    final best = candidates.first;
+    return _isSaneCircularFit(samples, best.$1, best.$2) ? best : null;
+  }
+
   bool _hasC1Tangency(
     Iterable<SketchEntity> context, {
     required Set<String> selectedIds,
@@ -475,6 +541,33 @@ class SketchReconstructionEngine {
     if (!center.x.isFinite || !center.y.isFinite) return false;
     return aligned(arcTangent(startAngle), startCandidates.single.scale(-1)) &&
         aligned(arcTangent(endAngle), endCandidates.single);
+  }
+
+  bool _hasAnyC1Tangency(
+    Iterable<SketchEntity> context, {
+    required Set<String> selectedIds,
+    required SketchVector center,
+    required double startAngle,
+    required double endAngle,
+    required SketchVector startPoint,
+    required SketchVector endPoint,
+  }) {
+    final startCandidates = _neighborTangents(startPoint, selectedIds, context);
+    final endCandidates = _neighborTangents(endPoint, selectedIds, context);
+    if (!center.x.isFinite || !center.y.isFinite) return false;
+    SketchVector arcTangent(double angle) =>
+        SketchVector(-math.sin(angle), math.cos(angle));
+    bool aligned(SketchVector first, SketchVector second) {
+      final firstLength = math.sqrt(first.dot(first));
+      final secondLength = math.sqrt(second.dot(second));
+      if (firstLength <= 1e-10 || secondLength <= 1e-10) return false;
+      return first.dot(second) / (firstLength * secondLength) >= 1 - 1e-6;
+    }
+
+    return (startCandidates.length == 1 &&
+            aligned(arcTangent(startAngle), startCandidates.single.scale(-1))) ||
+        (endCandidates.length == 1 &&
+            aligned(arcTangent(endAngle), endCandidates.single));
   }
 
   ({SketchVector start, SketchVector end})? _continuousChainBoundaries(
