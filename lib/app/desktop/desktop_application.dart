@@ -2474,6 +2474,7 @@ class _OfficialEngineeringWorkspaceState
       commands: widget.commands,
       runtime: widget.cad.runtime,
     );
+    operational.addListener(_onOperationalChanged);
     widget.cad.addListener(_synchronizeScene);
     widget.cad.runtime.addListener(_synchronizeScene);
     alignmentCoordinateSystemSelection.addListener(
@@ -2483,6 +2484,10 @@ class _OfficialEngineeringWorkspaceState
   }
 
   void _alignmentCaptureStateChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _onOperationalChanged() {
     if (mounted) setState(() {});
   }
 
@@ -2502,6 +2507,7 @@ class _OfficialEngineeringWorkspaceState
     sectionOffset.dispose();
     widget.cad.removeListener(_synchronizeScene);
     widget.cad.runtime.removeListener(_synchronizeScene);
+    operational.removeListener(_onOperationalChanged);
     alignmentCoordinateSystemSelection.removeListener(
       _alignmentCaptureStateChanged,
     );
@@ -10173,6 +10179,19 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   style: const TextStyle(fontSize: 10),
                 ),
               ),
+            if (controller.sketchReconstructionMessage case final message?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                child: Text(
+                  message,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: controller.error == message
+                        ? Theme.of(context).colorScheme.error
+                        : Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+              ),
             if (controller.sketchReconstructionSuggestions.isNotEmpty) ...[
               const SizedBox(height: 6),
               Align(
@@ -10197,10 +10216,19 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                         style: const TextStyle(fontSize: 9),
                       ),
                       trailing: IconButton(
+                        key: ValueKey(
+                          'sketch-reconstruction-accept-${suggestion.kind.name}-${suggestion.entityIds.join('-')}',
+                        ),
                         tooltip: 'Aceitar sugestão',
                         icon: const Icon(Icons.check, size: 16),
-                        onPressed: () => controller
-                            .acceptSketchReconstructionSuggestion(suggestion),
+                        onPressed: controller.busy
+                            ? null
+                            : () async {
+                                await controller
+                                    .acceptSketchReconstructionSuggestion(
+                                      suggestion,
+                                    );
+                              },
                       ),
                     ),
                   ),

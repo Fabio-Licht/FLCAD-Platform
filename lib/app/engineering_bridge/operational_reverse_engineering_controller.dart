@@ -562,6 +562,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   final SketchReconstructionEngine _sketchReconstruction =
       const SketchReconstructionEngine();
   String? sketchCircularFitMessage;
+  /// Operator-facing result for the last Assistant reconstruction action.
+  ///
+  /// This is deliberately runtime-only: it explains whether a suggestion was
+  /// promoted, annotated in place, or rejected, without becoming Sketch data.
+  String? sketchReconstructionMessage;
   List<SketchReconstructionSuggestion> _sketchReconstructionSuggestions =
       const [];
   final List<SketchReconstructionSuggestion>
@@ -571,6 +576,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
   void analyzeSketchReconstruction() {
+    sketchReconstructionMessage = null;
     _sketchReconstructionSuggestions = _sketchReconstruction.analyze(
       sketchEntities,
       angularTolerance: sketchAssistantPrecision.tolerance / 8,
@@ -604,12 +610,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     try {
       await _run('reverse.sketch.acceptReconstruction', parameters);
       final createdId = parameters['createdId'] as String?;
-      if (createdId != null) return createdId;
-      if (error != null) return null;
-      return null;
+      final constraintId = parameters['constraintId'] as String?;
+      // A successful line promotion intentionally leaves the dimensional fit
+      // diagnostic in `error` for the existing Assistant panel.  A created
+      // entity or constraint is therefore the authoritative success signal.
+      if (createdId == null && constraintId == null && error != null) {
+        sketchReconstructionMessage = error;
+        notifyListeners();
+        return null;
+      }
+      sketchReconstructionMessage = createdId != null
+          ? 'Sugestão aceita: ${suggestion.label} criada e selecionada.'
+          : constraintId != null
+          ? 'Sugestão aceita: restrição ${suggestion.label.toLowerCase()} criada.'
+          : 'Sugestão confirmada: ${suggestion.label} já corresponde à geometria existente; nenhuma entidade foi duplicada.';
+      notifyListeners();
+      return createdId;
     } finally {
       _reconstructionSuggestionBeingAccepted = null;
     }
+  }
+
+  void _rejectSketchReconstructionSuggestion(String message) {
+    error = message;
+    sketchReconstructionMessage = message;
+    notifyListeners();
   }
 
   bool _canAcceptSketchReconstructionSuggestion(
@@ -617,28 +642,37 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     required bool allowLowConfidence,
   }) {
     final api = sketchApi;
-    if (api == null) return false;
+    if (api == null) {
+      _rejectSketchReconstructionSuggestion(
+        'Sugestão rejeitada: o Sketch não está disponível para confirmação.',
+      );
+      return false;
+    }
     final entities = suggestion.entityIds
         .map(api.entity)
         .whereType<SketchEntity>()
         .toList(growable: false);
-    if (entities.length != suggestion.entityIds.length) return false;
+    if (entities.length != suggestion.entityIds.length) {
+      _rejectSketchReconstructionSuggestion(
+        'Sugestão rejeitada: uma ou mais entidades de origem não existem mais.',
+      );
+      return false;
+    }
     final isCircularPromotion =
         suggestion.kind == SketchReconstructionKind.circle ||
         suggestion.kind == SketchReconstructionKind.arc;
     if (isCircularPromotion &&
         suggestion.confidence < .75 &&
         !allowLowConfidence) {
-      error =
-          'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).';
-      notifyListeners();
+      _rejectSketchReconstructionSuggestion(
+        'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).',
+      );
       return false;
     }
     if (suggestion.kind == SketchReconstructionKind.line) {
       final plan = _planLineReconstruction(entities);
       if (plan.rejected) {
-        error = plan.message;
-        notifyListeners();
+        _rejectSketchReconstructionSuggestion(plan.message!);
         return false;
       }
       return true;
@@ -766,17 +800,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (isCircularPromotion &&
           suggestion.confidence < .75 &&
           !allowLowConfidence) {
-        error =
-            'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).';
-        notifyListeners();
+        _rejectSketchReconstructionSuggestion(
+          'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).',
+        );
         return null;
       }
       final linePlan = suggestion.kind == SketchReconstructionKind.line
           ? _planLineReconstruction(entities)
           : null;
       if (linePlan?.rejected == true) {
-        error = linePlan!.message;
-        notifyListeners();
+        _rejectSketchReconstructionSuggestion(linePlan!.message!);
         return null;
       }
       final canPromoteCurve =
@@ -1570,6 +1603,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void clearSketchReconstructionSuggestions() {
     _sketchReconstructionSuggestions = const [];
+    sketchReconstructionMessage = null;
     notifyListeners();
   }
 
@@ -12549,14 +12583,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           suggestion,
           allowLowConfidence: allowLowConfidence,
         )) {
-          throw StateError('Reconstruction suggestion is no longer valid.');
+          throw StateError(
+            error ?? 'Reconstruction suggestion is no longer valid.',
+          );
         }
         final applied = await _applySketchReconstructionSuggestion(
           suggestion,
           allowLowConfidence: allowLowConfidence,
         );
         if (applied == null) {
-          throw StateError('Reconstruction suggestion is no longer valid.');
+          throw StateError(
+            error ?? 'Reconstruction suggestion is no longer valid.',
+          );
         }
         parameters['createdId'] = applied.createdId;
         parameters['constraintId'] = applied.constraintId;

@@ -1962,6 +1962,10 @@ void main() {
             .commandId,
         'reverse.sketch.acceptReconstruction',
       );
+      expect(
+        controller.sketchReconstructionMessage,
+        contains('criada e selecionada'),
+      );
       Future<void> expectAssistantApplied(
         String createdId,
         List<SketchLine> sources, {
@@ -2248,6 +2252,7 @@ void main() {
       );
       expect(await controller.acceptSketchReconstructionSuggestion(weak), isNull);
       expect(controller.error, contains('confiança'));
+      expect(controller.sketchReconstructionMessage, controller.error);
       expect(controller.commands.manager.canUndo, canUndo);
       await expectAssistantApplied(promotedId, firstSources, selected: false);
 
@@ -2456,6 +2461,19 @@ void main() {
       expect(isolated.metadata['reconstructionKind'], 'line');
       expect(isolated.metadata['reconstructionHidden'], isNot(true));
       expect(cad.runtime.scene.find(isolated.id)!.visible, isTrue);
+      expect(
+        controller.sketchReconstructionMessage,
+        contains('nenhuma entidade foi duplicada'),
+      );
+      expect(
+        controller.sketchReconstructionSuggestions.any(
+          (item) =>
+              item.kind == isolatedSuggestion.kind &&
+              item.entityIds.length == isolatedSuggestion.entityIds.length &&
+              item.entityIds.every(isolatedSuggestion.entityIds.contains),
+        ),
+        isFalse,
+      );
 
       controller.analyzeSketchReconstruction();
       final chainSuggestion = controller.sketchReconstructionSuggestions
@@ -2480,6 +2498,10 @@ void main() {
       expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
       expectLineToleranceMessage(controller.error, chainFit.maxError);
       expect(controller.error, contains('RMS'));
+      expect(
+        controller.sketchReconstructionMessage,
+        contains('criada e selecionada'),
+      );
       expect(
         controller.commands.manager.history
             .where((record) => record.operation == 'execute')
@@ -2533,6 +2555,16 @@ void main() {
         elbowDiagnosis.result!.maxError,
       );
       expect(controller.error, contains('Linha rejeitada'));
+      expect(controller.sketchReconstructionMessage, controller.error);
+      expect(
+        controller.sketchReconstructionSuggestions.any(
+          (item) =>
+              item.kind == elbowSuggestion.kind &&
+              item.entityIds.length == elbowSuggestion.entityIds.length &&
+              item.entityIds.every(elbowSuggestion.entityIds.contains),
+        ),
+        isTrue,
+      );
       expect(controller.sketchApi!.entity(elbowHorizontal.id)!.visible, isTrue);
       expect(controller.sketchApi!.entity(elbowVertical.id)!.visible, isTrue);
       expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
