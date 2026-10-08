@@ -1292,21 +1292,79 @@ void main() {
       contains('Selecione novamente as regi'),
     );
 
+    final fittedStart = SketchVector.fromJson(
+      (controller.sketchApi!.entity(fittedId)! as SketchLine).parameters['start'],
+    );
+    final fittedEnd = SketchVector.fromJson(
+      (controller.sketchApi!.entity(fittedId)! as SketchLine).parameters['end'],
+    );
+
+    Future<void> expectFitApplied() async {
+      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+      expect(
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(fittedId)!.parameters['start'],
+        ).x,
+        closeTo(fittedStart.x, 1e-9),
+      );
+      expect(
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(fittedId)!.parameters['end'],
+        ).x,
+        closeTo(fittedEnd.x, 1e-9),
+      );
+      expect(
+        sources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(
+        sources.every(
+          (source) =>
+              cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+              false,
+        ),
+        isTrue,
+      );
+      expect(untouched.visible, isTrue);
+      expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
+      expect(cad.runtime.document!.entities.containsKey(referenceId), isFalse);
+    }
+
+    Future<void> expectFitUndone() async {
+      expect(controller.sketchApi!.entity(fittedId), isNull);
+      expect(cad.runtime.document!.entities.containsKey(fittedId), isFalse);
+      expect(cad.runtime.scene.find(fittedId), isNull);
+      expect(cad.runtime.scene.find(referenceId), isNull);
+      expect(
+        sources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      expect(
+        sources.every(
+          (source) => cad.runtime.scene.find(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      expect(untouched.visible, isTrue);
+    }
+
+    // Global history (Ctrl+Z / Ctrl+Y) is in-session only. The command
+    // manager never restores _undo/_redo from persist()+close+reopen.
+    await controller.undo();
+    await expectFitUndone();
+    await controller.redo();
+    await expectFitApplied();
+    await controller.undo();
+    await expectFitUndone();
+    await controller.redo();
+    await expectFitApplied();
+
     final engine = controller.sketchApi!.engine;
-    expect(engine.undo(), isTrue);
-    expect(
-      sources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == true,
-      ),
-      isTrue,
-    );
-    expect(engine.redo(), isTrue);
-    expect(
-      sources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-      ),
-      isTrue,
-    );
     await controller.toggleActiveSketchVisibility();
     await controller.toggleActiveSketchVisibility();
     expect(
@@ -1423,6 +1481,8 @@ void main() {
     // Save/Open must rebuild the visual-only comparison from the promoted
     // entity metadata, rather than from hidden source geometry or a document
     // entity. This is the same project/controller lifecycle used by users.
+    // Command-manager Undo/Redo is in-session only (history.jsonl is an audit
+    // log, not a restored stack), so reopening does not re-enable Ctrl+Z.
     await controller.persist();
     final reopenedKernels = KernelManager()
       ..register(_HealthySurfaceKernel(), makeDefault: true);

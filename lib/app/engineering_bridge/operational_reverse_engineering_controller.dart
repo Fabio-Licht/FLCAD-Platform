@@ -969,17 +969,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     final fit = diagnosis.result;
     if (fit == null) {
-      final message = switch (diagnosis.failure) {
-        SketchRegionFitFailure.invalidSamples =>
-          'Não foi possível ajustar: as regiões contêm pontos inválidos.',
-        SketchRegionFitFailure.degenerateGeometry =>
-          'Não foi possível ajustar: a geometria selecionada é degenerada.',
-        SketchRegionFitFailure.insufficientPoints || null =>
-          'Não foi possível ajustar: selecione regiões com pelo menos dois pontos externos distintos.',
-      };
+      final message = _regionFitFailureMessage(diagnosis.failure);
       sketchRegionFitMessage = message;
       error = message;
       notifyListeners();
+      return;
+    }
+    if (sketchRegionFitOutput == SketchRegionFitOutput.line) {
+      await _run('reverse.sketch.regionFit', <String, Object?>{});
       return;
     }
     String? createdId;
@@ -1032,6 +1029,101 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final kind = sketchRegionFitOutput == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
     sketchRegionFitMessage = '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${sketchRegionFitOutput == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
     notifyListeners();
+  }
+
+  String _regionFitFailureMessage(SketchRegionFitFailure? failure) =>
+      switch (failure) {
+        SketchRegionFitFailure.invalidSamples =>
+          'Não foi possível ajustar: as regiões contêm pontos inválidos.',
+        SketchRegionFitFailure.degenerateGeometry =>
+          'Não foi possível ajustar: a geometria selecionada é degenerada.',
+        SketchRegionFitFailure.insufficientPoints || null =>
+          'Não foi possível ajustar: selecione regiões com pelo menos dois pontos externos distintos.',
+      };
+
+  List<SketchEntity> _selectedRegionFitEntities() {
+    final api = sketchApi;
+    final sketch = activeSketch;
+    if (api == null || sketch == null) return const <SketchEntity>[];
+    return sketch.entityIds
+        .map(api.entity)
+        .whereType<SketchEntity>()
+        .where((entity) => selectedSketchEntityIds.contains(entity.id))
+        .where(
+          (entity) =>
+              entity is SketchLine ||
+              entity is SketchArc ||
+              entity is SketchSpline,
+        )
+        .toList(growable: false);
+  }
+
+  Future<String> _promoteLineRegionFit(SketchRegionFitResult fit) async {
+    final api = sketchApi ?? (throw StateError('Sketch is not available.'));
+    String? createdId;
+    api.engine.transaction('sketch.reconstruction.regionFit', () {
+      final created = api.builders.line.build(fit.start, fit.end);
+      createdId = created.id;
+      api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
+        value.metadata['reconstructionKind'] = SketchRegionFitOutput.line.name;
+        value.metadata['regionFitReferencePoints'] = fit.referencePoints
+            .map((point) => point.toJson())
+            .toList(growable: false);
+        value.metadata['regionFitReferenceRegions'] = fit.referenceRegions
+            .map(
+              (region) => region
+                  .map((point) => point.toJson())
+                  .toList(growable: false),
+            )
+            .toList(growable: false);
+        value.metadata['regionFitSourceIds'] = fit.usedEntityIds;
+        value.metadata['regionFitVisualComparison'] = true;
+      });
+      for (final id in fit.usedEntityIds) {
+        api.engine.modify(id, SketchHistoryAction.modify, (value) {
+          value.metadata['reconstructionKind'] =
+              SketchRegionFitOutput.line.name;
+          value.metadata['reconstructionHidden'] = true;
+          value.visible = false;
+        });
+      }
+    });
+    await _presentRegionFit(
+      createdId: createdId!,
+      sourceIds: fit.usedEntityIds,
+      applied: true,
+    );
+    sketchRegionFitMessage =
+        'Linha criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm';
+    return createdId!;
+  }
+
+  Future<void> _presentRegionFit({
+    required String createdId,
+    required List<String> sourceIds,
+    required bool applied,
+  }) async {
+    await _synchronizeSketchScene();
+    for (final id in sourceIds) {
+      if (runtime.document?.entities[id] == null) continue;
+      await runtime.setEntityVisibility(id, !applied);
+    }
+    selectedSketchEntityIds
+      ..clear()
+      ..addAll(applied ? <String>[createdId] : sourceIds);
+    runtime.select(selectedSketchEntityIds);
+    if (runtime.document case final document?) {
+      _publishRegionFitComparisonOverlays(
+        sketchApi?.sketches ?? const <Sketch>[],
+        document,
+      );
+    }
+    if (applied) {
+      runtime.write('sketch.circularSelectionMode', false);
+      runtime.write('sketch.tangency.startId', null);
+      runtime.write('sketch.tangency.endId', null);
+      runtime.write('sketch.tangency.pickTarget', null);
+    }
   }
 
   SketchRegionFitComparison? get sketchRegionFitComparison =>
@@ -12108,6 +12200,54 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         }
         await _synchronizeSketchScene();
         return 'gap closed';
+      },
+    );
+
+    register(
+      id: 'reverse.sketch.regionFit',
+      execute: (parameters) async {
+        if (sketchRegionFitOutput != SketchRegionFitOutput.line) {
+          throw StateError(
+            'reverse.sketch.regionFit currently applies only to lines.',
+          );
+        }
+        final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
+          _selectedRegionFitEntities(),
+        );
+        final fit = diagnosis.result;
+        if (fit == null) {
+          throw StateError(_regionFitFailureMessage(diagnosis.failure));
+        }
+        final createdId = await _promoteLineRegionFit(fit);
+        parameters['sourceIds'] = List<String>.from(fit.usedEntityIds);
+        parameters['createdId'] = createdId;
+        return createdId;
+      },
+      undo: (parameters) async {
+        final sourceIds = (parameters['sourceIds']! as List).cast<String>();
+        final createdId = parameters['createdId']! as String;
+        if (sketchApi?.engine.undo() != true) {
+          throw StateError('No region fit is available to undo.');
+        }
+        await _presentRegionFit(
+          createdId: createdId,
+          sourceIds: sourceIds,
+          applied: false,
+        );
+        return 'region fit undone';
+      },
+      redo: (parameters) async {
+        final sourceIds = (parameters['sourceIds']! as List).cast<String>();
+        final createdId = parameters['createdId']! as String;
+        if (sketchApi?.engine.redo() != true) {
+          throw StateError('No region fit is available to redo.');
+        }
+        await _presentRegionFit(
+          createdId: createdId,
+          sourceIds: sourceIds,
+          applied: true,
+        );
+        return createdId;
       },
     );
 
