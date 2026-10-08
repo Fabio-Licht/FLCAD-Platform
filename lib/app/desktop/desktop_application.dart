@@ -10124,6 +10124,38 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               label: const Text('Ajustar círculo/arco pelas linhas'),
             ),
             const SizedBox(height: 5),
+            SegmentedButton<SketchRegionFitOutput>(
+              segments: const [
+                ButtonSegment(
+                  value: SketchRegionFitOutput.line,
+                  label: Text('Linha'),
+                ),
+                ButtonSegment(
+                  value: SketchRegionFitOutput.spline,
+                  label: Text('Spline'),
+                ),
+              ],
+              selected: {controller.sketchRegionFitOutput},
+              onSelectionChanged: (values) =>
+                  controller.setSketchRegionFitOutput(values.single),
+            ),
+            OutlinedButton.icon(
+              onPressed: controller.sketchCircularSelectionMode &&
+                      controller.selectedSketchEntityIds.isNotEmpty
+                  ? controller.fitSelectedSketchLineOrSpline
+                  : null,
+              icon: const Icon(Icons.linear_scale, size: 16),
+              label: const Text('Ajustar linha/spline'),
+            ),
+            if (controller.sketchRegionFitMessage != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),
+                child: Text(
+                  controller.sketchRegionFitMessage!,
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+            const SizedBox(height: 5),
             _SketchTangencyReferences(controller: controller),
             if (controller.sketchCircularFitMessage != null)
               Padding(

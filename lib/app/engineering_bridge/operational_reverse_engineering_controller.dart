@@ -165,6 +165,8 @@ class SketchDragHud {
   final String snap;
 }
 
+enum SketchRegionFitOutput { line, spline }
+
 class OperationalReverseEngineeringController extends ChangeNotifier {
   OperationalReverseEngineeringController({
     required ProfessionalRecognitionApi recognition,
@@ -912,6 +914,87 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.tangency.endId', null);
     runtime.write('sketch.tangency.pickTarget', null);
     runtime.write('sketch.circularFit.confirmed', true);
+    notifyListeners();
+  }
+
+  String? sketchRegionFitMessage;
+  SketchRegionFitOutput get sketchRegionFitOutput =>
+      runtime.read<SketchRegionFitOutput>('sketch.regionFit.output') ??
+      SketchRegionFitOutput.line;
+  void setSketchRegionFitOutput(SketchRegionFitOutput value) {
+    runtime.write('sketch.regionFit.output', value);
+    notifyListeners();
+  }
+
+  /// Replaces the current multi-selection with one best-fit line or a stable
+  /// sampled spline.  It intentionally shares the explicit selection session
+  /// with the circular command, never its tangency semantics.
+  Future<void> fitSelectedSketchLineOrSpline() async {
+    sketchRegionFitMessage = null;
+    if (!sketchCircularSelectionMode) {
+      const message = 'Selecione novamente as regiões para criar outro ajuste.';
+      sketchRegionFitMessage = message;
+      error = message;
+      notifyListeners();
+      return;
+    }
+    final api = sketchApi;
+    if (api == null || activeSketch == null) return;
+    final selected = activeSketch!.entityIds
+        .map(api.entity)
+        .whereType<SketchEntity>()
+        .where((entity) => selectedSketchEntityIds.contains(entity.id))
+        .where((entity) => entity is SketchLine || entity is SketchArc || entity is SketchSpline)
+        .toList(growable: false);
+    final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
+      selected,
+    );
+    final fit = diagnosis.result;
+    if (fit == null) {
+      final message = switch (diagnosis.failure) {
+        SketchRegionFitFailure.invalidSamples =>
+          'Não foi possível ajustar: as regiões contêm pontos inválidos.',
+        SketchRegionFitFailure.degenerateGeometry =>
+          'Não foi possível ajustar: a geometria selecionada é degenerada.',
+        SketchRegionFitFailure.insufficientPoints || null =>
+          'Não foi possível ajustar: selecione regiões com pelo menos dois pontos externos distintos.',
+      };
+      sketchRegionFitMessage = message;
+      error = message;
+      notifyListeners();
+      return;
+    }
+    String? createdId;
+    api.engine.transaction('sketch.reconstruction.regionFit', () {
+      final created = sketchRegionFitOutput == SketchRegionFitOutput.line
+          ? api.builders.line.build(fit.start, fit.end)
+          : api.builders.spline.build(fit.points);
+      createdId = created.id;
+      api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
+        value.metadata['reconstructionKind'] = sketchRegionFitOutput.name;
+      });
+      for (final id in fit.usedEntityIds) {
+        api.engine.modify(id, SketchHistoryAction.modify, (value) {
+          value.metadata['reconstructionKind'] = sketchRegionFitOutput.name;
+          value.metadata['reconstructionHidden'] = true;
+          value.visible = false;
+        });
+      }
+    });
+    await _synchronizeSketchScene();
+    for (final id in fit.usedEntityIds) {
+      await runtime.setEntityVisibility(id, false);
+    }
+    selectedSketchEntityIds
+      ..clear()
+      ..add(createdId!);
+    runtime.select(selectedSketchEntityIds);
+    runtime.write('sketch.circularSelectionMode', false);
+    runtime.write('sketch.tangency.startId', null);
+    runtime.write('sketch.tangency.endId', null);
+    runtime.write('sketch.tangency.pickTarget', null);
+    final kind = sketchRegionFitOutput == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
+    sketchRegionFitMessage = '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${sketchRegionFitOutput == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
     notifyListeners();
   }
 

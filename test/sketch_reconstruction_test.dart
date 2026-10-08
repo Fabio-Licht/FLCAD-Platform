@@ -9,6 +9,113 @@ import 'package:flcad_mobile/core/sketch_engine/repository/sketch_repository.dar
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('line and spline region fit', () {
+    test('uses 2, 5 and 10 unordered fragments with large gaps', () {
+      final engine = const SketchReconstructionEngine();
+      for (final count in [2, 5, 10]) {
+        for (final gap in [1.0, 5.0, 20.0]) {
+          final fragments = <SketchLine>[
+            for (var i = 0; i < count; i++)
+              SketchLine(
+                SketchVector(i * (5 + gap), i.isEven ? .05 : -.05),
+                SketchVector(i * (5 + gap) + 5, i.isEven ? -.05 : .05),
+              ),
+          ];
+          final fit = engine.fitSelectedLineOrSpline(fragments.reversed);
+          expect(fit, isNotNull);
+          expect(fit!.usedEntityIds, hasLength(count));
+          expect(fit.maxGapMillimeters, closeTo(gap, .01));
+          expect(fit.rmsError, lessThan(.1));
+          // The chain may be oriented in either direction, but its two real
+          // outer endpoints must be retained.
+          expect(
+            {fit.start.x, fit.end.x},
+            {0.0, (count - 1) * (5 + gap) + 5},
+          );
+        }
+      }
+    });
+
+    test('preserves spline form and rejects insufficient or degenerate input', () {
+      final spline = SketchSpline(const [
+        SketchVector(0, 0),
+        SketchVector(1, 1),
+        SketchVector(2, 0),
+      ]);
+      final arc = SketchArc(
+        const SketchVector(12, 0),
+        2,
+        math.pi,
+        1.5 * math.pi,
+      );
+      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+        spline,
+        arc,
+      ]);
+      expect(fit, isNotNull);
+      // A spline contributes its stable interpolated samples, not just its
+      // original control polygon; neither endpoint may be discarded.
+      expect(fit!.points.length, greaterThanOrEqualTo(3));
+      expect(
+        fit.points.where((point) => point.x.abs() < 1e-9 && point.y.abs() < 1e-9),
+        isNotEmpty,
+      );
+      expect(
+        fit.points.where((point) => (point.x - 2).abs() < 1e-9 && point.y.abs() < 1e-9),
+        isNotEmpty,
+      );
+      expect(fit.usedEntityIds, containsAll([spline.id, arc.id]));
+      expect(
+        const SketchReconstructionEngine().fitSelectedLineOrSpline([
+          SketchLine(const SketchVector(1, 1), const SketchVector(1, 1)),
+        ]),
+        isNull,
+      );
+    });
+
+    test('rejects non-finite samples before PCA or spline creation', () {
+      final diagnosis = const SketchReconstructionEngine()
+          .diagnoseSelectedLineOrSpline([
+            SketchLine(
+              SketchVector(double.nan, 0),
+              const SketchVector(1, 0),
+            ),
+          ]);
+      expect(diagnosis.result, isNull);
+      expect(diagnosis.failure, SketchRegionFitFailure.invalidSamples);
+    });
+
+    test('limits dense spline knots while retaining endpoints and turns', () {
+      final source = SketchSpline([
+        for (var index = 0; index < 24; index++)
+          SketchVector(index.toDouble(), index.isEven ? 0 : .5),
+      ]);
+      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+        source,
+      ]);
+      expect(fit, isNotNull);
+      expect(fit!.points.length, lessThanOrEqualTo(SketchRegionFitResult.maxSplineKnots));
+      expect(fit.points.first.x, closeTo(0, 1e-9));
+      expect(fit.points.last.x, closeTo(23, 1e-9));
+      expect(fit.points.every((point) => point.x.isFinite && point.y.isFinite), isTrue);
+    });
+
+    test('a large gap stays stable without spline overshoot', () {
+      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+        SketchLine(const SketchVector(100, 0), const SketchVector(102, 0)),
+        SketchLine(const SketchVector(0, 0), const SketchVector(2, 0)),
+      ]);
+      expect(fit, isNotNull);
+      final spline = SketchSpline(fit!.points);
+      final samples = (spline.parameters['sampledPoints'] as List)
+          .whereType<List>()
+          .map(SketchVector.fromJson);
+      expect(samples.every((point) => point.y.abs() < 1e-9), isTrue);
+      expect(samples.every((point) => point.x >= -1e-9 && point.x <= 102 + 1e-9), isTrue);
+      expect({fit.start.x, fit.end.x}, {0.0, 102.0});
+    });
+  });
+
   test('manual fit creates a bounded arc from two adjacent section lines', () {
     SketchVector point(double angle) =>
         SketchVector(5 * math.cos(angle), 5 * math.sin(angle));

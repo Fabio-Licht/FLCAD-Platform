@@ -1201,6 +1201,163 @@ void main() {
     expect(collinear.every((entity) => entity.visible), isTrue);
   });
 
+  test('multi region line fit promotes only selected regions and resets the session', () async {
+    final directory = await Directory.systemTemp.createTemp('g124_1_line_fit_');
+    addTearDown(() => directory.delete(recursive: true));
+    final kernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final cad = DesktopCadController(
+      kernels: kernels,
+      projects: ProjectManager.instance,
+    );
+    final commands = DesktopCommandCoordinator(
+      cad: cad,
+      projects: ProjectManager.instance,
+    );
+    final projects = ProjectRepository(
+      storage: LocalStorageService(rootDirectory: directory),
+    );
+    final controller = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: commands,
+      runtime: cad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: projects),
+        ),
+      ),
+    );
+    addTearDown(controller.dispose);
+    addTearDown(cad.dispose);
+    await cad.runtime.open('g124-line-fit', directory);
+    await controller.configureProject(
+      projectId: 'g124-line-fit',
+      projectDirectory: directory,
+    );
+    controller.selectWorldSketchPlane(SketchPlaneType.xy);
+    await controller.openSketch();
+
+    final sources = <SketchLine>[
+      for (var index = 0; index < 5; index++)
+        controller.sketchApi!.builders.line.build(
+          SketchVector(index * 25.0, index.isEven ? .04 : -.04),
+          SketchVector(index * 25.0 + 5, index.isEven ? -.04 : .04),
+        ),
+    ];
+    final untouched = controller.sketchApi!.builders.line.build(
+      const SketchVector(300, 10),
+      const SketchVector(310, 10),
+    );
+
+    controller.beginSketchCircularSelection();
+    for (final source in [
+      sources[3],
+      sources[0],
+      sources[4],
+      sources[1],
+      sources[2],
+    ]) {
+      controller.selectSketchEntity(source.id);
+    }
+    controller.setSketchRegionFitOutput(SketchRegionFitOutput.line);
+    await controller.fitSelectedSketchLineOrSpline();
+
+    final fittedId = controller.selectedSketchEntityIds.single;
+    final fitted = controller.sketchApi!.entity(fittedId);
+    expect(fitted, isA<SketchLine>());
+    expect(controller.sketchCircularSelectionMode, isFalse);
+    expect(controller.sketchRegionFitMessage, contains('5 regi'));
+    expect(controller.sketchRegionFitMessage, contains('RMS'));
+    expect(sources.every((source) => source.visible == false), isTrue);
+    expect(untouched.visible, isTrue);
+    expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
+    expect(cad.runtime.scene.find(fittedId)!.selected, isTrue);
+
+    // A completed session must not consume the promoted line on a second run.
+    await controller.fitSelectedSketchLineOrSpline();
+    expect(controller.selectedSketchEntityIds, {fittedId});
+    expect(
+      controller.sketchRegionFitMessage,
+      contains('Selecione novamente as regi'),
+    );
+
+    final engine = controller.sketchApi!.engine;
+    expect(engine.undo(), isTrue);
+    expect(
+      sources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+      ),
+      isTrue,
+    );
+    expect(engine.redo(), isTrue);
+    expect(
+      sources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+      ),
+      isTrue,
+    );
+    await controller.toggleActiveSketchVisibility();
+    await controller.toggleActiveSketchVisibility();
+    expect(
+      sources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+      ),
+      isTrue,
+    );
+
+    // The other output mode promotes a real SketchSpline, without consuming
+    // the visible reference outside this second selection.
+    final splineSources = <SketchLine>[
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 30),
+        const SketchVector(5, 31),
+      ),
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(12, 33),
+        const SketchVector(18, 32),
+      ),
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(25, 30),
+        const SketchVector(30, 30),
+      ),
+    ];
+    controller.beginSketchCircularSelection();
+    for (final source in [splineSources[2], splineSources[0], splineSources[1]]) {
+      controller.selectSketchEntity(source.id);
+    }
+    controller.setSketchRegionFitOutput(SketchRegionFitOutput.spline);
+    await controller.fitSelectedSketchLineOrSpline();
+    final splineId = controller.selectedSketchEntityIds.single;
+    expect(controller.sketchApi!.entity(splineId), isA<SketchSpline>());
+    expect(controller.sketchRegionFitMessage, contains('pontos'));
+    expect(splineSources.every((source) => source.visible == false), isTrue);
+    expect(untouched.visible, isTrue);
+    expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
+    expect(cad.runtime.scene.find(splineId)!.selected, isTrue);
+    expect(engine.undo(), isTrue);
+    expect(
+      splineSources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+      ),
+      isTrue,
+    );
+    expect(engine.redo(), isTrue);
+    expect(
+      splineSources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+      ),
+      isTrue,
+    );
+    await controller.toggleActiveSketchVisibility();
+    await controller.toggleActiveSketchVisibility();
+    expect(
+      splineSources.every(
+        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+      ),
+      isTrue,
+    );
+  });
+
   test(
     'confirmation hides every used region and keeps the rest visible',
     () async {

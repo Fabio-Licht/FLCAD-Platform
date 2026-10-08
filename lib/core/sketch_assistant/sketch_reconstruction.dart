@@ -265,11 +265,190 @@ class SketchReconstructionSuggestion {
   };
 }
 
+/// Result of replacing several Section fragments with one line or spline.
+class SketchRegionFitResult {
+  static const int maxSplineKnots = 256;
+
+  const SketchRegionFitResult({
+    required this.start,
+    required this.end,
+    required this.points,
+    required this.usedEntityIds,
+    required this.rmsError,
+    required this.maxError,
+    required this.maxGapMillimeters,
+  });
+
+  final SketchVector start;
+  final SketchVector end;
+  final List<SketchVector> points;
+  final List<String> usedEntityIds;
+  final double rmsError;
+  final double maxError;
+  final double maxGapMillimeters;
+}
+
+enum SketchRegionFitFailure {
+  invalidSamples,
+  insufficientPoints,
+  degenerateGeometry,
+}
+
+/// Result or explicit rejection reason for a line/spline region adjustment.
+class SketchRegionFitDiagnosis {
+  const SketchRegionFitDiagnosis.success(this.result) : failure = null;
+  const SketchRegionFitDiagnosis.failure(this.failure) : result = null;
+
+  final SketchRegionFitResult? result;
+  final SketchRegionFitFailure? failure;
+}
+
 /// Conservative, non-mutating recognition pass for section-derived Sketches.
 /// It only proposes semantics; geometry and constraints change only after an
 /// explicit user confirmation.
 class SketchReconstructionEngine {
   const SketchReconstructionEngine();
+
+  /// Orders every selected region and computes a stable PCA line fit.  The
+  /// real external endpoints are retained even when the samples have gaps.
+  SketchRegionFitResult? fitSelectedLineOrSpline(
+    Iterable<SketchEntity> selected, {
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) =>
+      diagnoseSelectedLineOrSpline(selected, tolerance: tolerance).result;
+
+  /// Validates every source sample before ordering it or passing knots to the
+  /// spline kernel. This keeps malformed scan data out of PCA and rendering.
+  SketchRegionFitDiagnosis diagnoseSelectedLineOrSpline(
+    Iterable<SketchEntity> selected, {
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) {
+    final entities = selected.toList(growable: false);
+    if (entities.isEmpty ||
+        entities.length > SketchCircularFitTolerance.maxRegions) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.insufficientPoints,
+      );
+    }
+    try {
+      for (final entity in entities) {
+        final samples = _entitySamples(entity);
+        if (samples.length < 2 || samples.any((point) => !_isFinite(point))) {
+          return const SketchRegionFitDiagnosis.failure(
+            SketchRegionFitFailure.invalidSamples,
+          );
+        }
+      }
+    } catch (_) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.invalidSamples,
+      );
+    }
+    final order = _orderSelection(entities, tolerance);
+    final selection = order.selection;
+    if (selection == null || selection.points.length < 2) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.insufficientPoints,
+      );
+    }
+    final points = <SketchVector>[];
+    for (final point in selection.points) {
+      if (points.isEmpty || _distance(points.last, point) > 1e-8) {
+        points.add(point);
+      }
+    }
+    if (points.length < 2 || _distance(selection.start, selection.end) <= 1e-9) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.degenerateGeometry,
+      );
+    }
+    final mean = points.fold(const SketchVector(0, 0), (sum, point) => sum + point)
+        .scale(1 / points.length);
+    var xx = 0.0, xy = 0.0, yy = 0.0;
+    for (final point in points) {
+      final delta = point - mean;
+      xx += delta.x * delta.x;
+      xy += delta.x * delta.y;
+      yy += delta.y * delta.y;
+    }
+    if (!(xx + yy).isFinite || xx + yy <= 1e-16) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.degenerateGeometry,
+      );
+    }
+    final angle = .5 * math.atan2(2 * xy, xx - yy);
+    final direction = SketchVector(math.cos(angle), math.sin(angle));
+    var squared = 0.0, maximum = 0.0;
+    for (final point in points) {
+      final delta = point - mean;
+      final error = (delta.x * direction.y - delta.y * direction.x).abs();
+      squared += error * error;
+      maximum = math.max(maximum, error);
+    }
+    if (!squared.isFinite || !maximum.isFinite) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.invalidSamples,
+      );
+    }
+    return SketchRegionFitDiagnosis.success(SketchRegionFitResult(
+      start: selection.start,
+      end: selection.end,
+      points: _reduceSplineKnots(points),
+      usedEntityIds: selection.usedEntityIds,
+      rmsError: math.sqrt(squared / points.length),
+      maxError: maximum,
+      maxGapMillimeters:
+          selection.gaps.isEmpty ? 0 : selection.gaps.reduce(math.max),
+    ));
+  }
+
+  /// Deterministic, direction-aware decimation.  It leaves modest selections
+  /// untouched, retains the external endpoints and sharp turns, and keeps the
+  /// centripetal spline bounded for dense scan sections.
+  List<SketchVector> _reduceSplineKnots(List<SketchVector> points) {
+    if (points.length <= SketchRegionFitResult.maxSplineKnots) {
+      return List.unmodifiable(points);
+    }
+    final required = <int>{0, points.length - 1};
+    for (var index = 1; index + 1 < points.length; index++) {
+      final before = points[index] - points[index - 1];
+      final after = points[index + 1] - points[index];
+      final beforeLength = math.sqrt(before.dot(before));
+      final afterLength = math.sqrt(after.dot(after));
+      if (beforeLength <= 1e-9 || afterLength <= 1e-9) continue;
+      final cosine = (before.dot(after) / (beforeLength * afterLength)).clamp(
+        -1.0,
+        1.0,
+      );
+      // Keep turns over about 10 degrees even when downsampling heavily.
+      if (cosine < 0.985) required.add(index);
+    }
+    final available = SketchRegionFitResult.maxSplineKnots - 2;
+    final interior = required.where((index) => index != 0 && index != points.length - 1).toList()
+      ..sort();
+    if (interior.length > available) {
+      final stride = (interior.length - 1) / math.max(available - 1, 1);
+      required
+        ..clear()
+        ..add(0)
+        ..add(points.length - 1)
+        ..addAll(
+          List<int>.generate(available, (slot) => interior[(slot * stride).round()]),
+        );
+    }
+    if (required.length < SketchRegionFitResult.maxSplineKnots) {
+      final remaining = SketchRegionFitResult.maxSplineKnots - required.length;
+      final stride = (points.length - 1) / (remaining + 1);
+      for (var slot = 1; slot <= remaining; slot++) {
+        required.add((slot * stride).round());
+      }
+    }
+    final indices = required.toList()..sort();
+    return List.unmodifiable([for (final index in indices) points[index]]);
+  }
+
+  bool _isFinite(SketchVector point) =>
+      point.x.isFinite && point.y.isFinite && point.z.isFinite;
 
   /// Fits a circular primitive from an explicit short selection. Unlike the
   /// automatic pass, the selected entities do not need to form one connected
