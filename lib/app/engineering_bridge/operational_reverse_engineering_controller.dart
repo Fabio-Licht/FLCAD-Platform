@@ -588,9 +588,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     )) {
       return null;
     }
-    final isCircularPromotion =
-        suggestion.kind == SketchReconstructionKind.circle ||
-        suggestion.kind == SketchReconstructionKind.arc;
     // Manual circularFit already runs inside reverse.sketch.circularFit.
     // Re-entering _run here would stack a second command for one user action.
     if (_operationalCommandDepth > 0) {
@@ -598,7 +595,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         suggestion,
         allowLowConfidence: allowLowConfidence,
       );
-      return isCircularPromotion ? applied?.createdId : null;
+      return applied?.createdId;
     }
     _reconstructionSuggestionBeingAccepted = suggestion;
     final parameters = <String, Object?>{
@@ -606,8 +603,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     };
     try {
       await _run('reverse.sketch.acceptReconstruction', parameters);
+      final createdId = parameters['createdId'] as String?;
+      if (createdId != null) return createdId;
       if (error != null) return null;
-      return isCircularPromotion ? parameters['createdId'] as String? : null;
+      return null;
     } finally {
       _reconstructionSuggestionBeingAccepted = null;
     }
@@ -635,12 +634,88 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+    if (suggestion.kind == SketchReconstructionKind.line) {
+      final plan = _planLineReconstruction(entities);
+      if (plan.rejected) {
+        error = plan.message;
+        notifyListeners();
+        return false;
+      }
+      return true;
+    }
     if (suggestion.kind == SketchReconstructionKind.parallel ||
         suggestion.kind == SketchReconstructionKind.perpendicular) {
       return constraintApi != null;
     }
     return true;
   }
+
+  /// Accept-time gate for Assistant `line` suggestions.
+  ///
+  /// Isolated native lines stay metadata-only. Chains and single splines only
+  /// create geometry when PCA `maxError` is at most the reconstruction
+  /// tolerance (default 0.10 mm, optionally overridden by
+  /// `sketch.reconstruction.lineToleranceMm`). Suggestion confidence is not
+  /// a substitute for this dimensional budget.
+  ({bool rejected, SketchRegionFitResult? fit, String? message})
+  _planLineReconstruction(List<SketchEntity> entities) {
+    if (entities.length == 1 && entities.single is SketchLine) {
+      return (rejected: false, fit: null, message: null);
+    }
+    final isLineChain =
+        entities.length >= 2 &&
+        entities.every((entity) => entity is SketchLine);
+    final isSingleSpline =
+        entities.length == 1 && entities.single is SketchSpline;
+    if (!isLineChain && !isSingleSpline) {
+      return (
+        rejected: true,
+        fit: null,
+        message:
+            'Linha rejeitada: as fontes não formam uma cadeia reta utilizável.',
+      );
+    }
+    final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
+      entities,
+    );
+    final fit = diagnosis.result;
+    if (diagnosis.failure != null || fit == null) {
+      return (
+        rejected: true,
+        fit: null,
+        message: _regionFitFailureMessage(diagnosis.failure),
+      );
+    }
+    final limit = _lineReconstructionToleranceMm();
+    final phrase = _lineReconstructionTolerancePhrase(fit.maxError, limit);
+    // 1e-12 absorbs binary rounding of a residual that is dimensionally 0.10 mm.
+    if (fit.maxError > limit + 1e-12) {
+      return (
+        rejected: true,
+        fit: null,
+        message: 'Linha rejeitada: $phrase.',
+      );
+    }
+    return (
+      rejected: false,
+      fit: fit,
+      message:
+          'Linha criada · ${fit.usedEntityIds.length} regiões · RMS ${fit.rmsError.toStringAsFixed(3)} mm · $phrase',
+    );
+  }
+
+  double _lineReconstructionToleranceMm() {
+    final override = runtime.read<double>(
+      'sketch.reconstruction.lineToleranceMm',
+    );
+    if (override != null && override.isFinite && override > 0) {
+      return override;
+    }
+    return const SketchLineReconstructionTolerance().reconstructionToleranceMm;
+  }
+
+  String _lineReconstructionTolerancePhrase(double maxError, double limit) =>
+      'erro máx ${maxError.toStringAsFixed(3)} mm (limite ${limit.toStringAsFixed(3)} mm)';
 
   Future<
     ({
@@ -696,6 +771,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         notifyListeners();
         return null;
       }
+      final linePlan = suggestion.kind == SketchReconstructionKind.line
+          ? _planLineReconstruction(entities)
+          : null;
+      if (linePlan?.rejected == true) {
+        error = linePlan!.message;
+        notifyListeners();
+        return null;
+      }
       final canPromoteCurve =
           isCircularPromotion &&
           suggestion.center != null &&
@@ -708,6 +791,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                 entity is SketchArc ||
                 entity is SketchSpline,
           );
+      final lineFit = linePlan?.fit;
       api.engine.transaction('sketch.reconstruction.accept', () {
         if (canPromoteCurve) {
           final promoted = suggestion.kind == SketchReconstructionKind.circle
@@ -743,6 +827,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               value.visible = false;
             });
           }
+        } else if (lineFit != null) {
+          final promoted = api.builders.line.build(lineFit.start, lineFit.end);
+          promotedId = promoted.id;
+          api.engine.modify(promoted.id, SketchHistoryAction.modify, (value) {
+            value.metadata['reconstructionKind'] = suggestion.kind.name;
+            value.metadata.remove('reconstructionHidden');
+          });
+          for (final id in lineFit.usedEntityIds) {
+            hiddenIds.add(id);
+            api.engine.modify(id, SketchHistoryAction.modify, (value) {
+              value.metadata['reconstructionKind'] = suggestion.kind.name;
+              value.metadata['reconstructionHidden'] = true;
+              value.visible = false;
+            });
+          }
         } else {
           for (final entity in entities) {
             api.engine.modify(
@@ -754,6 +853,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           }
         }
       });
+      if (lineFit != null) {
+        usedIds
+          ..clear()
+          ..addAll(lineFit.usedEntityIds);
+        error = linePlan?.message;
+      }
     }
     if (promotedCurve) {
       final merged = <String>{

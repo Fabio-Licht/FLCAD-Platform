@@ -107,6 +107,22 @@ class SketchCircularFitTolerance {
       math.max(absoluteMillimeters, relativeToRadius * radius);
 }
 
+/// Absolute residual budget for Assistant line promotion.
+///
+/// Distances are millimetres. Isolated native lines stay metadata-only and
+/// do not use this budget. Chains of lines and single splines are accepted
+/// only when the PCA residual [SketchRegionFitResult.maxError] is at most
+/// [reconstructionToleranceMm]. Suggestion confidence is not a substitute
+/// for this dimensional gate.
+class SketchLineReconstructionTolerance {
+  const SketchLineReconstructionTolerance({
+    this.reconstructionToleranceMm = 0.10,
+  });
+
+  /// Largest PCA residual accepted when promoting a line chain or spline.
+  final double reconstructionToleranceMm;
+}
+
 /// Maximum angle between the arc tangent and the oriented neighbour tangent
 /// accepted for a bilateral C1 solution.
 ///

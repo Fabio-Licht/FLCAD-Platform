@@ -2062,41 +2062,53 @@ void main() {
           .firstWhere(
             (item) =>
                 item.kind == SketchReconstructionKind.line &&
+                item.entityIds.length == lineSources.length &&
                 item.entityIds.every(
                   (id) => lineSources.any((source) => source.id == id),
                 ),
           );
-      await controller.acceptSketchReconstructionSuggestion(lineSuggestion);
+      final expectedLineFit = const SketchReconstructionEngine()
+          .diagnoseSelectedLineOrSpline(lineSources)
+          .result!;
+      final lineCreatedId = await controller.acceptSketchReconstructionSuggestion(
+        lineSuggestion,
+      );
+      expect(lineCreatedId, isNotNull);
+      final promotedLine =
+          controller.sketchApi!.entity(lineCreatedId!)! as SketchLine;
+      expect(promotedLine.metadata['reconstructionKind'], 'line');
+      expect(promotedLine.metadata.containsKey('regionFitReferencePoints'), isFalse);
+      expect(promotedLine.metadata.containsKey('regionFitSourceIds'), isFalse);
+      final promotedEnds = [
+        SketchVector.fromJson(promotedLine.parameters['start']),
+        SketchVector.fromJson(promotedLine.parameters['end']),
+      ];
       expect(
-        lineSources.every(
-          (source) =>
-              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] ==
-              'line',
+        promotedEnds.any(
+          (point) =>
+              (point.x - expectedLineFit.start.x).abs() < 1e-9 &&
+              (point.y - expectedLineFit.start.y).abs() < 1e-9,
         ),
         isTrue,
       );
+      expect(
+        promotedEnds.any(
+          (point) =>
+              (point.x - expectedLineFit.end.x).abs() < 1e-9 &&
+              (point.y - expectedLineFit.end.y).abs() < 1e-9,
+        ),
+        isTrue,
+      );
+      await expectAssistantApplied(lineCreatedId, lineSources);
       expect(controller.sketchApi!.entity(promotedId), isNotNull);
       await controller.undo();
-      expect(
-        lineSources.every(
-          (source) =>
-              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] !=
-              'line',
-        ),
-        isTrue,
-      );
+      await expectAssistantUndone(lineCreatedId, lineSources);
       expect(controller.sketchApi!.entity(promotedId), isNotNull);
       await controller.redo();
-      expect(
-        lineSources.every(
-          (source) =>
-              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] ==
-              'line',
-        ),
-        isTrue,
-      );
+      await expectAssistantApplied(lineCreatedId, lineSources);
       await controller.undo();
       await controller.redo();
+      await expectAssistantApplied(lineCreatedId, lineSources);
 
       controller.analyzeSketchReconstruction();
       final perpendicular = controller.sketchReconstructionSuggestions
@@ -2269,12 +2281,535 @@ void main() {
       );
       expect(reopened.sketchApi!.entity(promotedId), isNotNull);
       expect(reopened.sketchApi!.entity(secondId), isNotNull);
+      expect(reopened.sketchApi!.entity(lineCreatedId), isA<SketchLine>());
       expect(
         firstSources.every(
           (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
         ),
         isTrue,
       );
+      expect(
+        lineSources.every(
+          (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(reopened.commands.manager.canUndo, isFalse);
+    },
+  );
+
+  test(
+    'assistant line promotion creates geometry only with collinear evidence',
+    () async {
+      final harness = await _g124Harness('g124-3-line-promotion');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final cad = harness.cad;
+      final engine = const SketchReconstructionEngine();
+      const lineTolerance = SketchLineReconstructionTolerance();
+      expect(lineTolerance.reconstructionToleranceMm, 0.10);
+      final limitMm = lineTolerance.reconstructionToleranceMm.toStringAsFixed(3);
+
+      void expectLineToleranceMessage(String? message, double maxError) {
+        expect(message, isNotNull);
+        expect(
+          message,
+          contains(
+            'erro máx ${maxError.toStringAsFixed(3)} mm (limite $limitMm mm)',
+          ),
+        );
+      }
+
+      Future<void> expectSourcesHidden(Iterable<SketchEntity> sources) async {
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == false &&
+                controller.sketchApi!.entity(source.id)?.metadata['reconstructionHidden'] ==
+                    true &&
+                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+                    false &&
+                cad.runtime.scene.find(source.id)?.visible == false,
+          ),
+          isTrue,
+        );
+      }
+
+      Future<void> expectSourcesRestored(Iterable<SketchEntity> sources) async {
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == true &&
+                controller.sketchApi!.entity(source.id)?.metadata['reconstructionHidden'] !=
+                    true &&
+                cad.runtime.scene.find(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+      }
+
+      final isolated = controller.sketchApi!.builders.line.build(
+        const SketchVector(900, 0),
+        const SketchVector(920, 0),
+      );
+      final collinear = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(300, 80),
+          const SketchVector(310, 80),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(310, 80),
+          const SketchVector(320, 80),
+        ),
+      ];
+      final elbowHorizontal = controller.sketchApi!.builders.line.build(
+        const SketchVector(500, 80),
+        const SketchVector(530, 80),
+      );
+      final elbowVertical = controller.sketchApi!.builders.line.build(
+        const SketchVector(530, 80),
+        const SketchVector(530, 100),
+      );
+      final straightSpline = controller.sketchApi!.builders.spline.build(const [
+        SketchVector(0, 200),
+        SketchVector(8, 200.04),
+        SketchVector(16, 199.98),
+        SketchVector(24, 200),
+      ]);
+      final curvedSpline = controller.sketchApi!.builders.spline.build(const [
+        SketchVector(0, 260),
+        SketchVector(12, 272),
+        SketchVector(24, 260),
+      ]);
+      final degenerateSpline = controller.sketchApi!.builders.spline.build(const [
+        SketchVector(700, 0),
+        SketchVector(710, 0),
+        SketchVector(700, 0),
+      ]);
+      // PCA of the four endpoints is exactly 0.10 mm (mean y offset 0.10).
+      final exactLines = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(1000, 500),
+          const SketchVector(1020, 500),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(1000, 500.20),
+          const SketchVector(1020, 500.20),
+        ),
+      ];
+      // Chord residual ~0.14 mm yields Assistant confidence < 0.75; PCA of
+      // the interpolating samples stays inside the 0.10 mm budget.
+      final weakSpline = controller.sketchApi!.builders.spline.build(const [
+        SketchVector(0, 320),
+        SketchVector(10, 320.14),
+        SketchVector(20, 320),
+      ]);
+      // PCA of the four endpoints is 0.15 mm, above the 0.10 mm budget.
+      final overLines = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(1100, 600),
+          const SketchVector(1120, 600),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(1100, 600.30),
+          const SketchVector(1120, 600.30),
+        ),
+      ];
+      final regionOver = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(800, 0),
+          const SketchVector(820, 0),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(820, 0.5),
+          const SketchVector(840, 0.5),
+        ),
+      ];
+      SketchVector arcPoint(double angle) =>
+          SketchVector(80 + 14 * math.cos(angle), 40 + 14 * math.sin(angle));
+      final arcSources = [
+        for (var index = 0; index < 5; index++)
+          controller.sketchApi!.builders.line.build(
+            arcPoint(0.2 + 1.2 * index / 5),
+            arcPoint(0.2 + 1.2 * (index + 1) / 5),
+          ),
+      ];
+      final entityCountBefore = controller.sketchEntities.length;
+
+      controller.analyzeSketchReconstruction();
+      final isolatedSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.length == 1 &&
+                item.entityIds.single == isolated.id,
+          );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(isolatedSuggestion),
+        isNull,
+      );
+      expect(controller.sketchEntities.length, entityCountBefore);
+      expect(controller.sketchApi!.entity(isolated.id), isNotNull);
+      expect(isolated.visible, isTrue);
+      expect(isolated.metadata['reconstructionKind'], 'line');
+      expect(isolated.metadata['reconstructionHidden'], isNot(true));
+      expect(cad.runtime.scene.find(isolated.id)!.visible, isTrue);
+
+      controller.analyzeSketchReconstruction();
+      final chainSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.length == collinear.length &&
+                item.entityIds.every(
+                  (id) => collinear.any((source) => source.id == id),
+                ),
+          );
+      final chainDiagnosis = engine.diagnoseSelectedLineOrSpline(collinear);
+      expect(chainDiagnosis.failure, isNull);
+      final chainFit = chainDiagnosis.result!;
+      expect(
+        chainFit.maxError,
+        lessThan(lineTolerance.reconstructionToleranceMm),
+      );
+      final chainId = (await controller.acceptSketchReconstructionSuggestion(
+        chainSuggestion,
+      ))!;
+      expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
+      expectLineToleranceMessage(controller.error, chainFit.maxError);
+      expect(controller.error, contains('RMS'));
+      expect(
+        controller.commands.manager.history
+            .where((record) => record.operation == 'execute')
+            .last
+            .commandId,
+        'reverse.sketch.acceptReconstruction',
+      );
+      await expectSourcesHidden(collinear);
+      expect(controller.selectedSketchEntityIds, {chainId});
+      expect(cad.runtime.scene.find(chainId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(chainId)!.selected, isTrue);
+
+      await controller.undo();
+      expect(controller.sketchApi!.entity(chainId), isNull);
+      await expectSourcesRestored(collinear);
+      await controller.redo();
+      expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
+      await expectSourcesHidden(collinear);
+      await controller.undo();
+      await expectSourcesRestored(collinear);
+      await controller.redo();
+      await expectSourcesHidden(collinear);
+
+      controller.analyzeSketchReconstruction();
+      final elbowSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.contains(elbowHorizontal.id) &&
+                item.entityIds.contains(elbowVertical.id),
+          );
+      final elbowDiagnosis = engine.diagnoseSelectedLineOrSpline([
+        elbowHorizontal,
+        elbowVertical,
+      ]);
+      expect(elbowDiagnosis.failure, isNull);
+      expect(
+        elbowDiagnosis.result!.maxError,
+        greaterThan(lineTolerance.reconstructionToleranceMm),
+      );
+      final canUndoBeforeElbow = controller.commands.manager.canUndo;
+      final historyBeforeElbow = controller.commands.manager.history.length;
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(elbowSuggestion),
+        isNull,
+      );
+      expect(controller.commands.manager.canUndo, canUndoBeforeElbow);
+      expect(controller.commands.manager.history.length, historyBeforeElbow);
+      expectLineToleranceMessage(
+        controller.error,
+        elbowDiagnosis.result!.maxError,
+      );
+      expect(controller.error, contains('Linha rejeitada'));
+      expect(controller.sketchApi!.entity(elbowHorizontal.id)!.visible, isTrue);
+      expect(controller.sketchApi!.entity(elbowVertical.id)!.visible, isTrue);
+      expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
+
+      controller.analyzeSketchReconstruction();
+      final splineSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.length == 1 &&
+                item.entityIds.single == straightSpline.id,
+          );
+      expect(splineSuggestion.confidence, greaterThanOrEqualTo(.75));
+      final splineFit = engine
+          .diagnoseSelectedLineOrSpline([straightSpline])
+          .result!;
+      expect(
+        splineFit.maxError,
+        lessThan(lineTolerance.reconstructionToleranceMm),
+      );
+      final splineLineId =
+          (await controller.acceptSketchReconstructionSuggestion(
+            splineSuggestion,
+          ))!;
+      expect(controller.sketchApi!.entity(splineLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(straightSpline.id), isA<SketchSpline>());
+      expectLineToleranceMessage(controller.error, splineFit.maxError);
+      expect(controller.error, contains('RMS'));
+      await expectSourcesHidden([straightSpline]);
+      expect(controller.selectedSketchEntityIds, {splineLineId});
+
+      final canUndoBeforeCurve = controller.commands.manager.canUndo;
+      final curvedSuggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: [curvedSpline.id],
+        confidence: 0.99,
+      );
+      final curvedDiagnosis = engine.diagnoseSelectedLineOrSpline([
+        curvedSpline,
+      ]);
+      expect(curvedDiagnosis.failure, isNull);
+      expect(
+        curvedDiagnosis.result!.maxError,
+        greaterThan(lineTolerance.reconstructionToleranceMm),
+      );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(curvedSuggestion),
+        isNull,
+      );
+      expect(controller.commands.manager.canUndo, canUndoBeforeCurve);
+      expectLineToleranceMessage(
+        controller.error,
+        curvedDiagnosis.result!.maxError,
+      );
+      expect(controller.error, contains('Linha rejeitada'));
+      expect(controller.sketchApi!.entity(curvedSpline.id), isNotNull);
+      expect(curvedSpline.visible, isTrue);
+      expect(
+        controller.sketchEntities.whereType<SketchLine>().any(
+          (line) => line.id == splineLineId,
+        ),
+        isTrue,
+      );
+
+      final degenerateSuggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: [degenerateSpline.id],
+        confidence: 0.99,
+      );
+      expect(
+        engine.diagnoseSelectedLineOrSpline([degenerateSpline]).failure,
+        SketchRegionFitFailure.degenerateGeometry,
+      );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(
+          degenerateSuggestion,
+        ),
+        isNull,
+      );
+      expect(controller.commands.manager.canUndo, canUndoBeforeCurve);
+      expect(degenerateSpline.visible, isTrue);
+
+      final exactSuggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: exactLines.map((source) => source.id).toList(),
+        confidence: 1.0,
+      );
+      final exactFit = engine.diagnoseSelectedLineOrSpline(exactLines).result!;
+      expect(
+        exactFit.maxError,
+        closeTo(lineTolerance.reconstructionToleranceMm, 1e-12),
+      );
+      final exactLineId =
+          (await controller.acceptSketchReconstructionSuggestion(
+            exactSuggestion,
+          ))!;
+      expect(controller.sketchApi!.entity(exactLineId), isA<SketchLine>());
+      expectLineToleranceMessage(controller.error, exactFit.maxError);
+      await expectSourcesHidden(exactLines);
+      expect(controller.selectedSketchEntityIds, {exactLineId});
+
+      controller.analyzeSketchReconstruction();
+      final weakSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.length == 1 &&
+                item.entityIds.single == weakSpline.id,
+          );
+      expect(weakSuggestion.confidence, lessThan(.75));
+      final weakFit = engine.diagnoseSelectedLineOrSpline([weakSpline]).result!;
+      expect(
+        weakFit.maxError,
+        lessThanOrEqualTo(lineTolerance.reconstructionToleranceMm),
+      );
+      final weakLineId =
+          (await controller.acceptSketchReconstructionSuggestion(
+            weakSuggestion,
+          ))!;
+      expect(controller.sketchApi!.entity(weakLineId), isA<SketchLine>());
+      expectLineToleranceMessage(controller.error, weakFit.maxError);
+      await expectSourcesHidden([weakSpline]);
+      expect(controller.selectedSketchEntityIds, {weakLineId});
+
+      final canUndoBeforeOver = controller.commands.manager.canUndo;
+      final historyBeforeOver = controller.commands.manager.history.length;
+      final overSuggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: overLines.map((source) => source.id).toList(),
+        confidence: 0.99,
+      );
+      final overFit = engine.diagnoseSelectedLineOrSpline(overLines).result!;
+      expect(
+        overFit.maxError,
+        closeTo(0.15, 1e-12),
+      );
+      expect(
+        overFit.maxError,
+        greaterThan(lineTolerance.reconstructionToleranceMm),
+      );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(overSuggestion),
+        isNull,
+      );
+      expect(controller.commands.manager.canUndo, canUndoBeforeOver);
+      expect(controller.commands.manager.history.length, historyBeforeOver);
+      expectLineToleranceMessage(controller.error, overFit.maxError);
+      expect(controller.error, contains('Linha rejeitada'));
+      expect(
+        overLines.every(
+          (source) => controller.sketchApi!.entity(source.id)!.visible,
+        ),
+        isTrue,
+      );
+      expect(controller.sketchApi!.entity(splineLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(exactLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(weakLineId), isA<SketchLine>());
+
+      controller.analyzeSketchReconstruction();
+      final arcSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                (item.kind == SketchReconstructionKind.arc ||
+                    item.kind == SketchReconstructionKind.circle) &&
+                item.entityIds.every(
+                  (id) => arcSources.any((source) => source.id == id),
+                ) &&
+                item.center != null &&
+                item.confidence >= .75,
+          );
+      final arcId = (await controller.acceptSketchReconstructionSuggestion(
+        arcSuggestion,
+      ))!;
+      expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(splineLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(exactLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(weakLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(arcId), isNotNull);
+      await expectSourcesHidden(collinear);
+      await expectSourcesHidden([straightSpline]);
+      await expectSourcesHidden(exactLines);
+      await expectSourcesHidden([weakSpline]);
+      await expectSourcesHidden(arcSources);
+      expect(isolated.visible, isTrue);
+      expect(elbowHorizontal.visible, isTrue);
+      expect(curvedSpline.visible, isTrue);
+      expect(
+        overLines.every((source) => source.visible),
+        isTrue,
+      );
+      expect(
+        controller.sketchEntities
+            .where(
+              (entity) =>
+                  entity.visible &&
+                  entity.metadata['reconstructionHidden'] != true &&
+                  (entity.id == chainId ||
+                      entity.id == splineLineId ||
+                      entity.id == exactLineId ||
+                      entity.id == weakLineId ||
+                      entity.id == arcId),
+            )
+            .map((entity) => entity.id)
+            .toSet(),
+        {chainId, splineLineId, exactLineId, weakLineId, arcId},
+      );
+
+      final regionDiagnosis = engine.diagnoseSelectedLineOrSpline(regionOver);
+      expect(regionDiagnosis.failure, isNull);
+      expect(
+        regionDiagnosis.result!.maxError,
+        greaterThan(lineTolerance.reconstructionToleranceMm),
+      );
+      controller.beginSketchCircularSelection();
+      for (final source in regionOver) {
+        controller.selectSketchEntity(source.id);
+      }
+      controller.setSketchRegionFitOutput(SketchRegionFitOutput.line);
+      await controller.fitSelectedSketchLineOrSpline();
+      final regionId = controller.selectedSketchEntityIds.single;
+      expect(controller.sketchApi!.entity(regionId), isA<SketchLine>());
+      await expectSourcesHidden(regionOver);
+      await controller.undo();
+      expect(controller.sketchApi!.entity(regionId), isNull);
+      await expectSourcesRestored(regionOver);
+      expect(controller.sketchApi!.entity(chainId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(exactLineId), isA<SketchLine>());
+      expect(controller.sketchApi!.entity(weakLineId), isA<SketchLine>());
+
+      await controller.persist();
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open('g124-3-line-promotion', harness.directory);
+      await reopened.configureProject(
+        projectId: 'g124-3-line-promotion',
+        projectDirectory: harness.directory,
+      );
+      expect(reopened.sketchApi!.entity(chainId), isA<SketchLine>());
+      expect(reopened.sketchApi!.entity(splineLineId), isA<SketchLine>());
+      expect(reopened.sketchApi!.entity(exactLineId), isA<SketchLine>());
+      expect(reopened.sketchApi!.entity(weakLineId), isA<SketchLine>());
+      expect(reopened.sketchApi!.entity(arcId), isNotNull);
+      expect(reopened.sketchApi!.entity(isolated.id)!.visible, isTrue);
+      expect(
+        collinear.every(
+          (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(reopened.sketchApi!.entity(straightSpline.id)?.visible, isFalse);
+      expect(
+        exactLines.every(
+          (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(reopened.sketchApi!.entity(weakSpline.id)?.visible, isFalse);
       expect(reopened.commands.manager.canUndo, isFalse);
     },
   );
