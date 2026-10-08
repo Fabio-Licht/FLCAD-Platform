@@ -221,6 +221,7 @@ class SketchReconstructionSuggestion {
     this.tangencyStartDegrees,
     this.tangencyEndDegrees,
     this.usedEntityIds = const <String>[],
+    this.coveredEntityIds = const <String>[],
   });
 
   final SketchReconstructionKind kind;
@@ -251,6 +252,9 @@ class SketchReconstructionSuggestion {
 
   /// Regions that actually contributed samples to the fit, in walk order.
   final List<String> usedEntityIds;
+
+  /// Visible source fragments already represented by the promoted arc.
+  final List<String> coveredEntityIds;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',
@@ -518,7 +522,68 @@ class SketchReconstructionEngine {
       tangencyStartDegrees: tangencyStartDegrees,
       tangencyEndDegrees: tangencyEndDegrees,
       usedEntityIds: selection.usedEntityIds,
+      coveredEntityIds: context
+          .where(
+            (entity) =>
+                !selectedIds.contains(entity.id) &&
+                entity.visible &&
+                _liesWhollyOnCircularSpan(
+                  entity,
+                  angles,
+                  circularFit,
+                  tolerance,
+                ),
+          )
+          .map((entity) => entity.id)
+          .toList(growable: false),
     );
+  }
+
+  /// True only when every sample is represented by this arc. Boundary curves
+  /// which merely touch an endpoint deliberately remain visible.
+  bool _liesWhollyOnCircularSpan(
+    SketchEntity entity,
+    ({
+      double startAngle,
+      double endAngle,
+      SketchVector startPoint,
+      SketchVector endPoint,
+    })
+    angles,
+    (SketchVector, double) circle,
+    SketchCircularFitTolerance tolerance,
+  ) {
+    final samples = _coverageSamples(entity);
+    if (samples.length < 2) return false;
+    final sweep = angles.endAngle - angles.startAngle;
+    if (!sweep.isFinite || sweep <= 1e-7) return false;
+    final radialTolerance = tolerance.radialFor(circle.$2);
+    for (final point in samples) {
+      final angle = math.atan2(point.y - circle.$1.y, point.x - circle.$1.x);
+      if (_positiveSweep(angles.startAngle, angle) > sweep + 1e-6 ||
+          (_distance(point, circle.$1) - circle.$2).abs() > radialTolerance) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Adds an interior check for each stored segment.  A long chord can have
+  /// both endpoints on a circle while its middle is far inside it, so endpoint
+  /// only checks are not enough to safely hide a source fragment.
+  List<SketchVector> _coverageSamples(SketchEntity entity) {
+    final source = _entitySamples(entity);
+    if (source.length < 2) return source;
+    final samples = <SketchVector>[];
+    for (var index = 0; index + 1 < source.length; index++) {
+      final start = source[index];
+      final end = source[index + 1];
+      samples
+        ..add(start)
+        ..add((start + end).scale(.5));
+    }
+    samples.add(source.last);
+    return samples;
   }
 
   /// Tangency angle, in degrees, of the circle at each endpoint that has a

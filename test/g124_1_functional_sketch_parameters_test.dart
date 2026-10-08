@@ -910,6 +910,10 @@ void main() {
     expect(startReference.visible, isTrue);
     expect(endReference.visible, isTrue);
     expect(decoy.visible, isTrue);
+    // A confirmed reconstruction never leaks its manual references into the
+    // next one; the next multi-selection starts from a clean command state.
+    expect(controller.sketchTangencyStartId, isNull);
+    expect(controller.sketchTangencyEndId, isNull);
     expect(cad.runtime.scene.find(fitted.id)!.selected, isTrue);
 
     // The promotion is still recorded as a single sketch transaction, which is
@@ -1123,6 +1127,18 @@ void main() {
         const SketchVector(400, 200),
         const SketchVector(430, 210),
       );
+      // This is an unselected Section fragment inside the span. It duplicates
+      // the future arc and must be cleaned with the selected source chain.
+      final overlapping = controller.sketchApi!.builders.line.build(
+        point(.85),
+        point(1.05),
+      );
+      // Its endpoints lie on the same arc, but this long chord cuts through
+      // the interior. The intermediate coverage sample must keep it visible.
+      final longChord = controller.sketchApi!.builders.line.build(
+        point(a0 + .05),
+        point(a1 - .05),
+      );
       final startReference = controller.sketchApi!.builders.line.build(
         point(a0) - tangent(a0).scale(6),
         point(a0),
@@ -1136,10 +1152,6 @@ void main() {
       for (final entity in sources) {
         controller.selectSketchEntity(entity.id);
       }
-      controller.beginSketchTangencyPick('start');
-      controller.selectSketchEntity(startReference.id);
-      controller.beginSketchTangencyPick('end');
-      controller.selectSketchEntity(endReference.id);
       expect(controller.selectedSketchEntityIds, hasLength(5));
 
       await controller.fitSelectedSketchCircularGeometry();
@@ -1162,6 +1174,10 @@ void main() {
       //    keeps its visibility.
       expect(untouched.visible, isTrue);
       expect(cad.runtime.scene.find(untouched.id)!.visible, isTrue);
+      expect(overlapping.visible, isFalse);
+      expect(cad.runtime.scene.find(overlapping.id)!.visible, isFalse);
+      expect(longChord.visible, isTrue);
+      expect(cad.runtime.scene.find(longChord.id)!.visible, isTrue);
       expect(startReference.visible, isTrue);
       expect(endReference.visible, isTrue);
       // 3. The new arc is the only active geometry on that stretch.
@@ -1258,6 +1274,18 @@ void main() {
         isTrue,
       );
 
+      // Confirmation leaves the created arc selected for inspection, but a
+      // second click without starting a fresh multi-selection must not reuse it.
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(controller.sketchCircularFitConfirmed, isTrue);
+      expect(controller.selectedSketchEntityIds, {arcId});
+      expect(cad.runtime.scene.find(arcId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(arcId)!.selected, isTrue);
+      expect(
+        controller.sketchCircularFitMessage,
+        'Selecione novamente as regiões para criar outro arco',
+      );
+
       // A new attempt that fails must drop the confirmed state (without going
       // through a fresh multi selection first) while keeping its own message.
       final flatA = controller.sketchApi!.builders.line.build(
@@ -1268,9 +1296,9 @@ void main() {
         const SketchVector(601, 0),
         const SketchVector(602, 0),
       );
-      controller.toggleSketchSelection(arcId);
-      controller.toggleSketchSelection(flatA.id);
-      controller.toggleSketchSelection(flatB.id);
+      controller.beginSketchCircularSelection();
+      controller.selectSketchEntity(flatA.id);
+      controller.selectSketchEntity(flatB.id);
       await controller.fitSelectedSketchCircularGeometry();
       expect(controller.sketchCircularFitConfirmed, isFalse);
       expect(controller.sketchCircularFitMessage, contains('colineares'));

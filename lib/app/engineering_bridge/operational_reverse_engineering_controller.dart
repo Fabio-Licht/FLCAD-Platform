@@ -619,7 +619,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             value.metadata['reconstructionKind'] = suggestion.kind.name;
             value.metadata.remove('reconstructionHidden');
           });
-          for (final entity in entities) {
+          final replacementEntities = <SketchEntity>[
+            ...entities,
+            for (final id in suggestion.coveredEntityIds)
+              if (!suggestion.entityIds.contains(id)) ?api.entity(id),
+          ];
+          for (final entity in replacementEntities) {
             api.engine.modify(entity.id, SketchHistoryAction.modify, (value) {
               value.metadata['reconstructionKind'] = suggestion.kind.name;
               // This distinguishes source curves replaced by a reconstruction
@@ -671,8 +676,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// tolerated and the two external endpoints are preserved.  When the user
   /// names a curve in "Tangência inicial" / "Tangência final" those explicit
   /// references drive the tangency instead.
+  ///
+  /// Limitação futura: a continuidade C1 é calculada e validada nesta
+  /// reconstrução, mas não é persistida como uma constraint paramétrica.
   Future<void> fitSelectedSketchCircularGeometry() async {
     sketchCircularFitMessage = null;
+    // Confirmation ends the multi-selection session.  Keeping the promoted
+    // arc selected is useful for inspection, but it must never become the
+    // implicit source of another fit.
+    if (!sketchCircularSelectionMode && sketchCircularFitConfirmed) {
+      const message = 'Selecione novamente as regiões para criar outro arco';
+      sketchCircularFitMessage = message;
+      error = message;
+      notifyListeners();
+      return;
+    }
     // A new attempt is no longer a confirmed result: the previous arc (if any)
     // must not keep claiming the panel state, while the diagnostic produced by
     // this attempt still replaces the message below.
@@ -848,7 +866,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final usedIds = suggestion.usedEntityIds.isEmpty
         ? suggestion.entityIds
         : suggestion.usedEntityIds;
-    for (final id in usedIds) {
+    final hiddenIds = <String>{...usedIds, ...suggestion.coveredEntityIds};
+    for (final id in hiddenIds) {
       await runtime.setEntityVisibility(id, false);
     }
     // Report the *effective* hiding state of each region: the panel has to tell
@@ -887,6 +906,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     sketchCircularFitMessage =
         '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} confirmado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
     runtime.write('sketch.circularSelectionMode', false);
+    // References are local to one reconstruction. Leaving them set made a
+    // later arc inherit unrelated boundary curves.
+    runtime.write('sketch.tangency.startId', null);
+    runtime.write('sketch.tangency.endId', null);
     runtime.write('sketch.tangency.pickTarget', null);
     runtime.write('sketch.circularFit.confirmed', true);
     notifyListeners();
