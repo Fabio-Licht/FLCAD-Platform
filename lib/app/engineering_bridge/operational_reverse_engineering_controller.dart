@@ -6631,7 +6631,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     };
   }
 
-  ({Map<String, double> arc, Map<String, Map<String, double>> lines})?
+  ({
+    Map<String, double>? arc,
+    Map<String, Map<String, double>> lines,
+    String? failure,
+  })?
   _arcRadiusEditTangentToNeighbors(SketchArc arc, double radius) {
     final oldCenter = SketchVector.fromJson(arc.parameters['center']);
     final oldRadius = (arc.parameters['radius'] as num).toDouble();
@@ -6642,7 +6646,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       oldCenter.y + oldRadius * math.sin(angle),
     );
     final anchors = [endpoint(oldStart), endpoint(oldEnd)];
-    final neighbors = <(SketchLine, String, SketchVector, SketchVector)>[];
+    final matchesByAnchor =
+        <List<(SketchLine, String, SketchVector, SketchVector)>>[];
+    // A reconstructed Section may retain a small scan gap at the old arc end.
+    // It is still the same frontier when it is within the Sketch fit budget.
+    final endpointTolerance = math.max(.25, oldRadius * .01);
     for (final anchor in anchors) {
       final matches = <(SketchLine, String, SketchVector, SketchVector)>[];
       for (final line in sketchEntities.whereType<SketchLine>()) {
@@ -6650,17 +6658,37 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         for (final key in ['start', 'end']) {
           final attached = SketchVector.fromJson(line.parameters[key]);
           final delta = attached - anchor;
-          if (delta.dot(delta) > 1e-8) continue;
+          if (delta.dot(delta) > endpointTolerance * endpointTolerance) {
+            continue;
+          }
           final other = SketchVector.fromJson(
             line.parameters[key == 'start' ? 'end' : 'start'],
           );
           matches.add((line, key, attached, other));
         }
       }
-      if (matches.length != 1) return null;
-      neighbors.add(matches.single);
+      matchesByAnchor.add(matches);
     }
-    if (neighbors[0].$1.id == neighbors[1].$1.id) return null;
+    final requiresTangency =
+        arc.metadata['reconstructionKind'] ==
+            SketchReconstructionKind.arc.name ||
+        matchesByAnchor.any((matches) => matches.isNotEmpty);
+    if (!requiresTangency) return null;
+    if (matchesByAnchor.any((matches) => matches.length != 1)) {
+      return (
+        arc: null,
+        lines: const <String, Map<String, double>>{},
+        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
+    final neighbors = matchesByAnchor.map((matches) => matches.single).toList();
+    if (neighbors[0].$1.id == neighbors[1].$1.id) {
+      return (
+        arc: null,
+        lines: const <String, Map<String, double>>{},
+        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
     SketchVector? normal(
       (SketchLine, String, SketchVector, SketchVector) item,
     ) {
@@ -6673,9 +6701,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
 
     final n0 = normal(neighbors[0]), n1 = normal(neighbors[1]);
-    if (n0 == null || n1 == null) return null;
+    if (n0 == null || n1 == null) {
+      return (
+        arc: null,
+        lines: const <String, Map<String, double>>{},
+        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
     final determinant = n0.x * n1.y - n0.y * n1.x;
-    if (determinant.abs() <= 1e-6) return null;
+    if (determinant.abs() <= 1e-6) {
+      return (
+        arc: null,
+        lines: const <String, Map<String, double>>{},
+        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
     ({Map<String, double> arc, Map<String, Map<String, double>> lines})? best;
     var bestScore = double.infinity;
     for (final sign0 in [-1.0, 1.0]) {
@@ -6696,11 +6736,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           final item = neighbors[i];
           final leg = item.$3 - item.$4;
           final length2 = leg.dot(leg);
-          final t = (contacts[i] - item.$4).dot(leg) / length2;
-          if (t < -.1 || t > 1.1) {
+          if (length2 <= 1e-12) {
             valid = false;
             break;
           }
+          // A radius edit is allowed to extend or shorten the boundary.  The
+          // contact can legitimately move beyond its former endpoint; keeping
+          // it bounded would force the non-tangent endpoint-preserving fallback.
           final movement = contacts[i] - item.$3;
           score += movement.dot(movement);
         }
@@ -6750,7 +6792,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         );
       }
     }
-    return best;
+    if (best == null) {
+      return (
+        arc: null,
+        lines: const <String, Map<String, double>>{},
+        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
+    return (arc: best.arc, lines: best.lines, failure: null);
   }
 
   void toggleSketchSelection(String id) {
@@ -12138,6 +12187,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         final tangentEdit = radiusOnly
             ? _arcRadiusEditTangentToNeighbors(entity, values['radius']!)
             : null;
+        if (tangentEdit?.failure case final failure?) {
+          throw StateError(failure);
+        }
         final resolvedValues = radiusOnly
             ? tangentEdit?.arc ??
                   _arcRadiusEditKeepingEndpoints(entity, values['radius']!)

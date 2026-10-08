@@ -505,6 +505,139 @@ void main() {
       await controller.updateSketchEntityParameters(arc.id, {'radius': 1.5});
       expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
 
+      // A larger radius moves both tangent contacts beyond the original line
+      // spans. The edit must extend the frontiers instead of falling back to
+      // the old arc endpoints and losing C1 continuity.
+      await controller.updateSketchEntityParameters(arc.id, {'radius': 3});
+      expect(arcEnd('start').x, closeTo(1, 1e-9));
+      expect(arcEnd('start').y, closeTo(-2, 1e-9));
+      expect(arcEnd('end').x, closeTo(-2, 1e-9));
+      expect(arcEnd('end').y, closeTo(1, 1e-9));
+      final extendedPreviousEnd = SketchVector.fromJson(
+        controller.sketchApi!.entity(preceding.id)!.parameters['end'],
+      );
+      final extendedNextStart = SketchVector.fromJson(
+        controller.sketchApi!.entity(following.id)!.parameters['start'],
+      );
+      expect(extendedPreviousEnd.y, closeTo(-2, 1e-9));
+      expect(extendedNextStart.x, closeTo(-2, 1e-9));
+      final centerAtThree = SketchVector.fromJson(
+        controller.sketchApi!.entity(arc.id)!.parameters['center'],
+      );
+      final extendedBeforeDirection =
+          extendedPreviousEnd -
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(preceding.id)!.parameters['start'],
+          );
+      final extendedAfterDirection =
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(following.id)!.parameters['end'],
+          ) -
+          extendedNextStart;
+      expect(
+        (arcEnd('start') - centerAtThree).dot(extendedBeforeDirection),
+        closeTo(0, 1e-9),
+      );
+      expect(
+        (arcEnd('end') - centerAtThree).dot(extendedAfterDirection),
+        closeTo(0, 1e-9),
+      );
+      await controller.undo();
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
+      await controller.redo();
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 3);
+
+      // Reducing the radius shortens the same frontiers and keeps the contact
+      // perpendicular to both line directions.
+      await controller.updateSketchEntityParameters(arc.id, {'radius': .5});
+      expect(arcEnd('start').y, closeTo(.5, 1e-9));
+      expect(arcEnd('end').x, closeTo(.5, 1e-9));
+
+      // A reconstructed arc with only one discoverable frontier must reject
+      // the edit atomically instead of falling back to isolated endpoints.
+      final rejectedArc = controller.sketchApi!.builders.arc.build(
+        const SketchVector(20, 20),
+        1,
+        0,
+        math.pi / 2,
+      );
+      rejectedArc.metadata['reconstructionKind'] = 'arc';
+      final onlyFrontier = controller.sketchApi!.builders.line.build(
+        const SketchVector(21, 19),
+        const SketchVector(21, 20),
+      );
+      await expectLater(
+        controller.updateSketchEntityParameters(rejectedArc.id, {
+          'radius': 1.5,
+        }),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.toString(),
+            'message',
+            contains(
+              'Não foi possível manter a tangência nas duas fronteiras.',
+            ),
+          ),
+        ),
+      );
+      expect(
+        controller.sketchApi!.entity(rejectedArc.id)!.parameters['radius'],
+        1,
+      );
+      expect(
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(onlyFrontier.id)!.parameters['end'],
+        ).y,
+        20,
+      );
+
+      // Frontier endpoints from a scanned Section can miss the old arc by a
+      // small amount and still must be extended to the new tangent contacts.
+      final gappedArc = controller.sketchApi!.builders.arc.build(
+        const SketchVector(40, 40),
+        1,
+        0,
+        math.pi / 2,
+      );
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(41, 39),
+        const SketchVector(41, 40.05),
+      );
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(39.95, 41),
+        const SketchVector(39, 41),
+      );
+      await controller.updateSketchEntityParameters(gappedArc.id, {
+        'radius': 1.5,
+      });
+      expect(
+        controller.sketchApi!.entity(gappedArc.id)!.parameters['radius'],
+        1.5,
+      );
+
+      // Clockwise (concave) arcs use the same bilateral tangent solution.
+      final concaveArc = controller.sketchApi!.builders.arc.build(
+        const SketchVector(60, 0),
+        1,
+        0,
+        -math.pi / 2,
+      );
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(61, 1),
+        const SketchVector(61, 0),
+      );
+      controller.sketchApi!.builders.line.build(
+        const SketchVector(60, -1),
+        const SketchVector(59, -1),
+      );
+      await controller.updateSketchEntityParameters(concaveArc.id, {
+        'radius': 1.5,
+      });
+      expect(
+        controller.sketchApi!.entity(concaveArc.id)!.parameters['radius'],
+        1.5,
+      );
+
       await controller.setSketchEntityVisibility(circle.id, false);
       final gapLineA = controller.sketchApi!.builders.line.build(
         const SketchVector(200, 200),
