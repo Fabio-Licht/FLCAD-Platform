@@ -566,6 +566,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       const [];
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
+  int _operationalCommandDepth = 0;
+  SketchReconstructionSuggestion? _reconstructionSuggestionBeingAccepted;
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
   void analyzeSketchReconstruction() {
@@ -580,6 +582,79 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchReconstructionSuggestion suggestion, {
     bool allowLowConfidence = false,
   }) async {
+    if (!_canAcceptSketchReconstructionSuggestion(
+      suggestion,
+      allowLowConfidence: allowLowConfidence,
+    )) {
+      return null;
+    }
+    final isCircularPromotion =
+        suggestion.kind == SketchReconstructionKind.circle ||
+        suggestion.kind == SketchReconstructionKind.arc;
+    // Manual circularFit already runs inside reverse.sketch.circularFit.
+    // Re-entering _run here would stack a second command for one user action.
+    if (_operationalCommandDepth > 0) {
+      final applied = await _applySketchReconstructionSuggestion(
+        suggestion,
+        allowLowConfidence: allowLowConfidence,
+      );
+      return isCircularPromotion ? applied?.createdId : null;
+    }
+    _reconstructionSuggestionBeingAccepted = suggestion;
+    final parameters = <String, Object?>{
+      'allowLowConfidence': allowLowConfidence,
+    };
+    try {
+      await _run('reverse.sketch.acceptReconstruction', parameters);
+      if (error != null) return null;
+      return isCircularPromotion ? parameters['createdId'] as String? : null;
+    } finally {
+      _reconstructionSuggestionBeingAccepted = null;
+    }
+  }
+
+  bool _canAcceptSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion, {
+    required bool allowLowConfidence,
+  }) {
+    final api = sketchApi;
+    if (api == null) return false;
+    final entities = suggestion.entityIds
+        .map(api.entity)
+        .whereType<SketchEntity>()
+        .toList(growable: false);
+    if (entities.length != suggestion.entityIds.length) return false;
+    final isCircularPromotion =
+        suggestion.kind == SketchReconstructionKind.circle ||
+        suggestion.kind == SketchReconstructionKind.arc;
+    if (isCircularPromotion &&
+        suggestion.confidence < .75 &&
+        !allowLowConfidence) {
+      error =
+          'Arco/círculo rejeitado: confiança ${(suggestion.confidence * 100).toStringAsFixed(0)}% (mínimo 75%).';
+      notifyListeners();
+      return false;
+    }
+    if (suggestion.kind == SketchReconstructionKind.parallel ||
+        suggestion.kind == SketchReconstructionKind.perpendicular) {
+      return constraintApi != null;
+    }
+    return true;
+  }
+
+  Future<
+    ({
+      String? createdId,
+      String? constraintId,
+      List<String> hiddenIds,
+      List<String> usedIds,
+      bool promotedCurve,
+    })?
+  >
+  _applySketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion, {
+    bool allowLowConfidence = false,
+  }) async {
     final api = sketchApi;
     if (api == null) return null;
     final entities = suggestion.entityIds
@@ -591,6 +666,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         suggestion.kind == SketchReconstructionKind.circle ||
         suggestion.kind == SketchReconstructionKind.arc;
     String? promotedId;
+    String? constraintId;
+    final hiddenIds = <String>[];
+    final usedIds = suggestion.usedEntityIds.isEmpty
+        ? List<String>.from(suggestion.entityIds)
+        : List<String>.from(suggestion.usedEntityIds);
+    var promotedCurve = false;
     if (suggestion.kind == SketchReconstructionKind.parallel ||
         suggestion.kind == SketchReconstructionKind.perpendicular) {
       final type = suggestion.kind == SketchReconstructionKind.parallel
@@ -599,7 +680,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final constraints = constraintApi;
       if (constraints == null) return null;
       final created = constraints.builders.of(type).build(suggestion.entityIds);
-      await constraints.solve(only: [created.id]);
+      constraintId = created.id;
+      try {
+        await constraints.solve(only: [created.id]);
+      } catch (_) {
+        constraints.engine.undo();
+        rethrow;
+      }
     } else {
       if (isCircularPromotion &&
           suggestion.confidence < .75 &&
@@ -635,6 +722,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                   suggestion.endAngle!,
                 );
           promotedId = promoted.id;
+          promotedCurve = true;
           api.engine.modify(promoted.id, SketchHistoryAction.modify, (value) {
             value.metadata['reconstructionKind'] = suggestion.kind.name;
             value.metadata.remove('reconstructionHidden');
@@ -645,6 +733,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               if (!suggestion.entityIds.contains(id)) ?api.entity(id),
           ];
           for (final entity in replacementEntities) {
+            hiddenIds.add(entity.id);
             api.engine.modify(entity.id, SketchHistoryAction.modify, (value) {
               value.metadata['reconstructionKind'] = suggestion.kind.name;
               // This distinguishes source curves replaced by a reconstruction
@@ -665,16 +754,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           }
         }
       });
-      if (promotedId != null) {
-        selectedSketchEntityIds
-          ..clear()
-          ..add(promotedId!);
-        runtime.select(selectedSketchEntityIds);
-      }
     }
-    _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
-        .where((item) => !identical(item, suggestion))
-        .toList(growable: false);
+    if (promotedCurve) {
+      final merged = <String>{
+        ...usedIds,
+        ...suggestion.coveredEntityIds,
+        ...hiddenIds,
+      };
+      hiddenIds
+        ..clear()
+        ..addAll(merged);
+    }
+    _forgetSketchReconstructionSuggestion(suggestion);
     if (!_acceptedSketchReconstructionSuggestions.any(
       (item) =>
           item.kind == suggestion.kind &&
@@ -684,8 +775,66 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _acceptedSketchReconstructionSuggestions.add(suggestion);
     }
     await _synchronizeSketchScene();
+    if (promotedId != null) {
+      selectedSketchEntityIds
+        ..clear()
+        ..add(promotedId!);
+      runtime.select({..._selectionWithDimensions()});
+    }
     notifyListeners();
-    return isCircularPromotion ? promotedId : null;
+    return (
+      createdId: promotedId,
+      constraintId: constraintId,
+      hiddenIds: List<String>.from(hiddenIds),
+      usedIds: usedIds,
+      promotedCurve: promotedCurve,
+    );
+  }
+
+  void _forgetSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
+        .where(
+          (item) =>
+              !(item.kind == suggestion.kind &&
+                  item.entityIds.length == suggestion.entityIds.length &&
+                  item.entityIds.every(suggestion.entityIds.contains)),
+        )
+        .toList(growable: false);
+  }
+
+  Future<void> _presentSketchReconstruction({
+    required String? createdId,
+    required List<String> hiddenIds,
+    required List<String> usedIds,
+    required bool applied,
+  }) async {
+    await _synchronizeSketchScene();
+    for (final id in hiddenIds) {
+      if (runtime.document?.entities[id] == null) continue;
+      await runtime.setEntityVisibility(id, !applied);
+    }
+    if (createdId != null) {
+      selectedSketchEntityIds
+        ..clear()
+        ..addAll(applied ? <String>[createdId] : usedIds);
+      final selection = {..._selectionWithDimensions()};
+      runtime.select(selection);
+      runtime.scene.select(selection);
+    }
+  }
+
+  Future<void> _rollbackSketchReconstructionApply({
+    required bool constraintHistory,
+  }) async {
+    if (constraintHistory) {
+      constraintApi?.engine.undo();
+      constraintApi?.engine.undo();
+    } else {
+      sketchApi?.engine.undo();
+    }
+    await _synchronizeSketchScene();
   }
 
   /// Fits a native circle/arc from a short chain selected directly on the
@@ -1030,10 +1179,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         suggestion.radius == null) {
       throw StateError('Ajuste circular rejeitado.');
     }
-    final promotedId = await acceptSketchReconstructionSuggestion(
+    final applied = await _applySketchReconstructionSuggestion(
       suggestion,
       allowLowConfidence: true,
     );
+    final promotedId = applied?.createdId;
     if (promotedId == null) {
       throw StateError('Ajuste circular rejeitado.');
     }
@@ -12116,11 +12266,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     busy = true;
     error = null;
     notifyListeners();
+    _operationalCommandDepth++;
     try {
       await commands.dispatch(id, parameters);
     } catch (value) {
       error = value.toString().replaceFirst('Bad state: ', '');
     } finally {
+      _operationalCommandDepth--;
       busy = false;
       notifyListeners();
     }
@@ -12277,6 +12429,111 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           applied: true,
         );
         return createdId;
+      },
+    );
+
+    register(
+      id: 'reverse.sketch.acceptReconstruction',
+      execute: (parameters) async {
+        final suggestion =
+            _reconstructionSuggestionBeingAccepted ??
+            (throw StateError('No reconstruction suggestion is pending.'));
+        final allowLowConfidence =
+            parameters['allowLowConfidence'] as bool? ?? false;
+        if (!_canAcceptSketchReconstructionSuggestion(
+          suggestion,
+          allowLowConfidence: allowLowConfidence,
+        )) {
+          throw StateError('Reconstruction suggestion is no longer valid.');
+        }
+        final applied = await _applySketchReconstructionSuggestion(
+          suggestion,
+          allowLowConfidence: allowLowConfidence,
+        );
+        if (applied == null) {
+          throw StateError('Reconstruction suggestion is no longer valid.');
+        }
+        parameters['createdId'] = applied.createdId;
+        parameters['constraintId'] = applied.constraintId;
+        parameters['hiddenIds'] = List<String>.from(applied.hiddenIds);
+        parameters['usedIds'] = List<String>.from(applied.usedIds);
+        parameters['entityIds'] = List<String>.from(suggestion.entityIds);
+        parameters['kind'] = suggestion.kind.name;
+        parameters['constraintHistory'] = applied.constraintId != null;
+        try {
+          await _presentSketchReconstruction(
+            createdId: applied.createdId,
+            hiddenIds: applied.hiddenIds,
+            usedIds: applied.usedIds,
+            applied: true,
+          );
+        } catch (_) {
+          await _rollbackSketchReconstructionApply(
+            constraintHistory: applied.constraintId != null,
+          );
+          rethrow;
+        }
+        return applied.createdId ?? applied.constraintId ?? suggestion.kind.name;
+      },
+      undo: (parameters) async {
+        final hiddenIds = (parameters['hiddenIds']! as List).cast<String>();
+        final usedIds = (parameters['usedIds']! as List).cast<String>();
+        final createdId = parameters['createdId'] as String?;
+        final constraintHistory = parameters['constraintHistory'] == true;
+        if (constraintHistory) {
+          final geometryUndone = constraintApi?.engine.undo() == true;
+          final constraintUndone = constraintApi?.engine.undo() == true;
+          if (!geometryUndone || !constraintUndone) {
+            throw StateError(
+              'No reconstruction constraint is available to undo.',
+            );
+          }
+        } else if (sketchApi?.engine.undo() != true) {
+          throw StateError('No reconstruction is available to undo.');
+        }
+        await _presentSketchReconstruction(
+          createdId: createdId,
+          hiddenIds: hiddenIds,
+          usedIds: usedIds,
+          applied: false,
+        );
+        return 'reconstruction undone';
+      },
+      redo: (parameters) async {
+        final hiddenIds = (parameters['hiddenIds']! as List).cast<String>();
+        final usedIds = (parameters['usedIds']! as List).cast<String>();
+        final createdId = parameters['createdId'] as String?;
+        final constraintHistory = parameters['constraintHistory'] == true;
+        if (constraintHistory) {
+          final constraintRedone = constraintApi?.engine.redo() == true;
+          final geometryRedone = constraintApi?.engine.redo() == true;
+          if (!constraintRedone || !geometryRedone) {
+            throw StateError(
+              'No reconstruction constraint is available to redo.',
+            );
+          }
+        } else if (sketchApi?.engine.redo() != true) {
+          throw StateError('No reconstruction is available to redo.');
+        }
+        await _presentSketchReconstruction(
+          createdId: createdId,
+          hiddenIds: hiddenIds,
+          usedIds: usedIds,
+          applied: true,
+        );
+        final kindName = parameters['kind'] as String?;
+        final entityIds = (parameters['entityIds'] as List?)?.cast<String>();
+        if (kindName != null && entityIds != null) {
+          _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
+              .where(
+                (item) =>
+                    !(item.kind.name == kindName &&
+                        item.entityIds.length == entityIds.length &&
+                        item.entityIds.every(entityIds.contains)),
+              )
+              .toList(growable: false);
+        }
+        return createdId ?? parameters['constraintId'] ?? 'reconstruction';
       },
     );
 

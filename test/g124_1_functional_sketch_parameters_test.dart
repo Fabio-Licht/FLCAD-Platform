@@ -20,6 +20,7 @@ import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/reference_engine/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart';
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
+import 'package:flcad_mobile/core/sketch_assistant/sketch_reconstruction.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
@@ -1884,6 +1885,446 @@ void main() {
       expect(controller.sketchCircularFitConfirmed, isFalse);
       expect(controller.sketchCircularFitMessage, contains('colineares'));
     },
+  );
+
+  test(
+    'assistant reconstruction joins global Undo/Redo without a second circularFit command',
+    () async {
+      final harness = await _g124Harness('g124-2-assistant');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final cad = harness.cad;
+
+      SketchVector arcPoint(
+        double cx,
+        double cy,
+        double radius,
+        double angle,
+      ) => SketchVector(cx + radius * math.cos(angle), cy + radius * math.sin(angle));
+      List<SketchLine> chain({
+        required double cx,
+        required double cy,
+        required double radius,
+        required double a0,
+        required double a1,
+        int count = 5,
+      }) => [
+        for (var index = 0; index < count; index++)
+          controller.sketchApi!.builders.line.build(
+            arcPoint(cx, cy, radius, a0 + (a1 - a0) * index / count),
+            arcPoint(cx, cy, radius, a0 + (a1 - a0) * (index + 1) / count),
+          ),
+      ];
+
+      final firstSources = chain(cx: 40, cy: 0, radius: 18, a0: 0.4, a1: 1.7);
+      final secondSources = chain(cx: 140, cy: 0, radius: 16, a0: 0.3, a1: 1.5);
+      final lineSources = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(300, 0),
+          const SketchVector(310, 0),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(310, 0),
+          const SketchVector(320, 0),
+        ),
+      ];
+      final horizontal = controller.sketchApi!.builders.line.build(
+        const SketchVector(400, 0),
+        const SketchVector(430, 0),
+      );
+      final vertical = controller.sketchApi!.builders.line.build(
+        const SketchVector(500, 0),
+        const SketchVector(500, 20),
+      );
+
+      controller.analyzeSketchReconstruction();
+      final firstSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                (item.kind == SketchReconstructionKind.arc ||
+                    item.kind == SketchReconstructionKind.circle) &&
+                item.entityIds.every(
+                  (id) => firstSources.any((source) => source.id == id),
+                ) &&
+                item.center != null,
+          );
+      expect(firstSuggestion.confidence, greaterThanOrEqualTo(.75));
+      final promotedId = await controller.acceptSketchReconstructionSuggestion(
+        firstSuggestion,
+      );
+      expect(promotedId, isNotNull);
+      expect(
+        controller.commands.manager.history
+            .where((record) => record.operation == 'execute')
+            .last
+            .commandId,
+        'reverse.sketch.acceptReconstruction',
+      );
+      Future<void> expectAssistantApplied(
+        String createdId,
+        List<SketchLine> sources, {
+        bool selected = true,
+      }) async {
+        expect(controller.sketchApi!.entity(createdId), isNotNull);
+        expect(cad.runtime.document!.entities.containsKey(createdId), isTrue);
+        expect(cad.runtime.scene.find(createdId)!.visible, isTrue);
+        if (selected) {
+          expect(controller.selectedSketchEntityIds, {createdId});
+          expect(cad.runtime.scene.find(createdId)!.selected, isTrue);
+        }
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == false,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) =>
+                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+                false,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) => cad.runtime.scene.find(source.id)?.visible == false,
+          ),
+          isTrue,
+        );
+      }
+
+      Future<void> expectAssistantUndone(String createdId, List<SketchLine> sources) async {
+        expect(controller.sketchApi!.entity(createdId), isNull);
+        expect(cad.runtime.document!.entities.containsKey(createdId), isFalse);
+        expect(cad.runtime.scene.find(createdId), isNull);
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) => cad.runtime.scene.find(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) =>
+                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] !=
+                false,
+          ),
+          isTrue,
+        );
+      }
+
+      await expectAssistantApplied(promotedId!, firstSources);
+      await controller.undo();
+      await expectAssistantUndone(promotedId, firstSources);
+      await controller.redo();
+      await expectAssistantApplied(promotedId, firstSources);
+      await controller.undo();
+      await expectAssistantUndone(promotedId, firstSources);
+      await controller.redo();
+      await expectAssistantApplied(promotedId, firstSources);
+
+      controller.analyzeSketchReconstruction();
+      final secondSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                (item.kind == SketchReconstructionKind.arc ||
+                    item.kind == SketchReconstructionKind.circle) &&
+                item.entityIds.every(
+                  (id) => secondSources.any((source) => source.id == id),
+                ) &&
+                item.center != null,
+          );
+      final secondId = await controller.acceptSketchReconstructionSuggestion(
+        secondSuggestion,
+      );
+      expect(secondId, isNotNull);
+      await expectAssistantApplied(secondId!, secondSources);
+      await expectAssistantApplied(promotedId, firstSources, selected: false);
+      await controller.undo();
+      await expectAssistantUndone(secondId, secondSources);
+      await expectAssistantApplied(promotedId, firstSources, selected: false);
+      await controller.redo();
+      await expectAssistantApplied(secondId, secondSources);
+
+      controller.analyzeSketchReconstruction();
+      final lineSuggestion = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.line &&
+                item.entityIds.every(
+                  (id) => lineSources.any((source) => source.id == id),
+                ),
+          );
+      await controller.acceptSketchReconstructionSuggestion(lineSuggestion);
+      expect(
+        lineSources.every(
+          (source) =>
+              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] ==
+              'line',
+        ),
+        isTrue,
+      );
+      expect(controller.sketchApi!.entity(promotedId), isNotNull);
+      await controller.undo();
+      expect(
+        lineSources.every(
+          (source) =>
+              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] !=
+              'line',
+        ),
+        isTrue,
+      );
+      expect(controller.sketchApi!.entity(promotedId), isNotNull);
+      await controller.redo();
+      expect(
+        lineSources.every(
+          (source) =>
+              controller.sketchApi!.entity(source.id)!.metadata['reconstructionKind'] ==
+              'line',
+        ),
+        isTrue,
+      );
+      await controller.undo();
+      await controller.redo();
+
+      controller.analyzeSketchReconstruction();
+      final perpendicular = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (item) =>
+                item.kind == SketchReconstructionKind.perpendicular &&
+                item.entityIds.contains(horizontal.id) &&
+                item.entityIds.contains(vertical.id),
+          );
+      await controller.acceptSketchReconstructionSuggestion(perpendicular);
+      final constraintId = controller.constraints
+          .firstWhere(
+            (item) =>
+                item.type == SketchConstraintType.perpendicular &&
+                item.references.contains(horizontal.id) &&
+                item.references.contains(vertical.id),
+          )
+          .id;
+      await controller.undo();
+      expect(
+        controller.constraints.any((item) => item.id == constraintId),
+        isFalse,
+      );
+      await controller.redo();
+      expect(
+        controller.constraints.any((item) => item.id == constraintId),
+        isTrue,
+      );
+      await controller.undo();
+      await controller.redo();
+      expect(
+        controller.constraints.any((item) => item.id == constraintId),
+        isTrue,
+      );
+
+      final regionSources = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(600, 0),
+          const SketchVector(605, 0),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(625, 0),
+          const SketchVector(630, 0),
+        ),
+      ];
+      controller.beginSketchCircularSelection();
+      for (final source in regionSources) {
+        controller.selectSketchEntity(source.id);
+      }
+      controller.setSketchRegionFitOutput(SketchRegionFitOutput.line);
+      await controller.fitSelectedSketchLineOrSpline();
+      final regionId = controller.selectedSketchEntityIds.single;
+      expect(controller.sketchApi!.entity(regionId), isA<SketchLine>());
+      await controller.undo();
+      expect(controller.sketchApi!.entity(regionId), isNull);
+      expect(
+        regionSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      await expectAssistantApplied(promotedId, firstSources, selected: false);
+      await expectAssistantApplied(secondId, secondSources, selected: false);
+
+      final acceptCount = controller.commands.manager.history
+          .where(
+            (record) =>
+                record.operation == 'execute' &&
+                record.commandId == 'reverse.sketch.acceptReconstruction',
+          )
+          .length;
+      final circularSources = chain(
+        cx: 80,
+        cy: 80,
+        radius: 14,
+        a0: 0.2,
+        a1: 1.4,
+      );
+      controller.beginSketchCircularSelection();
+      for (final source in circularSources) {
+        controller.selectSketchEntity(source.id);
+      }
+      await controller.fitSelectedSketchCircularGeometry();
+      expect(controller.sketchCircularFitConfirmed, isTrue);
+      expect(
+        controller.commands.manager.history
+            .where((record) => record.operation == 'execute')
+            .last
+            .commandId,
+        'reverse.sketch.circularFit',
+      );
+      expect(
+        controller.commands.manager.history
+            .where(
+              (record) =>
+                  record.operation == 'execute' &&
+                  record.commandId == 'reverse.sketch.acceptReconstruction',
+            )
+            .length,
+        acceptCount,
+      );
+      final circularId = controller.selectedSketchEntityIds.single;
+      await controller.undo();
+      expect(controller.sketchApi!.entity(circularId), isNull);
+      expect(
+        circularSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      await expectAssistantApplied(promotedId, firstSources, selected: false);
+
+      final canUndo = controller.commands.manager.canUndo;
+      final missing = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.arc,
+        entityIds: const ['missing-a', 'missing-b'],
+        confidence: 0.99,
+        center: const SketchVector(0, 0),
+        radius: 10,
+        startAngle: 0,
+        endAngle: 1,
+      );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(missing),
+        isNull,
+      );
+      expect(controller.commands.manager.canUndo, canUndo);
+
+      final weak = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.arc,
+        entityIds: firstSources.map((source) => source.id).toList(),
+        confidence: 0.2,
+        center: const SketchVector(40, 0),
+        radius: 18,
+        startAngle: 0.4,
+        endAngle: 1.7,
+      );
+      expect(await controller.acceptSketchReconstructionSuggestion(weak), isNull);
+      expect(controller.error, contains('confiança'));
+      expect(controller.commands.manager.canUndo, canUndo);
+      await expectAssistantApplied(promotedId, firstSources, selected: false);
+
+      await controller.persist();
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open('g124-2-assistant', harness.directory);
+      await reopened.configureProject(
+        projectId: 'g124-2-assistant',
+        projectDirectory: harness.directory,
+      );
+      expect(reopened.sketchApi!.entity(promotedId), isNotNull);
+      expect(reopened.sketchApi!.entity(secondId), isNotNull);
+      expect(
+        firstSources.every(
+          (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(reopened.commands.manager.canUndo, isFalse);
+    },
+  );
+}
+
+Future<
+  ({
+    Directory directory,
+    DesktopCadController cad,
+    OperationalReverseEngineeringController controller,
+    ProjectRepository projects,
+  })
+>
+_g124Harness(String name) async {
+  final directory = await Directory.systemTemp.createTemp('${name}_');
+  final kernels = KernelManager()
+    ..register(_HealthySurfaceKernel(), makeDefault: true);
+  final cad = DesktopCadController(
+    kernels: kernels,
+    projects: ProjectManager.instance,
+  );
+  final commands = DesktopCommandCoordinator(
+    cad: cad,
+    projects: ProjectManager.instance,
+  );
+  final projects = ProjectRepository(
+    storage: LocalStorageService(rootDirectory: directory),
+  );
+  final controller = OperationalReverseEngineeringController(
+    recognition: ProfessionalRecognitionApi(),
+    commands: commands,
+    runtime: cad.runtime,
+    referenceApi: ReferenceApi(
+      engine: ReferenceEngine(
+        repository: ReferenceRepository(projects: projects),
+      ),
+    ),
+  );
+  await cad.runtime.open(name, directory);
+  await controller.configureProject(
+    projectId: name,
+    projectDirectory: directory,
+  );
+  controller.selectWorldSketchPlane(SketchPlaneType.xy);
+  await controller.openSketch();
+  return (
+    directory: directory,
+    cad: cad,
+    controller: controller,
+    projects: projects,
   );
 }
 
