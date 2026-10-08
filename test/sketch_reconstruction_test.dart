@@ -26,14 +26,116 @@ void main() {
           expect(fit!.usedEntityIds, hasLength(count));
           expect(fit.maxGapMillimeters, closeTo(gap, .01));
           expect(fit.rmsError, lessThan(.1));
-          // The chain may be oriented in either direction, but its two real
-          // outer endpoints must be retained.
+          // The chain may be oriented in either direction, but the two real
+          // outer endpoints are projected onto the PCA line.
+          final span = (count - 1) * (5 + gap) + 5;
           expect(
-            {fit.start.x, fit.end.x},
-            {0.0, (count - 1) * (5 + gap) + 5},
+            {fit.start.x, fit.end.x}.reduce(math.min),
+            closeTo(0.0, 1e-3),
           );
+          expect(
+            {fit.start.x, fit.end.x}.reduce(math.max),
+            closeTo(span, 1e-3),
+          );
+          expect(fit.start.y.abs(), lessThan(0.02));
+          expect(fit.end.y.abs(), lessThan(0.02));
         }
       }
+    });
+
+    test('line endpoints lie on the PCA axis between the projected chain ends', () {
+      final first = SketchLine(
+        const SketchVector(0, 1),
+        const SketchVector(10, 1),
+      );
+      final second = SketchLine(
+        const SketchVector(12, -1),
+        const SketchVector(22, -1),
+      );
+      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+        second,
+        first,
+      ]);
+      expect(fit, isNotNull);
+
+      const chainStart = SketchVector(0, 1);
+      const chainEnd = SketchVector(22, -1);
+      final samples = <SketchVector>[
+        chainStart,
+        const SketchVector(10, 1),
+        const SketchVector(12, -1),
+        chainEnd,
+      ];
+      final mean = samples
+          .fold(const SketchVector(0, 0), (sum, point) => sum + point)
+          .scale(1 / samples.length);
+      var xx = 0.0, xy = 0.0, yy = 0.0;
+      for (final point in samples) {
+        final delta = point - mean;
+        xx += delta.x * delta.x;
+        xy += delta.x * delta.y;
+        yy += delta.y * delta.y;
+      }
+      final angle = .5 * math.atan2(2 * xy, xx - yy);
+      var direction = SketchVector(math.cos(angle), math.sin(angle));
+      if ((chainEnd - chainStart).dot(direction) < 0) {
+        direction = direction.scale(-1);
+      }
+      SketchVector project(SketchVector point) =>
+          mean + direction.scale((point - mean).dot(direction));
+      double cross(SketchVector point) {
+        final delta = point - mean;
+        return (delta.x * direction.y - delta.y * direction.x).abs();
+      }
+
+      final expectedStart = project(chainStart);
+      final expectedEnd = project(chainEnd);
+      expect(cross(fit!.start), lessThan(1e-9));
+      expect(cross(fit.end), lessThan(1e-9));
+      final lineDirection = fit.end - fit.start;
+      expect(
+        (lineDirection.x * direction.y - lineDirection.y * direction.x).abs(),
+        lessThan(1e-9),
+      );
+      expect(
+        (_distance(fit.start, expectedStart) < 1e-9 &&
+                _distance(fit.end, expectedEnd) < 1e-9) ||
+            (_distance(fit.start, expectedEnd) < 1e-9 &&
+                _distance(fit.end, expectedStart) < 1e-9),
+        isTrue,
+      );
+      expect(_distance(fit.start, chainStart), greaterThan(1e-6));
+      expect(_distance(fit.end, chainEnd), greaterThan(1e-6));
+
+      double param(SketchVector point) => (point - mean).dot(direction);
+      final fittedParams = [param(fit.start), param(fit.end)]..sort();
+      final expectedParams = [param(expectedStart), param(expectedEnd)]..sort();
+      expect(fittedParams[0], closeTo(expectedParams[0], 1e-9));
+      expect(fittedParams[1], closeTo(expectedParams[1], 1e-9));
+
+      var squared = 0.0, maximum = 0.0;
+      for (final point in fit.referencePoints) {
+        final error = cross(point);
+        squared += error * error;
+        maximum = math.max(maximum, error);
+      }
+      expect(
+        fit.rmsError,
+        closeTo(math.sqrt(squared / fit.referencePoints.length), 1e-12),
+      );
+      expect(fit.maxError, closeTo(maximum, 1e-12));
+      expect(
+        fit.points.any(
+          (point) => (point.x - 0).abs() < 1e-9 && (point.y - 1).abs() < 1e-9,
+        ),
+        isTrue,
+      );
+      expect(
+        fit.points.any(
+          (point) => (point.x - 22).abs() < 1e-9 && (point.y + 1).abs() < 1e-9,
+        ),
+        isTrue,
+      );
     });
 
     test('preserves spline form and rejects insufficient or degenerate input', () {

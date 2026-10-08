@@ -315,7 +315,8 @@ class SketchReconstructionEngine {
   const SketchReconstructionEngine();
 
   /// Orders every selected region and computes a stable PCA line fit.  The
-  /// real external endpoints are retained even when the samples have gaps.
+  /// real external endpoints are projected onto that line; spline knots stay
+  /// on the original samples.
   SketchRegionFitResult? fitSelectedLineOrSpline(
     Iterable<SketchEntity> selected, {
     SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
@@ -382,7 +383,19 @@ class SketchReconstructionEngine {
       );
     }
     final angle = .5 * math.atan2(2 * xy, xx - yy);
-    final direction = SketchVector(math.cos(angle), math.sin(angle));
+    var direction = SketchVector(math.cos(angle), math.sin(angle));
+    if ((selection.end - selection.start).dot(direction) < 0) {
+      direction = direction.scale(-1);
+    }
+    SketchVector project(SketchVector point) =>
+        mean + direction.scale((point - mean).dot(direction));
+    final lineStart = project(selection.start);
+    final lineEnd = project(selection.end);
+    if (_distance(lineStart, lineEnd) <= 1e-9) {
+      return const SketchRegionFitDiagnosis.failure(
+        SketchRegionFitFailure.degenerateGeometry,
+      );
+    }
     var squared = 0.0, maximum = 0.0;
     for (final point in points) {
       final delta = point - mean;
@@ -396,8 +409,8 @@ class SketchReconstructionEngine {
       );
     }
     return SketchRegionFitDiagnosis.success(SketchRegionFitResult(
-      start: selection.start,
-      end: selection.end,
+      start: lineStart,
+      end: lineEnd,
       points: _reduceSplineKnots(points),
       referencePoints: List.unmodifiable(points),
       referenceRegions: List.unmodifiable(
