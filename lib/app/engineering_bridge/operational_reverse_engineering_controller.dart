@@ -835,104 +835,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    final promotedId = await acceptSketchReconstructionSuggestion(
-      suggestion,
-      allowLowConfidence: true,
-    );
-    if (promotedId == null) return;
-    final promotedEntity = api.entity(promotedId);
-    final toleranceLimitDegrees =
-        const SketchCircularFitTolerance().tangencyAngleRadians * 180 / math.pi;
-    var measuredStart = suggestion.tangencyStartDegrees;
-    var measuredEnd = suggestion.tangencyEndDegrees;
-    // The tangency is validated on the *created* arc, not on the solver input:
-    // if the final geometry breaks either junction, the promotion is rolled
-    // back instead of leaving a visible kink on screen.
-    if (startTangencyId != null &&
-        endTangencyId != null &&
-        promotedEntity is SketchArc) {
-      final startReference = api.entity(startTangencyId);
-      final endReference = api.entity(endTangencyId);
-      final angles = startReference == null || endReference == null
-          ? null
-          : _sketchReconstruction.measureCreatedArcTangency(
-              arc: promotedEntity,
-              startReference: startReference,
-              endReference: endReference,
-            );
-      if (angles == null ||
-          angles.startDegrees > toleranceLimitDegrees ||
-          angles.endDegrees > toleranceLimitDegrees) {
-        api.engine.undo();
-        await _synchronizeSketchScene();
-        selectedSketchEntityIds.clear();
-        runtime.select(const <String>{});
-        final message = angles == null
-            ? 'Tangência incompatível: não foi possível medir o arco final.'
-            : 'Tangência incompatível: inicial ${angles.startDegrees.toStringAsFixed(2)}°, final ${angles.endDegrees.toStringAsFixed(2)}°';
-        sketchCircularFitMessage = message;
-        error = message;
-        runtime.write('sketch.circularFit.confirmed', false);
-        notifyListeners();
-        return;
-      }
-      measuredStart = angles.startDegrees;
-      measuredEnd = angles.endDegrees;
-    }
-    // Every region that took part in the fit is hidden through the document
-    // state as well, so the promoted arc is the only active geometry on that
-    // stretch.  Regions and reference curves outside the selection keep their
-    // visibility.
-    final usedIds = suggestion.usedEntityIds.isEmpty
-        ? suggestion.entityIds
-        : suggestion.usedEntityIds;
-    final hiddenIds = <String>{...usedIds, ...suggestion.coveredEntityIds};
-    for (final id in hiddenIds) {
-      await runtime.setEntityVisibility(id, false);
-    }
-    // Report the *effective* hiding state of each region: the panel has to tell
-    // a temporary selection drawing apart from a source curve that stayed
-    // visible after confirmation.
-    final document = runtime.document;
-    final hiddenCount = usedIds
-        .where(
-          (id) =>
-              document?.entities[id]?.data['sceneVisible'] == false &&
-              runtime.scene.find(id)?.visible == false,
-        )
-        .length;
-    final continuity = switch (suggestion.circularFitQuality) {
-      SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
-      SketchCircularFitQuality.c1Partial =>
-        'advertência: C1 parcial aplicado; ajuste pelos pontos nas demais extremidades',
-      SketchCircularFitQuality.geometricFallback || null =>
-        'ajuste por mínimos quadrados dos pontos, sem tangência bilateral',
-    };
-    final manualTangency = startTangencyId != null || endTangencyId != null;
-    final usedLabel = usedIds
-        .map((id) => id.length > 6 ? id.substring(id.length - 6) : id)
-        .join(', ');
-    final measurements = <String>[
-      '${usedIds.length} região(ões) usada(s) [$usedLabel] · ocultas $hiddenCount/${usedIds.length}',
-      if (suggestion.maxGapMillimeters != null &&
-          suggestion.maxGapMillimeters! > 0)
-        'gap máx ${suggestion.maxGapMillimeters!.toStringAsFixed(3)} mm',
-      if (measuredStart != null)
-        'erro angular inicial ${measuredStart.toStringAsFixed(2)}°',
-      if (measuredEnd != null)
-        'erro angular final ${measuredEnd.toStringAsFixed(2)}°',
-    ];
-    final warnings = <String>[...measurements, ...suggestion.warnings];
-    sketchCircularFitMessage =
-        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} confirmado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
-    runtime.write('sketch.circularSelectionMode', false);
-    // References are local to one reconstruction. Leaving them set made a
-    // later arc inherit unrelated boundary curves.
-    runtime.write('sketch.tangency.startId', null);
-    runtime.write('sketch.tangency.endId', null);
-    runtime.write('sketch.tangency.pickTarget', null);
-    runtime.write('sketch.circularFit.confirmed', true);
-    notifyListeners();
+    await _run('reverse.sketch.circularFit', <String, Object?>{});
   }
 
   String? sketchRegionFitMessage;
@@ -975,60 +878,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    if (sketchRegionFitOutput == SketchRegionFitOutput.line) {
-      await _run('reverse.sketch.regionFit', <String, Object?>{});
-      return;
-    }
-    String? createdId;
-    api.engine.transaction('sketch.reconstruction.regionFit', () {
-      final created = sketchRegionFitOutput == SketchRegionFitOutput.line
-          ? api.builders.line.build(fit.start, fit.end)
-          : api.builders.spline.build(fit.points);
-      createdId = created.id;
-      api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
-        value.metadata['reconstructionKind'] = sketchRegionFitOutput.name;
-        // Persisting this small local-space sample set lets the visual-only
-        // overlay return after reopening without introducing a new document
-        // entity, constraint, or profile member.
-        value.metadata['regionFitReferencePoints'] = fit.referencePoints
-            .map((point) => point.toJson())
-            .toList(growable: false);
-        value.metadata['regionFitReferenceRegions'] = fit.referenceRegions
-            .map(
-              (region) => region
-                  .map((point) => point.toJson())
-                  .toList(growable: false),
-            )
-            .toList(growable: false);
-        value.metadata['regionFitSourceIds'] = fit.usedEntityIds;
-        value.metadata['regionFitVisualComparison'] = true;
-      });
-      for (final id in fit.usedEntityIds) {
-        api.engine.modify(id, SketchHistoryAction.modify, (value) {
-          value.metadata['reconstructionKind'] = sketchRegionFitOutput.name;
-          value.metadata['reconstructionHidden'] = true;
-          value.visible = false;
-        });
-      }
-    });
-    await _synchronizeSketchScene();
-    for (final id in fit.usedEntityIds) {
-      await runtime.setEntityVisibility(id, false);
-    }
-    selectedSketchEntityIds
-      ..clear()
-      ..add(createdId!);
-    runtime.select(selectedSketchEntityIds);
-    if (runtime.document case final document?) {
-      _publishRegionFitComparisonOverlays(api.sketches, document);
-    }
-    runtime.write('sketch.circularSelectionMode', false);
-    runtime.write('sketch.tangency.startId', null);
-    runtime.write('sketch.tangency.endId', null);
-    runtime.write('sketch.tangency.pickTarget', null);
-    final kind = sketchRegionFitOutput == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
-    sketchRegionFitMessage = '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${sketchRegionFitOutput == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
-    notifyListeners();
+    await _run('reverse.sketch.regionFit', <String, Object?>{});
   }
 
   String _regionFitFailureMessage(SketchRegionFitFailure? failure) =>
@@ -1058,14 +908,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .toList(growable: false);
   }
 
-  Future<String> _promoteLineRegionFit(SketchRegionFitResult fit) async {
+  Future<String> _promoteRegionFit(SketchRegionFitResult fit) async {
     final api = sketchApi ?? (throw StateError('Sketch is not available.'));
+    final output = sketchRegionFitOutput;
     String? createdId;
     api.engine.transaction('sketch.reconstruction.regionFit', () {
-      final created = api.builders.line.build(fit.start, fit.end);
+      final created = output == SketchRegionFitOutput.line
+          ? api.builders.line.build(fit.start, fit.end)
+          : api.builders.spline.build(fit.points);
       createdId = created.id;
       api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
-        value.metadata['reconstructionKind'] = SketchRegionFitOutput.line.name;
+        value.metadata['reconstructionKind'] = output.name;
         value.metadata['regionFitReferencePoints'] = fit.referencePoints
             .map((point) => point.toJson())
             .toList(growable: false);
@@ -1081,8 +934,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       });
       for (final id in fit.usedEntityIds) {
         api.engine.modify(id, SketchHistoryAction.modify, (value) {
-          value.metadata['reconstructionKind'] =
-              SketchRegionFitOutput.line.name;
+          value.metadata['reconstructionKind'] = output.name;
           value.metadata['reconstructionHidden'] = true;
           value.visible = false;
         });
@@ -1093,8 +945,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       sourceIds: fit.usedEntityIds,
       applied: true,
     );
+    final kind = output == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
     sketchRegionFitMessage =
-        'Linha criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm';
+        '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${output == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
     return createdId!;
   }
 
@@ -1124,6 +977,152 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.tangency.endId', null);
       runtime.write('sketch.tangency.pickTarget', null);
     }
+  }
+
+  Future<void> _presentCircularFit({
+    required String createdId,
+    required List<String> hiddenIds,
+    required List<String> usedIds,
+    required bool applied,
+  }) async {
+    await _synchronizeSketchScene();
+    for (final id in hiddenIds) {
+      if (runtime.document?.entities[id] == null) continue;
+      await runtime.setEntityVisibility(id, !applied);
+    }
+    selectedSketchEntityIds
+      ..clear()
+      ..addAll(applied ? <String>[createdId] : usedIds);
+    runtime.select(selectedSketchEntityIds);
+    if (applied) {
+      runtime.write('sketch.circularSelectionMode', false);
+      runtime.write('sketch.tangency.startId', null);
+      runtime.write('sketch.tangency.endId', null);
+      runtime.write('sketch.tangency.pickTarget', null);
+      runtime.write('sketch.circularFit.confirmed', true);
+    } else {
+      runtime.write('sketch.circularFit.confirmed', false);
+    }
+  }
+
+  Future<String> _promoteCircularFit(Map<String, Object?> parameters) async {
+    final api = sketchApi ?? (throw StateError('Sketch is not available.'));
+    final selected = _selectedRegionFitEntities();
+    if (selected.isEmpty) {
+      throw StateError(
+        'Selecione as regiões da seção que formam o arco.',
+      );
+    }
+    final context = activeSketch!.entityIds
+        .map(api.entity)
+        .whereType<SketchEntity>()
+        .toList(growable: false);
+    final startTangencyId = sketchTangencyStartId;
+    final endTangencyId = sketchTangencyEndId;
+    final suggestion = _sketchReconstruction.fitSelectedCircular(
+      selected,
+      context: context,
+      startTangencyId: startTangencyId,
+      endTangencyId: endTangencyId,
+    );
+    if (suggestion == null ||
+        suggestion.center == null ||
+        suggestion.radius == null) {
+      throw StateError('Ajuste circular rejeitado.');
+    }
+    final promotedId = await acceptSketchReconstructionSuggestion(
+      suggestion,
+      allowLowConfidence: true,
+    );
+    if (promotedId == null) {
+      throw StateError('Ajuste circular rejeitado.');
+    }
+    final promotedEntity = api.entity(promotedId);
+    final toleranceLimitDegrees =
+        const SketchCircularFitTolerance().tangencyAngleRadians * 180 / math.pi;
+    var measuredStart = suggestion.tangencyStartDegrees;
+    var measuredEnd = suggestion.tangencyEndDegrees;
+    // The tangency is validated on the *created* arc, not on the solver input:
+    // if the final geometry breaks either junction, the promotion is rolled
+    // back instead of leaving a visible kink on screen. Throwing after the
+    // engine undo keeps CommandManager from stacking a failed command.
+    if (startTangencyId != null &&
+        endTangencyId != null &&
+        promotedEntity is SketchArc) {
+      final startReference = api.entity(startTangencyId);
+      final endReference = api.entity(endTangencyId);
+      final angles = startReference == null || endReference == null
+          ? null
+          : _sketchReconstruction.measureCreatedArcTangency(
+              arc: promotedEntity,
+              startReference: startReference,
+              endReference: endReference,
+            );
+      if (angles == null ||
+          angles.startDegrees > toleranceLimitDegrees ||
+          angles.endDegrees > toleranceLimitDegrees) {
+        api.engine.undo();
+        await _synchronizeSketchScene();
+        selectedSketchEntityIds.clear();
+        runtime.select(const <String>{});
+        runtime.write('sketch.circularFit.confirmed', false);
+        final message = angles == null
+            ? 'Tangência incompatível: não foi possível medir o arco final.'
+            : 'Tangência incompatível: inicial ${angles.startDegrees.toStringAsFixed(2)}°, final ${angles.endDegrees.toStringAsFixed(2)}°';
+        sketchCircularFitMessage = message;
+        throw StateError(message);
+      }
+      measuredStart = angles.startDegrees;
+      measuredEnd = angles.endDegrees;
+    }
+    final usedIds = suggestion.usedEntityIds.isEmpty
+        ? suggestion.entityIds
+        : suggestion.usedEntityIds;
+    final hiddenIds = <String>[
+      ...{...usedIds, ...suggestion.coveredEntityIds},
+    ];
+    await _presentCircularFit(
+      createdId: promotedId,
+      hiddenIds: hiddenIds,
+      usedIds: usedIds,
+      applied: true,
+    );
+    final document = runtime.document;
+    final hiddenCount = usedIds
+        .where(
+          (id) =>
+              document?.entities[id]?.data['sceneVisible'] == false &&
+              runtime.scene.find(id)?.visible == false,
+        )
+        .length;
+    final continuity = switch (suggestion.circularFitQuality) {
+      SketchCircularFitQuality.c1Bilateral => 'C1 bilateral aplicado',
+      SketchCircularFitQuality.c1Partial =>
+        'advertência: C1 parcial aplicado; ajuste pelos pontos nas demais extremidades',
+      SketchCircularFitQuality.geometricFallback || null =>
+        'ajuste por mínimos quadrados dos pontos, sem tangência bilateral',
+    };
+    final manualTangency = startTangencyId != null || endTangencyId != null;
+    final usedLabel = usedIds
+        .map((id) => id.length > 6 ? id.substring(id.length - 6) : id)
+        .join(', ');
+    final measurements = <String>[
+      '${usedIds.length} região(ões) usada(s) [$usedLabel] · ocultas $hiddenCount/${usedIds.length}',
+      if (suggestion.maxGapMillimeters != null &&
+          suggestion.maxGapMillimeters! > 0)
+        'gap máx ${suggestion.maxGapMillimeters!.toStringAsFixed(3)} mm',
+      if (measuredStart != null)
+        'erro angular inicial ${measuredStart.toStringAsFixed(2)}°',
+      if (measuredEnd != null)
+        'erro angular final ${measuredEnd.toStringAsFixed(2)}°',
+    ];
+    final warnings = <String>[...measurements, ...suggestion.warnings];
+    sketchCircularFitMessage =
+        '${suggestion.kind == SketchReconstructionKind.circle ? 'Círculo' : 'Arco'} confirmado · $continuity · raio ${suggestion.radius!.toStringAsFixed(3)} mm${manualTangency ? ' · tangência manual' : ''}${warnings.isEmpty ? '' : ' · ${warnings.join(' · ')}'}';
+    parameters['createdId'] = promotedId;
+    parameters['hiddenIds'] = hiddenIds;
+    parameters['usedIds'] = List<String>.from(usedIds);
+    return promotedId;
   }
 
   SketchRegionFitComparison? get sketchRegionFitComparison =>
@@ -12206,11 +12205,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.sketch.regionFit',
       execute: (parameters) async {
-        if (sketchRegionFitOutput != SketchRegionFitOutput.line) {
-          throw StateError(
-            'reverse.sketch.regionFit currently applies only to lines.',
-          );
-        }
         final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
           _selectedRegionFitEntities(),
         );
@@ -12218,7 +12212,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         if (fit == null) {
           throw StateError(_regionFitFailureMessage(diagnosis.failure));
         }
-        final createdId = await _promoteLineRegionFit(fit);
+        final createdId = await _promoteRegionFit(fit);
         parameters['sourceIds'] = List<String>.from(fit.usedEntityIds);
         parameters['createdId'] = createdId;
         return createdId;
@@ -12245,6 +12239,41 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         await _presentRegionFit(
           createdId: createdId,
           sourceIds: sourceIds,
+          applied: true,
+        );
+        return createdId;
+      },
+    );
+
+    register(
+      id: 'reverse.sketch.circularFit',
+      execute: (parameters) => _promoteCircularFit(parameters),
+      undo: (parameters) async {
+        final hiddenIds = (parameters['hiddenIds']! as List).cast<String>();
+        final usedIds = (parameters['usedIds']! as List).cast<String>();
+        final createdId = parameters['createdId']! as String;
+        if (sketchApi?.engine.undo() != true) {
+          throw StateError('No circular fit is available to undo.');
+        }
+        await _presentCircularFit(
+          createdId: createdId,
+          hiddenIds: hiddenIds,
+          usedIds: usedIds,
+          applied: false,
+        );
+        return 'circular fit undone';
+      },
+      redo: (parameters) async {
+        final hiddenIds = (parameters['hiddenIds']! as List).cast<String>();
+        final usedIds = (parameters['usedIds']! as List).cast<String>();
+        final createdId = parameters['createdId']! as String;
+        if (sketchApi?.engine.redo() != true) {
+          throw StateError('No circular fit is available to redo.');
+        }
+        await _presentCircularFit(
+          createdId: createdId,
+          hiddenIds: hiddenIds,
+          usedIds: usedIds,
           applied: true,
         );
         return createdId;

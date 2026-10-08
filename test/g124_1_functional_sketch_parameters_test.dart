@@ -1455,20 +1455,64 @@ void main() {
     expect(cad.runtime.scene.find(splineId)!.selected, isTrue);
     expect(cad.runtime.scene.find(splineId)!.geometry['displayColor'], 'regionFitNavy');
     expect(cad.runtime.scene.find('region-fit-reference-$splineId')!.visible, isTrue);
-    expect(engine.undo(), isTrue);
-    expect(
-      splineSources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == true,
-      ),
-      isTrue,
-    );
-    expect(engine.redo(), isTrue);
-    expect(
-      splineSources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-      ),
-      isTrue,
-    );
+    final splineReferenceId = 'region-fit-reference-$splineId';
+
+    Future<void> expectSplineApplied() async {
+      expect(controller.sketchApi!.entity(splineId), isA<SketchSpline>());
+      expect(
+        splineSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(
+        splineSources.every(
+          (source) =>
+              cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+              false,
+        ),
+        isTrue,
+      );
+      expect(untouched.visible, isTrue);
+      expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(splineReferenceId)!.visible, isTrue);
+      expect(cad.runtime.document!.entities.containsKey(splineReferenceId), isFalse);
+      // The earlier line fit stays on the same in-session stack.
+      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+      expect(cad.runtime.scene.find(fittedId), isNotNull);
+    }
+
+    Future<void> expectSplineUndone() async {
+      expect(controller.sketchApi!.entity(splineId), isNull);
+      expect(cad.runtime.document!.entities.containsKey(splineId), isFalse);
+      expect(cad.runtime.scene.find(splineId), isNull);
+      expect(cad.runtime.scene.find(splineReferenceId), isNull);
+      expect(
+        splineSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      expect(
+        splineSources.every(
+          (source) => cad.runtime.scene.find(source.id)?.visible == true,
+        ),
+        isTrue,
+      );
+      expect(untouched.visible, isTrue);
+      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+      expect(cad.runtime.document!.entities.containsKey(fittedId), isTrue);
+      expect(cad.runtime.scene.find(fittedId), isNotNull);
+    }
+
+    await controller.undo();
+    await expectSplineUndone();
+    await controller.redo();
+    await expectSplineApplied();
+    await controller.undo();
+    await expectSplineUndone();
+    await controller.redo();
+    await expectSplineApplied();
     await controller.toggleActiveSketchVisibility();
     await controller.toggleActiveSketchVisibility();
     expect(
@@ -1738,21 +1782,68 @@ void main() {
         isTrue,
       );
 
-      // 5. Undo/Redo and Toggle Sketch keep working with the hidden sources.
-      final engine = controller.sketchApi!.engine;
-      expect(engine.undo(), isTrue);
-      // Undo/Redo restore deserialized entities, so re-read them by id.
-      bool sourcesVisible() => sources.every(
-        (entity) => controller.sketchApi!.entity(entity.id)?.visible == true,
-      );
-      expect(sourcesVisible(), isTrue);
-      expect(engine.redo(), isTrue);
-      expect(
-        sources.every(
-          (entity) => controller.sketchApi!.entity(entity.id)?.visible == false,
-        ),
-        isTrue,
-      );
+      // 5. Global Undo/Redo (Ctrl+Z / Ctrl+Y) restores sources and drops the
+      //    arc from the document/scene. Circular fit has no region-fit overlay.
+      expect(cad.runtime.scene.find('region-fit-reference-$arcId'), isNull);
+      expect(cad.runtime.scene.find('region-fit-deviation-$arcId'), isNull);
+
+      Future<void> expectCircularApplied() async {
+        expect(controller.sketchApi!.entity(arcId), isA<SketchArc>());
+        expect(cad.runtime.document!.entities.containsKey(arcId), isTrue);
+        expect(cad.runtime.scene.find(arcId)!.visible, isTrue);
+        expect(cad.runtime.scene.find(arcId)!.selected, isTrue);
+        expect(
+          sources.every(
+            (entity) =>
+                controller.sketchApi!.entity(entity.id)?.visible == false,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (entity) => cad.runtime.scene.find(entity.id)?.visible == false,
+          ),
+          isTrue,
+        );
+        expect(controller.sketchApi!.entity(overlapping.id)?.visible, isFalse);
+        expect(controller.sketchApi!.entity(untouched.id)?.visible, isTrue);
+        expect(controller.sketchApi!.entity(longChord.id)?.visible, isTrue);
+        expect(cad.runtime.scene.find('region-fit-reference-$arcId'), isNull);
+        expect(cad.runtime.scene.find('region-fit-deviation-$arcId'), isNull);
+      }
+
+      Future<void> expectCircularUndone() async {
+        expect(controller.sketchApi!.entity(arcId), isNull);
+        expect(cad.runtime.document!.entities.containsKey(arcId), isFalse);
+        expect(cad.runtime.scene.find(arcId), isNull);
+        expect(
+          sources.every(
+            (entity) =>
+                controller.sketchApi!.entity(entity.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (entity) => cad.runtime.scene.find(entity.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(controller.sketchApi!.entity(overlapping.id)?.visible, isTrue);
+        expect(controller.sketchApi!.entity(untouched.id)?.visible, isTrue);
+        expect(controller.sketchApi!.entity(longChord.id)?.visible, isTrue);
+        expect(cad.runtime.scene.find('region-fit-reference-$arcId'), isNull);
+        expect(cad.runtime.scene.find('region-fit-deviation-$arcId'), isNull);
+      }
+
+      await controller.undo();
+      await expectCircularUndone();
+      await controller.redo();
+      await expectCircularApplied();
+      await controller.undo();
+      await expectCircularUndone();
+      await controller.redo();
+      await expectCircularApplied();
       await controller.toggleActiveSketchVisibility();
       expect(controller.activeSketchVisible, isFalse);
       await controller.toggleActiveSketchVisibility();
