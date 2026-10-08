@@ -2343,6 +2343,8 @@ class _CadScenePainter extends CustomPainter {
               entity.geometry['displayColor'] == 'referenceCurveHighlight';
           final assistantSuggestion =
               entity.geometry['displayColor'] == 'assistantSuggestion';
+          final regionFitOutput =
+              entity.geometry['displayColor'] == 'regionFitNavy';
           final referenceColor = entity.selected
               ? const Color(0xffffb02e)
               : highlighted
@@ -2357,6 +2359,8 @@ class _CadScenePainter extends CustomPainter {
               ? const Color(0xffe5007d)
               : assistantSuggestion
               ? const Color(0xff4de1d2)
+              : regionFitOutput
+              ? const Color(0xff163a70)
               : entity.kind == CadSceneEntityKind.preview
               ? const Color(0xffff9f43)
               : entity.kind == CadSceneEntityKind.sketch
@@ -2404,6 +2408,8 @@ class _CadScenePainter extends CustomPainter {
             'splineMagenta' => const Color(0xffd489ff),
             'sketchGreen' => const Color(0xff7cda72),
             'reconstructedLine' => const Color(0xff5ec8ff),
+            'reconstructedSpline' => const Color(0xff5ec8ff),
+            'regionFitNavy' => const Color(0xff163a70),
             'reconstructedCircle' => const Color(0xffffc857),
             'reconstructedArc' => const Color(0xffff8f66),
             'previewOrange' => const Color(0xffff9f43),

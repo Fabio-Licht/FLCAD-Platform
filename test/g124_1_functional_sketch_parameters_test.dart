@@ -4,6 +4,9 @@ import 'dart:math' as math;
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
 import 'package:flcad_mobile/app/desktop/desktop_application.dart';
+import 'package:flcad_mobile/app/cad_viewport/camera/cad_camera_controller.dart';
+import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
+import 'package:flcad_mobile/app/engineering_bridge/contracts/bridge_selection.dart';
 import 'package:flcad_mobile/app/engineering_bridge/operational_reverse_engineering_controller.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/managed_cad_reference.dart';
@@ -1240,8 +1243,8 @@ void main() {
     final sources = <SketchLine>[
       for (var index = 0; index < 5; index++)
         controller.sketchApi!.builders.line.build(
-          SketchVector(index * 25.0, index.isEven ? .04 : -.04),
-          SketchVector(index * 25.0 + 5, index.isEven ? -.04 : .04),
+          SketchVector(index * 25.0, 0),
+          SketchVector(index * 25.0 + 5, 0),
         ),
     ];
     final untouched = controller.sketchApi!.builders.line.build(
@@ -1272,6 +1275,14 @@ void main() {
     expect(untouched.visible, isTrue);
     expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
     expect(cad.runtime.scene.find(fittedId)!.selected, isTrue);
+    expect(cad.runtime.scene.find(fittedId)!.geometry['displayColor'], 'regionFitNavy');
+    final referenceId = 'region-fit-reference-$fittedId';
+    expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
+    expect(cad.runtime.scene.find(referenceId)!.geometry['displayColor'], 'referenceCurve');
+    expect(cad.runtime.document!.entities.containsKey(referenceId), isFalse);
+    expect(controller.activeSketch!.entityIds, isNot(contains(referenceId)));
+    expect(controller.sketchRegionFitComparison!.rms, closeTo(0, 1e-9));
+    expect(controller.sketchRegionFitComparison!.maximum, closeTo(0, 1e-9));
 
     // A completed session must not consume the promoted line on a second run.
     await controller.fitSelectedSketchLineOrSpline();
@@ -1304,6 +1315,56 @@ void main() {
       ),
       isTrue,
     );
+    await controller.toggleActiveSketchVisibility();
+    expect(cad.runtime.scene.find(referenceId), isNull);
+    await controller.toggleActiveSketchVisibility();
+    expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
+
+    // Region-fit dragging is a rigid translation of the promoted entity only.
+    final camera = CadCameraController()..resize(1000, 700);
+    final pick = CadViewportPick(
+      entityId: fittedId,
+      hit: const MeshHit(
+        triangleIndex: 0,
+        point: Vector3(0, 0, 0),
+        distance: 0,
+      ),
+    );
+    final lineBeforeCancel = SketchVector.fromJson(
+      controller.sketchApi!.entity(fittedId)!.parameters['start'],
+    );
+    controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
+    controller.updateSketchEntityDrag(const Offset(580, 350), camera);
+    expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
+    controller.cancelSketchEntityDrag();
+    expect(
+      SketchVector.fromJson(
+        controller.sketchApi!.entity(fittedId)!.parameters['start'],
+      ).x,
+      closeTo(lineBeforeCancel.x, 1e-9),
+    );
+    controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
+    await controller.finishSketchEntityDrag(const Offset(580, 350), camera);
+    final lineAfterDrag = SketchVector.fromJson(
+      controller.sketchApi!.entity(fittedId)!.parameters['start'],
+    );
+    expect(lineAfterDrag.x, isNot(closeTo(lineBeforeCancel.x, 1e-9)));
+    expect(sources.every((source) => source.visible == false), isTrue);
+    expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
+    expect(engine.undo(), isTrue);
+    expect(
+      SketchVector.fromJson(
+        controller.sketchApi!.entity(fittedId)!.parameters['start'],
+      ).x,
+      closeTo(lineBeforeCancel.x, 1e-9),
+    );
+    expect(engine.redo(), isTrue);
+    expect(
+      SketchVector.fromJson(
+        controller.sketchApi!.entity(fittedId)!.parameters['start'],
+      ).x,
+      closeTo(lineAfterDrag.x, 1e-9),
+    );
 
     // The other output mode promotes a real SketchSpline, without consuming
     // the visible reference outside this second selection.
@@ -1334,6 +1395,8 @@ void main() {
     expect(untouched.visible, isTrue);
     expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
     expect(cad.runtime.scene.find(splineId)!.selected, isTrue);
+    expect(cad.runtime.scene.find(splineId)!.geometry['displayColor'], 'regionFitNavy');
+    expect(cad.runtime.scene.find('region-fit-reference-$splineId')!.visible, isTrue);
     expect(engine.undo(), isTrue);
     expect(
       splineSources.every(
@@ -1356,6 +1419,83 @@ void main() {
       ),
       isTrue,
     );
+
+    // Save/Open must rebuild the visual-only comparison from the promoted
+    // entity metadata, rather than from hidden source geometry or a document
+    // entity. This is the same project/controller lifecycle used by users.
+    await controller.persist();
+    final reopenedKernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final reopenedCad = DesktopCadController(
+      kernels: reopenedKernels,
+      projects: ProjectManager.instance,
+    );
+    final reopenedCommands = DesktopCommandCoordinator(
+      cad: reopenedCad,
+      projects: ProjectManager.instance,
+    );
+    final reopened = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: reopenedCommands,
+      runtime: reopenedCad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: projects),
+        ),
+      ),
+    );
+    addTearDown(reopened.dispose);
+    addTearDown(reopenedCad.dispose);
+    await reopenedCad.runtime.open('g124-line-fit', directory);
+    await reopened.configureProject(
+      projectId: 'g124-line-fit',
+      projectDirectory: directory,
+    );
+
+    final restoredLine = reopened.sketchApi!.entity(fittedId);
+    final restoredSpline = reopened.sketchApi!.entity(splineId);
+    expect(restoredLine, isA<SketchLine>());
+    expect(restoredSpline, isA<SketchSpline>());
+    for (final fitted in [restoredLine!, restoredSpline!]) {
+      expect(fitted.metadata['regionFitReferencePoints'], isA<List>());
+      expect(fitted.metadata['regionFitReferenceRegions'], isA<List>());
+      expect(fitted.metadata['regionFitVisualComparison'], isTrue);
+      expect(
+        reopenedCad.runtime.scene.find(fitted.id)!.geometry['displayColor'],
+        'regionFitNavy',
+      );
+      expect(reopenedCad.runtime.scene.find(fitted.id)!.visible, isTrue);
+      expect(
+        reopenedCad.runtime.scene.find('region-fit-reference-${fitted.id}')!.visible,
+        isTrue,
+      );
+      expect(
+        reopenedCad.runtime.document!.entities
+            .containsKey('region-fit-reference-${fitted.id}'),
+        isFalse,
+      );
+    }
+    expect(
+      [...sources, ...splineSources].every(
+        (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+      ),
+      isTrue,
+    );
+    expect(reopened.sketchApi!.entity(untouched.id)!.visible, isTrue);
+
+    reopened.selectSketchEntity(fittedId);
+    await reopened.toggleActiveSketchVisibility();
+    expect(reopenedCad.runtime.scene.find(referenceId), isNull);
+    await reopened.toggleActiveSketchVisibility();
+    expect(reopenedCad.runtime.scene.find(referenceId)!.visible, isTrue);
+    expect(reopenedCad.runtime.scene.find(fittedId)!.selected, isTrue);
+    final restoredComparison = reopened.sketchRegionFitComparison;
+    expect(restoredComparison, isNotNull);
+    expect(restoredComparison!.rms, greaterThan(0));
+    expect(restoredComparison.mean, greaterThan(0));
+    expect(restoredComparison.maximum, greaterThan(0));
+    expect(restoredComparison.deviations, isNotEmpty);
+    expect(reopened.sketchEntities.any((entity) => entity.id == referenceId), isFalse);
   });
 
   test(

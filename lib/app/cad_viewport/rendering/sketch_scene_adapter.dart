@@ -37,8 +37,12 @@ class SketchSceneAdapter {
   );
 
   String? _reconstructionColor(SketchEntity entity) {
+    if (entity.metadata['regionFitVisualComparison'] == true) {
+      return 'regionFitNavy';
+    }
     return switch (entity.metadata['reconstructionKind']) {
       'line' => 'reconstructedLine',
+      'spline' => 'reconstructedSpline',
       'circle' => 'reconstructedCircle',
       'arc' => 'reconstructedArc',
       _ => null,

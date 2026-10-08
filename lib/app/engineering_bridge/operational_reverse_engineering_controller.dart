@@ -165,6 +165,24 @@ class SketchDragHud {
   final String snap;
 }
 
+/// Read-only visual metrology for a region-fit output. It is intentionally not
+/// a Sketch constraint and is never submitted to the geometric kernel.
+class SketchRegionFitComparison {
+  const SketchRegionFitComparison({
+    required this.rms,
+    required this.maximum,
+    required this.mean,
+    required this.deviations,
+  });
+
+  final double rms;
+  final double maximum;
+  final double mean;
+
+  /// Local-space pairs from an original section sample to its fitted point.
+  final List<({SketchVector source, SketchVector fitted})> deviations;
+}
+
 enum SketchRegionFitOutput { line, spline }
 
 class OperationalReverseEngineeringController extends ChangeNotifier {
@@ -972,6 +990,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       createdId = created.id;
       api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
         value.metadata['reconstructionKind'] = sketchRegionFitOutput.name;
+        // Persisting this small local-space sample set lets the visual-only
+        // overlay return after reopening without introducing a new document
+        // entity, constraint, or profile member.
+        value.metadata['regionFitReferencePoints'] = fit.referencePoints
+            .map((point) => point.toJson())
+            .toList(growable: false);
+        value.metadata['regionFitReferenceRegions'] = fit.referenceRegions
+            .map(
+              (region) => region
+                  .map((point) => point.toJson())
+                  .toList(growable: false),
+            )
+            .toList(growable: false);
+        value.metadata['regionFitSourceIds'] = fit.usedEntityIds;
+        value.metadata['regionFitVisualComparison'] = true;
       });
       for (final id in fit.usedEntityIds) {
         api.engine.modify(id, SketchHistoryAction.modify, (value) {
@@ -989,6 +1022,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ..clear()
       ..add(createdId!);
     runtime.select(selectedSketchEntityIds);
+    if (runtime.document case final document?) {
+      _publishRegionFitComparisonOverlays(api.sketches, document);
+    }
     runtime.write('sketch.circularSelectionMode', false);
     runtime.write('sketch.tangency.startId', null);
     runtime.write('sketch.tangency.endId', null);
@@ -996,6 +1032,194 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final kind = sketchRegionFitOutput == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
     sketchRegionFitMessage = '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${sketchRegionFitOutput == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
     notifyListeners();
+  }
+
+  SketchRegionFitComparison? get sketchRegionFitComparison =>
+      runtime.read<SketchRegionFitComparison>('sketch.regionFit.comparison');
+
+  bool _isRegionFitOutput(SketchEntity entity) =>
+      entity.metadata['regionFitVisualComparison'] == true &&
+      (entity.metadata['reconstructionKind'] == 'line' ||
+          entity.metadata['reconstructionKind'] == 'spline');
+
+  List<SketchVector> _regionFitReferencePoints(SketchEntity entity) {
+    final raw = entity.metadata['regionFitReferencePoints'];
+    if (raw is! List) return const <SketchVector>[];
+    try {
+      return raw.whereType<List>().map(SketchVector.fromJson).toList();
+    } catch (_) {
+      return const <SketchVector>[];
+    }
+  }
+
+  List<List<SketchVector>> _regionFitReferenceRegions(SketchEntity entity) {
+    final raw = entity.metadata['regionFitReferenceRegions'];
+    if (raw is! List) return [_regionFitReferencePoints(entity)];
+    try {
+      return raw
+          .whereType<List>()
+          .map(
+            (region) =>
+                region.whereType<List>().map(SketchVector.fromJson).toList(),
+          )
+          .where((region) => region.length > 1)
+          .toList();
+    } catch (_) {
+      return [_regionFitReferencePoints(entity)];
+    }
+  }
+
+  List<SketchVector> _regionFitOutputPoints(
+    SketchEntity entity, {
+    SketchVector delta = const SketchVector(0, 0),
+  }) {
+    try {
+      if (entity is SketchLine) {
+        return [
+          SketchVector.fromJson(entity.parameters['start']) + delta,
+          SketchVector.fromJson(entity.parameters['end']) + delta,
+        ];
+      }
+      if (entity is SketchSpline) {
+        final raw = entity.parameters['sampledPoints'] ?? entity.parameters['points'];
+        if (raw is List) {
+          return raw
+              .whereType<List>()
+              .map((point) => SketchVector.fromJson(point) + delta)
+              .toList();
+        }
+      }
+    } catch (_) {
+      return const <SketchVector>[];
+    }
+    return const <SketchVector>[];
+  }
+
+  SketchRegionFitComparison? _measureRegionFitComparison(
+    SketchEntity entity, {
+    SketchVector delta = const SketchVector(0, 0),
+  }) {
+    final source = _regionFitReferencePoints(entity);
+    final fitted = _regionFitOutputPoints(entity, delta: delta);
+    if (source.isEmpty || fitted.length < 2) return null;
+    SketchVector closestOnSegment(
+      SketchVector point,
+      SketchVector first,
+      SketchVector second,
+    ) {
+      final direction = second - first;
+      final lengthSquared = direction.dot(direction);
+      if (lengthSquared <= 1e-16) return first;
+      final t = ((point - first).dot(direction) / lengthSquared).clamp(0.0, 1.0);
+      return first + direction.scale(t);
+    }
+
+    final deviations = <({SketchVector source, SketchVector fitted})>[];
+    var sum = 0.0;
+    var squared = 0.0;
+    var maximum = 0.0;
+    for (final point in source) {
+      SketchVector? nearest;
+      var nearestDistance = double.infinity;
+      for (var index = 1; index < fitted.length; index++) {
+        final candidate = closestOnSegment(point, fitted[index - 1], fitted[index]);
+        final distance = (point - candidate).dot(point - candidate);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = candidate;
+        }
+      }
+      if (nearest == null || !nearestDistance.isFinite) return null;
+      final distance = math.sqrt(nearestDistance);
+      deviations.add((source: point, fitted: nearest));
+      sum += distance;
+      squared += distance * distance;
+      maximum = math.max(maximum, distance);
+    }
+    return SketchRegionFitComparison(
+      rms: math.sqrt(squared / deviations.length),
+      mean: sum / deviations.length,
+      maximum: maximum,
+      deviations: List.unmodifiable(deviations),
+    );
+  }
+
+  void _publishRegionFitComparisonOverlays(
+    Iterable<Sketch> sketches,
+    CadDocument document,
+  ) {
+    final previous =
+        runtime.read<Set<String>>('sketch.regionFit.overlayIds') ?? <String>{};
+    final next = <String>{};
+    SketchRegionFitComparison? selectedComparison;
+    for (final sketch in sketches) {
+      final rootVisible =
+          document.entities[sketch.id]?.data['sceneVisible'] as bool? ?? true;
+      for (final id in sketch.entityIds) {
+        final entity = sketchApi?.entity(id);
+        if (entity == null || !_isRegionFitOutput(entity)) continue;
+        final referenceId = 'region-fit-reference-$id';
+        final deviationId = 'region-fit-deviation-$id';
+        next.addAll([referenceId, deviationId]);
+        if (!rootVisible || !entity.visible) {
+          runtime.hideTransient(referenceId);
+          runtime.hideTransient(deviationId);
+          continue;
+        }
+        final regions = _regionFitReferenceRegions(entity);
+        runtime.showTransient(
+          CadSceneEntity(
+            id: referenceId,
+            kind: CadSceneEntityKind.preview,
+            transparent: true,
+            geometry: {
+              'segments': [
+                for (final region in regions)
+                  for (var index = 1; index < region.length; index++)
+                    [
+                      sketch.coordinates.localToGlobal(region[index - 1]).toJson(),
+                      sketch.coordinates.localToGlobal(region[index]).toJson(),
+                    ],
+              ],
+              'displayColor': 'referenceCurve',
+              'strokeWidth': 0.9,
+              'comparisonReference': true,
+            },
+          ),
+        );
+        final comparison = _measureRegionFitComparison(entity);
+        if (comparison != null) {
+          runtime.showTransient(
+            CadSceneEntity(
+              id: deviationId,
+              kind: CadSceneEntityKind.preview,
+              transparent: true,
+              geometry: {
+                'segments': [
+                  for (final deviation in comparison.deviations)
+                    [
+                      sketch.coordinates.localToGlobal(deviation.source).toJson(),
+                      sketch.coordinates.localToGlobal(deviation.fitted).toJson(),
+                    ],
+                ],
+                'displayColor': 'assistantSuggestion',
+                'strokeWidth': 0.7,
+                'dashed': true,
+                'comparisonDeviation': true,
+              },
+            ),
+          );
+          if (selectedSketchEntityIds.contains(id)) {
+            selectedComparison = comparison;
+          }
+        }
+      }
+    }
+    for (final id in previous.difference(next)) {
+      runtime.hideTransient(id);
+    }
+    runtime.write('sketch.regionFit.overlayIds', next);
+    runtime.write('sketch.regionFit.comparison', selectedComparison);
   }
 
   void clearSketchReconstructionSuggestions() {
@@ -2324,6 +2548,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final shouldShow =
           targetVisible && entity?.metadata['reconstructionHidden'] != true;
       await runtime.setEntityVisibility(id, shouldShow);
+    }
+    if (runtime.document case final document?) {
+      _publishRegionFitComparisonOverlays(
+        sketchApi?.sketches ?? const <Sketch>[],
+        document,
+      );
     }
     // Publish a legacy-source marker with the same document synchronization
     // used for all Sketch geometry, so reopening the project is idempotent.
@@ -5566,7 +5796,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (sketchCreationCommandActive || sketchEditingCommandActive) return;
     final entityId = pick.entityId;
     final entity = sketchApi?.entity(entityId);
-    if (entity is! SketchLine || activeSketch == null) return;
+    if (activeSketch == null || entity == null) return;
+    if (_isRegionFitOutput(entity)) {
+      _beginRegionFitTranslation(entityId, position, camera);
+      return;
+    }
+    if (entity is! SketchLine) return;
     final anchor = _sketchPointAt(position, camera);
     if (anchor == null) return;
     final start = SketchVector.fromJson(entity.parameters['start']);
@@ -5625,8 +5860,27 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _applySketchSelection(entityId);
   }
 
+  void _beginRegionFitTranslation(
+    String entityId,
+    Offset position,
+    CadCameraController camera,
+  ) {
+    final anchor = _sketchPointAt(position, camera);
+    if (anchor == null) return;
+    runtime.write('sketch.drag.active', true);
+    runtime.write('sketch.drag.regionFit', true);
+    runtime.write('sketch.drag.entityId', entityId);
+    runtime.write('sketch.drag.anchor', anchor);
+    runtime.write('sketch.drag.hud', SketchDragHud(anchor.x, anchor.y, 'Move'));
+    _applySketchSelection(entityId);
+  }
+
   void updateSketchEntityDrag(Offset position, CadCameraController camera) {
     if (!sketchEntityDragActive || activeSketch == null) return;
+    if (runtime.read<bool>('sketch.drag.regionFit') == true) {
+      _updateRegionFitTranslation(position, camera);
+      return;
+    }
     final point = _sketchPointAt(position, camera);
     final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
     final start = runtime.read<SketchVector>('sketch.drag.start');
@@ -5699,11 +5953,75 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void _updateRegionFitTranslation(
+    Offset position,
+    CadCameraController camera,
+  ) {
+    final point = _sketchPointAt(position, camera);
+    final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
+    final entityId = runtime.read<String>('sketch.drag.entityId');
+    final entity = entityId == null ? null : sketchApi?.entity(entityId);
+    if (point == null || anchor == null || entity == null || activeSketch == null) {
+      return;
+    }
+    final delta = point - anchor;
+    final output = _regionFitOutputPoints(entity, delta: delta);
+    final coordinates = activeSketch!.coordinates;
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'sketch-region-fit-drag-preview',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'segments': [
+            for (var index = 1; index < output.length; index++)
+              [
+                coordinates.localToGlobal(output[index - 1]).toJson(),
+                coordinates.localToGlobal(output[index]).toJson(),
+              ],
+          ],
+          'displayColor': 'regionFitNavy',
+          'strokeWidth': SketchSceneAdapter.technicalStrokeWidth,
+          'regionFitOutput': true,
+        },
+      ),
+    );
+    final comparison = _measureRegionFitComparison(entity, delta: delta);
+    if (comparison != null) {
+      runtime.write('sketch.regionFit.comparison', comparison);
+      runtime.showTransient(
+        CadSceneEntity(
+          id: 'region-fit-deviation-$entityId',
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': [
+              for (final deviation in comparison.deviations)
+                [
+                  coordinates.localToGlobal(deviation.source).toJson(),
+                  coordinates.localToGlobal(deviation.fitted).toJson(),
+                ],
+            ],
+            'displayColor': 'assistantSuggestion',
+            'strokeWidth': 0.7,
+            'dashed': true,
+          },
+        ),
+      );
+    }
+    runtime.write('sketch.drag.hud', SketchDragHud(point.x, point.y, 'Move'));
+    notifyListeners();
+  }
+
   Future<void> finishSketchEntityDrag(
     Offset position,
     CadCameraController camera,
   ) async {
     if (!sketchEntityDragActive) return;
+    if (runtime.read<bool>('sketch.drag.regionFit') == true) {
+      await _finishRegionFitTranslation(position, camera);
+      return;
+    }
     final entityId = runtime.read<String>('sketch.drag.entityId');
     final point = _sketchPointAt(position, camera);
     final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
@@ -5755,7 +6073,38 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
+  Future<void> _finishRegionFitTranslation(
+    Offset position,
+    CadCameraController camera,
+  ) async {
+    final entityId = runtime.read<String>('sketch.drag.entityId');
+    final point = _sketchPointAt(position, camera);
+    final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
+    try {
+      if (entityId != null && point != null && anchor != null) {
+        final api = sketchApi;
+        if (api == null) return;
+        final delta = point - anchor;
+        api.engine.transaction('region-fit-translate', () {
+          api.move(entityId, delta);
+        });
+        await api.persist();
+        await _synchronizeSketchScene();
+        selectedSketchEntityIds
+          ..clear()
+          ..add(entityId);
+        runtime.select(selectedSketchEntityIds);
+        if (runtime.document case final document?) {
+          _publishRegionFitComparisonOverlays(api.sketches, document);
+        }
+      }
+    } finally {
+      cancelSketchEntityDrag();
+    }
+  }
+
   void cancelSketchEntityDrag() {
+    final wasRegionFit = runtime.read<bool>('sketch.drag.regionFit') == true;
     runtime.write('sketch.drag.active', false);
     runtime.write('sketch.drag.entityId', null);
     runtime.write('sketch.drag.anchor', null);
@@ -5764,9 +6113,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.drag.endpoint', null);
     runtime.write('sketch.drag.originals', null);
     runtime.write('sketch.drag.hud', null);
+    runtime.write('sketch.drag.regionFit', null);
     runtime.hideTransient('sketch-drag-preview');
+    runtime.hideTransient('sketch-region-fit-drag-preview');
     runtime.hideTransient('sketch-drag-hud');
     runtime.hideTransient('sketch-alignment-guides');
+    final document = runtime.document;
+    if (wasRegionFit && document != null) {
+      _publishRegionFitComparisonOverlays(
+        sketchApi?.sketches ?? const <Sketch>[],
+        document,
+      );
+    }
     notifyListeners();
   }
 
@@ -13398,6 +13756,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await refreshDependentProfessionalExtrudes();
     await refreshDependentProfessionalRevolves();
     await _refreshSketchSurfacePreview();
+    _publishRegionFitComparisonOverlays(allSketches, document);
     runtime.select(
       selectedConstraintIds.isNotEmpty
           ? selectedConstraintIds

@@ -273,6 +273,8 @@ class SketchRegionFitResult {
     required this.start,
     required this.end,
     required this.points,
+    required this.referencePoints,
+    required this.referenceRegions,
     required this.usedEntityIds,
     required this.rmsError,
     required this.maxError,
@@ -281,6 +283,9 @@ class SketchRegionFitResult {
 
   final SketchVector start;
   final SketchVector end;
+  /// Ordered source samples retained only for the visual comparison overlay.
+  final List<SketchVector> referencePoints;
+  final List<List<SketchVector>> referenceRegions;
   final List<SketchVector> points;
   final List<String> usedEntityIds;
   final double rmsError;
@@ -394,6 +399,12 @@ class SketchReconstructionEngine {
       start: selection.start,
       end: selection.end,
       points: _reduceSplineKnots(points),
+      referencePoints: List.unmodifiable(points),
+      referenceRegions: List.unmodifiable(
+        selection.regions
+            .map((region) => List<SketchVector>.unmodifiable(region))
+            .toList(growable: false),
+      ),
       usedEntityIds: selection.usedEntityIds,
       rmsError: math.sqrt(squared / points.length),
       maxError: maximum,

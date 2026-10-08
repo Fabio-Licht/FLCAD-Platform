@@ -10155,6 +10155,14 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   style: const TextStyle(fontSize: 10),
                 ),
               ),
+            if (controller.sketchRegionFitComparison case final comparison?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(8, 2, 8, 0),
+                child: Text(
+                  'Comparação visual (não paramétrica) · RMS ${comparison.rms.toStringAsFixed(3)} mm · média ${comparison.mean.toStringAsFixed(3)} mm · máx ${comparison.maximum.toStringAsFixed(3)} mm · pares ${comparison.deviations.take(4).map((pair) => math.sqrt((pair.source - pair.fitted).dot(pair.source - pair.fitted)).toStringAsFixed(3)).join(', ')}${comparison.deviations.length > 4 ? '…' : ''}',
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
             const SizedBox(height: 5),
             _SketchTangencyReferences(controller: controller),
             if (controller.sketchCircularFitMessage != null)
