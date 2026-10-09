@@ -5869,68 +5869,75 @@ class _OfficialEngineeringWorkspaceState
                                         },
                                 ),
                               ),
-                              ValueListenableBuilder<
-                                ({Offset position, String label})?
-                              >(
-                                valueListenable:
-                                    _sketchSuggestionHoverPresentation,
-                                builder: (context, presentation, _) {
-                                  if (presentation == null ||
-                                      module != 'Sketch') {
-                                    return const SizedBox.shrink();
-                                  }
-                                  final left = presentation.position.dx + 12;
-                                  final top = presentation.position.dy + 12;
-                                  return Positioned(
-                                    left: left.clamp(
-                                      4.0,
-                                      math.max(
-                                        4.0,
-                                        camera.viewportWidth - 132,
-                                      ),
-                                    ),
-                                    top: top.clamp(
-                                      4.0,
-                                      math.max(
-                                        4.0,
-                                        camera.viewportHeight - 30,
-                                      ),
-                                    ),
-                                    child: IgnorePointer(
-                                      child: DecoratedBox(
-                                        decoration: BoxDecoration(
-                                          color: const Color(
-                                            0xff101820,
-                                          ).withValues(alpha: .88),
-                                          borderRadius: BorderRadius.circular(
-                                            3,
+                              Positioned.fill(
+                                child: ValueListenableBuilder<
+                                  ({Offset position, String label})?
+                                >(
+                                  valueListenable:
+                                      _sketchSuggestionHoverPresentation,
+                                  builder: (context, presentation, _) {
+                                    if (presentation == null ||
+                                        module != 'Sketch') {
+                                      return const SizedBox.shrink();
+                                    }
+                                    final left = presentation.position.dx + 12;
+                                    final top = presentation.position.dy + 12;
+                                    return Stack(
+                                      clipBehavior: Clip.none,
+                                      children: [
+                                        Positioned(
+                                          left: left.clamp(
+                                            4.0,
+                                            math.max(
+                                              4.0,
+                                              camera.viewportWidth - 132,
+                                            ),
                                           ),
-                                          border: Border.all(
-                                            color: const Color(
-                                              0xff4de1d2,
-                                            ).withValues(alpha: .75),
-                                            width: .7,
+                                          top: top.clamp(
+                                            4.0,
+                                            math.max(
+                                              4.0,
+                                              camera.viewportHeight - 30,
+                                            ),
                                           ),
-                                        ),
-                                        child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            horizontal: 5,
-                                            vertical: 2,
-                                          ),
-                                          child: Text(
-                                            presentation.label,
-                                            style: const TextStyle(
-                                              color: Color(0xffb8fff7),
-                                              fontSize: 10,
-                                              fontWeight: FontWeight.w700,
-                                              height: 1.1,
+                                          child: IgnorePointer(
+                                            child: DecoratedBox(
+                                              decoration: BoxDecoration(
+                                                color: const Color(
+                                                  0xff101820,
+                                                ).withValues(alpha: .88),
+                                                borderRadius:
+                                                    BorderRadius.circular(3),
+                                                border: Border.all(
+                                                  color: const Color(
+                                                    0xff4de1d2,
+                                                  ).withValues(alpha: .75),
+                                                  width: .7,
+                                                ),
+                                              ),
+                                              child: Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                      horizontal: 5,
+                                                      vertical: 2,
+                                                    ),
+                                                child: Text(
+                                                  presentation.label,
+                                                  style: const TextStyle(
+                                                    color: Color(0xffb8fff7),
+                                                    fontSize: 10,
+                                                    fontWeight: FontWeight.w700,
+                                                    height: 1.1,
+                                                  ),
+                                                ),
+                                              ),
                                             ),
                                           ),
                                         ),
-                                      ),
-                                    ),
-                                  );
-                                },
+                                      ],
+                                    );
+                                  },
+                                ),
                               ),
                               if (module == 'Sketch' &&
                                   operational.sketchCreationCommandActive)

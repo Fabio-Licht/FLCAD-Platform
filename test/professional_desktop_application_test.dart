@@ -2,9 +2,15 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flcad_mobile/app/desktop/desktop_application.dart';
 import 'package:flcad_mobile/app/desktop/desktop_asset_manager.dart';
+import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
 import 'package:flcad_mobile/app/desktop/desktop_settings.dart';
+import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
+import 'package:flcad_mobile/app/cad_viewport/native/integrated_native_viewport_widget.dart';
+import 'package:flcad_mobile/app/bootstrap/engineering_bootstrap.dart';
 import 'package:flcad_mobile/app/desktop/desktop_theme.dart';
 import 'package:flcad_mobile/app/reconstruction/desktop_colmap_lab_runtime.dart';
+import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
+import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +32,42 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('Professional Desktop Application', () {
+    testWidgets('workspace keeps the viewport bounded when suggestion hover is idle', (
+      tester,
+    ) async {
+      EngineeringBootstrap.instance.initialize();
+      final cad = DesktopCadController(
+        kernels: KernelManager(),
+        projects: ProjectManager.instance,
+      );
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      addTearDown(cad.dispose);
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: OfficialEngineeringWorkspace(
+              cad: cad,
+              commands: commands,
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final viewport = tester.renderObject<RenderBox>(
+        find.byType(IntegratedCadViewportWidget),
+      );
+      expect(viewport.hasSize, isTrue);
+      expect(viewport.size.width, greaterThan(0));
+      expect(viewport.size.height, greaterThan(0));
+    });
+
     testWidgets('shell and Settings remain available while lab initializes', (
       tester,
     ) async {
