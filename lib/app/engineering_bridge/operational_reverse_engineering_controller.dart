@@ -7343,6 +7343,114 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _publishSketchReconstructionHighlight(notify: persistent);
   }
 
+  /// Returns bounds for only the entities that contributed to [suggestion].
+  ///
+  /// The desktop shell uses this presentation-only query to focus the camera;
+  /// it deliberately does not inspect the rest of the Sketch or the Section
+  /// reference overlay.  Bounds are sampled from the real Sketch geometry in
+  /// the active coordinate system, so the camera never frames unrelated scene
+  /// entities.
+  ({Vector3 minimum, Vector3 maximum})?
+  sketchReconstructionSuggestionBounds(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    final sketch = activeSketch;
+    final api = sketchApi;
+    if (sketch == null || api == null) return null;
+    final points = <SketchVector>[];
+    for (final id in suggestion.entityIds) {
+      final entity = api.entity(id);
+      if (entity == null || !entity.visible) continue;
+      try {
+        points.addAll(
+          _surfaceInputPoints(entity).where(
+            (point) =>
+                point.x.isFinite && point.y.isFinite && point.z.isFinite,
+          ),
+        );
+        if (entity is SketchCircle || entity is SketchArc) {
+          points.addAll(_sketchCircularExtrema(entity));
+        }
+      } on Object {
+        // A stale suggestion must not make a presentation click fail or
+        // expose malformed geometry to the camera.
+        continue;
+      }
+    }
+    if (points.isEmpty) return null;
+    final first = sketch.coordinates.localToGlobal(points.first);
+    var minimum = Vector3(first.x, first.y, first.z);
+    var maximum = minimum;
+    for (final point in points.skip(1)) {
+      final local = sketch.coordinates.localToGlobal(point);
+      final global = Vector3(local.x, local.y, local.z);
+      minimum = Vector3(
+        math.min(minimum.x, global.x),
+        math.min(minimum.y, global.y),
+        math.min(minimum.z, global.z),
+      );
+      maximum = Vector3(
+        math.max(maximum.x, global.x),
+        math.max(maximum.y, global.y),
+        math.max(maximum.z, global.z),
+      );
+    }
+    return (minimum: minimum, maximum: maximum);
+  }
+
+  List<SketchVector> _sketchCircularExtrema(SketchEntity entity) {
+    final center = SketchVector.fromJson(entity.parameters['center']);
+    final radius = (entity.parameters['radius'] as num).toDouble();
+    if (!center.x.isFinite ||
+        !center.y.isFinite ||
+        !center.z.isFinite ||
+        !radius.isFinite ||
+        radius <= 0) {
+      return const [];
+    }
+    final candidates = [0.0, math.pi / 2, math.pi, math.pi * 1.5];
+    if (entity is SketchCircle) {
+      return [
+        for (final angle in candidates)
+          SketchVector(
+            center.x + radius * math.cos(angle),
+            center.y + radius * math.sin(angle),
+            center.z,
+          ),
+      ];
+    }
+    final start = (entity.parameters['startAngle'] as num).toDouble();
+    final end = (entity.parameters['endAngle'] as num).toDouble();
+    final sweep = end - start;
+    if (!sweep.isFinite || sweep.abs() >= 2 * math.pi - 1e-12) {
+      return [
+        for (final angle in candidates)
+          SketchVector(
+            center.x + radius * math.cos(angle),
+            center.y + radius * math.sin(angle),
+            center.z,
+          ),
+      ];
+    }
+    final extrema = <SketchVector>[];
+    for (final angle in candidates) {
+      var delta = sweep >= 0 ? angle - start : start - angle;
+      while (delta < 0) {
+        delta += 2 * math.pi;
+      }
+      if (delta <= sweep.abs() + 1e-12) {
+        extrema.add(
+          SketchVector(
+            center.x + radius * math.cos(angle),
+            center.y + radius * math.sin(angle),
+            center.z,
+          ),
+        );
+      }
+    }
+    return extrema;
+  }
+
   void clearHoveredSketchReconstructionSuggestion() {
     if (hoveredSketchReconstructionSuggestion == null) return;
     runtime.write('sketch.reconstruction.hovered', null);

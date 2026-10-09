@@ -2687,6 +2687,41 @@ void main() {
       );
       expect(first.rmsError, isNotNull);
       expect(first.maxError, isNotNull);
+      final firstBounds = controller
+          .sketchReconstructionSuggestionBounds(first)!;
+      expect(firstBounds.minimum.x, closeTo(0, 1e-9));
+      expect(firstBounds.maximum.x, closeTo(20, 1e-9));
+      expect(firstBounds.minimum.y, closeTo(0, 1e-9));
+      expect(firstBounds.maximum.y, closeTo(0, 1e-9));
+      final arc = controller.sketchApi!.builders.arc.build(
+        const SketchVector(100, 20),
+        5,
+        0,
+        math.pi / 2,
+      );
+      final spline = controller.sketchApi!.builders.spline.build(const [
+        SketchVector(200, 30),
+        SketchVector(205, 35),
+        SketchVector(210, 30),
+      ]);
+      final arcBounds = controller.sketchReconstructionSuggestionBounds(
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.arc,
+          entityIds: [arc.id],
+          confidence: 1,
+        ),
+      )!;
+      final splineBounds = controller.sketchReconstructionSuggestionBounds(
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [spline.id],
+          confidence: 1,
+        ),
+      )!;
+      expect(arcBounds.minimum.x, closeTo(100, 1e-9));
+      expect(arcBounds.maximum.x, closeTo(105, 1e-9));
+      expect(splineBounds.minimum.x, closeTo(200, 1e-9));
+      expect(splineBounds.maximum.x, closeTo(210, 1e-9));
 
       dynamic overlay() =>
           cad.runtime.scene.find(sketchReconstructionHighlightId);

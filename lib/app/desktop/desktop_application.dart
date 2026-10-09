@@ -3149,6 +3149,28 @@ class _OfficialEngineeringWorkspaceState
     if (bounds != null) camera.fit(bounds.minimum, bounds.maximum);
   }
 
+  void _focusSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    // Selection/highlight is still handled by the controller.  Focusing is a
+    // separate presentation action so hover never moves the camera and the
+    // accept button cannot accidentally trigger it through ListTile.onTap.
+    operational.highlightSketchReconstructionSuggestion(
+      suggestion,
+      persistent: true,
+    );
+    final bounds = operational.sketchReconstructionSuggestionBounds(suggestion);
+    if (bounds == null) return;
+    final extent = bounds.maximum - bounds.minimum;
+    final diagonal = extent.length;
+    if (!diagonal.isFinite) return;
+    // A non-zero floor keeps a tiny fragment from producing an unusably tight
+    // view, while the proportional margin keeps large chains readable.
+    final margin = math.max(0.5, diagonal * 0.15);
+    final padding = Vector3(margin, margin, margin);
+    navigation.fit(bounds.minimum - padding, bounds.maximum + padding);
+  }
+
   void _focusSketchHealthIssue(SketchHealthIssue issue) {
     operational.highlightSketchHealthIssue(issue);
     final sketch = operational.activeSketch;
@@ -5056,6 +5078,7 @@ class _OfficialEngineeringWorkspaceState
           controller: operational,
           onExitSketch: _finishSketch,
           onHealthIssue: _focusSketchHealthIssue,
+          onFocusSuggestion: _focusSketchReconstructionSuggestion,
           onAutoHeal: _offerSketchGapRepair,
         ),
       'Sketch' => _SketchEntryWorkspace(
@@ -9366,11 +9389,13 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     required this.controller,
     required this.onExitSketch,
     required this.onHealthIssue,
+    required this.onFocusSuggestion,
     required this.onAutoHeal,
   });
   final OperationalReverseEngineeringController controller;
   final Future<void> Function() onExitSketch;
   final ValueChanged<SketchHealthIssue> onHealthIssue;
+  final ValueChanged<SketchReconstructionSuggestion> onFocusSuggestion;
   final Future<void> Function(SketchHealthIssue) onAutoHeal;
 
   Future<void> _createDimension(
@@ -10277,7 +10302,10 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   style: const TextStyle(fontSize: 10),
                 ),
               ),
-              _SketchReconstructionSuggestionGroups(controller: controller),
+              _SketchReconstructionSuggestionGroups(
+                controller: controller,
+                onFocusSuggestion: onFocusSuggestion,
+              ),
               TextButton(
                 onPressed: controller.clearSketchReconstructionSuggestions,
                 child: const Text('Limpar sugestões'),
@@ -11067,9 +11095,13 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
 }
 
 class _SketchReconstructionSuggestionGroups extends StatelessWidget {
-  const _SketchReconstructionSuggestionGroups({required this.controller});
+  const _SketchReconstructionSuggestionGroups({
+    required this.controller,
+    required this.onFocusSuggestion,
+  });
 
   final OperationalReverseEngineeringController controller;
+  final ValueChanged<SketchReconstructionSuggestion> onFocusSuggestion;
 
   @override
   Widget build(BuildContext context) {
@@ -11126,6 +11158,7 @@ class _SketchReconstructionSuggestionGroups extends StatelessWidget {
             _SketchReconstructionSuggestionTile(
               controller: controller,
               suggestion: suggestion,
+              onFocus: () => onFocusSuggestion(suggestion),
             ),
       ],
     );
@@ -11136,10 +11169,12 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
   const _SketchReconstructionSuggestionTile({
     required this.controller,
     required this.suggestion,
+    required this.onFocus,
   });
 
   final OperationalReverseEngineeringController controller;
   final SketchReconstructionSuggestion suggestion;
+  final VoidCallback onFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -11154,10 +11189,7 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
         dense: true,
         selected: selected,
         contentPadding: EdgeInsets.zero,
-        onTap: () => controller.highlightSketchReconstructionSuggestion(
-          suggestion,
-          persistent: true,
-        ),
+        onTap: onFocus,
         title: Text(suggestion.label, style: const TextStyle(fontSize: 11)),
         subtitle: Text(
           _sketchReconstructionSuggestionSubtitle(suggestion),
