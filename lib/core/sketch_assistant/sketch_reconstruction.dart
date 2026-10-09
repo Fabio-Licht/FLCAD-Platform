@@ -274,9 +274,9 @@ class SketchReconstructionSuggestion {
   /// Visible source fragments already represented by the promoted arc.
   final List<String> coveredEntityIds;
 
-  /// Residual of the recognized fit, in millimetres. Automatic analyze()
-  /// leaves these null until a later split fills them; the UI must not invent
-  /// a PCA preview just to display a number.
+  /// Residual of the recognized fit, in millimetres. Geometrically segmented
+  /// line chains populate these from their PCA pass; native primitives and
+  /// relation suggestions may legitimately leave them null.
   final double? rmsError;
   final double? maxError;
 
@@ -307,6 +307,7 @@ class SketchRegionFitResult {
 
   final SketchVector start;
   final SketchVector end;
+
   /// Ordered source samples retained only for the visual comparison overlay.
   final List<SketchVector> referencePoints;
   final List<List<SketchVector>> referenceRegions;
@@ -344,18 +345,17 @@ class SketchReconstructionEngine {
   SketchRegionFitResult? fitSelectedLineOrSpline(
     Iterable<SketchEntity> selected, {
     SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
-  }) =>
-      diagnoseSelectedLineOrSpline(selected, tolerance: tolerance).result;
+  }) => diagnoseSelectedLineOrSpline(selected, tolerance: tolerance).result;
 
   /// Validates every source sample before ordering it or passing knots to the
   /// spline kernel. This keeps malformed scan data out of PCA and rendering.
   SketchRegionFitDiagnosis diagnoseSelectedLineOrSpline(
     Iterable<SketchEntity> selected, {
     SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+    int maxRegions = SketchCircularFitTolerance.maxRegions,
   }) {
     final entities = selected.toList(growable: false);
-    if (entities.isEmpty ||
-        entities.length > SketchCircularFitTolerance.maxRegions) {
+    if (entities.isEmpty || entities.length > maxRegions) {
       return const SketchRegionFitDiagnosis.failure(
         SketchRegionFitFailure.insufficientPoints,
       );
@@ -387,12 +387,14 @@ class SketchReconstructionEngine {
         points.add(point);
       }
     }
-    if (points.length < 2 || _distance(selection.start, selection.end) <= 1e-9) {
+    if (points.length < 2 ||
+        _distance(selection.start, selection.end) <= 1e-9) {
       return const SketchRegionFitDiagnosis.failure(
         SketchRegionFitFailure.degenerateGeometry,
       );
     }
-    final mean = points.fold(const SketchVector(0, 0), (sum, point) => sum + point)
+    final mean = points
+        .fold(const SketchVector(0, 0), (sum, point) => sum + point)
         .scale(1 / points.length);
     var xx = 0.0, xy = 0.0, yy = 0.0;
     for (final point in points) {
@@ -432,22 +434,25 @@ class SketchReconstructionEngine {
         SketchRegionFitFailure.invalidSamples,
       );
     }
-    return SketchRegionFitDiagnosis.success(SketchRegionFitResult(
-      start: lineStart,
-      end: lineEnd,
-      points: _reduceSplineKnots(points),
-      referencePoints: List.unmodifiable(points),
-      referenceRegions: List.unmodifiable(
-        selection.regions
-            .map((region) => List<SketchVector>.unmodifiable(region))
-            .toList(growable: false),
+    return SketchRegionFitDiagnosis.success(
+      SketchRegionFitResult(
+        start: lineStart,
+        end: lineEnd,
+        points: _reduceSplineKnots(points),
+        referencePoints: List.unmodifiable(points),
+        referenceRegions: List.unmodifiable(
+          selection.regions
+              .map((region) => List<SketchVector>.unmodifiable(region))
+              .toList(growable: false),
+        ),
+        usedEntityIds: selection.usedEntityIds,
+        rmsError: math.sqrt(squared / points.length),
+        maxError: maximum,
+        maxGapMillimeters: selection.gaps.isEmpty
+            ? 0
+            : selection.gaps.reduce(math.max),
       ),
-      usedEntityIds: selection.usedEntityIds,
-      rmsError: math.sqrt(squared / points.length),
-      maxError: maximum,
-      maxGapMillimeters:
-          selection.gaps.isEmpty ? 0 : selection.gaps.reduce(math.max),
-    ));
+    );
   }
 
   /// Deterministic, direction-aware decimation.  It leaves modest selections
@@ -472,8 +477,11 @@ class SketchReconstructionEngine {
       if (cosine < 0.985) required.add(index);
     }
     final available = SketchRegionFitResult.maxSplineKnots - 2;
-    final interior = required.where((index) => index != 0 && index != points.length - 1).toList()
-      ..sort();
+    final interior =
+        required
+            .where((index) => index != 0 && index != points.length - 1)
+            .toList()
+          ..sort();
     if (interior.length > available) {
       final stride = (interior.length - 1) / math.max(available - 1, 1);
       required
@@ -481,7 +489,10 @@ class SketchReconstructionEngine {
         ..add(0)
         ..add(points.length - 1)
         ..addAll(
-          List<int>.generate(available, (slot) => interior[(slot * stride).round()]),
+          List<int>.generate(
+            available,
+            (slot) => interior[(slot * stride).round()],
+          ),
         );
     }
     if (required.length < SketchRegionFitResult.maxSplineKnots) {
@@ -1966,85 +1977,14 @@ class SketchReconstructionEngine {
     }
     final result = <SketchReconstructionSuggestion>[];
     final lines = values.whereType<SketchLine>().toList(growable: false);
-    final components = <List<SketchLine>>[];
-    for (final line in lines) {
-      final component = components.firstWhere(
-        (candidate) => candidate.any(
-          (other) => _sharesEndpoint(line, other, angularTolerance * 8),
-        ),
-        orElse: () {
-          final created = <SketchLine>[];
-          components.add(created);
-          return created;
-        },
-      );
-      component.add(line);
-    }
-    for (final component in components) {
-      result.add(
-        SketchReconstructionSuggestion(
-          kind: SketchReconstructionKind.line,
-          entityIds: component.map((line) => line.id).toList(growable: false),
-          confidence: 1.0,
-        ),
-      );
-      // Automatic recognition is filtered by confidence at acceptance time;
-      // allowing smaller manually selected chains lets the user fit a short
-      // arc from two or three section segments.
-      if (component.length >= 2) {
-        final points = <SketchVector>[];
-        for (final line in component) {
-          points
-            ..add(SketchVector.fromJson(line.parameters['start']))
-            ..add(SketchVector.fromJson(line.parameters['end']));
-        }
-        final fit = _fitCircle(points);
-        if (fit != null && _isSaneCircularFit(points, fit.$1, fit.$2)) {
-          final error =
-              points
-                  .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
-                  .fold<double>(0, (sum, value) => sum + value) /
-              points.length;
-          if (error <= math.max(.5, fit.$2 * .05)) {
-            final angles =
-                points
-                    .map(
-                      (point) =>
-                          math.atan2(point.y - fit.$1.y, point.x - fit.$1.x),
-                    )
-                    .toList()
-                  ..sort();
-            var largestGap = 0.0;
-            for (var index = 0; index < angles.length; index++) {
-              final next = index + 1 < angles.length
-                  ? angles[index + 1]
-                  : angles.first + 2 * math.pi;
-              largestGap = math.max(largestGap, next - angles[index]);
-            }
-            final sweep = 2 * math.pi - largestGap;
-            final kind = sweep >= 2 * math.pi - .5
-                ? SketchReconstructionKind.circle
-                : sweep >= .35
-                ? SketchReconstructionKind.arc
-                : null;
-            if (kind != null) {
-              result.add(
-                SketchReconstructionSuggestion(
-                  kind: kind,
-                  entityIds: component.map((line) => line.id).toList(),
-                  confidence:
-                      (1 - error / math.max(math.max(.5, fit.$2 * .05), 1e-9))
-                          .clamp(0.0, 1.0),
-                  center: fit.$1,
-                  radius: fit.$2,
-                  startAngle: _arcAngles(points, fit.$1).$1,
-                  endAngle: _arcAngles(points, fit.$1).$2,
-                ),
-              );
-            }
-          }
-        }
-      }
+    for (final component in _orderedLineChains(
+      lines,
+      endpointTolerance:
+          const SketchCircularFitTolerance().endpointCoincidenceMillimeters,
+      angularTolerance: angularTolerance,
+    )) {
+      final suggestion = _classifyLineChain(component);
+      if (suggestion != null) result.add(suggestion);
     }
     for (final entity in values.where(
       (item) => item is SketchCircle || item is SketchArc,
@@ -2133,11 +2073,12 @@ class SketchReconstructionEngine {
         final second = _direction(lines[j]);
         final angle = (first - second).abs() % math.pi;
         final parallel = math.min(angle, math.pi - angle);
+        final relationIds = [lines[i].id, lines[j].id]..sort();
         if (parallel <= angularTolerance) {
           relations.add(
             SketchReconstructionSuggestion(
               kind: SketchReconstructionKind.parallel,
-              entityIds: [lines[i].id, lines[j].id],
+              entityIds: relationIds,
               confidence: 1 - parallel / angularTolerance,
             ),
           );
@@ -2145,16 +2086,411 @@ class SketchReconstructionEngine {
           relations.add(
             SketchReconstructionSuggestion(
               kind: SketchReconstructionKind.perpendicular,
-              entityIds: [lines[i].id, lines[j].id],
+              entityIds: relationIds,
               confidence: 1 - (parallel - math.pi / 2).abs() / angularTolerance,
             ),
           );
         }
       }
     }
-    relations.sort((a, b) => b.confidence.compareTo(a.confidence));
+    relations.sort((a, b) {
+      final confidence = b.confidence.compareTo(a.confidence);
+      if (confidence != 0) return confidence;
+      final kind = a.kind.index.compareTo(b.kind.index);
+      if (kind != 0) return kind;
+      return a.entityIds.join('\u0000').compareTo(b.entityIds.join('\u0000'));
+    });
     result.addAll(relations.take(128));
     return result;
+  }
+
+  /// Builds connected paths from the actual endpoint graph.  A shared
+  /// endpoint only establishes adjacency; it never qualifies a path as a
+  /// line.  Branch nodes and gaps terminate a path so each hypothesis can be
+  /// evaluated against the geometry it really contains.
+  List<List<SketchLine>> _orderedLineChains(
+    List<SketchLine> lines, {
+    required double endpointTolerance,
+    required double angularTolerance,
+  }) {
+    // Stable geometric ordering makes graph node creation, branch traversal
+    // and closed-cycle start points independent of the caller's selection
+    // order. IDs are only the final tie-breaker for coincident geometry.
+    final orderedLines = lines.toList()..sort(_compareLineGeometry);
+    final nodes = <SketchVector>[];
+    final nodeEdges = <List<int>>[];
+    final edges = <({SketchLine line, int start, int end})>[];
+
+    int nodeFor(SketchVector point) {
+      for (var index = 0; index < nodes.length; index++) {
+        if (_distance(nodes[index], point) <= endpointTolerance) return index;
+      }
+      nodes.add(point);
+      nodeEdges.add(<int>[]);
+      return nodes.length - 1;
+    }
+
+    for (final line in orderedLines) {
+      final start = SketchVector.fromJson(line.parameters['start']);
+      final end = SketchVector.fromJson(line.parameters['end']);
+      final edgeIndex = edges.length;
+      final edge = (line: line, start: nodeFor(start), end: nodeFor(end));
+      edges.add(edge);
+      nodeEdges[edge.start].add(edgeIndex);
+      nodeEdges[edge.end].add(edgeIndex);
+    }
+
+    final visited = <int>{};
+    final chains = <List<SketchLine>>[];
+
+    List<SketchLine> walk(int firstEdge, int firstNode) {
+      final path = <SketchLine>[];
+      var edgeIndex = firstEdge;
+      var node = firstNode;
+      while (!visited.contains(edgeIndex)) {
+        final edge = edges[edgeIndex];
+        visited.add(edgeIndex);
+        path.add(edge.line);
+        final nextNode = edge.start == node ? edge.end : edge.start;
+        if (nodeEdges[nextNode].length != 2) break;
+        final next = nodeEdges[nextNode].firstWhere(
+          (candidate) => !visited.contains(candidate),
+          orElse: () => -1,
+        );
+        if (next < 0) break;
+        node = nextNode;
+        edgeIndex = next;
+      }
+      return path;
+    }
+
+    // Open paths and branches are walked from their boundary nodes first.
+    for (var node = 0; node < nodeEdges.length; node++) {
+      if (nodeEdges[node].length == 2) continue;
+      for (final edgeIndex in nodeEdges[node]) {
+        if (visited.contains(edgeIndex)) continue;
+        final path = walk(edgeIndex, node);
+        if (path.isNotEmpty) {
+          chains.addAll(
+            _splitLineChain(path, angularTolerance, endpointTolerance),
+          );
+        }
+      }
+    }
+    // A closed ring has no boundary node.  Walk each remaining edge once;
+    // the turn-state splitter still keeps a constant-curvature ring intact.
+    for (var edgeIndex = 0; edgeIndex < edges.length; edgeIndex++) {
+      if (visited.contains(edgeIndex)) continue;
+      final edge = edges[edgeIndex];
+      final path = walk(edgeIndex, edge.start);
+      if (path.isNotEmpty) {
+        chains.addAll(
+          _splitLineChain(path, angularTolerance, endpointTolerance),
+        );
+      }
+    }
+    return chains;
+  }
+
+  int _compareLineGeometry(SketchLine first, SketchLine second) {
+    final firstPoints = [
+      SketchVector.fromJson(first.parameters['start']),
+      SketchVector.fromJson(first.parameters['end']),
+    ]..sort(_comparePointGeometry);
+    final secondPoints = [
+      SketchVector.fromJson(second.parameters['start']),
+      SketchVector.fromJson(second.parameters['end']),
+    ]..sort(_comparePointGeometry);
+    for (var index = 0; index < firstPoints.length; index++) {
+      final comparison = _comparePointGeometry(
+        firstPoints[index],
+        secondPoints[index],
+      );
+      if (comparison != 0) return comparison;
+    }
+    return first.id.compareTo(second.id);
+  }
+
+  int _comparePointGeometry(SketchVector first, SketchVector second) {
+    final x = first.x.compareTo(second.x);
+    if (x != 0) return x;
+    final y = first.y.compareTo(second.y);
+    if (y != 0) return y;
+    return first.z.compareTo(second.z);
+  }
+
+  List<List<SketchLine>> _splitLineChain(
+    List<SketchLine> path,
+    double angularTolerance,
+    double endpointTolerance,
+  ) {
+    if (path.length < 2) return [List.unmodifiable(path)];
+    final turns = <double>[];
+    for (var index = 0; index + 1 < path.length; index++) {
+      final directions = _pathDirections(
+        path[index],
+        path[index + 1],
+        endpointTolerance,
+      );
+      if (directions == null) {
+        turns.add(0);
+        continue;
+      }
+      final firstDirection = directions.$1;
+      final secondDirection = directions.$2;
+      turns.add(
+        math.atan2(
+          firstDirection.x * secondDirection.y -
+              firstDirection.y * secondDirection.x,
+          firstDirection.dot(secondDirection),
+        ),
+      );
+    }
+    final minimumTurn = math.max(angularTolerance, 1e-3);
+    // A visible cusp is a 30 degree turn (or eight times the existing
+    // recognition angular tolerance).  Curvature state changes and
+    // inflections split more gently, while constant-turn facets remain one
+    // curve instead of producing one suggestion per facet.
+    final cornerThreshold = math.max(math.pi / 6, minimumTurn * 8);
+    final breaks = <int>{};
+    for (var index = 0; index < turns.length; index++) {
+      final turn = turns[index];
+      if (turn.abs() >= cornerThreshold) {
+        breaks.add(index);
+      }
+      if (index == 0) continue;
+      final previous = turns[index - 1];
+      if (previous.abs() >= cornerThreshold || turn.abs() >= cornerThreshold) {
+        // The cusp itself already defines the boundary; do not add a second
+        // split for the curved/straight state change on the other side.
+        continue;
+      }
+      final previousCurved = previous.abs() > minimumTurn;
+      final currentCurved = turn.abs() > minimumTurn;
+      if (previousCurved != currentCurved ||
+          (previousCurved && currentCurved && previous * turn < 0)) {
+        breaks.add(index);
+      }
+    }
+    // A tangent line-to-arc transition has the same turn angle as the first
+    // arc facet, so angle state alone cannot locate that boundary.  Mark
+    // edges that belong to a stable three-edge circular window and split at
+    // changes of that state.  Sliding windows keep a real arc together while
+    // leaving its tangent straight neighbours outside the region.
+    final circularEdges = _circularEdgeFlags(path);
+    for (var index = 1; index < circularEdges.length; index++) {
+      if (circularEdges[index] != circularEdges[index - 1]) {
+        breaks.add(index - 1);
+      }
+    }
+    if (breaks.isEmpty) return [List.unmodifiable(path)];
+    final chunks = <List<SketchLine>>[];
+    var start = 0;
+    for (final breakAfter in breaks.toList()..sort()) {
+      final end = math.min(breakAfter + 1, path.length);
+      if (end > start) chunks.add(List.unmodifiable(path.sublist(start, end)));
+      start = end;
+    }
+    if (start < path.length) {
+      chunks.add(List.unmodifiable(path.sublist(start)));
+    }
+    return chunks;
+  }
+
+  List<bool> _circularEdgeFlags(List<SketchLine> path) {
+    final flags = List<bool>.filled(path.length, false);
+    if (path.length < 3) return flags;
+    for (var start = 0; start + 2 < path.length; start++) {
+      final points = <SketchVector>[];
+      for (var index = start; index <= start + 2; index++) {
+        final line = path[index];
+        final lineStart = SketchVector.fromJson(line.parameters['start']);
+        final lineEnd = SketchVector.fromJson(line.parameters['end']);
+        if (points.isEmpty || _distance(points.last, lineStart) > 1e-8) {
+          points.add(lineStart);
+        }
+        points.add(lineEnd);
+      }
+      final fit = _fitCircle(points);
+      if (fit == null || !_isSaneCircularFit(points, fit.$1, fit.$2)) {
+        continue;
+      }
+      final error = points
+          .map((point) => (_distance(point, fit.$1) - fit.$2).abs())
+          .fold<double>(0, math.max);
+      // Local windows use the established absolute circular budget rather
+      // than the broad whole-arc 5% display budget.  This prevents a long
+      // tangent line from being absorbed into a short curved transition.
+      if (error > const SketchCircularFitTolerance().absoluteMillimeters) {
+        continue;
+      }
+      for (var index = start; index <= start + 2; index++) {
+        flags[index] = true;
+      }
+    }
+    return flags;
+  }
+
+  SketchReconstructionSuggestion? _classifyLineChain(
+    List<SketchLine> component,
+  ) {
+    if (component.isEmpty) return null;
+    if (component.length == 1) {
+      return SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: [component.single.id],
+        confidence: 1.0,
+      );
+    }
+    // The PCA result is the gate.  Connectivity and shared endpoints alone
+    // are deliberately insufficient for line recognition.
+    final diagnosis = diagnoseSelectedLineOrSpline(
+      component,
+      maxRegions: math.max(
+        SketchCircularFitTolerance.maxRegions,
+        component.length,
+      ),
+    );
+    final fit = diagnosis.result;
+    const lineTolerance = SketchLineReconstructionTolerance();
+    if (fit != null &&
+        fit.maxError <= lineTolerance.reconstructionToleranceMm + 1e-12) {
+      return SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: component.map((line) => line.id).toList(growable: false),
+        confidence:
+            (1 -
+                    fit.maxError /
+                        math.max(
+                          lineTolerance.reconstructionToleranceMm,
+                          1e-12,
+                        ))
+                .clamp(0.0, 1.0),
+        usedEntityIds: fit.usedEntityIds,
+        rmsError: fit.rmsError,
+        maxError: fit.maxError,
+        maxGapMillimeters: fit.maxGapMillimeters,
+      );
+    }
+    // Reuse the established circular fitter for constant-curvature pieces;
+    // no new fitting criterion or tolerance is introduced here.
+    final circular = fitSelectedCircular(component);
+    if (circular != null) {
+      final firstStart = SketchVector.fromJson(
+        component.first.parameters['start'],
+      );
+      final lastEnd = SketchVector.fromJson(component.last.parameters['end']);
+      if (circular.kind == SketchReconstructionKind.arc &&
+          _distance(firstStart, lastEnd) <=
+              const SketchCircularFitTolerance()
+                  .endpointCoincidenceMillimeters) {
+        return SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.circle,
+          entityIds: circular.entityIds,
+          confidence: circular.confidence,
+          center: circular.center,
+          radius: circular.radius,
+          startAngle: circular.startAngle,
+          endAngle: circular.endAngle,
+          startPoint: circular.startPoint,
+          endPoint: circular.endPoint,
+          circularFitQuality: circular.circularFitQuality,
+          warnings: circular.warnings,
+          maxGapMillimeters: circular.maxGapMillimeters,
+          tangencyStartDegrees: circular.tangencyStartDegrees,
+          tangencyEndDegrees: circular.tangencyEndDegrees,
+          usedEntityIds: circular.usedEntityIds,
+          coveredEntityIds: circular.coveredEntityIds,
+          rmsError: circular.rmsError,
+          maxError: circular.maxError,
+        );
+      }
+      return circular;
+    }
+    // Closed polylines have no external endpoints, so the manual ordered
+    // fitter quite correctly refuses to invent a start/end arc.  They can
+    // still be recognized as a circle when the existing algebraic circle fit
+    // explains every source endpoint within its established error budget.
+    final points = <SketchVector>[];
+    for (final line in component) {
+      final start = SketchVector.fromJson(line.parameters['start']);
+      final end = SketchVector.fromJson(line.parameters['end']);
+      if (points.isEmpty || _distance(points.last, start) > 1e-8) {
+        points.add(start);
+      }
+      points.add(end);
+    }
+    final circleFit = _fitCircle(points);
+    if (circleFit == null ||
+        !_isSaneCircularFit(points, circleFit.$1, circleFit.$2)) {
+      return null;
+    }
+    final radialError = points
+        .map((point) => (_distance(point, circleFit.$1) - circleFit.$2).abs())
+        .fold<double>(0, math.max);
+    final errorLimit = math.max(0.5, circleFit.$2 * 0.05);
+    if (!radialError.isFinite || radialError > errorLimit) return null;
+    final closed =
+        _distance(points.first, points.last) <=
+        const SketchCircularFitTolerance().endpointCoincidenceMillimeters;
+    final angles = _arcAngles(points, circleFit.$1);
+    return SketchReconstructionSuggestion(
+      kind: closed
+          ? SketchReconstructionKind.circle
+          : SketchReconstructionKind.arc,
+      entityIds: component.map((line) => line.id).toList(growable: false),
+      confidence: (1 - radialError / math.max(errorLimit, 1e-9)).clamp(
+        0.0,
+        1.0,
+      ),
+      center: circleFit.$1,
+      radius: circleFit.$2,
+      startAngle: angles.$1,
+      endAngle: angles.$2,
+      rmsError: radialError,
+      maxError: radialError,
+    );
+  }
+
+  (SketchVector, SketchVector)? _pathDirections(
+    SketchLine line,
+    SketchLine next,
+    double endpointTolerance,
+  ) {
+    final lineStart = SketchVector.fromJson(line.parameters['start']);
+    final lineEnd = SketchVector.fromJson(line.parameters['end']);
+    final nextStart = SketchVector.fromJson(next.parameters['start']);
+    final nextEnd = SketchVector.fromJson(next.parameters['end']);
+    final pairs = <(SketchVector, SketchVector)>[
+      (lineStart, nextStart),
+      (lineStart, nextEnd),
+      (lineEnd, nextStart),
+      (lineEnd, nextEnd),
+    ];
+    var best = pairs.first;
+    var bestDistance = _distance(best.$1, best.$2);
+    for (final pair in pairs.skip(1)) {
+      final distance = _distance(pair.$1, pair.$2);
+      if (distance < bestDistance) {
+        best = pair;
+        bestDistance = distance;
+      }
+    }
+    if (!bestDistance.isFinite || bestDistance > endpointTolerance) return null;
+    final lineShared = best.$1;
+    final nextShared = best.$2;
+    final lineOther = _distance(lineShared, lineStart) <= 1e-12
+        ? lineEnd
+        : lineStart;
+    final nextOther = _distance(nextShared, nextStart) <= 1e-12
+        ? nextEnd
+        : nextStart;
+    final first = lineShared - lineOther;
+    final second = nextOther - nextShared;
+    final firstLength = math.sqrt(first.dot(first));
+    final secondLength = math.sqrt(second.dot(second));
+    if (firstLength <= 1e-12 || secondLength <= 1e-12) return null;
+    return (first.scale(1 / firstLength), second.scale(1 / secondLength));
   }
 
   bool _hasFiniteAutomaticGeometry(SketchEntity entity) {
@@ -2299,17 +2635,6 @@ class SketchReconstructionEngine {
     final start = SketchVector.fromJson(line.parameters['start']);
     final end = SketchVector.fromJson(line.parameters['end']);
     return math.atan2(end.y - start.y, end.x - start.x);
-  }
-
-  bool _sharesEndpoint(SketchLine first, SketchLine second, double tolerance) {
-    final firstStart = SketchVector.fromJson(first.parameters['start']);
-    final firstEnd = SketchVector.fromJson(first.parameters['end']);
-    final secondStart = SketchVector.fromJson(second.parameters['start']);
-    final secondEnd = SketchVector.fromJson(second.parameters['end']);
-    return _distance(firstStart, secondStart) <= tolerance ||
-        _distance(firstStart, secondEnd) <= tolerance ||
-        _distance(firstEnd, secondStart) <= tolerance ||
-        _distance(firstEnd, secondEnd) <= tolerance;
   }
 
   double _distance(SketchVector first, SketchVector second) {

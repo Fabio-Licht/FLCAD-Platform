@@ -29,10 +29,7 @@ void main() {
           // The chain may be oriented in either direction, but the two real
           // outer endpoints are projected onto the PCA line.
           final span = (count - 1) * (5 + gap) + 5;
-          expect(
-            {fit.start.x, fit.end.x}.reduce(math.min),
-            closeTo(0.0, 1e-3),
-          );
+          expect({fit.start.x, fit.end.x}.reduce(math.min), closeTo(0.0, 1e-3));
           expect(
             {fit.start.x, fit.end.x}.reduce(math.max),
             closeTo(span, 1e-3),
@@ -43,145 +40,154 @@ void main() {
       }
     });
 
-    test('line endpoints lie on the PCA axis between the projected chain ends', () {
-      final first = SketchLine(
-        const SketchVector(0, 1),
-        const SketchVector(10, 1),
-      );
-      final second = SketchLine(
-        const SketchVector(12, -1),
-        const SketchVector(22, -1),
-      );
-      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
-        second,
-        first,
-      ]);
-      expect(fit, isNotNull);
+    test(
+      'line endpoints lie on the PCA axis between the projected chain ends',
+      () {
+        final first = SketchLine(
+          const SketchVector(0, 1),
+          const SketchVector(10, 1),
+        );
+        final second = SketchLine(
+          const SketchVector(12, -1),
+          const SketchVector(22, -1),
+        );
+        final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+          second,
+          first,
+        ]);
+        expect(fit, isNotNull);
 
-      const chainStart = SketchVector(0, 1);
-      const chainEnd = SketchVector(22, -1);
-      final samples = <SketchVector>[
-        chainStart,
-        const SketchVector(10, 1),
-        const SketchVector(12, -1),
-        chainEnd,
-      ];
-      final mean = samples
-          .fold(const SketchVector(0, 0), (sum, point) => sum + point)
-          .scale(1 / samples.length);
-      var xx = 0.0, xy = 0.0, yy = 0.0;
-      for (final point in samples) {
-        final delta = point - mean;
-        xx += delta.x * delta.x;
-        xy += delta.x * delta.y;
-        yy += delta.y * delta.y;
-      }
-      final angle = .5 * math.atan2(2 * xy, xx - yy);
-      var direction = SketchVector(math.cos(angle), math.sin(angle));
-      if ((chainEnd - chainStart).dot(direction) < 0) {
-        direction = direction.scale(-1);
-      }
-      SketchVector project(SketchVector point) =>
-          mean + direction.scale((point - mean).dot(direction));
-      double cross(SketchVector point) {
-        final delta = point - mean;
-        return (delta.x * direction.y - delta.y * direction.x).abs();
-      }
+        const chainStart = SketchVector(0, 1);
+        const chainEnd = SketchVector(22, -1);
+        final samples = <SketchVector>[
+          chainStart,
+          const SketchVector(10, 1),
+          const SketchVector(12, -1),
+          chainEnd,
+        ];
+        final mean = samples
+            .fold(const SketchVector(0, 0), (sum, point) => sum + point)
+            .scale(1 / samples.length);
+        var xx = 0.0, xy = 0.0, yy = 0.0;
+        for (final point in samples) {
+          final delta = point - mean;
+          xx += delta.x * delta.x;
+          xy += delta.x * delta.y;
+          yy += delta.y * delta.y;
+        }
+        final angle = .5 * math.atan2(2 * xy, xx - yy);
+        var direction = SketchVector(math.cos(angle), math.sin(angle));
+        if ((chainEnd - chainStart).dot(direction) < 0) {
+          direction = direction.scale(-1);
+        }
+        SketchVector project(SketchVector point) =>
+            mean + direction.scale((point - mean).dot(direction));
+        double cross(SketchVector point) {
+          final delta = point - mean;
+          return (delta.x * direction.y - delta.y * direction.x).abs();
+        }
 
-      final expectedStart = project(chainStart);
-      final expectedEnd = project(chainEnd);
-      expect(cross(fit!.start), lessThan(1e-9));
-      expect(cross(fit.end), lessThan(1e-9));
-      final lineDirection = fit.end - fit.start;
-      expect(
-        (lineDirection.x * direction.y - lineDirection.y * direction.x).abs(),
-        lessThan(1e-9),
-      );
-      expect(
-        (_distance(fit.start, expectedStart) < 1e-9 &&
-                _distance(fit.end, expectedEnd) < 1e-9) ||
-            (_distance(fit.start, expectedEnd) < 1e-9 &&
-                _distance(fit.end, expectedStart) < 1e-9),
-        isTrue,
-      );
-      expect(_distance(fit.start, chainStart), greaterThan(1e-6));
-      expect(_distance(fit.end, chainEnd), greaterThan(1e-6));
+        final expectedStart = project(chainStart);
+        final expectedEnd = project(chainEnd);
+        expect(cross(fit!.start), lessThan(1e-9));
+        expect(cross(fit.end), lessThan(1e-9));
+        final lineDirection = fit.end - fit.start;
+        expect(
+          (lineDirection.x * direction.y - lineDirection.y * direction.x).abs(),
+          lessThan(1e-9),
+        );
+        expect(
+          (_distance(fit.start, expectedStart) < 1e-9 &&
+                  _distance(fit.end, expectedEnd) < 1e-9) ||
+              (_distance(fit.start, expectedEnd) < 1e-9 &&
+                  _distance(fit.end, expectedStart) < 1e-9),
+          isTrue,
+        );
+        expect(_distance(fit.start, chainStart), greaterThan(1e-6));
+        expect(_distance(fit.end, chainEnd), greaterThan(1e-6));
 
-      double param(SketchVector point) => (point - mean).dot(direction);
-      final fittedParams = [param(fit.start), param(fit.end)]..sort();
-      final expectedParams = [param(expectedStart), param(expectedEnd)]..sort();
-      expect(fittedParams[0], closeTo(expectedParams[0], 1e-9));
-      expect(fittedParams[1], closeTo(expectedParams[1], 1e-9));
+        double param(SketchVector point) => (point - mean).dot(direction);
+        final fittedParams = [param(fit.start), param(fit.end)]..sort();
+        final expectedParams = [param(expectedStart), param(expectedEnd)]
+          ..sort();
+        expect(fittedParams[0], closeTo(expectedParams[0], 1e-9));
+        expect(fittedParams[1], closeTo(expectedParams[1], 1e-9));
 
-      var squared = 0.0, maximum = 0.0;
-      for (final point in fit.referencePoints) {
-        final error = cross(point);
-        squared += error * error;
-        maximum = math.max(maximum, error);
-      }
-      expect(
-        fit.rmsError,
-        closeTo(math.sqrt(squared / fit.referencePoints.length), 1e-12),
-      );
-      expect(fit.maxError, closeTo(maximum, 1e-12));
-      expect(
-        fit.points.any(
-          (point) => (point.x - 0).abs() < 1e-9 && (point.y - 1).abs() < 1e-9,
-        ),
-        isTrue,
-      );
-      expect(
-        fit.points.any(
-          (point) => (point.x - 22).abs() < 1e-9 && (point.y + 1).abs() < 1e-9,
-        ),
-        isTrue,
-      );
-    });
+        var squared = 0.0, maximum = 0.0;
+        for (final point in fit.referencePoints) {
+          final error = cross(point);
+          squared += error * error;
+          maximum = math.max(maximum, error);
+        }
+        expect(
+          fit.rmsError,
+          closeTo(math.sqrt(squared / fit.referencePoints.length), 1e-12),
+        );
+        expect(fit.maxError, closeTo(maximum, 1e-12));
+        expect(
+          fit.points.any(
+            (point) => (point.x - 0).abs() < 1e-9 && (point.y - 1).abs() < 1e-9,
+          ),
+          isTrue,
+        );
+        expect(
+          fit.points.any(
+            (point) =>
+                (point.x - 22).abs() < 1e-9 && (point.y + 1).abs() < 1e-9,
+          ),
+          isTrue,
+        );
+      },
+    );
 
-    test('preserves spline form and rejects insufficient or degenerate input', () {
-      final spline = SketchSpline(const [
-        SketchVector(0, 0),
-        SketchVector(1, 1),
-        SketchVector(2, 0),
-      ]);
-      final arc = SketchArc(
-        const SketchVector(12, 0),
-        2,
-        math.pi,
-        1.5 * math.pi,
-      );
-      final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
-        spline,
-        arc,
-      ]);
-      expect(fit, isNotNull);
-      // A spline contributes its stable interpolated samples, not just its
-      // original control polygon; neither endpoint may be discarded.
-      expect(fit!.points.length, greaterThanOrEqualTo(3));
-      expect(
-        fit.points.where((point) => point.x.abs() < 1e-9 && point.y.abs() < 1e-9),
-        isNotEmpty,
-      );
-      expect(
-        fit.points.where((point) => (point.x - 2).abs() < 1e-9 && point.y.abs() < 1e-9),
-        isNotEmpty,
-      );
-      expect(fit.usedEntityIds, containsAll([spline.id, arc.id]));
-      expect(
-        const SketchReconstructionEngine().fitSelectedLineOrSpline([
-          SketchLine(const SketchVector(1, 1), const SketchVector(1, 1)),
-        ]),
-        isNull,
-      );
-    });
+    test(
+      'preserves spline form and rejects insufficient or degenerate input',
+      () {
+        final spline = SketchSpline(const [
+          SketchVector(0, 0),
+          SketchVector(1, 1),
+          SketchVector(2, 0),
+        ]);
+        final arc = SketchArc(
+          const SketchVector(12, 0),
+          2,
+          math.pi,
+          1.5 * math.pi,
+        );
+        final fit = const SketchReconstructionEngine().fitSelectedLineOrSpline([
+          spline,
+          arc,
+        ]);
+        expect(fit, isNotNull);
+        // A spline contributes its stable interpolated samples, not just its
+        // original control polygon; neither endpoint may be discarded.
+        expect(fit!.points.length, greaterThanOrEqualTo(3));
+        expect(
+          fit.points.where(
+            (point) => point.x.abs() < 1e-9 && point.y.abs() < 1e-9,
+          ),
+          isNotEmpty,
+        );
+        expect(
+          fit.points.where(
+            (point) => (point.x - 2).abs() < 1e-9 && point.y.abs() < 1e-9,
+          ),
+          isNotEmpty,
+        );
+        expect(fit.usedEntityIds, containsAll([spline.id, arc.id]));
+        expect(
+          const SketchReconstructionEngine().fitSelectedLineOrSpline([
+            SketchLine(const SketchVector(1, 1), const SketchVector(1, 1)),
+          ]),
+          isNull,
+        );
+      },
+    );
 
     test('rejects non-finite samples before PCA or spline creation', () {
       final diagnosis = const SketchReconstructionEngine()
           .diagnoseSelectedLineOrSpline([
-            SketchLine(
-              SketchVector(double.nan, 0),
-              const SketchVector(1, 0),
-            ),
+            SketchLine(SketchVector(double.nan, 0), const SketchVector(1, 0)),
           ]);
       expect(diagnosis.result, isNull);
       expect(diagnosis.failure, SketchRegionFitFailure.invalidSamples);
@@ -196,10 +202,16 @@ void main() {
         source,
       ]);
       expect(fit, isNotNull);
-      expect(fit!.points.length, lessThanOrEqualTo(SketchRegionFitResult.maxSplineKnots));
+      expect(
+        fit!.points.length,
+        lessThanOrEqualTo(SketchRegionFitResult.maxSplineKnots),
+      );
       expect(fit.points.first.x, closeTo(0, 1e-9));
       expect(fit.points.last.x, closeTo(23, 1e-9));
-      expect(fit.points.every((point) => point.x.isFinite && point.y.isFinite), isTrue);
+      expect(
+        fit.points.every((point) => point.x.isFinite && point.y.isFinite),
+        isTrue,
+      );
     });
 
     test('a large gap stays stable without spline overshoot', () {
@@ -213,7 +225,10 @@ void main() {
           .whereType<List>()
           .map(SketchVector.fromJson);
       expect(samples.every((point) => point.y.abs() < 1e-9), isTrue);
-      expect(samples.every((point) => point.x >= -1e-9 && point.x <= 102 + 1e-9), isTrue);
+      expect(
+        samples.every((point) => point.x >= -1e-9 && point.x <= 102 + 1e-9),
+        isTrue,
+      );
       expect({fit.start.x, fit.end.x}, {0.0, 102.0});
     });
   });
@@ -557,7 +572,16 @@ void main() {
     );
     expect(
       suggestions.where((item) => item.kind == SketchReconstructionKind.line),
-      hasLength(1),
+      hasLength(2),
+    );
+    expect(
+      suggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.toSet().containsAll([horizontal.id, vertical.id]) &&
+            item.confidence == 1.0,
+      ),
+      isFalse,
     );
     expect(
       suggestions.where(
@@ -575,6 +599,230 @@ void main() {
     );
     expect(horizontal.id, isNotEmpty);
     expect(vertical.id, isNotEmpty);
+  });
+
+  test('automatic segmentation keeps collinear chains and splits corners', () {
+    final collinear = [
+      for (var index = 0; index < 5; index++)
+        SketchLine(
+          SketchVector(index * 10.0, 0),
+          SketchVector((index + 1) * 10.0, 0),
+        ),
+    ];
+    final collinearSuggestions = const SketchReconstructionEngine().analyze(
+      collinear,
+    );
+    expect(
+      collinearSuggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.toSet().length == 5 &&
+            item.entityIds.toSet().containsAll(
+              collinear.map((line) => line.id),
+            ),
+      ),
+      isTrue,
+    );
+
+    final lShape = [
+      SketchLine(const SketchVector(0, 0), const SketchVector(10, 0)),
+      SketchLine(const SketchVector(10, 0), const SketchVector(20, 0)),
+      SketchLine(const SketchVector(20, 0), const SketchVector(20, 10)),
+      SketchLine(const SketchVector(20, 10), const SketchVector(20, 20)),
+    ];
+    final lSuggestions = const SketchReconstructionEngine().analyze(lShape);
+    expect(
+      lSuggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.toSet().containsAll(lShape.map((line) => line.id)) &&
+            item.confidence == 1.0,
+      ),
+      isFalse,
+    );
+    expect(
+      lSuggestions.where((item) => item.kind == SketchReconstructionKind.line),
+      hasLength(2),
+    );
+  });
+
+  test('automatic segmentation rejects U and S chains as one line', () {
+    final uShape = [
+      SketchLine(const SketchVector(0, 0), const SketchVector(0, 10)),
+      SketchLine(const SketchVector(0, 10), const SketchVector(0, 20)),
+      SketchLine(const SketchVector(0, 20), const SketchVector(10, 20)),
+      SketchLine(const SketchVector(10, 20), const SketchVector(20, 20)),
+      SketchLine(const SketchVector(20, 20), const SketchVector(20, 10)),
+      SketchLine(const SketchVector(20, 10), const SketchVector(20, 0)),
+    ];
+    final sPoints = [
+      for (var index = 0; index <= 12; index++)
+        SketchVector(index * 2.0, math.sin(index * math.pi / 6) * 5),
+    ];
+    final sShape = [
+      for (var index = 0; index + 1 < sPoints.length; index++)
+        SketchLine(sPoints[index], sPoints[index + 1]),
+    ];
+    for (final shape in [uShape, sShape]) {
+      final suggestions = const SketchReconstructionEngine().analyze(shape);
+      expect(
+        suggestions.any(
+          (item) =>
+              item.kind == SketchReconstructionKind.line &&
+              item.entityIds.toSet().containsAll(
+                shape.map((line) => line.id),
+              ) &&
+              item.confidence == 1.0,
+        ),
+        isFalse,
+      );
+    }
+  });
+
+  test('automatic segmentation keeps constant curvature as one arc region', () {
+    final points = [
+      for (var index = 0; index <= 8; index++)
+        SketchVector(
+          20 * math.cos(index * math.pi / 16),
+          20 * math.sin(index * math.pi / 16),
+        ),
+    ];
+    final arcFragments = [
+      for (var index = 0; index + 1 < points.length; index++)
+        SketchLine(points[index], points[index + 1]),
+    ];
+    final suggestions = const SketchReconstructionEngine().analyze(
+      arcFragments,
+    );
+    expect(
+      suggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.arc &&
+            item.entityIds.toSet().length == arcFragments.length,
+      ),
+      isTrue,
+    );
+  });
+
+  test(
+    'automatic segmentation separates tangent line arc and line regions',
+    () {
+      final arcPoints = [
+        for (var index = 0; index <= 6; index++)
+          SketchVector(
+            20 * math.cos(-math.pi / 2 + index * math.pi / 12),
+            20 + 20 * math.sin(-math.pi / 2 + index * math.pi / 12),
+          ),
+      ];
+      final mixed = <SketchLine>[
+        SketchLine(const SketchVector(-20, 0), arcPoints.first),
+        for (var index = 0; index + 1 < arcPoints.length; index++)
+          SketchLine(arcPoints[index], arcPoints[index + 1]),
+        SketchLine(arcPoints.last, const SketchVector(40, 20)),
+      ];
+      final suggestions = const SketchReconstructionEngine().analyze(mixed);
+      expect(
+        suggestions.any(
+          (item) =>
+              item.kind == SketchReconstructionKind.arc &&
+              item.entityIds.toSet().length == arcPoints.length - 1,
+        ),
+        isTrue,
+      );
+      expect(
+        suggestions.any(
+          (item) =>
+              item.kind == SketchReconstructionKind.line &&
+              item.entityIds.toSet().containsAll(mixed.map((line) => line.id)),
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test(
+    'automatic segmentation is deterministic and rejects a near-line arc',
+    () {
+      final chain = [
+        SketchLine(const SketchVector(20, 0), const SketchVector(10, 0)),
+        SketchLine(const SketchVector(0, 0), const SketchVector(10, 0)),
+        SketchLine(const SketchVector(20, 0), const SketchVector(30, 0.001)),
+        SketchLine(const SketchVector(10, 0), const SketchVector(20, 0)),
+      ];
+      final engine = const SketchReconstructionEngine();
+      final forward = engine.analyze(chain);
+      final reversed = engine.analyze(chain.reversed);
+      String signature(Iterable<SketchReconstructionSuggestion> suggestions) =>
+          suggestions
+              .map((item) => '${item.kind}:${item.entityIds.join(',')}')
+              .join('|');
+      expect(signature(forward), signature(reversed));
+      expect(
+        forward.any(
+          (item) =>
+              (item.kind == SketchReconstructionKind.arc ||
+                  item.kind == SketchReconstructionKind.circle) &&
+              item.entityIds.length == chain.length,
+        ),
+        isFalse,
+      );
+    },
+  );
+
+  test('automatic segmentation separates gaps, branches and long chains', () {
+    final first = SketchLine(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    final second = SketchLine(
+      const SketchVector(10.2, 0),
+      const SketchVector(20.2, 0),
+    );
+    final gapSuggestions = const SketchReconstructionEngine().analyze([
+      first,
+      second,
+    ]);
+    expect(
+      gapSuggestions.where(
+        (item) => item.kind == SketchReconstructionKind.line,
+      ),
+      hasLength(2),
+    );
+    final branch = [
+      SketchLine(const SketchVector(0, 0), const SketchVector(10, 0)),
+      SketchLine(const SketchVector(10, 0), const SketchVector(20, 0)),
+      SketchLine(const SketchVector(10, 0), const SketchVector(10, 10)),
+    ];
+    final branchSuggestions = const SketchReconstructionEngine().analyze(
+      branch,
+    );
+    expect(
+      branchSuggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.toSet().containsAll(branch.map((line) => line.id)),
+      ),
+      isFalse,
+    );
+
+    final longChain = [
+      for (var index = 0; index < 1000; index++)
+        SketchLine(
+          SketchVector(index.toDouble(), 0),
+          SketchVector((index + 1).toDouble(), 0),
+        ),
+    ];
+    final longSuggestions = const SketchReconstructionEngine().analyze(
+      longChain,
+    );
+    expect(
+      longSuggestions.any(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.toSet().length == 1000,
+      ),
+      isTrue,
+    );
   });
 
   test('recognizes a circular best-fit spline as a circle', () {
@@ -610,9 +858,20 @@ void main() {
         SketchLine(points[index], points[index + 1]),
     ];
     final suggestions = const SketchReconstructionEngine().analyze(lines);
+    final reversedSuggestions = const SketchReconstructionEngine().analyze(
+      lines.reversed,
+    );
     expect(
       suggestions.any((item) => item.kind == SketchReconstructionKind.circle),
       isTrue,
+    );
+    expect(
+      suggestions
+          .map((item) => '${item.kind}:${item.entityIds.join(',')}')
+          .toList(),
+      reversedSuggestions
+          .map((item) => '${item.kind}:${item.entityIds.join(',')}')
+          .toList(),
     );
   });
 

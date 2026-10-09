@@ -1206,403 +1206,450 @@ void main() {
     expect(collinear.every((entity) => entity.visible), isTrue);
   });
 
-  test('multi region line fit promotes only selected regions and resets the session', () async {
-    final directory = await Directory.systemTemp.createTemp('g124_1_line_fit_');
-    addTearDown(() => directory.delete(recursive: true));
-    final kernels = KernelManager()
-      ..register(_HealthySurfaceKernel(), makeDefault: true);
-    final cad = DesktopCadController(
-      kernels: kernels,
-      projects: ProjectManager.instance,
-    );
-    final commands = DesktopCommandCoordinator(
-      cad: cad,
-      projects: ProjectManager.instance,
-    );
-    final projects = ProjectRepository(
-      storage: LocalStorageService(rootDirectory: directory),
-    );
-    final controller = OperationalReverseEngineeringController(
-      recognition: ProfessionalRecognitionApi(),
-      commands: commands,
-      runtime: cad.runtime,
-      referenceApi: ReferenceApi(
-        engine: ReferenceEngine(
-          repository: ReferenceRepository(projects: projects),
+  test(
+    'multi region line fit promotes only selected regions and resets the session',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'g124_1_line_fit_',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final kernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
         ),
-      ),
-    );
-    addTearDown(controller.dispose);
-    addTearDown(cad.dispose);
-    await cad.runtime.open('g124-line-fit', directory);
-    await controller.configureProject(
-      projectId: 'g124-line-fit',
-      projectDirectory: directory,
-    );
-    controller.selectWorldSketchPlane(SketchPlaneType.xy);
-    await controller.openSketch();
+      );
+      addTearDown(controller.dispose);
+      addTearDown(cad.dispose);
+      await cad.runtime.open('g124-line-fit', directory);
+      await controller.configureProject(
+        projectId: 'g124-line-fit',
+        projectDirectory: directory,
+      );
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
 
-    final sources = <SketchLine>[
-      for (var index = 0; index < 5; index++)
-        controller.sketchApi!.builders.line.build(
-          SketchVector(index * 25.0, 0),
-          SketchVector(index * 25.0 + 5, 0),
+      final sources = <SketchLine>[
+        for (var index = 0; index < 5; index++)
+          controller.sketchApi!.builders.line.build(
+            SketchVector(index * 25.0, 0),
+            SketchVector(index * 25.0 + 5, 0),
+          ),
+      ];
+      final untouched = controller.sketchApi!.builders.line.build(
+        const SketchVector(300, 10),
+        const SketchVector(310, 10),
+      );
+
+      controller.beginSketchCircularSelection();
+      for (final source in [
+        sources[3],
+        sources[0],
+        sources[4],
+        sources[1],
+        sources[2],
+      ]) {
+        controller.selectSketchEntity(source.id);
+      }
+      controller.setSketchRegionFitOutput(SketchRegionFitOutput.line);
+      await controller.fitSelectedSketchLineOrSpline();
+
+      final fittedId = controller.selectedSketchEntityIds.single;
+      final fitted = controller.sketchApi!.entity(fittedId);
+      expect(fitted, isA<SketchLine>());
+      expect(controller.sketchCircularSelectionMode, isFalse);
+      expect(controller.sketchRegionFitMessage, contains('5 regi'));
+      expect(controller.sketchRegionFitMessage, contains('RMS'));
+      expect(sources.every((source) => source.visible == false), isTrue);
+      expect(untouched.visible, isTrue);
+      expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
+      expect(cad.runtime.scene.find(fittedId)!.selected, isTrue);
+      expect(
+        cad.runtime.scene.find(fittedId)!.geometry['displayColor'],
+        'regionFitNavy',
+      );
+      final referenceId = 'region-fit-reference-$fittedId';
+      expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
+      expect(
+        cad.runtime.scene.find(referenceId)!.geometry['displayColor'],
+        'referenceCurve',
+      );
+      expect(cad.runtime.document!.entities.containsKey(referenceId), isFalse);
+      expect(controller.activeSketch!.entityIds, isNot(contains(referenceId)));
+      expect(controller.sketchRegionFitComparison!.rms, closeTo(0, 1e-9));
+      expect(controller.sketchRegionFitComparison!.maximum, closeTo(0, 1e-9));
+
+      // A completed session must not consume the promoted line on a second run.
+      await controller.fitSelectedSketchLineOrSpline();
+      expect(controller.selectedSketchEntityIds, {fittedId});
+      expect(
+        controller.sketchRegionFitMessage,
+        contains('Selecione novamente as regi'),
+      );
+
+      final fittedStart = SketchVector.fromJson(
+        (controller.sketchApi!.entity(fittedId)! as SketchLine)
+            .parameters['start'],
+      );
+      final fittedEnd = SketchVector.fromJson(
+        (controller.sketchApi!.entity(fittedId)! as SketchLine)
+            .parameters['end'],
+      );
+
+      Future<void> expectFitApplied() async {
+        expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+        expect(
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(fittedId)!.parameters['start'],
+          ).x,
+          closeTo(fittedStart.x, 1e-9),
+        );
+        expect(
+          SketchVector.fromJson(
+            controller.sketchApi!.entity(fittedId)!.parameters['end'],
+          ).x,
+          closeTo(fittedEnd.x, 1e-9),
+        );
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == false,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) =>
+                cad
+                    .runtime
+                    .document!
+                    .entities[source.id]!
+                    .data['sceneVisible'] ==
+                false,
+          ),
+          isTrue,
+        );
+        expect(untouched.visible, isTrue);
+        expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
+        expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
+        expect(
+          cad.runtime.document!.entities.containsKey(referenceId),
+          isFalse,
+        );
+      }
+
+      Future<void> expectFitUndone() async {
+        expect(controller.sketchApi!.entity(fittedId), isNull);
+        expect(cad.runtime.document!.entities.containsKey(fittedId), isFalse);
+        expect(cad.runtime.scene.find(fittedId), isNull);
+        expect(cad.runtime.scene.find(referenceId), isNull);
+        expect(
+          sources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(
+          sources.every(
+            (source) => cad.runtime.scene.find(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(untouched.visible, isTrue);
+      }
+
+      // Global history (Ctrl+Z / Ctrl+Y) is in-session only. The command
+      // manager never restores _undo/_redo from persist()+close+reopen.
+      await controller.undo();
+      await expectFitUndone();
+      await controller.redo();
+      await expectFitApplied();
+      await controller.undo();
+      await expectFitUndone();
+      await controller.redo();
+      await expectFitApplied();
+
+      final engine = controller.sketchApi!.engine;
+      await controller.toggleActiveSketchVisibility();
+      await controller.toggleActiveSketchVisibility();
+      expect(
+        sources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
         ),
-    ];
-    final untouched = controller.sketchApi!.builders.line.build(
-      const SketchVector(300, 10),
-      const SketchVector(310, 10),
-    );
+        isTrue,
+      );
+      await controller.toggleActiveSketchVisibility();
+      expect(cad.runtime.scene.find(referenceId), isNull);
+      await controller.toggleActiveSketchVisibility();
+      expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
 
-    controller.beginSketchCircularSelection();
-    for (final source in [
-      sources[3],
-      sources[0],
-      sources[4],
-      sources[1],
-      sources[2],
-    ]) {
-      controller.selectSketchEntity(source.id);
-    }
-    controller.setSketchRegionFitOutput(SketchRegionFitOutput.line);
-    await controller.fitSelectedSketchLineOrSpline();
-
-    final fittedId = controller.selectedSketchEntityIds.single;
-    final fitted = controller.sketchApi!.entity(fittedId);
-    expect(fitted, isA<SketchLine>());
-    expect(controller.sketchCircularSelectionMode, isFalse);
-    expect(controller.sketchRegionFitMessage, contains('5 regi'));
-    expect(controller.sketchRegionFitMessage, contains('RMS'));
-    expect(sources.every((source) => source.visible == false), isTrue);
-    expect(untouched.visible, isTrue);
-    expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
-    expect(cad.runtime.scene.find(fittedId)!.selected, isTrue);
-    expect(cad.runtime.scene.find(fittedId)!.geometry['displayColor'], 'regionFitNavy');
-    final referenceId = 'region-fit-reference-$fittedId';
-    expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
-    expect(cad.runtime.scene.find(referenceId)!.geometry['displayColor'], 'referenceCurve');
-    expect(cad.runtime.document!.entities.containsKey(referenceId), isFalse);
-    expect(controller.activeSketch!.entityIds, isNot(contains(referenceId)));
-    expect(controller.sketchRegionFitComparison!.rms, closeTo(0, 1e-9));
-    expect(controller.sketchRegionFitComparison!.maximum, closeTo(0, 1e-9));
-
-    // A completed session must not consume the promoted line on a second run.
-    await controller.fitSelectedSketchLineOrSpline();
-    expect(controller.selectedSketchEntityIds, {fittedId});
-    expect(
-      controller.sketchRegionFitMessage,
-      contains('Selecione novamente as regi'),
-    );
-
-    final fittedStart = SketchVector.fromJson(
-      (controller.sketchApi!.entity(fittedId)! as SketchLine).parameters['start'],
-    );
-    final fittedEnd = SketchVector.fromJson(
-      (controller.sketchApi!.entity(fittedId)! as SketchLine).parameters['end'],
-    );
-
-    Future<void> expectFitApplied() async {
-      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+      // Region-fit dragging is a rigid translation of the promoted entity only.
+      final camera = CadCameraController()..resize(1000, 700);
+      final pick = CadViewportPick(
+        entityId: fittedId,
+        hit: const MeshHit(
+          triangleIndex: 0,
+          point: Vector3(0, 0, 0),
+          distance: 0,
+        ),
+      );
+      final lineBeforeCancel = SketchVector.fromJson(
+        controller.sketchApi!.entity(fittedId)!.parameters['start'],
+      );
+      controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
+      controller.updateSketchEntityDrag(const Offset(580, 350), camera);
+      expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
+      controller.cancelSketchEntityDrag();
       expect(
         SketchVector.fromJson(
           controller.sketchApi!.entity(fittedId)!.parameters['start'],
         ).x,
-        closeTo(fittedStart.x, 1e-9),
+        closeTo(lineBeforeCancel.x, 1e-9),
       );
+      controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
+      await controller.finishSketchEntityDrag(const Offset(580, 350), camera);
+      final lineAfterDrag = SketchVector.fromJson(
+        controller.sketchApi!.entity(fittedId)!.parameters['start'],
+      );
+      expect(lineAfterDrag.x, isNot(closeTo(lineBeforeCancel.x, 1e-9)));
+      expect(sources.every((source) => source.visible == false), isTrue);
+      expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
+      expect(engine.undo(), isTrue);
       expect(
         SketchVector.fromJson(
-          controller.sketchApi!.entity(fittedId)!.parameters['end'],
+          controller.sketchApi!.entity(fittedId)!.parameters['start'],
         ).x,
-        closeTo(fittedEnd.x, 1e-9),
+        closeTo(lineBeforeCancel.x, 1e-9),
       );
+      expect(engine.redo(), isTrue);
       expect(
-        sources.every(
-          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-        ),
-        isTrue,
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(fittedId)!.parameters['start'],
+        ).x,
+        closeTo(lineAfterDrag.x, 1e-9),
       );
-      expect(
-        sources.every(
-          (source) =>
-              cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
-              false,
+
+      // The other output mode promotes a real SketchSpline, without consuming
+      // the visible reference outside this second selection.
+      final splineSources = <SketchLine>[
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(0, 30),
+          const SketchVector(5, 31),
         ),
-        isTrue,
-      );
-      expect(untouched.visible, isTrue);
-      expect(cad.runtime.scene.find(fittedId)!.visible, isTrue);
-      expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
-      expect(cad.runtime.document!.entities.containsKey(referenceId), isFalse);
-    }
-
-    Future<void> expectFitUndone() async {
-      expect(controller.sketchApi!.entity(fittedId), isNull);
-      expect(cad.runtime.document!.entities.containsKey(fittedId), isFalse);
-      expect(cad.runtime.scene.find(fittedId), isNull);
-      expect(cad.runtime.scene.find(referenceId), isNull);
-      expect(
-        sources.every(
-          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(12, 33),
+          const SketchVector(18, 32),
         ),
-        isTrue,
-      );
-      expect(
-        sources.every(
-          (source) => cad.runtime.scene.find(source.id)?.visible == true,
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(25, 30),
+          const SketchVector(30, 30),
         ),
-        isTrue,
-      );
-      expect(untouched.visible, isTrue);
-    }
-
-    // Global history (Ctrl+Z / Ctrl+Y) is in-session only. The command
-    // manager never restores _undo/_redo from persist()+close+reopen.
-    await controller.undo();
-    await expectFitUndone();
-    await controller.redo();
-    await expectFitApplied();
-    await controller.undo();
-    await expectFitUndone();
-    await controller.redo();
-    await expectFitApplied();
-
-    final engine = controller.sketchApi!.engine;
-    await controller.toggleActiveSketchVisibility();
-    await controller.toggleActiveSketchVisibility();
-    expect(
-      sources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-      ),
-      isTrue,
-    );
-    await controller.toggleActiveSketchVisibility();
-    expect(cad.runtime.scene.find(referenceId), isNull);
-    await controller.toggleActiveSketchVisibility();
-    expect(cad.runtime.scene.find(referenceId)!.visible, isTrue);
-
-    // Region-fit dragging is a rigid translation of the promoted entity only.
-    final camera = CadCameraController()..resize(1000, 700);
-    final pick = CadViewportPick(
-      entityId: fittedId,
-      hit: const MeshHit(
-        triangleIndex: 0,
-        point: Vector3(0, 0, 0),
-        distance: 0,
-      ),
-    );
-    final lineBeforeCancel = SketchVector.fromJson(
-      controller.sketchApi!.entity(fittedId)!.parameters['start'],
-    );
-    controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
-    controller.updateSketchEntityDrag(const Offset(580, 350), camera);
-    expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
-    controller.cancelSketchEntityDrag();
-    expect(
-      SketchVector.fromJson(
-        controller.sketchApi!.entity(fittedId)!.parameters['start'],
-      ).x,
-      closeTo(lineBeforeCancel.x, 1e-9),
-    );
-    controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
-    await controller.finishSketchEntityDrag(const Offset(580, 350), camera);
-    final lineAfterDrag = SketchVector.fromJson(
-      controller.sketchApi!.entity(fittedId)!.parameters['start'],
-    );
-    expect(lineAfterDrag.x, isNot(closeTo(lineBeforeCancel.x, 1e-9)));
-    expect(sources.every((source) => source.visible == false), isTrue);
-    expect(controller.sketchRegionFitComparison!.maximum, greaterThan(0));
-    expect(engine.undo(), isTrue);
-    expect(
-      SketchVector.fromJson(
-        controller.sketchApi!.entity(fittedId)!.parameters['start'],
-      ).x,
-      closeTo(lineBeforeCancel.x, 1e-9),
-    );
-    expect(engine.redo(), isTrue);
-    expect(
-      SketchVector.fromJson(
-        controller.sketchApi!.entity(fittedId)!.parameters['start'],
-      ).x,
-      closeTo(lineAfterDrag.x, 1e-9),
-    );
-
-    // The other output mode promotes a real SketchSpline, without consuming
-    // the visible reference outside this second selection.
-    final splineSources = <SketchLine>[
-      controller.sketchApi!.builders.line.build(
-        const SketchVector(0, 30),
-        const SketchVector(5, 31),
-      ),
-      controller.sketchApi!.builders.line.build(
-        const SketchVector(12, 33),
-        const SketchVector(18, 32),
-      ),
-      controller.sketchApi!.builders.line.build(
-        const SketchVector(25, 30),
-        const SketchVector(30, 30),
-      ),
-    ];
-    controller.beginSketchCircularSelection();
-    for (final source in [splineSources[2], splineSources[0], splineSources[1]]) {
-      controller.selectSketchEntity(source.id);
-    }
-    controller.setSketchRegionFitOutput(SketchRegionFitOutput.spline);
-    await controller.fitSelectedSketchLineOrSpline();
-    final splineId = controller.selectedSketchEntityIds.single;
-    expect(controller.sketchApi!.entity(splineId), isA<SketchSpline>());
-    expect(controller.sketchRegionFitMessage, contains('pontos'));
-    expect(splineSources.every((source) => source.visible == false), isTrue);
-    expect(untouched.visible, isTrue);
-    expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
-    expect(cad.runtime.scene.find(splineId)!.selected, isTrue);
-    expect(cad.runtime.scene.find(splineId)!.geometry['displayColor'], 'regionFitNavy');
-    expect(cad.runtime.scene.find('region-fit-reference-$splineId')!.visible, isTrue);
-    final splineReferenceId = 'region-fit-reference-$splineId';
-
-    Future<void> expectSplineApplied() async {
+      ];
+      controller.beginSketchCircularSelection();
+      for (final source in [
+        splineSources[2],
+        splineSources[0],
+        splineSources[1],
+      ]) {
+        controller.selectSketchEntity(source.id);
+      }
+      controller.setSketchRegionFitOutput(SketchRegionFitOutput.spline);
+      await controller.fitSelectedSketchLineOrSpline();
+      final splineId = controller.selectedSketchEntityIds.single;
       expect(controller.sketchApi!.entity(splineId), isA<SketchSpline>());
-      expect(
-        splineSources.every(
-          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-        ),
-        isTrue,
-      );
-      expect(
-        splineSources.every(
-          (source) =>
-              cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
-              false,
-        ),
-        isTrue,
-      );
+      expect(controller.sketchRegionFitMessage, contains('pontos'));
+      expect(splineSources.every((source) => source.visible == false), isTrue);
       expect(untouched.visible, isTrue);
       expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
-      expect(cad.runtime.scene.find(splineReferenceId)!.visible, isTrue);
-      expect(cad.runtime.document!.entities.containsKey(splineReferenceId), isFalse);
-      // The earlier line fit stays on the same in-session stack.
-      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
-      expect(cad.runtime.scene.find(fittedId), isNotNull);
-    }
-
-    Future<void> expectSplineUndone() async {
-      expect(controller.sketchApi!.entity(splineId), isNull);
-      expect(cad.runtime.document!.entities.containsKey(splineId), isFalse);
-      expect(cad.runtime.scene.find(splineId), isNull);
-      expect(cad.runtime.scene.find(splineReferenceId), isNull);
+      expect(cad.runtime.scene.find(splineId)!.selected, isTrue);
       expect(
-        splineSources.every(
-          (source) => controller.sketchApi!.entity(source.id)?.visible == true,
-        ),
-        isTrue,
-      );
-      expect(
-        splineSources.every(
-          (source) => cad.runtime.scene.find(source.id)?.visible == true,
-        ),
-        isTrue,
-      );
-      expect(untouched.visible, isTrue);
-      expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
-      expect(cad.runtime.document!.entities.containsKey(fittedId), isTrue);
-      expect(cad.runtime.scene.find(fittedId), isNotNull);
-    }
-
-    await controller.undo();
-    await expectSplineUndone();
-    await controller.redo();
-    await expectSplineApplied();
-    await controller.undo();
-    await expectSplineUndone();
-    await controller.redo();
-    await expectSplineApplied();
-    await controller.toggleActiveSketchVisibility();
-    await controller.toggleActiveSketchVisibility();
-    expect(
-      splineSources.every(
-        (source) => controller.sketchApi!.entity(source.id)?.visible == false,
-      ),
-      isTrue,
-    );
-
-    // Save/Open must rebuild the visual-only comparison from the promoted
-    // entity metadata, rather than from hidden source geometry or a document
-    // entity. This is the same project/controller lifecycle used by users.
-    // Command-manager Undo/Redo is in-session only (history.jsonl is an audit
-    // log, not a restored stack), so reopening does not re-enable Ctrl+Z.
-    await controller.persist();
-    final reopenedKernels = KernelManager()
-      ..register(_HealthySurfaceKernel(), makeDefault: true);
-    final reopenedCad = DesktopCadController(
-      kernels: reopenedKernels,
-      projects: ProjectManager.instance,
-    );
-    final reopenedCommands = DesktopCommandCoordinator(
-      cad: reopenedCad,
-      projects: ProjectManager.instance,
-    );
-    final reopened = OperationalReverseEngineeringController(
-      recognition: ProfessionalRecognitionApi(),
-      commands: reopenedCommands,
-      runtime: reopenedCad.runtime,
-      referenceApi: ReferenceApi(
-        engine: ReferenceEngine(
-          repository: ReferenceRepository(projects: projects),
-        ),
-      ),
-    );
-    addTearDown(reopened.dispose);
-    addTearDown(reopenedCad.dispose);
-    await reopenedCad.runtime.open('g124-line-fit', directory);
-    await reopened.configureProject(
-      projectId: 'g124-line-fit',
-      projectDirectory: directory,
-    );
-
-    final restoredLine = reopened.sketchApi!.entity(fittedId);
-    final restoredSpline = reopened.sketchApi!.entity(splineId);
-    expect(restoredLine, isA<SketchLine>());
-    expect(restoredSpline, isA<SketchSpline>());
-    for (final fitted in [restoredLine!, restoredSpline!]) {
-      expect(fitted.metadata['regionFitReferencePoints'], isA<List>());
-      expect(fitted.metadata['regionFitReferenceRegions'], isA<List>());
-      expect(fitted.metadata['regionFitVisualComparison'], isTrue);
-      expect(
-        reopenedCad.runtime.scene.find(fitted.id)!.geometry['displayColor'],
+        cad.runtime.scene.find(splineId)!.geometry['displayColor'],
         'regionFitNavy',
       );
-      expect(reopenedCad.runtime.scene.find(fitted.id)!.visible, isTrue);
       expect(
-        reopenedCad.runtime.scene.find('region-fit-reference-${fitted.id}')!.visible,
+        cad.runtime.scene.find('region-fit-reference-$splineId')!.visible,
         isTrue,
       );
+      final splineReferenceId = 'region-fit-reference-$splineId';
+
+      Future<void> expectSplineApplied() async {
+        expect(controller.sketchApi!.entity(splineId), isA<SketchSpline>());
+        expect(
+          splineSources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == false,
+          ),
+          isTrue,
+        );
+        expect(
+          splineSources.every(
+            (source) =>
+                cad
+                    .runtime
+                    .document!
+                    .entities[source.id]!
+                    .data['sceneVisible'] ==
+                false,
+          ),
+          isTrue,
+        );
+        expect(untouched.visible, isTrue);
+        expect(cad.runtime.scene.find(splineId)!.visible, isTrue);
+        expect(cad.runtime.scene.find(splineReferenceId)!.visible, isTrue);
+        expect(
+          cad.runtime.document!.entities.containsKey(splineReferenceId),
+          isFalse,
+        );
+        // The earlier line fit stays on the same in-session stack.
+        expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+        expect(cad.runtime.scene.find(fittedId), isNotNull);
+      }
+
+      Future<void> expectSplineUndone() async {
+        expect(controller.sketchApi!.entity(splineId), isNull);
+        expect(cad.runtime.document!.entities.containsKey(splineId), isFalse);
+        expect(cad.runtime.scene.find(splineId), isNull);
+        expect(cad.runtime.scene.find(splineReferenceId), isNull);
+        expect(
+          splineSources.every(
+            (source) =>
+                controller.sketchApi!.entity(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(
+          splineSources.every(
+            (source) => cad.runtime.scene.find(source.id)?.visible == true,
+          ),
+          isTrue,
+        );
+        expect(untouched.visible, isTrue);
+        expect(controller.sketchApi!.entity(fittedId), isA<SketchLine>());
+        expect(cad.runtime.document!.entities.containsKey(fittedId), isTrue);
+        expect(cad.runtime.scene.find(fittedId), isNotNull);
+      }
+
+      await controller.undo();
+      await expectSplineUndone();
+      await controller.redo();
+      await expectSplineApplied();
+      await controller.undo();
+      await expectSplineUndone();
+      await controller.redo();
+      await expectSplineApplied();
+      await controller.toggleActiveSketchVisibility();
+      await controller.toggleActiveSketchVisibility();
       expect(
-        reopenedCad.runtime.document!.entities
-            .containsKey('region-fit-reference-${fitted.id}'),
+        splineSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+
+      // Save/Open must rebuild the visual-only comparison from the promoted
+      // entity metadata, rather than from hidden source geometry or a document
+      // entity. This is the same project/controller lifecycle used by users.
+      // Command-manager Undo/Redo is in-session only (history.jsonl is an audit
+      // log, not a restored stack), so reopening does not re-enable Ctrl+Z.
+      await controller.persist();
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open('g124-line-fit', directory);
+      await reopened.configureProject(
+        projectId: 'g124-line-fit',
+        projectDirectory: directory,
+      );
+
+      final restoredLine = reopened.sketchApi!.entity(fittedId);
+      final restoredSpline = reopened.sketchApi!.entity(splineId);
+      expect(restoredLine, isA<SketchLine>());
+      expect(restoredSpline, isA<SketchSpline>());
+      for (final fitted in [restoredLine!, restoredSpline!]) {
+        expect(fitted.metadata['regionFitReferencePoints'], isA<List>());
+        expect(fitted.metadata['regionFitReferenceRegions'], isA<List>());
+        expect(fitted.metadata['regionFitVisualComparison'], isTrue);
+        expect(
+          reopenedCad.runtime.scene.find(fitted.id)!.geometry['displayColor'],
+          'regionFitNavy',
+        );
+        expect(reopenedCad.runtime.scene.find(fitted.id)!.visible, isTrue);
+        expect(
+          reopenedCad.runtime.scene
+              .find('region-fit-reference-${fitted.id}')!
+              .visible,
+          isTrue,
+        );
+        expect(
+          reopenedCad.runtime.document!.entities.containsKey(
+            'region-fit-reference-${fitted.id}',
+          ),
+          isFalse,
+        );
+      }
+      expect(
+        [...sources, ...splineSources].every(
+          (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(reopened.sketchApi!.entity(untouched.id)!.visible, isTrue);
+
+      reopened.selectSketchEntity(fittedId);
+      await reopened.toggleActiveSketchVisibility();
+      expect(reopenedCad.runtime.scene.find(referenceId), isNull);
+      await reopened.toggleActiveSketchVisibility();
+      expect(reopenedCad.runtime.scene.find(referenceId)!.visible, isTrue);
+      expect(reopenedCad.runtime.scene.find(fittedId)!.selected, isTrue);
+      final restoredComparison = reopened.sketchRegionFitComparison;
+      expect(restoredComparison, isNotNull);
+      expect(restoredComparison!.rms, greaterThan(0));
+      expect(restoredComparison.mean, greaterThan(0));
+      expect(restoredComparison.maximum, greaterThan(0));
+      expect(restoredComparison.deviations, isNotEmpty);
+      expect(
+        reopened.sketchEntities.any((entity) => entity.id == referenceId),
         isFalse,
       );
-    }
-    expect(
-      [...sources, ...splineSources].every(
-        (source) => reopened.sketchApi!.entity(source.id)?.visible == false,
-      ),
-      isTrue,
-    );
-    expect(reopened.sketchApi!.entity(untouched.id)!.visible, isTrue);
-
-    reopened.selectSketchEntity(fittedId);
-    await reopened.toggleActiveSketchVisibility();
-    expect(reopenedCad.runtime.scene.find(referenceId), isNull);
-    await reopened.toggleActiveSketchVisibility();
-    expect(reopenedCad.runtime.scene.find(referenceId)!.visible, isTrue);
-    expect(reopenedCad.runtime.scene.find(fittedId)!.selected, isTrue);
-    final restoredComparison = reopened.sketchRegionFitComparison;
-    expect(restoredComparison, isNotNull);
-    expect(restoredComparison!.rms, greaterThan(0));
-    expect(restoredComparison.mean, greaterThan(0));
-    expect(restoredComparison.maximum, greaterThan(0));
-    expect(restoredComparison.deviations, isNotEmpty);
-    expect(reopened.sketchEntities.any((entity) => entity.id == referenceId), isFalse);
-  });
+    },
+  );
 
   test(
     'confirmation hides every used region and keeps the rest visible',
@@ -1903,7 +1950,10 @@ void main() {
         double cy,
         double radius,
         double angle,
-      ) => SketchVector(cx + radius * math.cos(angle), cy + radius * math.sin(angle));
+      ) => SketchVector(
+        cx + radius * math.cos(angle),
+        cy + radius * math.sin(angle),
+      );
       List<SketchLine> chain({
         required double cx,
         required double cy,
@@ -1989,7 +2039,11 @@ void main() {
         expect(
           sources.every(
             (source) =>
-                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+                cad
+                    .runtime
+                    .document!
+                    .entities[source.id]!
+                    .data['sceneVisible'] ==
                 false,
           ),
           isTrue,
@@ -2002,7 +2056,10 @@ void main() {
         );
       }
 
-      Future<void> expectAssistantUndone(String createdId, List<SketchLine> sources) async {
+      Future<void> expectAssistantUndone(
+        String createdId,
+        List<SketchLine> sources,
+      ) async {
         expect(controller.sketchApi!.entity(createdId), isNull);
         expect(cad.runtime.document!.entities.containsKey(createdId), isFalse);
         expect(cad.runtime.scene.find(createdId), isNull);
@@ -2022,7 +2079,11 @@ void main() {
         expect(
           sources.every(
             (source) =>
-                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] !=
+                cad
+                    .runtime
+                    .document!
+                    .entities[source.id]!
+                    .data['sceneVisible'] !=
                 false,
           ),
           isTrue,
@@ -2075,14 +2136,16 @@ void main() {
       final expectedLineFit = const SketchReconstructionEngine()
           .diagnoseSelectedLineOrSpline(lineSources)
           .result!;
-      final lineCreatedId = await controller.acceptSketchReconstructionSuggestion(
-        lineSuggestion,
-      );
+      final lineCreatedId = await controller
+          .acceptSketchReconstructionSuggestion(lineSuggestion);
       expect(lineCreatedId, isNotNull);
       final promotedLine =
           controller.sketchApi!.entity(lineCreatedId!)! as SketchLine;
       expect(promotedLine.metadata['reconstructionKind'], 'line');
-      expect(promotedLine.metadata.containsKey('regionFitReferencePoints'), isFalse);
+      expect(
+        promotedLine.metadata.containsKey('regionFitReferencePoints'),
+        isFalse,
+      );
       expect(promotedLine.metadata.containsKey('regionFitSourceIds'), isFalse);
       final promotedEnds = [
         SketchVector.fromJson(promotedLine.parameters['start']),
@@ -2251,7 +2314,10 @@ void main() {
         startAngle: 0.4,
         endAngle: 1.7,
       );
-      expect(await controller.acceptSketchReconstructionSuggestion(weak), isNull);
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(weak),
+        isNull,
+      );
       expect(controller.error, contains('não estão mais visíveis'));
       expect(controller.sketchReconstructionMessage, controller.error);
       expect(controller.commands.manager.canUndo, canUndo);
@@ -2351,8 +2417,8 @@ void main() {
               (id) => secondSources.any((source) => source.id == id),
             ),
       );
-      expect(first.rmsError, isNull);
-      expect(first.maxError, isNull);
+      expect(first.rmsError, isNotNull);
+      expect(first.maxError, isNotNull);
 
       dynamic overlay() =>
           cad.runtime.scene.find(sketchReconstructionHighlightId);
@@ -2657,7 +2723,9 @@ void main() {
       final engine = const SketchReconstructionEngine();
       const lineTolerance = SketchLineReconstructionTolerance();
       expect(lineTolerance.reconstructionToleranceMm, 0.10);
-      final limitMm = lineTolerance.reconstructionToleranceMm.toStringAsFixed(3);
+      final limitMm = lineTolerance.reconstructionToleranceMm.toStringAsFixed(
+        3,
+      );
 
       void expectLineToleranceMessage(String? message, double maxError) {
         expect(message, isNotNull);
@@ -2674,9 +2742,15 @@ void main() {
           sources.every(
             (source) =>
                 controller.sketchApi!.entity(source.id)?.visible == false &&
-                controller.sketchApi!.entity(source.id)?.metadata['reconstructionHidden'] ==
+                controller.sketchApi!
+                        .entity(source.id)
+                        ?.metadata['reconstructionHidden'] ==
                     true &&
-                cad.runtime.document!.entities[source.id]!.data['sceneVisible'] ==
+                cad
+                        .runtime
+                        .document!
+                        .entities[source.id]!
+                        .data['sceneVisible'] ==
                     false &&
                 cad.runtime.scene.find(source.id)?.visible == false,
           ),
@@ -2689,7 +2763,9 @@ void main() {
           sources.every(
             (source) =>
                 controller.sketchApi!.entity(source.id)?.visible == true &&
-                controller.sketchApi!.entity(source.id)?.metadata['reconstructionHidden'] !=
+                controller.sketchApi!
+                        .entity(source.id)
+                        ?.metadata['reconstructionHidden'] !=
                     true &&
                 cad.runtime.scene.find(source.id)?.visible == true,
           ),
@@ -2730,11 +2806,13 @@ void main() {
         SketchVector(12, 272),
         SketchVector(24, 260),
       ]);
-      final degenerateSpline = controller.sketchApi!.builders.spline.build(const [
-        SketchVector(700, 0),
-        SketchVector(710, 0),
-        SketchVector(700, 0),
-      ]);
+      final degenerateSpline = controller.sketchApi!.builders.spline.build(
+        const [
+          SketchVector(700, 0),
+          SketchVector(710, 0),
+          SketchVector(700, 0),
+        ],
+      );
       // PCA of the four endpoints is exactly 0.10 mm (mean y offset 0.10).
       final exactLines = [
         controller.sketchApi!.builders.line.build(
@@ -2794,7 +2872,9 @@ void main() {
                 item.entityIds.single == isolated.id,
           );
       expect(
-        await controller.acceptSketchReconstructionSuggestion(isolatedSuggestion),
+        await controller.acceptSketchReconstructionSuggestion(
+          isolatedSuggestion,
+        ),
         isNull,
       );
       expect(controller.sketchEntities.length, entityCountBefore);
@@ -2868,13 +2948,17 @@ void main() {
       await expectSourcesHidden(collinear);
 
       controller.analyzeSketchReconstruction();
-      final elbowSuggestion = controller.sketchReconstructionSuggestions
-          .firstWhere(
+      final elbowSuggestions = controller.sketchReconstructionSuggestions
+          .where(
             (item) =>
                 item.kind == SketchReconstructionKind.line &&
                 item.entityIds.contains(elbowHorizontal.id) &&
                 item.entityIds.contains(elbowVertical.id),
-          );
+          )
+          .toList();
+      // Geometric segmentation rejects the L as one line before the list is
+      // shown; the two arms remain available as independent regions.
+      expect(elbowSuggestions, isEmpty);
       final elbowDiagnosis = engine.diagnoseSelectedLineOrSpline([
         elbowHorizontal,
         elbowVertical,
@@ -2886,26 +2970,16 @@ void main() {
       );
       final canUndoBeforeElbow = controller.commands.manager.canUndo;
       final historyBeforeElbow = controller.commands.manager.history.length;
-      expect(
-        await controller.acceptSketchReconstructionSuggestion(elbowSuggestion),
-        isNull,
-      );
       expect(controller.commands.manager.canUndo, canUndoBeforeElbow);
       expect(controller.commands.manager.history.length, historyBeforeElbow);
-      expectLineToleranceMessage(
-        controller.error,
-        elbowDiagnosis.result!.maxError,
-      );
-      expect(controller.error, contains('Linha rejeitada'));
-      expect(controller.sketchReconstructionMessage, controller.error);
       expect(
         controller.sketchReconstructionSuggestions.any(
           (item) =>
-              item.kind == elbowSuggestion.kind &&
-              item.entityIds.length == elbowSuggestion.entityIds.length &&
-              item.entityIds.every(elbowSuggestion.entityIds.contains),
+              item.kind == SketchReconstructionKind.line &&
+              item.entityIds.contains(elbowHorizontal.id) &&
+              item.entityIds.contains(elbowVertical.id),
         ),
-        isTrue,
+        isFalse,
       );
       expect(controller.sketchApi!.entity(elbowHorizontal.id)!.visible, isTrue);
       expect(controller.sketchApi!.entity(elbowVertical.id)!.visible, isTrue);
@@ -2920,19 +2994,20 @@ void main() {
                 item.entityIds.single == straightSpline.id,
           );
       expect(splineSuggestion.confidence, greaterThanOrEqualTo(.75));
-      final splineFit = engine
-          .diagnoseSelectedLineOrSpline([straightSpline])
-          .result!;
+      final splineFit = engine.diagnoseSelectedLineOrSpline([
+        straightSpline,
+      ]).result!;
       expect(
         splineFit.maxError,
         lessThan(lineTolerance.reconstructionToleranceMm),
       );
-      final splineLineId =
-          (await controller.acceptSketchReconstructionSuggestion(
-            splineSuggestion,
-          ))!;
+      final splineLineId = (await controller
+          .acceptSketchReconstructionSuggestion(splineSuggestion))!;
       expect(controller.sketchApi!.entity(splineLineId), isA<SketchLine>());
-      expect(controller.sketchApi!.entity(straightSpline.id), isA<SketchSpline>());
+      expect(
+        controller.sketchApi!.entity(straightSpline.id),
+        isA<SketchSpline>(),
+      );
       expectLineToleranceMessage(controller.error, splineFit.maxError);
       expect(controller.error, contains('RMS'));
       await expectSourcesHidden([straightSpline]);
@@ -2999,10 +3074,8 @@ void main() {
         exactFit.maxError,
         closeTo(lineTolerance.reconstructionToleranceMm, 1e-12),
       );
-      final exactLineId =
-          (await controller.acceptSketchReconstructionSuggestion(
-            exactSuggestion,
-          ))!;
+      final exactLineId = (await controller
+          .acceptSketchReconstructionSuggestion(exactSuggestion))!;
       expect(controller.sketchApi!.entity(exactLineId), isA<SketchLine>());
       expectLineToleranceMessage(controller.error, exactFit.maxError);
       await expectSourcesHidden(exactLines);
@@ -3022,10 +3095,9 @@ void main() {
         weakFit.maxError,
         lessThanOrEqualTo(lineTolerance.reconstructionToleranceMm),
       );
-      final weakLineId =
-          (await controller.acceptSketchReconstructionSuggestion(
-            weakSuggestion,
-          ))!;
+      final weakLineId = (await controller.acceptSketchReconstructionSuggestion(
+        weakSuggestion,
+      ))!;
       expect(controller.sketchApi!.entity(weakLineId), isA<SketchLine>());
       expectLineToleranceMessage(controller.error, weakFit.maxError);
       await expectSourcesHidden([weakSpline]);
@@ -3039,10 +3111,7 @@ void main() {
         confidence: 0.99,
       );
       final overFit = engine.diagnoseSelectedLineOrSpline(overLines).result!;
-      expect(
-        overFit.maxError,
-        closeTo(0.15, 1e-12),
-      );
+      expect(overFit.maxError, closeTo(0.15, 1e-12));
       expect(
         overFit.maxError,
         greaterThan(lineTolerance.reconstructionToleranceMm),
@@ -3093,10 +3162,7 @@ void main() {
       expect(isolated.visible, isTrue);
       expect(elbowHorizontal.visible, isTrue);
       expect(curvedSpline.visible, isTrue);
-      expect(
-        overLines.every((source) => source.visible),
-        isTrue,
-      );
+      expect(overLines.every((source) => source.visible), isTrue);
       expect(
         controller.sketchEntities
             .where(
@@ -3159,7 +3225,10 @@ void main() {
       );
       addTearDown(reopened.dispose);
       addTearDown(reopenedCad.dispose);
-      await reopenedCad.runtime.open('g124-3-line-promotion', harness.directory);
+      await reopenedCad.runtime.open(
+        'g124-3-line-promotion',
+        harness.directory,
+      );
       await reopened.configureProject(
         projectId: 'g124-3-line-promotion',
         projectDirectory: harness.directory,
@@ -3207,8 +3276,7 @@ void main() {
       final hidden = controller.sketchApi!.builders.line.build(
         const SketchVector(20, 0),
         const SketchVector(30, 0),
-      )
-        ..visible = false;
+      )..visible = false;
       hidden.metadata['reconstructionHidden'] = true;
       final promoted = controller.sketchApi!.builders.line.build(
         const SketchVector(40, 0),
@@ -3218,8 +3286,7 @@ void main() {
       final construction = controller.sketchApi!.builders.line.build(
         const SketchVector(60, 0),
         const SketchVector(70, 0),
-      )
-        ..construction = true;
+      )..construction = true;
 
       controller.analyzeSketchReconstruction();
       final ids = controller.sketchReconstructionSuggestions
@@ -3231,12 +3298,13 @@ void main() {
       expect(ids, isNot(contains(duplicate.id)));
       expect(ids, isNot(contains(construction.id)));
 
-      final geometryStale = controller.sketchReconstructionSuggestions.firstWhere(
-        (suggestion) =>
-            suggestion.kind == SketchReconstructionKind.line &&
-            suggestion.entityIds.length == 1 &&
-            suggestion.entityIds.single == promoted.id,
-      );
+      final geometryStale = controller.sketchReconstructionSuggestions
+          .firstWhere(
+            (suggestion) =>
+                suggestion.kind == SketchReconstructionKind.line &&
+                suggestion.entityIds.length == 1 &&
+                suggestion.entityIds.single == promoted.id,
+          );
       final historyBeforeGeometry = controller.commands.manager.history.length;
       promoted.parameters['end'] = const SketchVector(50, 1).toJson();
       promoted.refreshDerivedParameters();
@@ -3244,14 +3312,8 @@ void main() {
         await controller.acceptSketchReconstructionSuggestion(geometryStale),
         isNull,
       );
-      expect(
-        controller.error,
-        contains('geometria de origem foi alterada'),
-      );
-      expect(
-        controller.commands.manager.history.length,
-        historyBeforeGeometry,
-      );
+      expect(controller.error, contains('geometria de origem foi alterada'));
+      expect(controller.commands.manager.history.length, historyBeforeGeometry);
 
       final stale = controller.sketchReconstructionSuggestions.firstWhere(
         (suggestion) =>
