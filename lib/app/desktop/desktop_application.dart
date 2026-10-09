@@ -10154,6 +10154,21 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               icon: const Icon(Icons.linear_scale, size: 16),
               label: const Text('Ajustar linha/spline'),
             ),
+            if (controller.activeSketchSourceSection != null)
+              OutlinedButton.icon(
+                onPressed: controller.toggleOriginalSectionReferenceVisibility,
+                icon: Icon(
+                  controller.originalSectionReferenceVisible
+                      ? Icons.visibility_off_outlined
+                      : Icons.visibility_outlined,
+                  size: 16,
+                ),
+                label: Text(
+                  controller.originalSectionReferenceVisible
+                      ? 'Ocultar seÃ§Ã£o original'
+                      : 'Mostrar seÃ§Ã£o original',
+                ),
+              ),
             if (controller.sketchRegionFitMessage != null)
               Padding(
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 0),

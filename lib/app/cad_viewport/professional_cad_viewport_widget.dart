@@ -2339,6 +2339,8 @@ class _CadScenePainter extends CustomPainter {
               entity.geometry['displayColor'] == 'alignmentGuide';
           final referenceCurve =
               entity.geometry['displayColor'] == 'referenceCurve';
+          final originalSectionReference =
+              entity.geometry['displayColor'] == 'originalSectionReference';
           final referenceCurveHighlight =
               entity.geometry['displayColor'] == 'referenceCurveHighlight';
           final assistantSuggestion =
@@ -2357,6 +2359,8 @@ class _CadScenePainter extends CustomPainter {
               // Thin magenta reference line, matching the conventional
               // reverse-engineering section display without filling the mesh.
               ? const Color(0xffe5007d)
+              : originalSectionReference
+              ? const Color(0xffb7a5bd)
               : assistantSuggestion
               ? const Color(0xff4de1d2)
               : regionFitOutput
@@ -2371,6 +2375,8 @@ class _CadScenePainter extends CustomPainter {
             ..strokeWidth = entity.selected
                 ? 1.7
                 : referenceCurve
+                ? 0.9
+                : originalSectionReference
                 ? 0.9
                 : (entity.geometry['strokeWidth'] as num?)?.toDouble() ?? 1.35
             ..strokeCap = StrokeCap.round

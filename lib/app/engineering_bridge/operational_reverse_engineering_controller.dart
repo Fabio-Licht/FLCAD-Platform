@@ -112,6 +112,13 @@ const double _sketchPointTolerance = 1e-4;
 const String sketchReconstructionHighlightId =
     'sketch-reconstruction-highlight';
 
+/// Runtime-only visual overlay for the immutable Section that originated the
+/// active Sketch.  The durable Section remains the source of truth; this
+/// presentation has no document entity and therefore cannot enter Sketch
+/// picking, constraints, Health, Extrude or Revolve.
+const String sketchOriginalSectionReferencePrefix =
+    'sketch-original-section-';
+
 enum RecognitionDecision { pending, accepted, rejected }
 
 enum _LineBoundaryKind {
@@ -1822,6 +1829,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sketchApi?.sketches ?? const <Sketch>[],
         document,
       );
+      _publishOriginalSectionReferenceOverlay();
     }
     if (applied) {
       runtime.write('sketch.circularSelectionMode', false);
@@ -2176,6 +2184,81 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     runtime.write('sketch.regionFit.overlayIds', next);
     runtime.write('sketch.regionFit.comparison', selectedComparison);
+  }
+
+  void _publishOriginalSectionReferenceOverlay() {
+    final previous = runtime.read<String>(
+      'sketch.originalSectionReference.overlayId',
+    );
+    final sketch = activeSketch;
+    final source = activeSketchSourceSection;
+    final sourceId = source?.id;
+    final overlayId = sourceId == null
+        ? null
+        : '$sketchOriginalSectionReferencePrefix$sourceId';
+    if (previous != null && previous != overlayId) {
+      runtime.hideTransient(previous);
+    }
+    if (sketch == null || source == null || overlayId == null) {
+      if (previous != null) runtime.hideTransient(previous);
+      runtime.write('sketch.originalSectionReference.overlayId', null);
+      return;
+    }
+    final rootVisible =
+        runtime.document?.entities[sketch.id]?.data['sceneVisible'] as bool? ??
+        (sketch.metadata['visible'] as bool? ?? true);
+    final rawSection = source.data['section'];
+    final rawSegments = rawSection is Map ? rawSection['segments'] : null;
+    if (!rootVisible ||
+        !originalSectionReferenceVisible ||
+        rawSegments is! List ||
+        rawSegments.isEmpty) {
+      runtime.hideTransient(overlayId);
+      runtime.write(
+        'sketch.originalSectionReference.overlayId',
+        overlayId,
+      );
+      return;
+    }
+    final segments = <List<List<double>>>[];
+    for (final raw in rawSegments) {
+      if (raw is! List || raw.length < 2) continue;
+      final first = raw[0];
+      final last = raw[1];
+      if (first is! List || last is! List || first.length < 3 || last.length < 3) {
+        continue;
+      }
+      final firstPoint = first.whereType<num>().map((value) => value.toDouble()).toList();
+      final lastPoint = last.whereType<num>().map((value) => value.toDouble()).toList();
+      if (firstPoint.length != 3 || lastPoint.length != 3) continue;
+      segments.add([firstPoint, lastPoint]);
+    }
+    if (segments.isEmpty) {
+      runtime.hideTransient(overlayId);
+      runtime.write(
+        'sketch.originalSectionReference.overlayId',
+        overlayId,
+      );
+      return;
+    }
+    runtime.showTransient(
+      CadSceneEntity(
+        id: overlayId,
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          // These are the exact Section samples in world coordinates.  No
+          // fitting, smoothing or display decimation is applied here.
+          'segments': segments,
+          'displayColor': 'originalSectionReference',
+          'strokeWidth': 0.9,
+          'referenceCurve': true,
+          'originalSectionReference': true,
+          'nonSelectable': true,
+        },
+      ),
+    );
+    runtime.write('sketch.originalSectionReference.overlayId', overlayId);
   }
 
   void clearSketchReconstructionSuggestions() {
@@ -2669,6 +2752,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return visible.length == 1 ? visible.single : null;
   }
 
+  /// The durable Section that originated the active Sketch, when available.
+  /// This is deliberately separate from [selectedSection]: selecting another
+  /// Section must not retarget the Sketch comparison overlay.
+  CadDocumentEntity? get activeSketchSourceSection {
+    final sourceId = activeSketch?.metadata['sourceSectionId'] as String?;
+    if (sourceId == null) return null;
+    final source = runtime.document?.entities[sourceId];
+    return source?.kind == CadDocumentEntityKind.section ? source : null;
+  }
+
+  bool get originalSectionReferenceVisible {
+    final source = activeSketchSourceSection;
+    if (source == null) return false;
+    return activeSketch?.metadata['originalSectionReferenceVisible'] as bool? ??
+        true;
+  }
+
   CadDocumentEntity? get selectedOrActiveSketchSourceSection {
     final selected = selectedSection;
     if (selected != null) return selected;
@@ -2983,7 +3083,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final section =
         selectedSection ??
         (throw StateError('Select a Section before moving it.'));
+    if (activeSketchSourceSection?.id == section.id &&
+        section.data['referenceCurve'] == true) {
+      throw StateError('A SeÃ§Ã£o original ativa Ã© somente visual.');
+    }
     await sections.updateOffset(section.id, offset);
+    _publishOriginalSectionReferenceOverlay();
     runtime.select({section.id});
     notifyListeners();
   }
@@ -2992,7 +3097,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final section =
         selectedSection ??
         (throw StateError('Select a Reference Curve before moving its plane.'));
+    if (activeSketchSourceSection?.id == section.id &&
+        section.data['referenceCurve'] == true) {
+      throw StateError('A SeÃ§Ã£o original ativa Ã© somente visual.');
+    }
     await sections.setOffset(section.id, offset);
+    _publishOriginalSectionReferenceOverlay();
     runtime.select({section.id});
     notifyListeners();
   }
@@ -3006,7 +3116,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final section =
         selectedSection ??
         (throw StateError('Select a Reference Curve to recalculate.'));
+    if (activeSketchSourceSection?.id == section.id &&
+        section.data['referenceCurve'] == true) {
+      throw StateError('A SeÃ§Ã£o original ativa Ã© somente visual.');
+    }
     await sections.recalculate(section.id);
+    _publishOriginalSectionReferenceOverlay();
     runtime.select({section.id});
     notifyListeners();
   }
@@ -3029,9 +3144,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (existing != null) {
         api.openSketch(existing.id);
         activeSketch = existing;
+        existing.metadata.putIfAbsent(
+          'originalSectionReferenceVisible',
+          () => true,
+        );
         stage = SketchSurfaceStage.sketchActive;
         await _synchronizeSketchScene();
         await runtime.setEntityVisibility(section.id, false);
+        _publishOriginalSectionReferenceOverlay();
         runtime.select({existing.id});
         notifyListeners();
         return;
@@ -3080,6 +3200,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'tolerance': tolerance,
       'associationState': 'current',
       'sourceSectionRevision': section.data['revision'] ?? 1,
+      'originalSectionReferenceVisible': true,
       'lastUpdatedAt': DateTime.now().toUtc().toIso8601String(),
     });
     api.openSketch(sketch.id);
@@ -3160,6 +3281,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     // durable but hidden to avoid drawing the dense intersection twice; the
     // Sections panel can restore it with Toggle Section.
     await runtime.setEntityVisibility(section.id, false);
+    _publishOriginalSectionReferenceOverlay();
     runtime.select({sketch.id});
     notifyListeners();
   }
@@ -3459,10 +3581,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         selectedSection ??
         (sourceId == null ? null : runtime.document?.entities[sourceId]);
     if (section == null) throw StateError('No source Section is available.');
+    if (sketch != null &&
+        sourceId == section.id &&
+        section.data['referenceCurve'] == true) {
+      await _run('reverse.sketch.originalSectionReference.visibility', {
+        'sketchId': sketch.id,
+        'visible': !originalSectionReferenceVisible,
+      });
+      return;
+    }
     final visible = section.data['sceneVisible'] as bool? ?? true;
     await _run('reverse.section.visibility', {
       'id': section.id,
       'visible': !visible,
+    });
+  }
+
+  Future<void> toggleOriginalSectionReferenceVisibility() async {
+    final sketch = activeSketch;
+    final source = activeSketchSourceSection;
+    if (sketch == null || source == null) {
+      throw StateError('No source Section is available for this Sketch.');
+    }
+    await _run('reverse.sketch.originalSectionReference.visibility', {
+      'sketchId': sketch.id,
+      'visible': !originalSectionReferenceVisible,
     });
   }
 
@@ -3516,6 +3659,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sketchApi?.sketches ?? const <Sketch>[],
         document,
       );
+      _publishOriginalSectionReferenceOverlay();
     }
     // Publish a legacy-source marker with the same document synchronization
     // used for all Sketch geometry, so reopening the project is idempotent.
@@ -4446,6 +4590,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     activeSurface = null;
     surfacePlan = null;
     runtime.hideTransient('surface-preview');
+    final originalSectionOverlay = runtime.read<String>(
+      'sketch.originalSectionReference.overlayId',
+    );
+    if (originalSectionOverlay != null) {
+      runtime.hideTransient(originalSectionOverlay);
+    }
+    runtime.write('sketch.originalSectionReference.overlayId', null);
     runtime.write('sketch.surfacePreview.active', false);
     activeContext = null;
     activeSelection = null;
@@ -13186,6 +13337,59 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
 
     register(
+      id: 'reverse.sketch.originalSectionReference.visibility',
+      execute: (parameters) async {
+        final sketchId = parameters['sketchId']! as String;
+        final sketch = sketchApi?.sketches
+            .where((item) => item.id == sketchId)
+            .firstOrNull;
+        if (sketch == null) {
+          throw StateError('Unknown Sketch: $sketchId');
+        }
+        final sourceId = sketch.metadata['sourceSectionId'] as String?;
+        if (sourceId == null ||
+            runtime.document?.entities[sourceId]?.kind !=
+                CadDocumentEntityKind.section) {
+          throw StateError('No source Section is available for this Sketch.');
+        }
+        parameters['before'] =
+            sketch.metadata['originalSectionReferenceVisible'] as bool? ?? true;
+        sketch.metadata['originalSectionReferenceVisible'] =
+            parameters['visible']! as bool;
+        await sketchApi?.persist();
+        _publishOriginalSectionReferenceOverlay();
+        notifyListeners();
+        return sketchId;
+      },
+      undo: (parameters) async {
+        final sketchId = parameters['sketchId']! as String;
+        final sketch = sketchApi?.sketches
+            .where((item) => item.id == sketchId)
+            .firstOrNull;
+        if (sketch == null) throw StateError('Unknown Sketch: $sketchId');
+        sketch.metadata['originalSectionReferenceVisible'] =
+            parameters['before']! as bool;
+        await sketchApi?.persist();
+        _publishOriginalSectionReferenceOverlay();
+        notifyListeners();
+        return sketchId;
+      },
+      redo: (parameters) async {
+        final sketchId = parameters['sketchId']! as String;
+        final sketch = sketchApi?.sketches
+            .where((item) => item.id == sketchId)
+            .firstOrNull;
+        if (sketch == null) throw StateError('Unknown Sketch: $sketchId');
+        sketch.metadata['originalSectionReferenceVisible'] =
+            parameters['visible']! as bool;
+        await sketchApi?.persist();
+        _publishOriginalSectionReferenceOverlay();
+        notifyListeners();
+        return sketchId;
+      },
+    );
+
+    register(
       id: 'reverse.sketch.healGap',
       execute: (parameters) async {
         final endpoints = (parameters['endpoints']! as List).cast<String>();
@@ -15052,6 +15256,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await refreshDependentProfessionalRevolves();
     await _refreshSketchSurfacePreview();
     _publishRegionFitComparisonOverlays(allSketches, document);
+    _publishOriginalSectionReferenceOverlay();
     runtime.select(
       selectedConstraintIds.isNotEmpty
           ? selectedConstraintIds

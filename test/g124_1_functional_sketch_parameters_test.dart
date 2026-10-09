@@ -18,6 +18,7 @@ import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
 import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
+import 'package:flcad_mobile/core/import_export/api/import_export_api.dart';
 import 'package:flcad_mobile/core/reference_engine/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart';
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
@@ -26,6 +27,7 @@ import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
+import 'package:flcad_mobile/app/runtime/world_coordinate_system.dart';
 import 'package:flcad_mobile/features/projects/data/project_repository.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -882,6 +884,272 @@ void main() {
         reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
         isFalse,
       );
+    },
+  );
+
+  test(
+    'real STL Section publishes an exact non-pickable reference overlay',
+    () async {
+      final harness = await _g124Harness('g124-7f-real-section');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      const mesh = KernelMeshHandle(
+        persistentId: 'mesh-shape',
+        kernelId: 'test',
+        fingerprint: 'mesh',
+        vertexCount: 4,
+        triangleCount: 4,
+        bounds: KernelBounds(-1, -1, -1, 1, 1, 1),
+        hasNormals: false,
+        metadata: {},
+      );
+      await harness.cad.runtime.registerImport(
+        const ImportedCadDocument(
+          id: 'Mesh001',
+          projectId: 'g124-7f-real-section',
+          sourcePath: 'mesh.stl',
+          format: CadImportFormat.stl,
+          registeredPath: 'CAD/Imports/mesh.stl',
+          validation: [],
+          mesh: mesh,
+        ),
+        geometry: const KernelMeshGeometry(
+          nodes: [-1, -1, -1, 1, -1, 1, 0, 1, -1, 0, 0, 1],
+          triangles: [0, 1, 2, 0, 3, 1, 1, 3, 2, 2, 3, 0],
+        ),
+      );
+      final section = await harness.controller.sections.create(
+        planeId: '${WorldCoordinateSystem.prefix('g124-7f-real-section')}xy-plane',
+        origin: Vector3.zero,
+        normal: const Vector3(0, 0, 1),
+      );
+      final raw = section.data['section'] as Map;
+      final sourceSegments = raw['segments'] as List;
+      expect(sourceSegments, isNotEmpty);
+      await harness.cad.runtime.setEntityVisibility(section.id, false);
+
+      final api = harness.controller.sketchApi!;
+      final sketch = api.createSketch('Real Section comparison');
+      sketch.metadata['sourceSectionId'] = section.id;
+      api.openSketch(sketch.id);
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      await harness.controller.reopenSketchForEditing(sketch.id);
+      final overlay = harness.cad.runtime.scene.find(
+        '$sketchOriginalSectionReferencePrefix${section.id}',
+      );
+      expect(overlay, isNotNull);
+      expect(overlay!.kind, CadSceneEntityKind.preview);
+      expect(overlay.geometry['displayColor'], 'originalSectionReference');
+      expect(overlay.geometry['segments'], sourceSegments);
+      expect(overlay.geometry['nonSelectable'], isTrue);
+      expect(harness.cad.runtime.document!.entities.containsKey(overlay.id), isFalse);
+    },
+  );
+
+  test(
+    'open Section reference uses the original samples without fitting',
+    () async {
+      final harness = await _g124Harness('g124-7f-open-section');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      const sectionId = 'ReferenceCurveOpen';
+      const segments = <List<List<double>>>[
+        [
+          [0, 0, 0],
+          [4, 1, 0],
+        ],
+        [
+          [4, 1, 0],
+          [8, 0, 0],
+        ],
+      ];
+      await harness.cad.runtime.mutate(
+        command: 'test.original-open-section',
+        upsert: [
+          CadDocumentEntity(
+            id: sectionId,
+            kind: CadDocumentEntityKind.section,
+            data: {
+              'referenceCurve': true,
+              'sceneKind': 'curve',
+              'sceneVisible': false,
+              'sceneGeometry': {'segments': segments},
+              'section': {'segments': segments, 'closed': false, 'open': true},
+            },
+          ),
+        ],
+      );
+      final sketch = api.createSketch('Open Section comparison');
+      sketch.metadata['sourceSectionId'] = sectionId;
+      api.openSketch(sketch.id);
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(8, 0),
+      );
+      await controller.reopenSketchForEditing(sketch.id);
+      final overlay = harness.cad.runtime.scene.find(
+        '$sketchOriginalSectionReferencePrefix$sectionId',
+      );
+      expect(overlay, isNotNull);
+      expect(overlay!.geometry['segments'], segments);
+      expect(overlay.geometry['displayColor'], 'originalSectionReference');
+      expect(controller.activeSketchSourceSection!.data['section']['open'], isTrue);
+    },
+  );
+
+  test(
+    'original Section reference overlay stays exact, hidden from picking, and persists',
+    () async {
+      final harness = await _g124Harness('g124-7f-section-reference');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final cad = harness.cad;
+      const sectionId = 'ReferenceCurve001';
+      const segments = <List<List<double>>>[
+        [
+          [0, 0, 0],
+          [10, 0, 0],
+        ],
+        [
+          [10, 0, 0],
+          [10, 10, 0],
+        ],
+        [
+          [10, 10, 0],
+          [0, 10, 0],
+        ],
+        [
+          [0, 10, 0],
+          [0, 0, 0],
+        ],
+      ];
+      await cad.runtime.mutate(
+        command: 'test.original-section',
+        upsert: [
+          CadDocumentEntity(
+            id: sectionId,
+            kind: CadDocumentEntityKind.section,
+            data: {
+              'name': 'Original STL Section',
+              'referenceCurve': true,
+              'sceneKind': 'curve',
+              'sceneVisible': false,
+              'sceneGeometry': {
+                'segments': segments,
+                'referenceCurve': true,
+              },
+              'section': {
+                'segments': segments,
+                'closed': true,
+                'open': false,
+              },
+            },
+          ),
+        ],
+      );
+
+      final api = controller.sketchApi!;
+      final sketch = api.createSketch(
+        'Section comparison',
+        plane: SketchPlane(type: SketchPlaneType.xy),
+        coordinates: const SketchCoordinateSystem(),
+      );
+      sketch.metadata['sourceSectionId'] = sectionId;
+      sketch.metadata['originalSectionReferenceVisible'] = true;
+      api.openSketch(sketch.id);
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      await controller.reopenSketchForEditing(sketch.id);
+
+      final overlayId = '$sketchOriginalSectionReferencePrefix$sectionId';
+      final overlay = cad.runtime.scene.find(overlayId);
+      expect(overlay, isNotNull);
+      expect(overlay!.kind, CadSceneEntityKind.preview);
+      expect(overlay.visible, isTrue);
+      expect(overlay.geometry['displayColor'], 'originalSectionReference');
+      expect(overlay.geometry['strokeWidth'], 0.9);
+      expect(overlay.geometry['nonSelectable'], isTrue);
+      expect(overlay.geometry['segments'], segments);
+      expect(cad.runtime.document!.entities.containsKey(overlayId), isFalse);
+      expect(api.entity(overlayId), isNull);
+      expect(
+        cad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+        isFalse,
+      );
+      expect(controller.sketchHealth.issues, isNot(contains(overlayId)));
+
+      await controller.toggleOriginalSectionReferenceVisibility();
+      expect(cad.runtime.scene.find(overlayId), isNull);
+      await controller.undo();
+      expect(cad.runtime.scene.find(overlayId)!.visible, isTrue);
+      await controller.redo();
+      expect(cad.runtime.scene.find(overlayId), isNull);
+      await controller.toggleOriginalSectionReferenceVisibility();
+      expect(cad.runtime.scene.find(overlayId)!.visible, isTrue);
+
+      await controller.toggleActiveSketchVisibility();
+      expect(cad.runtime.scene.find(overlayId), isNull);
+      await controller.toggleActiveSketchVisibility();
+      expect(cad.runtime.scene.find(overlayId)!.visible, isTrue);
+      await controller.persist();
+
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open(
+        'g124-7f-section-reference',
+        harness.directory,
+      );
+      await reopened.configureProject(
+        projectId: 'g124-7f-section-reference',
+        projectDirectory: harness.directory,
+      );
+      await reopened.reopenSketchForEditing(sketch.id);
+      expect(reopened.activeSketchSourceSection!.id, sectionId);
+      expect(reopened.originalSectionReferenceVisible, isTrue);
+      expect(reopenedCad.runtime.scene.find(overlayId), isNotNull);
+      expect(
+        reopenedCad.runtime.scene.find(overlayId)!.geometry['segments'],
+        segments,
+      );
+      expect(reopenedCad.runtime.scene.find(overlayId)!.kind,
+          CadSceneEntityKind.preview);
+      expect(reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+          isFalse);
+      expect(reopenedCad.runtime.document!.entities.containsKey(overlayId),
+          isFalse);
+      await reopened.toggleOriginalSectionReferenceVisibility();
+      expect(reopenedCad.runtime.scene.find(overlayId), isNull);
     },
   );
 
