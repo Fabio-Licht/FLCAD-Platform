@@ -911,16 +911,35 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       );
       return false;
     }
-    final sourceIds = <String>{
+    // `entityIds`/`usedEntityIds` are the geometry that must still be
+    // available for the fit.  `coveredEntityIds` only describes visible
+    // overlap that should be hidden after promotion; it is deliberately not
+    // an eligibility requirement.  Treating covered fragments as required
+    // sources made a valid arc suggestion stale as soon as another
+    // overlapping suggestion had hidden one of them.
+    final requiredSourceIds = <String>{
       ...suggestion.entityIds,
       ...suggestion.usedEntityIds,
+    };
+    final allSourceIds = <String>{
+      ...requiredSourceIds,
       ...suggestion.coveredEntityIds,
     };
-    final entities = sourceIds
-        .map(api.entity)
-        .whereType<SketchEntity>()
+    final byId = <String, SketchEntity>{};
+    for (final id in allSourceIds) {
+      final entity = api.entity(id);
+      if (entity == null) {
+        _rejectSketchReconstructionSuggestion(
+          'Sugestão rejeitada: uma ou mais entidades de origem não existem mais.',
+        );
+        return false;
+      }
+      byId[id] = entity;
+    }
+    final entities = requiredSourceIds
+        .map((id) => byId[id]!)
         .toList(growable: false);
-    if (entities.length != sourceIds.length) {
+    if (entities.length != requiredSourceIds.length) {
       _rejectSketchReconstructionSuggestion(
         'Sugestão rejeitada: uma ou mais entidades de origem não existem mais.',
       );
@@ -938,9 +957,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         )];
     if (expectedFingerprint != null &&
         expectedFingerprint !=
-            _reconstructionFingerprint(suggestion, {
-              for (final entity in entities) entity.id: entity,
-            })) {
+            _reconstructionFingerprint(suggestion, byId)) {
       _rejectSketchReconstructionSuggestion(
         'Sugestão rejeitada: a geometria de origem foi alterada desde o reconhecimento.',
       );

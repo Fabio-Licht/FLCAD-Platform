@@ -25,6 +25,7 @@ import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart'
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
 import 'package:flcad_mobile/core/sketch_assistant/sketch_reconstruction.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
+import 'package:flcad_mobile/core/sketch_engine/history/sketch_history.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
@@ -2995,6 +2996,63 @@ void main() {
         reopenedCad.runtime.scene.find(sketchReconstructionHighlightId),
         isNull,
       );
+    },
+  );
+
+  test(
+    'assistant accepts a valid arc when an overlapped covered fragment was hidden',
+    () async {
+      final harness = await _g124Harness('g124-4-arc-covered-source');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      SketchVector point(double angle) => SketchVector(
+        20 + 12 * math.cos(angle),
+        12 * math.sin(angle),
+      );
+      final sources = [
+        for (var index = 0; index < 5; index++)
+          api.builders.line.build(
+            point(.2 + 1.3 * index / 5),
+            point(.2 + 1.3 * (index + 1) / 5),
+          ),
+      ];
+      final covered = api.builders.arc.build(
+        const SketchVector(20, 0),
+        12,
+        .65,
+        .95,
+      );
+      final suggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.arc,
+        entityIds: sources.map((source) => source.id).toList(),
+        confidence: 1.0,
+        center: const SketchVector(20, 0),
+        radius: 12,
+        startAngle: .2,
+        endAngle: 1.5,
+        coveredEntityIds: [covered.id],
+      );
+
+      // A prior overlapping promotion may already have hidden this visual
+      // fragment. It must not invalidate the arc's actual fitting sources.
+      api.engine.modify(
+        covered.id,
+        SketchHistoryAction.modify,
+        (entity) {
+          entity.visible = false;
+          entity.metadata['reconstructionHidden'] = true;
+        },
+      );
+      final createdId = await controller.acceptSketchReconstructionSuggestion(
+        suggestion,
+      );
+      expect(createdId, isNotNull);
+      expect(controller.sketchApi!.entity(createdId!), isA<SketchArc>());
+      expect(controller.sketchReconstructionMessage, contains('criada'));
+      expect(controller.error, isNull);
     },
   );
 
