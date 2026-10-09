@@ -303,6 +303,9 @@ class SketchRegionFitResult {
     required this.rmsError,
     required this.maxError,
     required this.maxGapMillimeters,
+    this.pcaRmsError,
+    this.pcaMaxError,
+    this.boundaryStatus,
   });
 
   final SketchVector start;
@@ -316,6 +319,17 @@ class SketchRegionFitResult {
   final double rmsError;
   final double maxError;
   final double maxGapMillimeters;
+
+  /// PCA residuals before a controller applies endpoint conditioning.
+  ///
+  /// The reconstruction engine itself never conditions endpoints, so these
+  /// remain null for a raw engine result and are populated by the promotion
+  /// path when a boundary-aware result is produced.
+  final double? pcaRmsError;
+  final double? pcaMaxError;
+
+  /// Human-readable boundary classification recorded by the promotion path.
+  final String? boundaryStatus;
 }
 
 enum SketchRegionFitFailure {

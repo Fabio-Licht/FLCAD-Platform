@@ -114,6 +114,71 @@ const String sketchReconstructionHighlightId =
 
 enum RecognitionDecision { pending, accepted, rejected }
 
+enum _LineBoundaryKind {
+  free,
+  connected,
+  preexistingGap,
+  ambiguous,
+  constrained,
+}
+
+class _LineBoundary {
+  const _LineBoundary({
+    required this.sourceReference,
+    required this.sourcePoint,
+    required this.kind,
+    this.contactReference,
+    this.contactPoint,
+    this.candidateReferences = const <String>[],
+  });
+
+  final String sourceReference;
+  final SketchVector sourcePoint;
+  final _LineBoundaryKind kind;
+  final String? contactReference;
+  final SketchVector? contactPoint;
+  final List<String> candidateReferences;
+
+  bool get isConnected => kind == _LineBoundaryKind.connected;
+}
+
+class _LineBoundaryDiagnosis {
+  const _LineBoundaryDiagnosis({
+    required this.start,
+    required this.end,
+    this.constraintConflicts = const <String>[],
+  });
+
+  final _LineBoundary start;
+  final _LineBoundary end;
+  final List<String> constraintConflicts;
+
+  bool get hasAmbiguousBoundary =>
+      start.kind == _LineBoundaryKind.ambiguous ||
+      end.kind == _LineBoundaryKind.ambiguous;
+
+  String get status {
+    String describe(_LineBoundary boundary) => switch (boundary.kind) {
+      _LineBoundaryKind.free => 'livre',
+      _LineBoundaryKind.connected => 'conectada',
+      _LineBoundaryKind.preexistingGap => 'gap preexistente',
+      _LineBoundaryKind.ambiguous => 'ramificação ambígua',
+      _LineBoundaryKind.constrained => 'constraint explícita',
+    };
+
+    return 'fronteiras: início ${describe(start)}, fim ${describe(end)}';
+  }
+}
+
+class _ConditionedLineFit {
+  const _ConditionedLineFit({this.fit, required this.message});
+
+  final SketchRegionFitResult? fit;
+  final String message;
+
+  bool get rejected => fit == null;
+}
+
 /// A transient closed loop resolved exclusively from the profile entities the
 /// operator selected for the current Extrude command. It is never persisted.
 class _ExtrudeProfileLoop {
@@ -866,17 +931,303 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         message: _regionFitFailureMessage(diagnosis.failure),
       );
     }
+    final conditioned = _conditionLineFit(entities, fit);
+    if (conditioned.rejected) {
+      return (rejected: true, fit: null, message: conditioned.message);
+    }
+    final conditionedFit = conditioned.fit!;
     final limit = _lineReconstructionToleranceMm();
-    final phrase = _lineReconstructionTolerancePhrase(fit.maxError, limit);
+    final phrase = _lineReconstructionTolerancePhrase(
+      conditionedFit.maxError,
+      limit,
+    );
     // 1e-12 absorbs binary rounding of a residual that is dimensionally 0.10 mm.
-    if (fit.maxError > limit + 1e-12) {
+    if (conditionedFit.maxError > limit + 1e-12) {
       return (rejected: true, fit: null, message: 'Linha rejeitada: $phrase.');
     }
     return (
       rejected: false,
-      fit: fit,
+      fit: conditionedFit,
       message:
           'Linha criada · ${fit.usedEntityIds.length} regiões · RMS ${fit.rmsError.toStringAsFixed(3)} mm · $phrase',
+    );
+  }
+
+  _LineBoundaryDiagnosis _diagnoseLineBoundaries(
+    List<SketchEntity> entities,
+    SketchRegionFitResult fit,
+  ) {
+    final api = sketchApi;
+    if (api == null ||
+        fit.usedEntityIds.isEmpty ||
+        fit.referenceRegions.isEmpty) {
+      return _LineBoundaryDiagnosis(
+        start: _LineBoundary(
+          sourceReference: '',
+          sourcePoint: fit.start,
+          kind: _LineBoundaryKind.free,
+        ),
+        end: _LineBoundary(
+          sourceReference: '',
+          sourcePoint: fit.end,
+          kind: _LineBoundaryKind.free,
+        ),
+      );
+    }
+    final selectedIds = fit.usedEntityIds.toSet();
+    final visibleExternalEndpoints = <(String, SketchVector)>[];
+    final sketch = activeSketch;
+    if (sketch != null) {
+      for (final id in sketch.entityIds) {
+        if (selectedIds.contains(id)) continue;
+        final entity = api.entity(id);
+        if (entity == null ||
+            !entity.visible ||
+            entity.construction ||
+            entity.reference) {
+          continue;
+        }
+        visibleExternalEndpoints.addAll(_sketchEndpointCandidates(entity));
+      }
+    }
+
+    _LineBoundary inspect(String sourceId, SketchVector sample) {
+      final source = api.entity(sourceId);
+      final candidates = source == null
+          ? const <(String, SketchVector)>[]
+          : _sketchEndpointCandidates(source);
+      if (candidates.isEmpty) {
+        return _LineBoundary(
+          sourceReference: '$sourceId:unknown',
+          sourcePoint: sample,
+          kind: _LineBoundaryKind.free,
+        );
+      }
+      final sourceEndpoint = candidates.reduce(
+        (first, second) =>
+            _sketchVectorDistance(first.$2, sample) <=
+                _sketchVectorDistance(second.$2, sample)
+            ? first
+            : second,
+      );
+      final nearby = visibleExternalEndpoints
+          .where(
+            (candidate) =>
+                _sketchVectorDistance(candidate.$2, sourceEndpoint.$2) <=
+                const SketchHealthAnalyzer().gapTolerance,
+          )
+          .toList(growable: false);
+      final exact = nearby
+          .where(
+            (candidate) =>
+                _sketchVectorDistance(candidate.$2, sourceEndpoint.$2) <=
+                _sketchPointTolerance,
+          )
+          .toList(growable: false);
+      if (exact.length > 1) {
+        return _LineBoundary(
+          sourceReference: sourceEndpoint.$1,
+          sourcePoint: sourceEndpoint.$2,
+          kind: _LineBoundaryKind.ambiguous,
+          candidateReferences: exact.map((item) => item.$1).toList(),
+        );
+      }
+      if (exact.length == 1) {
+        return _LineBoundary(
+          sourceReference: sourceEndpoint.$1,
+          sourcePoint: sourceEndpoint.$2,
+          kind: _LineBoundaryKind.connected,
+          contactReference: exact.single.$1,
+          contactPoint: exact.single.$2,
+          candidateReferences: exact.map((item) => item.$1).toList(),
+        );
+      }
+      if (nearby.isNotEmpty) {
+        return _LineBoundary(
+          sourceReference: sourceEndpoint.$1,
+          sourcePoint: sourceEndpoint.$2,
+          kind: _LineBoundaryKind.preexistingGap,
+          candidateReferences: nearby.map((item) => item.$1).toList(),
+        );
+      }
+      return _LineBoundary(
+        sourceReference: sourceEndpoint.$1,
+        sourcePoint: sourceEndpoint.$2,
+        kind: _LineBoundaryKind.free,
+      );
+    }
+
+    final startRegion = fit.referenceRegions.first;
+    final endRegion = fit.referenceRegions.last;
+    final start = inspect(fit.usedEntityIds.first, startRegion.first);
+    final end = inspect(fit.usedEntityIds.last, endRegion.last);
+    final constraintConflicts = _lineConstraintConflicts(selectedIds);
+    return _LineBoundaryDiagnosis(
+      start: start,
+      end: end,
+      constraintConflicts: constraintConflicts,
+    );
+  }
+
+  List<String> _lineConstraintConflicts(Set<String> selectedIds) {
+    String owner(String reference) =>
+        reference.replaceFirst(RegExp(r':(start|end|point)$'), '');
+    final conflicts = <String>{};
+    for (final constraint in constraints) {
+      if (constraint.references.any((reference) {
+        return selectedIds.contains(owner(reference));
+      })) {
+        conflicts.add('${constraint.type.name} (${constraint.id})');
+      }
+    }
+    for (final dimension in dimensions) {
+      final references = <String>[
+        ...dimension.references,
+        if (dimension.anchorReference != null) dimension.anchorReference!,
+      ];
+      if (references.any((reference) => selectedIds.contains(owner(reference)))) {
+        conflicts.add('${dimension.type.name} (${dimension.id})');
+      }
+    }
+    return conflicts.toList()..sort();
+  }
+
+  double _sketchVectorDistance(SketchVector first, SketchVector second) {
+    final delta = first - second;
+    return math.sqrt(delta.dot(delta));
+  }
+
+  double _linePerpendicularError(
+    SketchVector point,
+    SketchVector start,
+    SketchVector end,
+  ) {
+    final direction = end - start;
+    final length = math.sqrt(direction.dot(direction));
+    if (!length.isFinite || length <= 1e-12) return double.infinity;
+    return ((point.x - start.x) * direction.y -
+                (point.y - start.y) * direction.x)
+            .abs() /
+        length;
+  }
+
+  _ConditionedLineFit _conditionLineFit(
+    List<SketchEntity> entities,
+    SketchRegionFitResult fit, {
+    bool enforceTolerance = true,
+  }) {
+    final boundaries = _diagnoseLineBoundaries(entities, fit);
+    final pcaRms = fit.pcaRmsError ?? fit.rmsError;
+    final pcaMax = fit.pcaMaxError ?? fit.maxError;
+    if (boundaries.constraintConflicts.isNotEmpty) {
+      return _ConditionedLineFit(
+        message:
+            'Linha rejeitada: constraints impedem preservar a conectividade '
+            '(${boundaries.constraintConflicts.join(', ')}). '
+            'As relações não foram migradas.',
+      );
+    }
+    if (boundaries.hasAmbiguousBoundary) {
+      return const _ConditionedLineFit(
+        message:
+            'Linha rejeitada: ramificação ambígua nas fronteiras; '
+            'nenhuma entidade vizinha foi modificada.',
+      );
+    }
+
+    final startConnected = boundaries.start.isConnected;
+    final endConnected = boundaries.end.isConnected;
+    var start = fit.start;
+    var end = fit.end;
+    final rawStart = boundaries.start.sourcePoint;
+    final rawEnd = boundaries.end.sourcePoint;
+    final pcaDirection = fit.end - fit.start;
+    final pcaLength = math.sqrt(pcaDirection.dot(pcaDirection));
+    if (!pcaLength.isFinite || pcaLength <= 1e-12) {
+      return const _ConditionedLineFit(
+        message: 'Linha rejeitada: direção PCA degenerada nas fronteiras.',
+      );
+    }
+    var direction = pcaDirection.scale(1 / pcaLength);
+
+    if (startConnected && endConnected) {
+      start = boundaries.start.contactPoint!;
+      end = boundaries.end.contactPoint!;
+      if ((end - start).dot(direction) < 0) {
+        direction = direction.scale(-1);
+      }
+    } else if (startConnected) {
+      start = boundaries.start.contactPoint!;
+      final distance = (rawEnd - start).dot(direction);
+      if (!distance.isFinite || distance <= 1e-9) {
+        return const _ConditionedLineFit(
+          message:
+              'Linha rejeitada: fronteira inicial incompatível com a direção PCA.',
+        );
+      }
+      end = start + direction.scale(distance);
+    } else if (endConnected) {
+      end = boundaries.end.contactPoint!;
+      final distance = (end - rawStart).dot(direction);
+      if (!distance.isFinite || distance <= 1e-9) {
+        return const _ConditionedLineFit(
+          message:
+              'Linha rejeitada: fronteira final incompatível com a direção PCA.',
+        );
+      }
+      start = end - direction.scale(distance);
+    }
+
+    final conditionedErrors = fit.referencePoints
+        .map((point) => _linePerpendicularError(point, start, end))
+        .toList(growable: false);
+    if (conditionedErrors.isEmpty ||
+        conditionedErrors.any((value) => !value.isFinite)) {
+      return const _ConditionedLineFit(
+        message:
+            'Linha rejeitada: ajuste condicionado produziu dados inválidos.',
+      );
+    }
+    final squared = conditionedErrors.fold<double>(
+      0,
+      (sum, value) => sum + value * value,
+    );
+    final conditionedMax = conditionedErrors.fold<double>(0, math.max);
+    final conditionedRms = math.sqrt(squared / conditionedErrors.length);
+    final limit = _lineReconstructionToleranceMm();
+    final topology = boundaries.status;
+    final result = SketchRegionFitResult(
+      start: start,
+      end: end,
+      points: fit.points,
+      referencePoints: fit.referencePoints,
+      referenceRegions: fit.referenceRegions,
+      usedEntityIds: fit.usedEntityIds,
+      rmsError: conditionedRms,
+      maxError: conditionedMax,
+      maxGapMillimeters: fit.maxGapMillimeters,
+      pcaRmsError: pcaRms,
+      pcaMaxError: pcaMax,
+      boundaryStatus: topology,
+    );
+    if (enforceTolerance && conditionedMax > limit + 1e-12) {
+      return _ConditionedLineFit(
+        message:
+            'Linha rejeitada: '
+            '${_lineReconstructionTolerancePhrase(conditionedMax, limit)} '
+            '(condicionado). '
+            'PCA RMS ${pcaRms.toStringAsFixed(3)} mm; '
+            'PCA erro máx ${pcaMax.toStringAsFixed(3)} mm; '
+            '$topology.',
+      );
+    }
+    return _ConditionedLineFit(
+      fit: result,
+      message:
+          '$topology; PCA RMS ${pcaRms.toStringAsFixed(3)} mm; '
+          'PCA erro máx ${pcaMax.toStringAsFixed(3)} mm; '
+          'condicionado RMS ${conditionedRms.toStringAsFixed(3)} mm; '
+          'condicionado erro máx ${conditionedMax.toStringAsFixed(3)} mm',
     );
   }
 
@@ -885,7 +1236,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'sketch.reconstruction.lineToleranceMm',
     );
     if (override != null && override.isFinite && override > 0) {
-      return override;
+      return math.min(
+        override,
+        const SketchLineReconstructionTolerance().reconstructionToleranceMm,
+      );
     }
     return const SketchLineReconstructionTolerance().reconstructionToleranceMm;
   }
@@ -1007,6 +1361,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           promotedId = promoted.id;
           api.engine.modify(promoted.id, SketchHistoryAction.modify, (value) {
             value.metadata['reconstructionKind'] = suggestion.kind.name;
+            value.metadata['reconstructionPcaRmsError'] =
+                lineFit.pcaRmsError ?? lineFit.rmsError;
+            value.metadata['reconstructionPcaMaxError'] =
+                lineFit.pcaMaxError ?? lineFit.maxError;
+            value.metadata['reconstructionConditionedRmsError'] =
+                lineFit.rmsError;
+            value.metadata['reconstructionConditionedMaxError'] =
+                lineFit.maxError;
+            if (lineFit.boundaryStatus != null) {
+              value.metadata['reconstructionBoundaryStatus'] =
+                  lineFit.boundaryStatus;
+            }
             value.metadata.remove('reconstructionHidden');
           });
           for (final id in lineFit.usedEntityIds) {
@@ -1032,7 +1398,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         usedIds
           ..clear()
           ..addAll(lineFit.usedEntityIds);
-        error = linePlan?.message;
+        error = [
+          linePlan?.message,
+          lineFit.boundaryStatus,
+          'PCA RMS ${(lineFit.pcaRmsError ?? lineFit.rmsError).toStringAsFixed(3)} mm',
+          'PCA erro máx ${(lineFit.pcaMaxError ?? lineFit.maxError).toStringAsFixed(3)} mm',
+          'condicionado RMS ${lineFit.rmsError.toStringAsFixed(3)} mm',
+          'condicionado erro máx ${lineFit.maxError.toStringAsFixed(3)} mm',
+        ].whereType<String>().join(' · ');
       }
     }
     if (promotedCurve) {
@@ -1308,6 +1681,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    if (sketchRegionFitOutput == SketchRegionFitOutput.line) {
+      final conditioned = _conditionLineFit(
+        selected,
+        fit,
+        enforceTolerance: false,
+      );
+      if (conditioned.rejected) {
+        sketchRegionFitMessage = conditioned.message;
+        error = conditioned.message;
+        notifyListeners();
+        return;
+      }
+    }
     await _run('reverse.sketch.regionFit', <String, Object?>{});
   }
 
@@ -1342,27 +1728,57 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<String> _promoteRegionFit(SketchRegionFitResult fit) async {
     final api = sketchApi ?? (throw StateError('Sketch is not available.'));
     final output = sketchRegionFitOutput;
+    var effectiveFit = fit;
+    if (output == SketchRegionFitOutput.line) {
+      final conditioned = _conditionLineFit(
+        _selectedRegionFitEntities(),
+        fit,
+        enforceTolerance: false,
+      );
+      if (conditioned.rejected) {
+        sketchRegionFitMessage = conditioned.message;
+        error = conditioned.message;
+        throw StateError(conditioned.message);
+      }
+      effectiveFit = conditioned.fit!;
+    }
     String? createdId;
     api.engine.transaction('sketch.reconstruction.regionFit', () {
       final created = output == SketchRegionFitOutput.line
-          ? api.builders.line.build(fit.start, fit.end)
-          : api.builders.spline.build(fit.points);
+          ? api.builders.line.build(effectiveFit.start, effectiveFit.end)
+          : api.builders.spline.build(effectiveFit.points);
       createdId = created.id;
       api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
         value.metadata['reconstructionKind'] = output.name;
-        value.metadata['regionFitReferencePoints'] = fit.referencePoints
+        value.metadata['regionFitReferencePoints'] = effectiveFit
+            .referencePoints
             .map((point) => point.toJson())
             .toList(growable: false);
-        value.metadata['regionFitReferenceRegions'] = fit.referenceRegions
+        value.metadata['regionFitReferenceRegions'] = effectiveFit
+            .referenceRegions
             .map(
               (region) =>
                   region.map((point) => point.toJson()).toList(growable: false),
             )
             .toList(growable: false);
-        value.metadata['regionFitSourceIds'] = fit.usedEntityIds;
+        value.metadata['regionFitSourceIds'] = effectiveFit.usedEntityIds;
         value.metadata['regionFitVisualComparison'] = true;
+        if (output == SketchRegionFitOutput.line) {
+          value.metadata['reconstructionPcaRmsError'] =
+              effectiveFit.pcaRmsError ?? effectiveFit.rmsError;
+          value.metadata['reconstructionPcaMaxError'] =
+              effectiveFit.pcaMaxError ?? effectiveFit.maxError;
+          value.metadata['reconstructionConditionedRmsError'] =
+              effectiveFit.rmsError;
+          value.metadata['reconstructionConditionedMaxError'] =
+              effectiveFit.maxError;
+          if (effectiveFit.boundaryStatus != null) {
+            value.metadata['reconstructionBoundaryStatus'] =
+                effectiveFit.boundaryStatus;
+          }
+        }
       });
-      for (final id in fit.usedEntityIds) {
+      for (final id in effectiveFit.usedEntityIds) {
         api.engine.modify(id, SketchHistoryAction.modify, (value) {
           value.metadata['reconstructionKind'] = output.name;
           value.metadata['reconstructionHidden'] = true;
@@ -1372,12 +1788,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     });
     await _presentRegionFit(
       createdId: createdId!,
-      sourceIds: fit.usedEntityIds,
+      sourceIds: effectiveFit.usedEntityIds,
       applied: true,
     );
     final kind = output == SketchRegionFitOutput.line ? 'Linha' : 'Spline';
     sketchRegionFitMessage =
         '$kind criada · ${fit.usedEntityIds.length} regiões · gap máx ${fit.maxGapMillimeters.toStringAsFixed(3)} mm · RMS ${fit.rmsError.toStringAsFixed(3)} mm · erro máx ${fit.maxError.toStringAsFixed(3)} mm${output == SketchRegionFitOutput.spline ? ' · ${fit.points.length} pontos' : ''}';
+    if (output == SketchRegionFitOutput.line) {
+      sketchRegionFitMessage =
+          '${sketchRegionFitMessage ?? ''} · ${effectiveFit.boundaryStatus} · '
+          'PCA RMS ${(effectiveFit.pcaRmsError ?? effectiveFit.rmsError).toStringAsFixed(3)} mm · '
+          'PCA erro máx ${(effectiveFit.pcaMaxError ?? effectiveFit.maxError).toStringAsFixed(3)} mm';
+    }
     return createdId!;
   }
 

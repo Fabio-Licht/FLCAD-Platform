@@ -3332,6 +3332,357 @@ void main() {
       expect(controller.sketchApi!.entity(visible.id), isNotNull);
     },
   );
+
+  test(
+    'line reconstruction preserves valid external boundaries atomically',
+    () async {
+      final harness = await _g124Harness('g124-7a-boundaries');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+
+      Future<String> promote(List<SketchEntity> sources, String label) async {
+        final suggestion = SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: sources.map((entity) => entity.id).toList(),
+          confidence: 1,
+        );
+        final id = await controller.acceptSketchReconstructionSuggestion(
+          suggestion,
+        );
+        expect(id, isNotNull, reason: label);
+        return id!;
+      }
+
+      final lineBefore = api.builders.line.build(
+        const SketchVector(-10, 0),
+        const SketchVector(0, 0),
+      );
+      final lineA = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, .05),
+      );
+      final lineB = api.builders.line.build(
+        const SketchVector(5, .05),
+        const SketchVector(10, 0),
+      );
+      final lineAfter = api.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final lineId = await promote([lineA, lineB], 'line-line');
+      final rebuiltLine = api.entity(lineId)! as SketchLine;
+      final rebuiltLineEnds = [
+        SketchVector.fromJson(rebuiltLine.parameters['start']),
+        SketchVector.fromJson(rebuiltLine.parameters['end']),
+      ];
+      expect(
+        rebuiltLineEnds.any(
+          (point) =>
+              (point - const SketchVector(0, 0)).dot(
+                point - const SketchVector(0, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(
+        rebuiltLineEnds.any(
+          (point) =>
+              (point - const SketchVector(10, 0)).dot(
+                point - const SketchVector(10, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(lineBefore.visible, isTrue);
+      expect(lineAfter.visible, isTrue);
+      expect(lineA.visible, isFalse);
+      expect(lineB.visible, isFalse);
+      expect(
+        controller.sketchHealth
+            .ofType(SketchHealthIssueType.gap)
+            .where((issue) => issue.entityIds.contains(lineId)),
+        isEmpty,
+      );
+      await controller.undo();
+      expect(api.entity(lineId), isNull);
+      expect(api.entity(lineA.id)!.visible, isTrue);
+      expect(api.entity(lineB.id)!.visible, isTrue);
+      await controller.redo();
+      expect(api.entity(lineId), isA<SketchLine>());
+      await controller.undo();
+      await controller.redo();
+
+      final arc = api.builders.arc.build(
+        const SketchVector(105, 0),
+        5,
+        math.pi,
+        2 * math.pi,
+      );
+      final arcA = api.builders.line.build(
+        const SketchVector(100, 0),
+        const SketchVector(105, .05),
+      );
+      final arcB = api.builders.line.build(
+        const SketchVector(105, .05),
+        const SketchVector(110, 0),
+      );
+      final arcId = await promote([arcA, arcB], 'line-arc');
+      final rebuiltArcLine = api.entity(arcId)! as SketchLine;
+      final arcEnds = [
+        SketchVector.fromJson(rebuiltArcLine.parameters['start']),
+        SketchVector.fromJson(rebuiltArcLine.parameters['end']),
+      ];
+      expect(
+        arcEnds.any(
+          (point) =>
+              (point - const SketchVector(100, 0)).dot(
+                point - const SketchVector(100, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(
+        arcEnds.any(
+          (point) =>
+              (point - const SketchVector(110, 0)).dot(
+                point - const SketchVector(110, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(api.entity(arc.id)!.visible, isTrue);
+
+      final spline = api.builders.spline.build([
+        const SketchVector(200, 0),
+        const SketchVector(205, -1),
+        const SketchVector(210, 0),
+      ]);
+      final splineA = api.builders.line.build(
+        const SketchVector(200, 0),
+        const SketchVector(205, .05),
+      );
+      final splineB = api.builders.line.build(
+        const SketchVector(205, .05),
+        const SketchVector(210, 0),
+      );
+      final splineId = await promote([splineA, splineB], 'line-spline');
+      final rebuiltSplineLine = api.entity(splineId)! as SketchLine;
+      final splineEnds = [
+        SketchVector.fromJson(rebuiltSplineLine.parameters['start']),
+        SketchVector.fromJson(rebuiltSplineLine.parameters['end']),
+      ];
+      expect(
+        splineEnds.any(
+          (point) =>
+              (point - const SketchVector(200, 0)).dot(
+                point - const SketchVector(200, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(
+        splineEnds.any(
+          (point) =>
+              (point - const SketchVector(210, 0)).dot(
+                point - const SketchVector(210, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(api.entity(spline.id)!.visible, isTrue);
+
+      final gapNeighbor = api.builders.line.build(
+        const SketchVector(299.9, 0),
+        const SketchVector(299.95, 0),
+      );
+      final gapA = api.builders.line.build(
+        const SketchVector(300, 0),
+        const SketchVector(305, .05),
+      );
+      final gapB = api.builders.line.build(
+        const SketchVector(305, .05),
+        const SketchVector(310, 0),
+      );
+      final gapId = await promote([gapA, gapB], 'preexisting gap');
+      expect(controller.error, contains('gap preexistente'));
+      expect(api.entity(gapNeighbor.id)!.visible, isTrue);
+      expect(api.entity(gapId), isA<SketchLine>());
+
+      final freeA = api.builders.line.build(
+        const SketchVector(600, 0),
+        const SketchVector(605, .05),
+      );
+      final freeB = api.builders.line.build(
+        const SketchVector(605, .05),
+        const SketchVector(610, 0),
+      );
+      final freeId = await promote([freeA, freeB], 'sem fronteiras');
+      expect(api.entity(freeId), isA<SketchLine>());
+
+      final oneNeighbor = api.builders.line.build(
+        const SketchVector(690, 0),
+        const SketchVector(700, 0),
+      );
+      final oneA = api.builders.line.build(
+        const SketchVector(700, 0),
+        const SketchVector(705, .05),
+      );
+      final oneB = api.builders.line.build(
+        const SketchVector(705, .05),
+        const SketchVector(710, 0),
+      );
+      final oneId = await promote([oneA, oneB], 'uma fronteira');
+      final oneLine = api.entity(oneId)! as SketchLine;
+      final oneEnds = [
+        SketchVector.fromJson(oneLine.parameters['start']),
+        SketchVector.fromJson(oneLine.parameters['end']),
+      ];
+      expect(
+        oneEnds.any(
+          (point) =>
+              (point - const SketchVector(700, 0)).dot(
+                point - const SketchVector(700, 0),
+              ) <
+              1e-18,
+        ),
+        isTrue,
+      );
+      expect(api.entity(oneNeighbor.id)!.visible, isTrue);
+
+      final incompatibleNeighbor = api.builders.line.build(
+        const SketchVector(790, 0),
+        const SketchVector(800, 0),
+      );
+      final incompatibleA = api.builders.line.build(
+        const SketchVector(800, 0),
+        const SketchVector(805, 1),
+      );
+      final incompatibleB = api.builders.line.build(
+        const SketchVector(805, 1),
+        const SketchVector(810, 0),
+      );
+      final historyBeforeIncompatible =
+          controller.commands.manager.history.length;
+      final incompatibleId =
+          await controller.acceptSketchReconstructionSuggestion(
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [incompatibleA.id, incompatibleB.id],
+          confidence: 1,
+        ),
+      );
+      expect(incompatibleId, isNull);
+      expect(controller.error, contains('condicionado'));
+      expect(
+        controller.commands.manager.history.length,
+        historyBeforeIncompatible,
+      );
+      expect(api.entity(incompatibleNeighbor.id)!.visible, isTrue);
+      expect(api.entity(incompatibleA.id)!.visible, isTrue);
+      expect(api.entity(incompatibleB.id)!.visible, isTrue);
+
+      final branchA = api.builders.line.build(
+        const SketchVector(400, 0),
+        const SketchVector(405, .05),
+      );
+      final branchB = api.builders.line.build(
+        const SketchVector(405, .05),
+        const SketchVector(410, 0),
+      );
+      final branchOne = api.builders.line.build(
+        const SketchVector(390, 0),
+        const SketchVector(400, 0),
+      );
+      final branchTwo = api.builders.line.build(
+        const SketchVector(390, 1),
+        const SketchVector(400, 0),
+      );
+      final historyBeforeBranch = controller.commands.manager.history.length;
+      final branchId = await controller.acceptSketchReconstructionSuggestion(
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [branchA.id, branchB.id],
+          confidence: 1,
+        ),
+      );
+      expect(branchId, isNull);
+      expect(controller.error, contains('ramificação ambígua'));
+      expect(controller.commands.manager.history.length, historyBeforeBranch);
+      expect(api.entity(branchA.id)!.visible, isTrue);
+      expect(api.entity(branchB.id)!.visible, isTrue);
+      expect(api.entity(branchOne.id)!.visible, isTrue);
+      expect(api.entity(branchTwo.id)!.visible, isTrue);
+    },
+  );
+
+  test(
+    'line reconstruction blocks incident constraints without partial edits',
+    () async {
+      final harness = await _g124Harness('g124-7a-constraints');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      final external = api.builders.line.build(
+        const SketchVector(-10, 0),
+        const SketchVector(0, 0),
+      );
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, .05),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(5, .05),
+        const SketchVector(10, 0),
+      );
+      final constraints = controller.constraintApi!;
+      constraints.builders.coincident.build([
+        '${external.id}:end',
+        '${first.id}:start',
+      ]);
+      constraints.builders.of(SketchConstraintType.fixed).build([first.id]);
+      constraints.builders.distance.build([second.id], value: 5);
+      constraints.createDrivingDimension(
+        type: SketchDimensionType.angular,
+        references: [first.id, second.id],
+        value: math.pi / 4,
+      );
+      final historyBefore = controller.commands.manager.history.length;
+      final accepted = await controller.acceptSketchReconstructionSuggestion(
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [first.id, second.id],
+          confidence: 1,
+        ),
+      );
+      expect(accepted, isNull);
+      expect(controller.error, contains('constraints impedem'));
+      expect(controller.error, contains('coincident'));
+      expect(controller.error, contains('fixed'));
+      expect(controller.error, contains('distance'));
+      expect(controller.error, contains('angular'));
+      expect(controller.commands.manager.history.length, historyBefore);
+      expect(api.entity(external.id)!.visible, isTrue);
+      expect(api.entity(first.id)!.visible, isTrue);
+      expect(api.entity(second.id)!.visible, isTrue);
+      expect(
+        api.engine.entities.values.where(
+          (entity) => entity.metadata['reconstructionHidden'] == true,
+        ),
+        isEmpty,
+      );
+    },
+  );
 }
 
 Future<
