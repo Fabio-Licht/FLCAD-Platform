@@ -10277,14 +10277,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   style: const TextStyle(fontSize: 10),
                 ),
               ),
-              ...controller.sketchReconstructionSuggestions
-                  .take(8)
-                  .map(
-                    (suggestion) => _SketchReconstructionSuggestionTile(
-                      controller: controller,
-                      suggestion: suggestion,
-                    ),
-                  ),
+              _SketchReconstructionSuggestionGroups(controller: controller),
               TextButton(
                 onPressed: controller.clearSketchReconstructionSuggestions,
                 child: const Text('Limpar sugestões'),
@@ -11071,6 +11064,72 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _SketchReconstructionSuggestionGroups extends StatelessWidget {
+  const _SketchReconstructionSuggestionGroups({required this.controller});
+
+  final OperationalReverseEngineeringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final suggestions = controller.sketchReconstructionSuggestions;
+    return Column(
+      children: [
+        for (final category in SketchReconstructionSuggestionCategory.values)
+          _buildGroup(category, suggestions),
+      ],
+    );
+  }
+
+  Widget _buildGroup(
+    SketchReconstructionSuggestionCategory category,
+    List<SketchReconstructionSuggestion> suggestions,
+  ) {
+    final categorySuggestions = suggestions
+        .where(
+          (suggestion) =>
+              controller.sketchReconstructionSuggestionCategory(suggestion) ==
+              category,
+        )
+        .toList(growable: false);
+    final label = switch (category) {
+      SketchReconstructionSuggestionCategory.lines => 'Linhas',
+      SketchReconstructionSuggestionCategory.splines => 'Splines',
+      SketchReconstructionSuggestionCategory.arcs => 'Arcos/Círculos',
+    };
+    final icon = switch (category) {
+      SketchReconstructionSuggestionCategory.lines => Icons.show_chart,
+      SketchReconstructionSuggestionCategory.splines => Icons.gesture,
+      SketchReconstructionSuggestionCategory.arcs =>
+        Icons.architecture_outlined,
+    };
+    return ExpansionTile(
+      key: ValueKey('sketch-reconstruction-group-${category.name}'),
+      initiallyExpanded: categorySuggestions.isNotEmpty,
+      maintainState: true,
+      tilePadding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      leading: Icon(icon, size: 16),
+      title: Text('$label (${categorySuggestions.length})'),
+      children: [
+        if (categorySuggestions.isEmpty)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(30, 0, 8, 4),
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: Text('Nenhuma sugestão', style: TextStyle(fontSize: 9)),
+            ),
+          )
+        else
+          for (final suggestion in categorySuggestions)
+            _SketchReconstructionSuggestionTile(
+              controller: controller,
+              suggestion: suggestion,
+            ),
+      ],
+    );
+  }
 }
 
 class _SketchReconstructionSuggestionTile extends StatelessWidget {

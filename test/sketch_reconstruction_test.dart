@@ -769,6 +769,50 @@ void main() {
     },
   );
 
+  test('automatic suggestions retain the physical order of a chain', () {
+    final first = SketchLine(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    final second = SketchLine(
+      const SketchVector(10, 0),
+      const SketchVector(20, 0),
+    );
+    final third = SketchLine(
+      const SketchVector(20, 0),
+      const SketchVector(30, 0),
+    );
+    final suggestions = const SketchReconstructionEngine().analyze([
+      third,
+      first,
+      second,
+    ]);
+    final chain = suggestions.firstWhere(
+      (item) =>
+          item.kind == SketchReconstructionKind.line &&
+          item.entityIds.toSet().containsAll([first.id, second.id, third.id]),
+    );
+    expect(chain.entityIds, [first.id, second.id, third.id]);
+  });
+
+  test(
+    'automatic analysis exposes more than eight disconnected suggestions',
+    () {
+      final fragments = [
+        for (var index = 0; index < 10; index++)
+          SketchLine(
+            SketchVector(index * 20.0, 0),
+            SketchVector(index * 20.0 + 5, 0),
+          ),
+      ];
+      final suggestions = const SketchReconstructionEngine().analyze(fragments);
+      final lineSuggestions = suggestions.where(
+        (item) => item.kind == SketchReconstructionKind.line,
+      );
+      expect(lineSuggestions.length, greaterThanOrEqualTo(10));
+    },
+  );
+
   test('automatic segmentation separates gaps, branches and long chains', () {
     final first = SketchLine(
       const SketchVector(0, 0),

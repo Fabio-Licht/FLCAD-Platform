@@ -121,6 +121,11 @@ const String sketchOriginalSectionReferencePrefix =
 
 enum RecognitionDecision { pending, accepted, rejected }
 
+/// Presentation buckets for reconstruction suggestions.  This is intentionally
+/// a UI concern: the recognition engine keeps emitting the same hypotheses and
+/// the acceptance path remains unchanged.
+enum SketchReconstructionSuggestionCategory { lines, splines, arcs }
+
 enum _LineBoundaryKind {
   free,
   connected,
@@ -666,6 +671,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchReconstructionSuggestion? _reconstructionSuggestionBeingAccepted;
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
+
+  /// Classifies a suggestion for the Sketch Assistant presentation without
+  /// changing its geometric hypothesis.  The reconstruction model currently
+  /// has no separate spline kind: a spline source is therefore detected from
+  /// the entities that contributed samples to the suggestion.
+  SketchReconstructionSuggestionCategory sketchReconstructionSuggestionCategory(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    if (suggestion.kind == SketchReconstructionKind.arc ||
+        suggestion.kind == SketchReconstructionKind.circle) {
+      return SketchReconstructionSuggestionCategory.arcs;
+    }
+    final api = sketchApi;
+    if (api != null) {
+      final ids = <String>{
+        ...suggestion.entityIds,
+        ...suggestion.usedEntityIds,
+        ...suggestion.coveredEntityIds,
+      };
+      if (ids.any((id) => api.entity(id) is SketchSpline)) {
+        return SketchReconstructionSuggestionCategory.splines;
+      }
+    }
+    return SketchReconstructionSuggestionCategory.lines;
+  }
+
   SketchReconstructionSuggestion? get hoveredSketchReconstructionSuggestion =>
       runtime.read<SketchReconstructionSuggestion>(
         'sketch.reconstruction.hovered',
