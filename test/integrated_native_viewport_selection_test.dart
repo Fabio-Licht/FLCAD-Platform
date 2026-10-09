@@ -237,6 +237,7 @@ class _Fixture {
     Set<String>? pickCaptureCandidateIds,
     ValueChanged<CadViewportPick?>? onPickCaptureHover,
     ValueChanged<CadViewportPick?>? onSketchSuggestionHover,
+    ValueChanged<Offset?>? onSketchSuggestionHoverPosition,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     await tester.pumpWidget(
@@ -255,6 +256,7 @@ class _Fixture {
           pickCaptureCandidateIds: pickCaptureCandidateIds,
           onPickCaptureHover: onPickCaptureHover,
           onSketchSuggestionHover: onSketchSuggestionHover,
+          onSketchSuggestionHoverPosition: onSketchSuggestionHoverPosition,
           onSketchTap: sketchTap,
           onSketchEntityPick: sketchEntity,
           onSketchSupportPick: sketchSupport,
@@ -882,6 +884,39 @@ void main() {
     await tester.sendEventToBinding(mouse.hover(const Offset(1100, 700)));
     await tester.pump(const Duration(milliseconds: 50));
     expect(hovered.last, isNull);
+  });
+
+  testWidgets('Sketch suggestion hover publishes cursor position independently', (
+    tester,
+  ) async {
+    final f = _Fixture();
+    f.scene.upsert(
+      const CadSceneEntity(
+        id: 'suggestion-source',
+        kind: CadSceneEntityKind.sketch,
+        geometry: {
+          'segments': [
+            [
+              [-1.0, 0.0, 0.0],
+              [1.0, 0.0, 0.0],
+            ],
+          ],
+        },
+      ),
+    );
+    final positions = <Offset?>[];
+    final mouse = TestPointer(72, PointerDeviceKind.mouse);
+    await f.mount(
+      tester,
+      onSketchSuggestionHoverPosition: positions.add,
+    );
+    const hoverPoint = Offset(600, 400);
+    await tester.sendEventToBinding(mouse.hover(hoverPoint));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(positions.last, hoverPoint);
+    await tester.sendEventToBinding(mouse.hover(const Offset(1100, 700)));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(positions.last, const Offset(1100, 700));
   });
 
   for (final mode in ['entity', 'support', 'tap', 'double', 'drag']) {

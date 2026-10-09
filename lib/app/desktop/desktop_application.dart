@@ -1116,6 +1116,11 @@ class _OfficialEngineeringWorkspaceState
   bool automaticSplinePreview = true;
   bool advancedInspector = false;
   bool choosingSketchSupport = false;
+  final ScrollController _sketchSuggestionScrollController =
+      ScrollController();
+  final ValueNotifier<({Offset position, String label})?>
+  _sketchSuggestionHoverPresentation = ValueNotifier(null);
+  Offset? _sketchSuggestionHoverPosition;
 
   /// True only when the operator explicitly asked for a new Sketch. A plain
   /// return to the Sketch module reuses the root already bound to the support.
@@ -2553,6 +2558,13 @@ class _OfficialEngineeringWorkspaceState
   }
 
   void _onOperationalChanged() {
+    if (operational.hoveredSketchReconstructionSuggestion == null ||
+        operational.sketchCreationCommandActive ||
+        operational.sketchEditingCommandActive ||
+        choosingSketchSupport) {
+      _sketchSuggestionHoverPosition = null;
+      _sketchSuggestionHoverPresentation.value = null;
+    }
     if (mounted) setState(() {});
   }
 
@@ -2570,6 +2582,8 @@ class _OfficialEngineeringWorkspaceState
     transformScaleZ.dispose();
     surfaceOffset.dispose();
     sectionOffset.dispose();
+    _sketchSuggestionScrollController.dispose();
+    _sketchSuggestionHoverPresentation.dispose();
     widget.cad.removeListener(_synchronizeScene);
     widget.cad.runtime.removeListener(_synchronizeScene);
     operational.removeListener(_onOperationalChanged);
@@ -5119,6 +5133,7 @@ class _OfficialEngineeringWorkspaceState
           onHealthIssue: _focusSketchHealthIssue,
           onFocusSuggestion: _focusSketchReconstructionSuggestion,
           onAutoHeal: _offerSketchGapRepair,
+          suggestionScrollController: _sketchSuggestionScrollController,
         ),
       'Sketch' => _SketchEntryWorkspace(
         onChooseFromList: _openSketchSupportFallback,
@@ -5509,11 +5524,63 @@ class _OfficialEngineeringWorkspaceState
                                           operational.stage ==
                                               SketchSurfaceStage.sketchActive &&
                                           !choosingSketchSupport &&
+                                          !operational
+                                              .sketchCreationCommandActive &&
+                                          !operational
+                                              .sketchEditingCommandActive &&
                                           _contextualCaptureCandidateIds == null
-                                      ? (pick) => operational
-                                            .hoverSketchReconstructionSuggestionForEntity(
-                                              pick?.entityId,
-                                            )
+                                      ? (pick) {
+                                          if (_sketchSuggestionHoverPosition ==
+                                              null) {
+                                            operational
+                                                .clearHoveredSketchReconstructionSuggestion();
+                                            _sketchSuggestionHoverPresentation
+                                                .value = null;
+                                            return;
+                                          }
+                                          final found = operational
+                                              .hoverSketchReconstructionSuggestionForEntity(
+                                                pick?.entityId,
+                                              );
+                                          final suggestion = operational
+                                              .hoveredSketchReconstructionSuggestion;
+                                          final position =
+                                              _sketchSuggestionHoverPosition;
+                                          if (found &&
+                                              suggestion != null &&
+                                              position != null) {
+                                            _sketchSuggestionHoverPresentation
+                                                .value = (
+                                                  position: position,
+                                                  label: operational
+                                                      .sketchReconstructionSuggestionDisplayLabel(
+                                                        suggestion,
+                                                      ),
+                                                );
+                                          } else {
+                                            _sketchSuggestionHoverPresentation
+                                                .value = null;
+                                          }
+                                        }
+                                      : null,
+                                  onSketchSuggestionHoverPosition:
+                                      module == 'Sketch' &&
+                                          operational.stage ==
+                                              SketchSurfaceStage.sketchActive &&
+                                          !choosingSketchSupport &&
+                                          !operational
+                                              .sketchCreationCommandActive &&
+                                          !operational
+                                              .sketchEditingCommandActive &&
+                                          _contextualCaptureCandidateIds == null
+                                      ? (position) {
+                                          _sketchSuggestionHoverPosition =
+                                              position;
+                                          if (position == null) {
+                                            _sketchSuggestionHoverPresentation
+                                                .value = null;
+                                          }
+                                        }
                                       : null,
                                   scene: scene,
                                   camera: camera,
@@ -5801,6 +5868,69 @@ class _OfficialEngineeringWorkspaceState
                                           }
                                         },
                                 ),
+                              ),
+                              ValueListenableBuilder<
+                                ({Offset position, String label})?
+                              >(
+                                valueListenable:
+                                    _sketchSuggestionHoverPresentation,
+                                builder: (context, presentation, _) {
+                                  if (presentation == null ||
+                                      module != 'Sketch') {
+                                    return const SizedBox.shrink();
+                                  }
+                                  final left = presentation.position.dx + 12;
+                                  final top = presentation.position.dy + 12;
+                                  return Positioned(
+                                    left: left.clamp(
+                                      4.0,
+                                      math.max(
+                                        4.0,
+                                        camera.viewportWidth - 132,
+                                      ),
+                                    ),
+                                    top: top.clamp(
+                                      4.0,
+                                      math.max(
+                                        4.0,
+                                        camera.viewportHeight - 30,
+                                      ),
+                                    ),
+                                    child: IgnorePointer(
+                                      child: DecoratedBox(
+                                        decoration: BoxDecoration(
+                                          color: const Color(
+                                            0xff101820,
+                                          ).withValues(alpha: .88),
+                                          borderRadius: BorderRadius.circular(
+                                            3,
+                                          ),
+                                          border: Border.all(
+                                            color: const Color(
+                                              0xff4de1d2,
+                                            ).withValues(alpha: .75),
+                                            width: .7,
+                                          ),
+                                        ),
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 5,
+                                            vertical: 2,
+                                          ),
+                                          child: Text(
+                                            presentation.label,
+                                            style: const TextStyle(
+                                              color: Color(0xffb8fff7),
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.w700,
+                                              height: 1.1,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  );
+                                },
                               ),
                               if (module == 'Sketch' &&
                                   operational.sketchCreationCommandActive)
@@ -6641,6 +6771,9 @@ class _OfficialEngineeringWorkspaceState
                             ? 'Sketch'
                             : module,
                         onClose: () => _closeToolWindow(module),
+                        scrollController: module == 'Sketch'
+                            ? _sketchSuggestionScrollController
+                            : null,
                         child: tool,
                       ),
                 ],
@@ -9473,12 +9606,14 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     required this.onHealthIssue,
     required this.onFocusSuggestion,
     required this.onAutoHeal,
+    required this.suggestionScrollController,
   });
   final OperationalReverseEngineeringController controller;
   final Future<void> Function() onExitSketch;
   final ValueChanged<SketchHealthIssue> onHealthIssue;
   final ValueChanged<SketchReconstructionSuggestion> onFocusSuggestion;
   final Future<void> Function(SketchHealthIssue) onAutoHeal;
+  final ScrollController suggestionScrollController;
 
   Future<void> _createDimension(
     BuildContext context,
@@ -10387,6 +10522,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               _SketchReconstructionSuggestionGroups(
                 controller: controller,
                 onFocusSuggestion: onFocusSuggestion,
+                scrollController: suggestionScrollController,
               ),
               if (controller.sketchReconstructionSelectionAnalysis
                   case final analysis?)
@@ -11185,23 +11321,170 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
   );
 }
 
-class _SketchReconstructionSuggestionGroups extends StatelessWidget {
+String _sketchSuggestionUiKey(SketchReconstructionSuggestion suggestion) {
+  final ids = suggestion.entityIds.toList()..sort();
+  return '${suggestion.kind.name}:${ids.join(',')}';
+}
+
+class _SketchReconstructionSuggestionGroups extends StatefulWidget {
   const _SketchReconstructionSuggestionGroups({
     required this.controller,
     required this.onFocusSuggestion,
+    required this.scrollController,
   });
 
   final OperationalReverseEngineeringController controller;
   final ValueChanged<SketchReconstructionSuggestion> onFocusSuggestion;
+  final ScrollController scrollController;
+
+  @override
+  State<_SketchReconstructionSuggestionGroups> createState() =>
+      _SketchReconstructionSuggestionGroupsState();
+}
+
+class _SketchReconstructionSuggestionGroupsState
+    extends State<_SketchReconstructionSuggestionGroups> {
+  final _tileKeys = <String, GlobalKey>{};
+  final _expanded = <SketchReconstructionSuggestionCategory, bool>{};
+  Timer? _hoverScrollTimer;
+  String? _lastScrolledKey;
+  String? _lastObservedHoverKey;
+  String? _lastSuggestionSignature;
+  bool _pointerInsideList = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _lastObservedHoverKey = _hoverKey(
+      widget.controller.hoveredSketchReconstructionSuggestion,
+    );
+    _lastSuggestionSignature = _suggestionSignature(
+      widget.controller.sketchReconstructionSuggestions,
+    );
+  }
+
+  @override
+  void dispose() {
+    _hoverScrollTimer?.cancel();
+    super.dispose();
+  }
+
+  String? _hoverKey(SketchReconstructionSuggestion? suggestion) =>
+      suggestion == null ? null : _sketchSuggestionUiKey(suggestion);
+
+  @override
+  void didUpdateWidget(
+    covariant _SketchReconstructionSuggestionGroups oldWidget,
+  ) {
+    super.didUpdateWidget(oldWidget);
+    final newSuggestion =
+        widget.controller.hoveredSketchReconstructionSuggestion;
+    final newKey = _hoverKey(newSuggestion);
+    if (_lastObservedHoverKey != newKey) {
+      _hoverScrollTimer?.cancel();
+      _stopAutomaticScrollAnimation();
+      if (newKey == null) {
+        _lastScrolledKey = null;
+      } else if (!_pointerInsideList && newSuggestion != null) {
+        _scheduleHoverScroll(newSuggestion);
+      }
+      _lastObservedHoverKey = newKey;
+    }
+    final signature = _suggestionSignature(
+      widget.controller.sketchReconstructionSuggestions,
+    );
+    final currentKeys = signature.isEmpty
+        ? const <String>{}
+        : widget.controller.sketchReconstructionSuggestions
+            .map(_sketchSuggestionUiKey)
+            .toSet();
+    _tileKeys.removeWhere((key, _) => !currentKeys.contains(key));
+    if (_lastSuggestionSignature != signature) {
+      _cancelHoverScroll();
+      _stopAutomaticScrollAnimation();
+      _lastScrolledKey = null;
+      _lastSuggestionSignature = signature;
+      if (newSuggestion != null && !_pointerInsideList) {
+        _scheduleHoverScroll(newSuggestion);
+      }
+    }
+  }
+
+  String _suggestionSignature(
+    Iterable<SketchReconstructionSuggestion> suggestions,
+  ) => suggestions
+      .map(
+        (suggestion) =>
+            '${_sketchSuggestionUiKey(suggestion)}:${suggestion.label}:'
+            '${suggestion.confidence}:${suggestion.rmsError}:'
+            '${suggestion.maxError}',
+      )
+      .join('|');
+
+  void _cancelHoverScroll() {
+    _hoverScrollTimer?.cancel();
+    _hoverScrollTimer = null;
+  }
+
+  void _stopAutomaticScrollAnimation() {
+    if (widget.scrollController.hasClients) {
+      // Jumping to the current offset cancels an active ensureVisible
+      // animation without changing the operator's visible position.
+      widget.scrollController.jumpTo(widget.scrollController.offset);
+    }
+  }
+
+  void _scheduleHoverScroll(SketchReconstructionSuggestion suggestion) {
+    final key = _sketchSuggestionUiKey(suggestion);
+    if (_lastScrolledKey == key) return;
+    _cancelHoverScroll();
+    _hoverScrollTimer = Timer(const Duration(milliseconds: 300), () {
+      _hoverScrollTimer = null;
+      if (!mounted || _pointerInsideList) return;
+      final current = widget.controller.hoveredSketchReconstructionSuggestion;
+      if (current == null || _sketchSuggestionUiKey(current) != key) return;
+      _lastScrolledKey = key;
+      _expandAndCenter(current);
+    });
+  }
+
+  void _expandAndCenter(SketchReconstructionSuggestion suggestion) {
+    final category = widget.controller.sketchReconstructionSuggestionCategory(
+      suggestion,
+    );
+    if (_expanded[category] != true) {
+      setState(() => _expanded[category] = true);
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _pointerInsideList) return;
+      final context = _tileKeys[_sketchSuggestionUiKey(suggestion)]
+          ?.currentContext;
+      if (context == null || !widget.scrollController.hasClients) return;
+      Scrollable.ensureVisible(
+        context,
+        alignment: .5,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOutCubic,
+      );
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    final suggestions = controller.sketchReconstructionSuggestions;
-    return Column(
-      children: [
-        for (final category in SketchReconstructionSuggestionCategory.values)
-          _buildGroup(category, suggestions),
-      ],
+    final suggestions = widget.controller.sketchReconstructionSuggestions;
+    return MouseRegion(
+      onEnter: (_) {
+        _pointerInsideList = true;
+        _cancelHoverScroll();
+        _stopAutomaticScrollAnimation();
+      },
+      onExit: (_) => _pointerInsideList = false,
+      child: Column(
+        children: [
+          for (final category in SketchReconstructionSuggestionCategory.values)
+            _buildGroup(category, suggestions),
+        ],
+      ),
     );
   }
 
@@ -11212,7 +11495,7 @@ class _SketchReconstructionSuggestionGroups extends StatelessWidget {
     final categorySuggestions = suggestions
         .where(
           (suggestion) =>
-              controller.sketchReconstructionSuggestionCategory(suggestion) ==
+              widget.controller.sketchReconstructionSuggestionCategory(suggestion) ==
               category,
         )
         .toList(growable: false);
@@ -11228,9 +11511,15 @@ class _SketchReconstructionSuggestionGroups extends StatelessWidget {
         Icons.architecture_outlined,
     };
     return ExpansionTile(
-      key: ValueKey('sketch-reconstruction-group-${category.name}'),
-      initiallyExpanded: categorySuggestions.isNotEmpty,
+      key: ValueKey(
+        'sketch-reconstruction-group-${category.name}-${_expanded[category] ?? categorySuggestions.isNotEmpty}',
+      ),
+      initiallyExpanded: _expanded[category] ?? categorySuggestions.isNotEmpty,
       maintainState: true,
+      onExpansionChanged: (expanded) {
+        _expanded[category] = expanded;
+        if (mounted) setState(() {});
+      },
       tilePadding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
       leading: Icon(icon, size: 16),
@@ -11247,9 +11536,20 @@ class _SketchReconstructionSuggestionGroups extends StatelessWidget {
         else
           for (final suggestion in categorySuggestions)
             _SketchReconstructionSuggestionTile(
-              controller: controller,
+              key: _tileKeys.putIfAbsent(
+                _sketchSuggestionUiKey(suggestion),
+                GlobalKey.new,
+              ),
+              controller: widget.controller,
               suggestion: suggestion,
-              onFocus: () => onFocusSuggestion(suggestion),
+              onFocus: () => widget.onFocusSuggestion(suggestion),
+              onListHoverChanged: (inside) {
+                _pointerInsideList = inside;
+                if (inside) {
+                  _cancelHoverScroll();
+                  _stopAutomaticScrollAnimation();
+                }
+              },
             ),
       ],
     );
@@ -11258,14 +11558,17 @@ class _SketchReconstructionSuggestionGroups extends StatelessWidget {
 
 class _SketchReconstructionSuggestionTile extends StatelessWidget {
   const _SketchReconstructionSuggestionTile({
+    super.key,
     required this.controller,
     required this.suggestion,
     required this.onFocus,
+    this.onListHoverChanged,
   });
 
   final OperationalReverseEngineeringController controller;
   final SketchReconstructionSuggestion suggestion;
   final VoidCallback onFocus;
+  final ValueChanged<bool>? onListHoverChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -11279,9 +11582,14 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
       suggestion,
     );
     return MouseRegion(
-      onEnter: (_) =>
-          controller.highlightSketchReconstructionSuggestion(suggestion),
-      onExit: (_) => controller.clearHoveredSketchReconstructionSuggestion(),
+      onEnter: (_) {
+        onListHoverChanged?.call(true);
+        controller.highlightSketchReconstructionSuggestion(suggestion);
+      },
+      onExit: (_) {
+        onListHoverChanged?.call(false);
+        controller.clearHoveredSketchReconstructionSuggestion();
+      },
       child: ListTile(
         dense: true,
         selected: selected,
@@ -11811,10 +12119,12 @@ class _ProfessionalToolWindow extends StatefulWidget {
     required this.title,
     required this.child,
     this.onClose,
+    this.scrollController,
   });
   final String title;
   final Widget child;
   final Future<void> Function()? onClose;
+  final ScrollController? scrollController;
 
   @override
   State<_ProfessionalToolWindow> createState() =>
@@ -11963,6 +12273,7 @@ class _ProfessionalToolWindowState extends State<_ProfessionalToolWindow> {
                     const Divider(),
                     Expanded(
                       child: SingleChildScrollView(
+                        controller: widget.scrollController,
                         padding: const EdgeInsets.all(10),
                         child:
                             NotificationListener<SizeChangedLayoutNotification>(

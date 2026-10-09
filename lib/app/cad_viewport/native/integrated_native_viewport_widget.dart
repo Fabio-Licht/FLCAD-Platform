@@ -46,6 +46,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.onSketchSecondaryTap,
     this.onSketchHover,
     this.onSketchSuggestionHover,
+    this.onSketchSuggestionHoverPosition,
     this.onSketchEntityDragStart,
     this.onSketchEntityDragUpdate,
     this.onSketchEntityDragEnd,
@@ -75,6 +76,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final VoidCallback? onSketchSecondaryTap;
   final ValueChanged<Offset>? onSketchHover;
   final ValueChanged<CadViewportPick?>? onSketchSuggestionHover;
+  final ValueChanged<Offset?>? onSketchSuggestionHoverPosition;
   final void Function(CadViewportPick pick, Offset position)?
   onSketchEntityDragStart;
   final ValueChanged<Offset>? onSketchEntityDragUpdate;
@@ -844,6 +846,9 @@ class _IntegratedCadViewportWidgetState
                 : MouseCursor.defer,
             onHover: useNative || widget.onSketchHover != null
                 ? (event) {
+                    widget.onSketchSuggestionHoverPosition?.call(
+                      event.localPosition,
+                    );
                     widget.onSketchHover?.call(event.localPosition);
                     if (useNative) _updateNativeHover(event.localPosition);
                   }
@@ -860,6 +865,7 @@ class _IntegratedCadViewportWidgetState
                     });
                     widget.onPickCaptureHover?.call(null);
                     widget.onSketchSuggestionHover?.call(null);
+                    widget.onSketchSuggestionHoverPosition?.call(null);
                   }
                 : null,
             child: Stack(
@@ -892,6 +898,9 @@ class _IntegratedCadViewportWidgetState
                       onSketchSuggestionHover: useNative
                           ? null
                           : widget.onSketchSuggestionHover,
+                      onSketchSuggestionHoverPosition: useNative
+                          ? null
+                          : widget.onSketchSuggestionHoverPosition,
                       captureHoveredEntityId: _captureHover?.entityId,
                       onManagedFacePick: useNative ? null : _pickCanvas,
                       onEmptyNormalTap: () {
