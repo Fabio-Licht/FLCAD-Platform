@@ -2252,7 +2252,7 @@ void main() {
         endAngle: 1.7,
       );
       expect(await controller.acceptSketchReconstructionSuggestion(weak), isNull);
-      expect(controller.error, contains('confiança'));
+      expect(controller.error, contains('não estão mais visíveis'));
       expect(controller.sketchReconstructionMessage, controller.error);
       expect(controller.commands.manager.canUndo, canUndo);
       await expectAssistantApplied(promotedId, firstSources, selected: false);
@@ -3185,6 +3185,89 @@ void main() {
       );
       expect(reopened.sketchApi!.entity(weakSpline.id)?.visible, isFalse);
       expect(reopened.commands.manager.canUndo, isFalse);
+    },
+  );
+
+  test(
+    'assistant recognition uses eligible sources and rejects stale suggestions',
+    () async {
+      final harness = await _g124Harness('g124-6a-eligible-sources');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final visible = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final duplicate = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final hidden = controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 0),
+        const SketchVector(30, 0),
+      )
+        ..visible = false;
+      hidden.metadata['reconstructionHidden'] = true;
+      final promoted = controller.sketchApi!.builders.line.build(
+        const SketchVector(40, 0),
+        const SketchVector(50, 0),
+      );
+      promoted.metadata['reconstructionKind'] = 'line';
+      final construction = controller.sketchApi!.builders.line.build(
+        const SketchVector(60, 0),
+        const SketchVector(70, 0),
+      )
+        ..construction = true;
+
+      controller.analyzeSketchReconstruction();
+      final ids = controller.sketchReconstructionSuggestions
+          .expand((suggestion) => suggestion.entityIds)
+          .toSet();
+      expect(ids, contains(visible.id));
+      expect(ids, contains(promoted.id));
+      expect(ids, isNot(contains(hidden.id)));
+      expect(ids, isNot(contains(duplicate.id)));
+      expect(ids, isNot(contains(construction.id)));
+
+      final geometryStale = controller.sketchReconstructionSuggestions.firstWhere(
+        (suggestion) =>
+            suggestion.kind == SketchReconstructionKind.line &&
+            suggestion.entityIds.length == 1 &&
+            suggestion.entityIds.single == promoted.id,
+      );
+      final historyBeforeGeometry = controller.commands.manager.history.length;
+      promoted.parameters['end'] = const SketchVector(50, 1).toJson();
+      promoted.refreshDerivedParameters();
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(geometryStale),
+        isNull,
+      );
+      expect(
+        controller.error,
+        contains('geometria de origem foi alterada'),
+      );
+      expect(
+        controller.commands.manager.history.length,
+        historyBeforeGeometry,
+      );
+
+      final stale = controller.sketchReconstructionSuggestions.firstWhere(
+        (suggestion) =>
+            suggestion.kind == SketchReconstructionKind.line &&
+            suggestion.entityIds.length == 1 &&
+            suggestion.entityIds.single == visible.id,
+      );
+      final historyBefore = controller.commands.manager.history.length;
+      visible.visible = false;
+      final accepted = await controller.acceptSketchReconstructionSuggestion(
+        stale,
+      );
+      expect(accepted, isNull);
+      expect(controller.error, contains('não estão mais visíveis'));
+      expect(controller.commands.manager.history.length, historyBefore);
+      expect(controller.sketchApi!.entity(visible.id), isNotNull);
     },
   );
 }

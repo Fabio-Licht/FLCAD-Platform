@@ -633,6 +633,37 @@ void main() {
     );
   });
 
+  test('automatic recognition deduplicates IDs and skips invalid geometry', () {
+    final line = SketchLine(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    final invalid = SketchLine(
+      const SketchVector(double.nan, 0),
+      const SketchVector(10, 0),
+    );
+    final suggestions = const SketchReconstructionEngine().analyze([
+      line,
+      line,
+      invalid,
+    ]);
+    expect(
+      suggestions.every(
+        (suggestion) =>
+            suggestion.entityIds.toSet().length == suggestion.entityIds.length,
+      ),
+      isTrue,
+    );
+    expect(
+      suggestions.expand((suggestion) => suggestion.entityIds),
+      contains(line.id),
+    );
+    expect(
+      suggestions.expand((suggestion) => suggestion.entityIds),
+      isNot(contains(invalid.id)),
+    );
+  });
+
   group('automatic circular adjustment is C1 at both extremities', () {
     test('two tangent neighbour lines', () {
       const radius = 1.5;

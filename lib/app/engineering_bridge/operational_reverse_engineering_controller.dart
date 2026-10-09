@@ -586,6 +586,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String? sketchReconstructionMessage;
   List<SketchReconstructionSuggestion> _sketchReconstructionSuggestions =
       const [];
+  Map<String, String> _sketchReconstructionSuggestionFingerprints = const {};
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
@@ -612,11 +613,90 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _clearSketchReconstructionHighlight(
       clearEntitySelection: highlighted != null,
     );
+    final candidates = _sketchReconstructionCandidates();
     _sketchReconstructionSuggestions = _sketchReconstruction.analyze(
-      sketchEntities,
+      candidates,
       angularTolerance: sketchAssistantPrecision.tolerance / 8,
     );
+    final byId = <String, SketchEntity>{
+      for (final entity in candidates) entity.id: entity,
+    };
+    _sketchReconstructionSuggestionFingerprints = {
+      for (final suggestion in _sketchReconstructionSuggestions)
+        _reconstructionSuggestionKey(suggestion): _reconstructionFingerprint(
+          suggestion,
+          byId,
+        ),
+    };
     notifyListeners();
+  }
+
+  /// Returns only the current, visible sources that may be considered by the
+  /// recognition pass. A promoted entity remains eligible when it is visible;
+  /// only its replaced, hidden sources are excluded. This keeps the filter
+  /// from confusing a valid new result with a source that must not be reused.
+  List<SketchEntity> _sketchReconstructionCandidates() {
+    final sketch = activeSketch;
+    final api = sketchApi;
+    if (sketch == null || api == null) return const [];
+    final seen = <String>{};
+    final visible = <SketchEntity>[];
+    for (final id in sketch.entityIds) {
+      if (!seen.add(id)) continue;
+      final entity = api.entity(id);
+      if (entity == null || !entity.visible) continue;
+      if (entity.construction || entity.reference) continue;
+      if (entity.metadata['reconstructionHidden'] == true) continue;
+      visible.add(entity);
+    }
+    final duplicateIds = <String>{};
+    final duplicateIssues = sketchHealth.ofType(
+      SketchHealthIssueType.duplicate,
+    );
+    for (final issue in duplicateIssues) {
+      final matches = issue.entityIds.where(
+        (id) => visible.any((entity) => entity.id == id),
+      );
+      // Sketch Health already establishes that these are duplicate
+      // signatures. Keep the first document-order entity and do not feed the
+      // later copies back into automatic recognition. Overlaps that are not
+      // duplicate signatures remain eligible.
+      duplicateIds.addAll(matches.skip(1));
+    }
+    return visible
+        .where((entity) => !duplicateIds.contains(entity.id))
+        .toList(growable: false);
+  }
+
+  bool _isSketchReconstructionCandidate(SketchEntity entity) =>
+      activeSketch?.entityIds.contains(entity.id) == true &&
+      entity.visible &&
+      entity.metadata['reconstructionHidden'] != true;
+
+  String _reconstructionSuggestionKey(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    final ids = suggestion.entityIds.toSet().toList()..sort();
+    return '${suggestion.kind.name}:${ids.join(',')}';
+  }
+
+  String _reconstructionFingerprint(
+    SketchReconstructionSuggestion suggestion,
+    Map<String, SketchEntity> byId,
+  ) {
+    final ids = <String>{
+      ...suggestion.entityIds,
+      ...suggestion.usedEntityIds,
+      ...suggestion.coveredEntityIds,
+    }.toList()..sort();
+    try {
+      return jsonEncode([
+        for (final id in ids)
+          [id, byId[id]?.type.name, byId[id]?.parameters],
+      ]);
+    } catch (_) {
+      return ids.map((id) => '$id:${byId[id]?.version}').join('|');
+    }
   }
 
   Future<String?> acceptSketchReconstructionSuggestion(
@@ -685,13 +765,37 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       );
       return false;
     }
-    final entities = suggestion.entityIds
+    final sourceIds = <String>{
+      ...suggestion.entityIds,
+      ...suggestion.usedEntityIds,
+      ...suggestion.coveredEntityIds,
+    };
+    final entities = sourceIds
         .map(api.entity)
         .whereType<SketchEntity>()
         .toList(growable: false);
-    if (entities.length != suggestion.entityIds.length) {
+    if (entities.length != sourceIds.length) {
       _rejectSketchReconstructionSuggestion(
         'Sugestão rejeitada: uma ou mais entidades de origem não existem mais.',
+      );
+      return false;
+    }
+    if (entities.any((entity) => !_isSketchReconstructionCandidate(entity))) {
+      _rejectSketchReconstructionSuggestion(
+        'Sugestão rejeitada: uma ou mais fontes não estão mais visíveis ou elegíveis.',
+      );
+      return false;
+    }
+    final expectedFingerprint =
+        _sketchReconstructionSuggestionFingerprints[
+          _reconstructionSuggestionKey(suggestion)
+        ];
+    if (expectedFingerprint != null &&
+        expectedFingerprint != _reconstructionFingerprint(suggestion, {
+          for (final entity in entities) entity.id: entity,
+        })) {
+      _rejectSketchReconstructionSuggestion(
+        'Sugestão rejeitada: a geometria de origem foi alterada desde o reconhecimento.',
       );
       return false;
     }
@@ -1639,6 +1743,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void clearSketchReconstructionSuggestions() {
     final highlighted = selectedSketchReconstructionSuggestion;
     _sketchReconstructionSuggestions = const [];
+    _sketchReconstructionSuggestionFingerprints = const {};
     sketchReconstructionMessage = null;
     _clearSketchReconstructionHighlight(
       clearEntitySelection: highlighted != null,

@@ -1954,7 +1954,16 @@ class SketchReconstructionEngine {
     Iterable<SketchEntity> entities, {
     double angularTolerance = 0.035,
   }) {
-    final values = entities.toList(growable: false);
+    // Recognition receives a snapshot from the document, so stale callers
+    // can still hand us repeated IDs, removed entities or malformed geometry.
+    // Normalize that boundary here without changing any fitting criteria.
+    final seenIds = <String>{};
+    final values = <SketchEntity>[];
+    for (final entity in entities) {
+      if (!seenIds.add(entity.id)) continue;
+      if (!_hasFiniteAutomaticGeometry(entity)) continue;
+      values.add(entity);
+    }
     final result = <SketchReconstructionSuggestion>[];
     final lines = values.whereType<SketchLine>().toList(growable: false);
     final components = <List<SketchLine>>[];
@@ -2146,6 +2155,25 @@ class SketchReconstructionEngine {
     relations.sort((a, b) => b.confidence.compareTo(a.confidence));
     result.addAll(relations.take(128));
     return result;
+  }
+
+  bool _hasFiniteAutomaticGeometry(SketchEntity entity) {
+    try {
+      if (entity is SketchCircle) {
+        final center = SketchVector.fromJson(entity.parameters['center']);
+        final radius = (entity.parameters['radius'] as num).toDouble();
+        return _isFinite(center) && radius.isFinite && radius > 0;
+      }
+      if (entity is! SketchLine &&
+          entity is! SketchArc &&
+          entity is! SketchSpline) {
+        return true;
+      }
+      final samples = _entitySamples(entity);
+      return samples.length >= 2 && samples.every(_isFinite);
+    } catch (_) {
+      return false;
+    }
   }
 
   (double, double) _arcAngles(List<SketchVector> points, SketchVector center) {
