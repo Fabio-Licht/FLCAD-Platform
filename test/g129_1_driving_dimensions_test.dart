@@ -3,6 +3,7 @@ import 'dart:math' as math;
 
 import 'package:flcad_mobile/core/sketch_constraints/api/constraint_api.dart';
 import 'package:flcad_mobile/core/sketch_constraints/integration/constraint_factory.dart';
+import 'package:flcad_mobile/core/sketch_constraints/integration/arc_radius_edit_planner.dart';
 import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
 import 'package:flcad_mobile/core/sketch_engine/api/sketch_engine_api.dart';
 import 'package:flcad_mobile/core/sketch_engine/integration/sketch_factory.dart';
@@ -217,7 +218,7 @@ void main() {
     expect(second.parameters['start'], [10.0, 0.0, 0.0]);
   });
 
-  test('arc radius moves its connected endpoint group without a gap', () {
+  test('arc radius moves its connected endpoint group after confirmation', () {
     final arc = sketch.builders.arc.build(
       const SketchVector(0, 0),
       5,
@@ -232,8 +233,145 @@ void main() {
       type: SketchDimensionType.radius,
       references: [arc.id],
       value: 10,
+      confirmAdjacent: true,
     );
     expect(line.parameters['start'], [10.0, 0.0, 0.0]);
+  });
+
+  test('connected radius dimension is blocked before mutation', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(0, 0),
+      5,
+      0,
+      math.pi / 2,
+    );
+    final line = sketch.builders.line.build(
+      const SketchVector(5, 0),
+      const SketchVector(8, 0),
+    );
+    final historyBefore = dimensions.engine.history.entries.length;
+    expect(
+      () => dimensions.createDrivingDimension(
+        type: SketchDimensionType.radius,
+        references: [arc.id],
+        value: 10,
+      ),
+      throwsA(
+        isA<ArcRadiusEditConfirmationRequired>().having(
+          (failure) => failure.details,
+          'details',
+          allOf(
+            containsPair('previousRadiusMm', 5.0),
+            containsPair('requestedRadiusMm', 10.0),
+            containsPair('maxEndpointDisplacementMm', 5.0),
+            containsPair('affectedEntityIds', contains(arc.id)),
+          ),
+        ),
+      ),
+    );
+    expect(arc.parameters['radius'], 5.0);
+    expect(line.parameters['start'], [5.0, 0.0, 0.0]);
+    expect(dimensions.dimensions, isEmpty);
+    expect(dimensions.engine.history.entries.length, historyBefore);
+  });
+
+  test('connected radius dimension edit requires confirmation', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(0, 0),
+      1,
+      0,
+      math.pi / 2,
+    );
+    final line = sketch.builders.line.build(
+      const SketchVector(1, 0),
+      const SketchVector(4, 0),
+    );
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 1,
+      confirmAdjacent: true,
+    );
+    final historyBefore = dimensions.engine.history.entries.length;
+    expect(
+      () => dimensions.driveDimension(dimension.id, 2),
+      throwsA(isA<ArcRadiusEditConfirmationRequired>()),
+    );
+    expect(arc.parameters['radius'], 1.0);
+    expect(line.parameters['start'], [1.0, 0.0, 0.0]);
+    expect(dimension.value, 1.0);
+    expect(dimensions.engine.history.entries.length, historyBefore);
+  });
+
+  test('arc radius dimension uses the tangent planner for two frontiers', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(0, 0),
+      1,
+      0,
+      math.pi / 2,
+    );
+    final preceding = sketch.builders.line.build(
+      const SketchVector(1, -5),
+      const SketchVector(1, 0),
+    );
+    final following = sketch.builders.line.build(
+      const SketchVector(0, 1),
+      const SketchVector(-5, 1),
+    );
+
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 1,
+      confirmAdjacent: true,
+    );
+    dimensions.driveDimension(dimension.id, 1.5, confirmAdjacent: true);
+
+    expect(arc.parameters['radius'], 1.5);
+    expect(preceding.parameters['end'], [1.0, -.5, 0.0]);
+    expect(following.parameters['start'], [-.5, 1.0, 0.0]);
+    expect(dimensions.undoDimensionEdit(), isTrue);
+    expect(sketch.entity(arc.id)!.parameters['radius'], 1.0);
+    expect(sketch.entity(preceding.id)!.parameters['end'], [1.0, 0.0, 0.0]);
+    expect(dimensions.redoDimensionEdit(), isTrue);
+    expect(sketch.entity(arc.id)!.parameters['radius'], 1.5);
+    expect(sketch.entity(following.id)!.parameters['start'], [-.5, 1.0, 0.0]);
+    expect(dimension.value, 1.5);
+  });
+
+  test('reconstructed arc dimension rejects one frontier atomically', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(0, 0),
+      1,
+      0,
+      math.pi / 2,
+    );
+    final frontier = sketch.builders.line.build(
+      const SketchVector(1, -5),
+      const SketchVector(1, 0),
+    );
+
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 1,
+      confirmAdjacent: true,
+    );
+    arc.metadata['reconstructionKind'] = 'arc';
+
+    expect(
+      () => dimensions.driveDimension(dimension.id, 1.5),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.toString(),
+          'message',
+          contains('Não foi possível manter a tangência nas duas fronteiras.'),
+        ),
+      ),
+    );
+    expect(arc.parameters['radius'], 1.0);
+    expect(frontier.parameters['end'], [1.0, 0.0, 0.0]);
+    expect(dimensions.dimensions.single.value, 1.0);
   });
 
   test('text move is graphical only and survives save and reopen', () async {
@@ -282,6 +420,55 @@ void main() {
     );
     await afterDelete.load();
     expect(afterDelete.dimensions, isEmpty);
+  });
+
+  test('isolated arc radius edit survives save and reopen', () async {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(12, 8),
+      2,
+      .25,
+      1.75,
+    );
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 2,
+    );
+    dimensions.driveDimension(dimension.id, 3);
+    await sketch.persist();
+    await dimensions.persist();
+
+    final reopenedSketch = const SketchEngineFactory().create(project);
+    await reopenedSketch.load();
+    final reopened = const ConstraintFactory().create(
+      projectDirectory: project,
+      sketch: reopenedSketch,
+    );
+    await reopened.load();
+
+    expect(
+      (reopenedSketch.entity(arc.id)!.parameters['radius'] as num).toDouble(),
+      3.0,
+    );
+    expect(reopened.dimensions.single.id, dimension.id);
+    expect(reopened.dimensions.single.value, 3.0);
+  });
+
+  test('isolated radius edit accepts 7.216 to 7.500 mm', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(-12, 4),
+      7.216,
+      .4,
+      1.8,
+    );
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 7.216,
+    );
+    dimensions.driveDimension(dimension.id, 7.5);
+    expect(arc.parameters['radius'], 7.5);
+    expect(dimension.value, 7.5);
   });
 
   test('dimension deletion supports undo and redo without moving geometry', () {

@@ -48,6 +48,7 @@ import '../../core/reference_engine/models/reference_geometry.dart';
 import '../../core/reference_engine/serialization/reference_serializer.dart';
 import '../../core/sketch_constraints/api/constraint_api.dart';
 import '../../core/sketch_constraints/integration/constraint_factory.dart';
+import '../../core/sketch_constraints/integration/arc_radius_edit_planner.dart';
 import '../../core/sketch_constraints/models/constraint_models.dart';
 import '../../core/sketch_editor/api/sketch_editor_api.dart';
 import '../../core/sketch_editor/integration/editor_factory.dart';
@@ -4388,6 +4389,30 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       constraintApi?.constraints ?? const [];
   List<SketchDimension> get dimensions => constraintApi?.dimensions ?? const [];
 
+  ArcRadiusEditPlan _planArcRadiusEdit(SketchArc arc, double radius) =>
+      const ArcRadiusEditPlanner().plan(
+        arc: arc,
+        radius: radius,
+        context: ArcRadiusEditContext(
+          entities: sketchEntities,
+          constraints: constraints,
+        ),
+      );
+
+  Map<String, double> _arcParametersFromPlan(ArcRadiusEditPlan plan) {
+    final geometry = plan.arc;
+    if (geometry == null) {
+      throw StateError(plan.diagnostic ?? 'Plano de raio inválido.');
+    }
+    return {
+      'centerX': geometry.center.x,
+      'centerY': geometry.center.y,
+      'radius': geometry.radius,
+      'startAngleDegrees': geometry.startAngle * 180 / math.pi,
+      'endAngleDegrees': geometry.endAngle * 180 / math.pi,
+    };
+  }
+
   bool get sketchPointReferenceCaptureActive =>
       runtime.read<String>('sketch.pointCapture.mode') != null;
   String? get sketchPointReferenceCaptureMode =>
@@ -6912,8 +6937,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// identity, Explorer node and command history.
   Future<void> updateSketchEntityParameters(
     String id,
-    Map<String, double> values,
-  ) async {
+    Map<String, double> values, {
+    bool confirmAdjacent = false,
+  }) async {
     busy = true;
     error = null;
     notifyListeners();
@@ -6921,6 +6947,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       await commands.dispatch('reverse.sketch.parameters', {
         'id': id,
         'values': values,
+        'confirmAdjacent': confirmAdjacent,
       });
       runtime.select({id});
     } catch (value) {
@@ -7670,6 +7697,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchDimensionType type,
     double value, {
     String? anchorReference,
+    bool confirmAdjacent = false,
   }) async {
     if (selectedSketchEntityIds.length != 1) {
       throw StateError('Select exactly one Sketch entity for this dimension.');
@@ -7695,11 +7723,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'anchorReference': anchorReference,
       'labelX': label.x,
       'labelY': label.y,
+      'confirmAdjacent': confirmAdjacent,
     });
   }
 
-  Future<void> editDrivingDimension(String id, double value) =>
-      _run('reverse.sketch.dimension.edit', {'id': id, 'value': value});
+  Future<void> editDrivingDimension(
+    String id,
+    double value, {
+    bool confirmAdjacent = false,
+  }) => _run('reverse.sketch.dimension.edit', {
+    'id': id,
+    'value': value,
+    'confirmAdjacent': confirmAdjacent,
+  });
 
   Future<void> deleteDrivingDimension(String id) =>
       _run('reverse.sketch.dimension.delete', {'id': id});
@@ -8398,243 +8434,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         );
       }
     }
-  }
-
-  Map<String, double> _arcRadiusEditKeepingEndpoints(
-    SketchArc arc,
-    double radius,
-  ) {
-    if (!radius.isFinite || radius <= 0) {
-      throw ArgumentError('O raio deve ser positivo.');
-    }
-    final center = SketchVector.fromJson(arc.parameters['center']);
-    final oldRadius = (arc.parameters['radius'] as num).toDouble();
-    final oldStart = (arc.parameters['startAngle'] as num).toDouble();
-    final oldEnd = (arc.parameters['endAngle'] as num).toDouble();
-    final start = SketchVector(
-      center.x + oldRadius * math.cos(oldStart),
-      center.y + oldRadius * math.sin(oldStart),
-    );
-    final end = SketchVector(
-      center.x + oldRadius * math.cos(oldEnd),
-      center.y + oldRadius * math.sin(oldEnd),
-    );
-    final dx = end.x - start.x, dy = end.y - start.y;
-    final chord = math.sqrt(dx * dx + dy * dy);
-    if (chord <= 1e-9 || chord > 2 * radius + 1e-8) {
-      throw StateError(
-        'Raio incompatível com as duas extremidades do arco. '
-        'Use pelo menos ${(chord / 2).toStringAsFixed(3)} mm.',
-      );
-    }
-    final halfChord = chord / 2;
-    final height = math.sqrt(
-      math.max(0, radius * radius - halfChord * halfChord),
-    );
-    final midX = (start.x + end.x) / 2, midY = (start.y + end.y) / 2;
-    final candidates = [
-      SketchVector(midX - dy / chord * height, midY + dx / chord * height),
-      SketchVector(midX + dy / chord * height, midY - dx / chord * height),
-    ];
-    candidates.sort((a, b) {
-      final da =
-          (a.x - center.x) * (a.x - center.x) +
-          (a.y - center.y) * (a.y - center.y);
-      final db =
-          (b.x - center.x) * (b.x - center.x) +
-          (b.y - center.y) * (b.y - center.y);
-      return da.compareTo(db);
-    });
-    final next = candidates.first;
-    final startAngle = math.atan2(start.y - next.y, start.x - next.x);
-    var endAngle = math.atan2(end.y - next.y, end.x - next.x);
-    if (oldEnd >= oldStart) {
-      while (endAngle < startAngle) {
-        endAngle += 2 * math.pi;
-      }
-    } else {
-      while (endAngle > startAngle) {
-        endAngle -= 2 * math.pi;
-      }
-    }
-    return {
-      'centerX': next.x,
-      'centerY': next.y,
-      'radius': radius,
-      'startAngleDegrees': startAngle * 180 / math.pi,
-      'endAngleDegrees': endAngle * 180 / math.pi,
-    };
-  }
-
-  ({
-    Map<String, double>? arc,
-    Map<String, Map<String, double>> lines,
-    String? failure,
-  })?
-  _arcRadiusEditTangentToNeighbors(SketchArc arc, double radius) {
-    final oldCenter = SketchVector.fromJson(arc.parameters['center']);
-    final oldRadius = (arc.parameters['radius'] as num).toDouble();
-    final oldStart = (arc.parameters['startAngle'] as num).toDouble();
-    final oldEnd = (arc.parameters['endAngle'] as num).toDouble();
-    SketchVector endpoint(double angle) => SketchVector(
-      oldCenter.x + oldRadius * math.cos(angle),
-      oldCenter.y + oldRadius * math.sin(angle),
-    );
-    final anchors = [endpoint(oldStart), endpoint(oldEnd)];
-    final matchesByAnchor =
-        <List<(SketchLine, String, SketchVector, SketchVector)>>[];
-    // A reconstructed Section may retain a small scan gap at the old arc end.
-    // It is still the same frontier when it is within the Sketch fit budget.
-    final endpointTolerance = math.max(.25, oldRadius * .01);
-    for (final anchor in anchors) {
-      final matches = <(SketchLine, String, SketchVector, SketchVector)>[];
-      for (final line in sketchEntities.whereType<SketchLine>()) {
-        if (!line.visible) continue;
-        for (final key in ['start', 'end']) {
-          final attached = SketchVector.fromJson(line.parameters[key]);
-          final delta = attached - anchor;
-          if (delta.dot(delta) > endpointTolerance * endpointTolerance) {
-            continue;
-          }
-          final other = SketchVector.fromJson(
-            line.parameters[key == 'start' ? 'end' : 'start'],
-          );
-          matches.add((line, key, attached, other));
-        }
-      }
-      matchesByAnchor.add(matches);
-    }
-    final requiresTangency =
-        arc.metadata['reconstructionKind'] ==
-            SketchReconstructionKind.arc.name ||
-        matchesByAnchor.any((matches) => matches.isNotEmpty);
-    if (!requiresTangency) return null;
-    if (matchesByAnchor.any((matches) => matches.length != 1)) {
-      return (
-        arc: null,
-        lines: const <String, Map<String, double>>{},
-        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
-      );
-    }
-    final neighbors = matchesByAnchor.map((matches) => matches.single).toList();
-    if (neighbors[0].$1.id == neighbors[1].$1.id) {
-      return (
-        arc: null,
-        lines: const <String, Map<String, double>>{},
-        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
-      );
-    }
-    SketchVector? normal(
-      (SketchLine, String, SketchVector, SketchVector) item,
-    ) {
-      final direction = item.$3 - item.$4;
-      final length = math.sqrt(
-        direction.x * direction.x + direction.y * direction.y,
-      );
-      if (length <= 1e-9) return null;
-      return SketchVector(-direction.y / length, direction.x / length);
-    }
-
-    final n0 = normal(neighbors[0]), n1 = normal(neighbors[1]);
-    if (n0 == null || n1 == null) {
-      return (
-        arc: null,
-        lines: const <String, Map<String, double>>{},
-        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
-      );
-    }
-    final determinant = n0.x * n1.y - n0.y * n1.x;
-    if (determinant.abs() <= 1e-6) {
-      return (
-        arc: null,
-        lines: const <String, Map<String, double>>{},
-        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
-      );
-    }
-    ({Map<String, double> arc, Map<String, Map<String, double>> lines})? best;
-    var bestScore = double.infinity;
-    for (final sign0 in [-1.0, 1.0]) {
-      for (final sign1 in [-1.0, 1.0]) {
-        final d0 = n0.dot(neighbors[0].$3) + sign0 * radius;
-        final d1 = n1.dot(neighbors[1].$3) + sign1 * radius;
-        final center = SketchVector(
-          (d0 * n1.y - n0.y * d1) / determinant,
-          (n0.x * d1 - d0 * n1.x) / determinant,
-        );
-        final contacts = [
-          center - n0.scale(sign0 * radius),
-          center - n1.scale(sign1 * radius),
-        ];
-        var score = 0.0;
-        var valid = true;
-        for (var i = 0; i < 2; i++) {
-          final item = neighbors[i];
-          final leg = item.$3 - item.$4;
-          final length2 = leg.dot(leg);
-          if (length2 <= 1e-12) {
-            valid = false;
-            break;
-          }
-          // A radius edit is allowed to extend or shorten the boundary.  The
-          // contact can legitimately move beyond its former endpoint; keeping
-          // it bounded would force the non-tangent endpoint-preserving fallback.
-          final movement = contacts[i] - item.$3;
-          score += movement.dot(movement);
-        }
-        if (!valid) continue;
-        final centerMove = center - oldCenter;
-        score += centerMove.dot(centerMove) * .1;
-        final startAngle = math.atan2(
-          contacts[0].y - center.y,
-          contacts[0].x - center.x,
-        );
-        var endAngle = math.atan2(
-          contacts[1].y - center.y,
-          contacts[1].x - center.x,
-        );
-        if (oldEnd >= oldStart) {
-          while (endAngle < startAngle) {
-            endAngle += 2 * math.pi;
-          }
-        } else {
-          while (endAngle > startAngle) {
-            endAngle -= 2 * math.pi;
-          }
-        }
-        final sweep = (endAngle - startAngle).abs();
-        if (sweep <= 1e-6 || sweep > math.pi) continue;
-        score +=
-            math.pow(sweep - (oldEnd - oldStart).abs(), 2).toDouble() *
-            radius *
-            radius;
-        if (score >= bestScore) continue;
-        bestScore = score;
-        best = (
-          arc: {
-            'centerX': center.x,
-            'centerY': center.y,
-            'radius': radius,
-            'startAngleDegrees': startAngle * 180 / math.pi,
-            'endAngleDegrees': endAngle * 180 / math.pi,
-          },
-          lines: {
-            for (var i = 0; i < 2; i++)
-              neighbors[i].$1.id: {
-                '${neighbors[i].$2}X': contacts[i].x,
-                '${neighbors[i].$2}Y': contacts[i].y,
-              },
-          },
-        );
-      }
-    }
-    if (best == null) {
-      return (
-        arc: null,
-        lines: const <String, Map<String, double>>{},
-        failure: 'Não foi possível manter a tangência nas duas fronteiras.',
-      );
-    }
-    return (arc: best.arc, lines: best.lines, failure: null);
   }
 
   void toggleSketchSelection(String id) {
@@ -14263,23 +14062,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             entity is SketchArc &&
             values.length == 1 &&
             values.containsKey('radius');
-        final tangentEdit = radiusOnly
-            ? _arcRadiusEditTangentToNeighbors(entity, values['radius']!)
+        final radiusPlan = entity is SketchArc && radiusOnly
+            ? _planArcRadiusEdit(entity, values['radius']!)
             : null;
-        if (tangentEdit?.failure case final failure?) {
-          throw StateError(failure);
+        if (radiusPlan != null && !radiusPlan.accepted) {
+          throw StateError(
+            radiusPlan.diagnostic ??
+                'Não foi possível planejar a edição segura do raio.',
+          );
         }
-        final resolvedValues = radiusOnly
-            ? tangentEdit?.arc ??
-                  _arcRadiusEditKeepingEndpoints(entity, values['radius']!)
-            : values;
+        if (radiusPlan != null) {
+          parameters['radiusEditMetrics'] = radiusPlan.diagnosticDetails;
+          if (radiusPlan.hasExternalUpdates &&
+              parameters['confirmAdjacent'] != true) {
+            throw ArcRadiusEditConfirmationRequired(radiusPlan);
+          }
+        }
+        final resolvedValues = radiusPlan == null
+            ? values
+            : _arcParametersFromPlan(radiusPlan);
         _validateConstrainedParameterEdit(entity, resolvedValues);
         parameters['entityVersionBefore'] = entity.version;
         final connections = _currentSketchConnections();
         sketchApi!.engine.transaction('safe-parametric-edit', () {
           sketchApi!.updateParameters(id, resolvedValues);
           for (final entry
-              in tangentEdit?.lines.entries ??
+              in radiusPlan?.endpointUpdates.entries ??
                   <MapEntry<String, Map<String, double>>>[]) {
             sketchApi!.updateParameters(entry.key, entry.value);
           }
@@ -14338,16 +14146,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.sketch.dimension.create',
       execute: (parameters) async {
-        final dimension = constraintApi!.createDrivingDimension(
-          type: SketchDimensionType.values.byName(
-            parameters['type']! as String,
-          ),
-          references: (parameters['references']! as List).cast<String>(),
-          value: (parameters['value']! as num).toDouble(),
-          anchorReference: parameters['anchorReference'] as String?,
-          labelX: (parameters['labelX'] as num?)?.toDouble() ?? 0,
-          labelY: (parameters['labelY'] as num?)?.toDouble() ?? 0,
-        );
+        late final SketchDimension dimension;
+        try {
+          dimension = constraintApi!.createDrivingDimension(
+            type: SketchDimensionType.values.byName(
+              parameters['type']! as String,
+            ),
+            references: (parameters['references']! as List).cast<String>(),
+            value: (parameters['value']! as num).toDouble(),
+            anchorReference: parameters['anchorReference'] as String?,
+            labelX: (parameters['labelX'] as num?)?.toDouble() ?? 0,
+            labelY: (parameters['labelY'] as num?)?.toDouble() ?? 0,
+            confirmAdjacent: parameters['confirmAdjacent'] == true,
+          );
+        } on ArcRadiusEditConfirmationRequired catch (failure) {
+          parameters['radiusEditMetrics'] = failure.details;
+          rethrow;
+        }
         parameters['id'] = dimension.id;
         await persist();
         await _synchronizeSketchScene();
@@ -14373,10 +14188,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.sketch.dimension.edit',
       execute: (parameters) async {
-        constraintApi!.driveDimension(
-          parameters['id']! as String,
-          (parameters['value']! as num).toDouble(),
-        );
+        try {
+          constraintApi!.driveDimension(
+            parameters['id']! as String,
+            (parameters['value']! as num).toDouble(),
+            confirmAdjacent: parameters['confirmAdjacent'] == true,
+          );
+        } on ArcRadiusEditConfirmationRequired catch (failure) {
+          parameters['radiusEditMetrics'] = failure.details;
+          rethrow;
+        }
+        final radiusPlan =
+            constraintApi!.engine.dimensionAdapter.lastArcRadiusEditPlan;
+        if (radiusPlan != null) {
+          parameters['radiusEditMetrics'] = radiusPlan.diagnosticDetails;
+        }
         await persist();
         await _synchronizeSketchScene();
         return parameters['id']!;

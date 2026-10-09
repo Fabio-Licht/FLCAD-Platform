@@ -5,6 +5,7 @@ import '../../sketch_engine/api/sketch_engine_api.dart';
 import '../../sketch_engine/entities/sketch_entities.dart';
 import '../../sketch_engine/history/sketch_history.dart';
 import '../../sketch_engine/models/sketch_models.dart';
+import 'arc_radius_edit_planner.dart';
 import '../models/constraint_models.dart';
 
 class SketchDrivingDimensionSolution {
@@ -20,12 +21,43 @@ class SketchDrivingDimensionSolution {
 /// It is deliberately deterministic: the explicit anchor wins, then a fixed
 /// endpoint, then the start/centre convention.
 class SketchDrivingDimensionAdapter {
-  const SketchDrivingDimensionAdapter({
+  SketchDrivingDimensionAdapter({
     this.connectionTolerance = 1e-4,
     this.parametricSolver = const ParametricPropagationSolver(),
   });
   final double connectionTolerance;
   final ParametricPropagationSolver parametricSolver;
+
+  /// Last pure radius plan produced by [apply], exposed for command feedback.
+  /// It is diagnostic state only and is not part of the Sketch history.
+  ArcRadiusEditPlan? lastArcRadiusEditPlan;
+
+  ArcRadiusEditPlan? planRadiusDimension({
+    required SketchEngineApi sketch,
+    required Iterable<SketchConstraint> constraints,
+    required SketchDimensionType type,
+    required List<String> references,
+    required double value,
+    String? ignoredConstraintId,
+  }) {
+    if (references.isEmpty ||
+        (type != SketchDimensionType.radius &&
+            type != SketchDimensionType.diameter)) {
+      return null;
+    }
+    final entityId = _entityId(references.first);
+    final entity = sketch.entity(entityId);
+    if (entity is! SketchArc) return null;
+    final activeConstraints = constraints.where(
+      (constraint) => constraint.id != ignoredConstraintId,
+    );
+    return _planArcRadiusEdit(
+      sketch: sketch,
+      constraints: activeConstraints,
+      arc: entity,
+      radius: type == SketchDimensionType.diameter ? value / 2 : value,
+    );
+  }
 
   SketchDrivingDimensionSolution apply({
     required SketchEngineApi sketch,
@@ -35,7 +67,9 @@ class SketchDrivingDimensionAdapter {
     required double value,
     String? anchorReference,
     double? orientationSign,
+    bool allowAdjacentEndpointUpdates = false,
   }) {
+    lastArcRadiusEditPlan = null;
     if (!value.isFinite ||
         (value <= 0 &&
             !const {
@@ -316,31 +350,42 @@ class SketchDrivingDimensionAdapter {
           item.parameters['radius'] = radius;
         });
       } else if (entity is SketchArc) {
-        final oldStart = _endpoint(sketch, '${entity.id}:start')!;
-        final oldEnd = _endpoint(sketch, '${entity.id}:end')!;
-        final center = SketchVector.fromJson(entity.parameters['center']);
-        final startAngle = math.atan2(
-          oldStart.y - center.y,
-          oldStart.x - center.x,
+        if (entity.locked) {
+          throw StateError('Sketch over constrained: ${entity.id} is fixed.');
+        }
+        final plan = _planArcRadiusEdit(
+          sketch: sketch,
+          constraints: constraints,
+          arc: entity,
+          radius: radius,
         );
-        final endAngle = math.atan2(oldEnd.y - center.y, oldEnd.x - center.x);
-        sketch.engine.modify(entity.id, SketchHistoryAction.modify, (item) {
-          item.parameters['radius'] = radius;
+        lastArcRadiusEditPlan = plan;
+        if (!plan.accepted || plan.arc == null) {
+          throw StateError(
+            plan.diagnostic ??
+                'Não foi possível planejar a edição segura do raio.',
+          );
+        }
+        if (plan.hasExternalUpdates && !allowAdjacentEndpointUpdates) {
+          throw ArcRadiusEditConfirmationRequired(plan);
+        }
+        final geometry = plan.arc!;
+        sketch.updateParameters(entity.id, {
+          'centerX': geometry.center.x,
+          'centerY': geometry.center.y,
+          'radius': geometry.radius,
+          'startAngleDegrees': geometry.startAngle * 180 / math.pi,
+          'endAngleDegrees': geometry.endAngle * 180 / math.pi,
         });
-        moveGroup(
-          '${entity.id}:start',
-          SketchVector(
-            center.x + radius * math.cos(startAngle),
-            center.y + radius * math.sin(startAngle),
-          ),
-        );
-        moveGroup(
-          '${entity.id}:end',
-          SketchVector(
-            center.x + radius * math.cos(endAngle),
-            center.y + radius * math.sin(endAngle),
-          ),
-        );
+        for (final entry in plan.endpointUpdates.entries) {
+          sketch.updateParameters(entry.key, entry.value);
+          for (final endpoint in const ['start', 'end']) {
+            if (entry.value.containsKey('${endpoint}X')) {
+              moved.add('${entry.key}:$endpoint');
+            }
+          }
+        }
+        moved.add(entity.id);
       }
       selectedAnchor ??= '${entity.id}:center';
     } else {
@@ -350,6 +395,26 @@ class SketchDrivingDimensionAdapter {
     }
     _validateGeometricConstraints(sketch, constraints);
     return SketchDrivingDimensionSolution(selectedAnchor, moved);
+  }
+
+  ArcRadiusEditPlan _planArcRadiusEdit({
+    required SketchEngineApi sketch,
+    required Iterable<SketchConstraint> constraints,
+    required SketchArc arc,
+    required double radius,
+  }) {
+    final activeEntities = sketch.engine.activeSketch.entityIds
+        .map(sketch.entity)
+        .whereType<SketchEntity>();
+    return const ArcRadiusEditPlanner().plan(
+      arc: arc,
+      radius: radius,
+      context: ArcRadiusEditContext(
+        entities: activeEntities,
+        constraints: constraints,
+        connectionTolerance: connectionTolerance,
+      ),
+    );
   }
 
   Set<String> _fixedReferences(Iterable<SketchConstraint> constraints) {

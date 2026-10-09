@@ -42,6 +42,7 @@ class ConstraintApi {
     String? anchorReference,
     double labelX = 0,
     double labelY = 0,
+    bool confirmAdjacent = false,
   }) => engine.createDrivingDimension(
     type: type,
     references: references,
@@ -49,12 +50,19 @@ class ConstraintApi {
     anchorReference: anchorReference,
     labelX: labelX,
     labelY: labelY,
+    confirmAdjacent: confirmAdjacent,
   );
   SketchDimension driveDimension(
     String id,
     double value, {
     String? anchorReference,
-  }) => engine.driveDimension(id, value, anchorReference: anchorReference);
+    bool confirmAdjacent = false,
+  }) => engine.driveDimension(
+    id,
+    value,
+    anchorReference: anchorReference,
+    confirmAdjacent: confirmAdjacent,
+  );
   bool undoDimensionEdit() {
     final sketchUndone = engine.sketch.engine.undo();
     final constraintUndone = engine.undo();

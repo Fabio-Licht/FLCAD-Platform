@@ -201,11 +201,37 @@ void main() {
     },
   );
 
+  test('reports C0-only compatibility for a non-tangent single frontier', () {
+    final arc = SketchArc(
+      const SketchVector(0, 0),
+      1,
+      0,
+      math.pi / 2,
+      id: 'arc:radial',
+    );
+    final radial = SketchLine(
+      const SketchVector(1, 0),
+      const SketchVector(3, 0),
+      id: 'line:radial',
+    );
+    final plan = const ArcRadiusEditPlanner().plan(
+      arc: arc,
+      radius: 10,
+      context: ArcRadiusEditContext(entities: [arc, radial]),
+    );
+
+    expect(plan.accepted, isTrue);
+    expect(plan.maxCoincidenceResidual, closeTo(0, 1e-9));
+    expect(plan.maxTangencyResidual, greaterThan(.9));
+    expect(plan.diagnostic, contains('C0'));
+    expect(plan.endpointUpdates[radial.id], containsPair('startX', 10.0));
+  });
+
   test('rejects a pre-existing gap, spline frontier and fixed contact', () {
     final fixture = _TwoLineFixture();
     final gapLine = SketchLine(
       const SketchVector(1, -2),
-      const SketchVector(1, 0.05),
+      const SketchVector(1, 0.2),
       id: 'line:gap',
     );
     final gap = const ArcRadiusEditPlanner().plan(

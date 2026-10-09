@@ -98,6 +98,8 @@ class ArcRadiusEditPlan {
     required this.maxCoincidenceResidual,
     required this.maxTangencyResidual,
     required this.requiresConfirmation,
+    this.previousRadius,
+    this.requestedRadius,
     this.diagnostic,
   });
 
@@ -110,6 +112,9 @@ class ArcRadiusEditPlan {
     required double maxCoincidenceResidual,
     required double maxTangencyResidual,
     required bool requiresConfirmation,
+    required double previousRadius,
+    required double requestedRadius,
+    String? diagnostic,
   }) => ArcRadiusEditPlan._(
     accepted: true,
     arc: arc,
@@ -123,6 +128,9 @@ class ArcRadiusEditPlan {
     maxCoincidenceResidual: maxCoincidenceResidual,
     maxTangencyResidual: maxTangencyResidual,
     requiresConfirmation: requiresConfirmation,
+    previousRadius: previousRadius,
+    requestedRadius: requestedRadius,
+    diagnostic: diagnostic,
   );
 
   factory ArcRadiusEditPlan.rejected(String diagnostic) => ArcRadiusEditPlan._(
@@ -147,15 +155,58 @@ class ArcRadiusEditPlan {
   final double maxCoincidenceResidual;
   final double maxTangencyResidual;
   final bool requiresConfirmation;
+  final double? previousRadius;
+  final double? requestedRadius;
   final String? diagnostic;
+
+  bool get hasExternalUpdates => endpointUpdates.isNotEmpty;
+
+  Map<String, Object?> get diagnosticDetails => {
+    'previousRadiusMm': previousRadius,
+    'requestedRadiusMm': requestedRadius,
+    'affectedEntityIds': affectedEntityIds.toList(growable: false),
+    'endpointUpdates': endpointUpdates,
+    'maxEndpointDisplacementMm': maxEndpointDisplacement,
+    'maxCoincidenceResidual': maxCoincidenceResidual,
+    'maxTangencyResidual': maxTangencyResidual,
+    'requiresConfirmation': hasExternalUpdates,
+    if (diagnostic != null) 'diagnostic': diagnostic,
+  };
+}
+
+/// Raised before a radius edit can mutate adjacent entities.
+///
+/// The plan is retained so a future preview/confirmation UI can present the
+/// exact affected IDs, displacement and C0/G1 residuals without replanning.
+class ArcRadiusEditConfirmationRequired implements Exception {
+  ArcRadiusEditConfirmationRequired(this.plan)
+    : message = _message(plan);
+
+  final ArcRadiusEditPlan plan;
+  final String message;
+
+  Map<String, Object?> get details => plan.diagnosticDetails;
+
+  @override
+  String toString() => message;
+
+  static String _message(ArcRadiusEditPlan plan) {
+    final before = plan.previousRadius?.toStringAsFixed(6) ?? '?';
+    final after = plan.requestedRadius?.toStringAsFixed(6) ?? '?';
+    final ids = plan.affectedEntityIds.join(', ');
+    return 'Confirmação necessária para editar o raio de $before para '
+        '$after mm: entidades adjacentes ($ids) seriam deslocadas; '
+        'deslocamento máximo ${plan.maxEndpointDisplacement.toStringAsFixed(6)} '
+        'mm, resíduo C0 ${plan.maxCoincidenceResidual.toStringAsExponential(3)}, '
+        'resíduo G1 ${plan.maxTangencyResidual.toStringAsExponential(3)}.';
+  }
 }
 
 /// Builds a safe geometric proposal for changing an arc radius.
 ///
-/// The existing edit paths currently apply their own mutations.  This class
-/// deliberately does not integrate with either path yet; it provides one
-/// deterministic geometry/constraint decision that both paths can consume in
-/// a later step.
+/// The planner remains pure: both the Property Inspector and driving-dimension
+/// paths consume the same proposal, then apply it inside their own existing
+/// transactions.
 class ArcRadiusEditPlanner {
   const ArcRadiusEditPlanner();
 
@@ -189,6 +240,36 @@ class ArcRadiusEditPlanner {
         'O contexto da edição possui tolerâncias inválidas.',
       );
     }
+    if (_hasEntityConstraint(context.constraints, arc.id, const {
+      SketchConstraintType.fixed,
+      SketchConstraintType.lock,
+    })) {
+      return ArcRadiusEditPlan.rejected(
+        'O arco possui uma constraint fixa e não pode mudar de raio.',
+      );
+    }
+    final dimensionConstraint = context.constraints
+        .where(
+          (constraint) =>
+              constraint.enabled &&
+              !constraint.suppressed &&
+              const {
+                SketchConstraintType.radius,
+                SketchConstraintType.diameter,
+                SketchConstraintType.drivingDimension,
+                SketchConstraintType.drivenDimension,
+              }.contains(constraint.type) &&
+              constraint.references.any(
+                (reference) =>
+                    reference == arc.id || reference.startsWith('${arc.id}:'),
+              ),
+        )
+        .firstOrNull;
+    if (dimensionConstraint != null) {
+      return ArcRadiusEditPlan.rejected(
+        'A cota ${dimensionConstraint.id} impede editar o raio diretamente.',
+      );
+    }
 
     final oldEndpoints = [
       _pointAt(center, oldRadius, oldStart),
@@ -196,7 +277,7 @@ class ArcRadiusEditPlanner {
     ];
     if (oldEndpoints.any((point) => !point._finite)) {
       return ArcRadiusEditPlan.rejected(
-        'Os endpoints calculados do arco nÃ£o sÃ£o finitos.',
+        'Os endpoints calculados do arco não são finitos.',
       );
     }
     final boundaries = <_BoundaryCandidate>[];
@@ -217,7 +298,11 @@ class ArcRadiusEditPlanner {
         'Fronteira ambígua: selecione uma única conexão em cada extremidade.',
       );
     }
-    if (boundaries.any((item) => item.kind == ArcRadiusBoundaryKind.gap)) {
+    if (boundaries.any(
+      (item) =>
+          item.kind == ArcRadiusBoundaryKind.gap &&
+          item.gap > context.gapTolerance,
+    )) {
       return ArcRadiusEditPlan.rejected(
         'Existe um gap preexistente em uma fronteira '
         '(tolerância ${context.gapTolerance} mm); a edição não o corrige automaticamente.',
@@ -225,6 +310,12 @@ class ArcRadiusEditPlanner {
     }
 
     final matched = boundaries.where((item) => item.entity != null).toList();
+    final reconstructedArc = arc.metadata['reconstructionKind'] == 'arc';
+    if (reconstructedArc && matched.length != 2) {
+      return ArcRadiusEditPlan.rejected(
+        'Não foi possível manter a tangência nas duas fronteiras.',
+      );
+    }
     if (matched.length == 2 && matched[0].entity!.id == matched[1].entity!.id) {
       return ArcRadiusEditPlan.rejected(
         'A mesma entidade não pode ser as duas fronteiras do arco.',
@@ -278,7 +369,7 @@ class ArcRadiusEditPlanner {
         !geometry.center._finite ||
         geometry.contacts.any((point) => !point._finite)) {
       return ArcRadiusEditPlan.rejected(
-        'A soluÃ§Ã£o do raio produziu geometria nÃ£o finita.',
+        'A solução do raio produziu geometria não finita.',
       );
     }
 
@@ -353,9 +444,12 @@ class ArcRadiusEditPlanner {
       }
     }
 
-    if (maxG1 > context.tangencyTolerance) {
+    if (maxG1 > context.tangencyTolerance &&
+        boundaries.any(
+          (boundary) => boundary.kind == ArcRadiusBoundaryKind.tangent,
+        )) {
       return ArcRadiusEditPlan.rejected(
-        'A soluÃ§Ã£o nÃ£o preserva a tangÃªncia dentro da tolerÃ¢ncia configurada.',
+        'A solução não preserva a tangência dentro da tolerância configurada.',
       );
     }
 
@@ -392,6 +486,12 @@ class ArcRadiusEditPlanner {
       maxCoincidenceResidual: maxC0,
       maxTangencyResidual: maxG1,
       requiresConfirmation: threshold != null && maxMove > threshold,
+      previousRadius: oldRadius,
+      requestedRadius: radius,
+      diagnostic: maxG1 > context.tangencyTolerance
+          ? 'Contato C0 preservado; tangência G1 não solicitada '
+                '(resíduo ${maxG1.toStringAsExponential(3)}).'
+          : null,
     );
   }
 }
@@ -528,7 +628,10 @@ _BoundaryCandidate _findBoundary({
       math.max(.25, (_number(arc.parameters['radius']) ?? 0) * .01);
   final candidates = <({_EndpointCandidate candidate, double distance})>[];
   for (final entity in context.entities) {
-    if (entity.id == arc.id || entity.construction || entity.reference) {
+    if (entity.id == arc.id ||
+        !entity.visible ||
+        entity.construction ||
+        entity.reference) {
       continue;
     }
     for (final candidate in _endpoints(entity)) {
@@ -666,6 +769,21 @@ bool _hasEndpointConstraint(
       ),
 );
 
+bool _hasEntityConstraint(
+  Iterable<SketchConstraint> constraints,
+  String entityId,
+  Set<SketchConstraintType> types,
+) => constraints.any(
+  (constraint) =>
+      constraint.enabled &&
+      !constraint.suppressed &&
+      types.contains(constraint.type) &&
+      constraint.references.any(
+        (reference) =>
+            reference == entityId || reference.startsWith('$entityId:'),
+      ),
+);
+
 bool _hasPairConstraint(
   Iterable<SketchConstraint> constraints,
   SketchConstraintType type,
@@ -742,6 +860,7 @@ _SolvedGeometry? _solveTwoLines({
     return null;
   }
   final n0 = _normal(first), n1 = _normal(second);
+  if (n0 == null || n1 == null) return null;
   final p0 = first.attached!, p1 = second.attached!;
   final determinant = n0.cross2d(n1);
   if (determinant.abs() <= 1e-8) return null;
@@ -799,8 +918,17 @@ _SolvedGeometry? _solveOneLine({
   required double tangencyTolerance,
 }) {
   if (matched.entity is! SketchLine || matched.attached == null) return null;
-  if (matched.tangencyResidual > tangencyTolerance) return null;
+  if (matched.tangencyResidual > tangencyTolerance) {
+    return _solveOneLineByContact(
+      center: center,
+      oldStart: oldStart,
+      oldEnd: oldEnd,
+      radius: radius,
+      matched: matched,
+    );
+  }
   final normal = _normal(matched);
+  if (normal == null) return null;
   final attachedIndex = matched.endpoint == 'start' ? 0 : 1;
   final freeIndex = 1 - attachedIndex;
   final free = oldEndpoints[freeIndex];
@@ -846,9 +974,62 @@ _SolvedGeometry? _solveOneLine({
   return best;
 }
 
-SketchVector _normal(_BoundaryCandidate boundary) {
+_SolvedGeometry? _solveOneLineByContact({
+  required SketchVector center,
+  required double oldStart,
+  required double oldEnd,
+  required double radius,
+  required _BoundaryCandidate matched,
+}) {
+  final normal = _normal(matched);
+  final attached = matched.attached;
+  final other = matched.other;
+  if (normal == null || attached == null || other == null) return null;
+  final offset = normal.dot2d(attached);
+  final signedDistance = offset - normal.dot2d(center);
+  final distance = signedDistance.abs();
+  if (distance > radius + 1e-9) return null;
+  final foot = center + normal.scale(signedDistance);
+  final tangent = SketchVector(-normal.y, normal.x);
+  final height = math.sqrt(math.max(0, radius * radius - distance * distance));
+  final attachedIndex = matched.endpoint == 'start' ? 0 : 1;
+  final freeIndex = 1 - attachedIndex;
+  final freeAngle = freeIndex == 0 ? oldStart : oldEnd;
+  final free = _pointAt(center, radius, freeAngle);
+  _SolvedGeometry? best;
+  var bestScore = double.infinity;
+  for (final sign in [-1.0, 1.0]) {
+    final contact = foot + tangent.scale(sign * height);
+    final contacts = attachedIndex == 0 ? [contact, free] : [free, contact];
+    final angles = _orientedAngles(
+      center,
+      contacts[0],
+      contacts[1],
+      oldStart,
+      oldEnd,
+    );
+    final sweep = (angles.$2 - angles.$1).abs();
+    if (sweep <= 1e-8 || sweep > 2 * math.pi + 1e-8) continue;
+    final score =
+        contact.distanceTo(attached) +
+        (sweep - (oldEnd - oldStart).abs()).abs() * radius;
+    if (score < bestScore) {
+      bestScore = score;
+      best = _SolvedGeometry(
+        center: center,
+        startAngle: angles.$1,
+        endAngle: angles.$2,
+        contacts: contacts,
+      );
+    }
+  }
+  return best;
+}
+
+SketchVector? _normal(_BoundaryCandidate boundary) {
   final direction = boundary.attached! - boundary.other!;
   final length = direction.length2d;
+  if (length <= 1e-12 || !length.isFinite) return null;
   return SketchVector(-direction.y / length, direction.x / length);
 }
 

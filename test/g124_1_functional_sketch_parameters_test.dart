@@ -16,6 +16,7 @@ import 'package:flcad_mobile/core/cad_kernel/api/geometry_kernel_api.dart';
 import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
 import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
+import 'package:flcad_mobile/core/sketch_constraints/integration/arc_radius_edit_planner.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/import_export/api/import_export_api.dart';
@@ -465,7 +466,34 @@ void main() {
         const SketchVector(0, 1),
         const SketchVector(-1, 1),
       );
-      await controller.updateSketchEntityParameters(arc.id, {'radius': 1.5});
+      final historyBeforeConfirmation =
+          controller.sketchApi!.engine.history.entries.length;
+      final commandHistoryBeforeConfirmation =
+          controller.commands.manager.history.length;
+      await expectLater(
+        controller.updateSketchEntityParameters(arc.id, {'radius': 1.5}),
+        throwsA(
+          isA<ArcRadiusEditConfirmationRequired>().having(
+            (failure) => failure.details,
+            'details',
+            containsPair('requestedRadiusMm', 1.5),
+          ),
+        ),
+      );
+      expect(arc.parameters['radius'], 1.0);
+      expect(
+        controller.sketchApi!.engine.history.entries.length,
+        historyBeforeConfirmation,
+      );
+      expect(
+        controller.commands.manager.history.length,
+        commandHistoryBeforeConfirmation,
+      );
+      await controller.updateSketchEntityParameters(
+        arc.id,
+        {'radius': 1.5},
+        confirmAdjacent: true,
+      );
       SketchVector arcEnd(String key) {
         final current = controller.sketchApi!.entity(arc.id)!;
         final center = SketchVector.fromJson(current.parameters['center']);
@@ -509,13 +537,21 @@ void main() {
       expect(controller.sketchApi!.entity(preceding.id), isNotNull);
       expect(controller.sketchApi!.entity(following.id), isNotNull);
       expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1);
-      await controller.updateSketchEntityParameters(arc.id, {'radius': 1.5});
+      await controller.updateSketchEntityParameters(
+        arc.id,
+        {'radius': 1.5},
+        confirmAdjacent: true,
+      );
       expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
 
       // A larger radius moves both tangent contacts beyond the original line
       // spans. The edit must extend the frontiers instead of falling back to
       // the old arc endpoints and losing C1 continuity.
-      await controller.updateSketchEntityParameters(arc.id, {'radius': 3});
+      await controller.updateSketchEntityParameters(
+        arc.id,
+        {'radius': 3},
+        confirmAdjacent: true,
+      );
       expect(arcEnd('start').x, closeTo(1, 1e-9));
       expect(arcEnd('start').y, closeTo(-2, 1e-9));
       expect(arcEnd('end').x, closeTo(-2, 1e-9));
@@ -556,7 +592,11 @@ void main() {
 
       // Reducing the radius shortens the same frontiers and keeps the contact
       // perpendicular to both line directions.
-      await controller.updateSketchEntityParameters(arc.id, {'radius': .5});
+      await controller.updateSketchEntityParameters(
+        arc.id,
+        {'radius': .5},
+        confirmAdjacent: true,
+      );
       expect(arcEnd('start').y, closeTo(.5, 1e-9));
       expect(arcEnd('end').x, closeTo(.5, 1e-9));
 
@@ -616,7 +656,7 @@ void main() {
       );
       await controller.updateSketchEntityParameters(gappedArc.id, {
         'radius': 1.5,
-      });
+      }, confirmAdjacent: true);
       expect(
         controller.sketchApi!.entity(gappedArc.id)!.parameters['radius'],
         1.5,
@@ -639,7 +679,7 @@ void main() {
       );
       await controller.updateSketchEntityParameters(concaveArc.id, {
         'radius': 1.5,
-      });
+      }, confirmAdjacent: true);
       expect(
         controller.sketchApi!.entity(concaveArc.id)!.parameters['radius'],
         1.5,

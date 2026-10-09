@@ -6,6 +6,7 @@ import '../analytics/constraint_analytics.dart';
 import '../diagnostics/constraint_diagnostics.dart';
 import '../graph/constraint_graph.dart';
 import '../history/constraint_history.dart';
+import '../integration/arc_radius_edit_planner.dart';
 import '../models/constraint_models.dart';
 import '../repository/constraint_repository.dart';
 import '../runtime/constraint_runtime.dart';
@@ -34,7 +35,7 @@ class ConstraintEngine {
   final Map<String, SketchConstraint> constraints = {};
   final Map<String, SketchDimension> dimensions = {};
   final SketchDrivingDimensionAdapter dimensionAdapter =
-      const SketchDrivingDimensionAdapter();
+      SketchDrivingDimensionAdapter();
   final List<_ConstraintSnapshot> _undo = [], _redo = [];
   ConstraintSolveResult? lastResult;
 
@@ -133,7 +134,15 @@ class ConstraintEngine {
     String? anchorReference,
     double labelX = 0,
     double labelY = 0,
-  }) => transaction(
+    bool confirmAdjacent = false,
+  }) {
+    _rejectUnconfirmedAdjacentRadius(
+      type: type,
+      references: references,
+      value: value,
+      confirmAdjacent: confirmAdjacent,
+    );
+    return transaction(
     'create-driving-dimension',
     () => sketch.engine.transaction('create-driving-dimension', () {
       final orientationSign = _angularOrientationSign(type, references);
@@ -198,6 +207,8 @@ class ConstraintEngine {
         value: value,
         anchorReference: anchorReference,
         orientationSign: orientationSign,
+        ignoredConstraintId: constraint.id,
+        allowAdjacentEndpointUpdates: confirmAdjacent,
       );
       return addDimension(
         SketchDimension(
@@ -212,17 +223,27 @@ class ConstraintEngine {
         ),
       );
     }),
-  );
+    );
+  }
 
   SketchDimension driveDimension(
     String id,
     double value, {
     String? anchorReference,
-  }) => transaction(
+    bool confirmAdjacent = false,
+  }) {
+    final dimension =
+        dimensions[id] ?? (throw StateError('Unknown dimension: $id'));
+    _rejectUnconfirmedAdjacentRadius(
+      type: dimension.type,
+      references: dimension.references,
+      value: value,
+      ignoredConstraintId: dimension.constraintId,
+      confirmAdjacent: confirmAdjacent,
+    );
+    return transaction(
     'edit-driving-dimension',
     () => sketch.engine.transaction('edit-driving-dimension', () {
-      final dimension =
-          dimensions[id] ?? (throw StateError('Unknown dimension: $id'));
       final solution = _applyDrivingDimension(
         type: dimension.type,
         references: dimension.references,
@@ -232,6 +253,7 @@ class ConstraintEngine {
             dimension.orientationSign ??
             _angularOrientationSign(dimension.type, dimension.references),
         ignoredConstraintId: dimension.constraintId,
+        allowAdjacentEndpointUpdates: confirmAdjacent,
       );
       return updateDimension(
         id,
@@ -239,7 +261,8 @@ class ConstraintEngine {
         anchorReference: solution.anchorReference,
       );
     }),
-  );
+    );
+  }
 
   SketchDrivingDimensionSolution _applyDrivingDimension({
     required SketchDimensionType type,
@@ -248,6 +271,7 @@ class ConstraintEngine {
     String? anchorReference,
     double? orientationSign,
     String? ignoredConstraintId,
+    bool allowAdjacentEndpointUpdates = false,
   }) {
     final active = constraints.values
         .where((constraint) => constraint.id != ignoredConstraintId)
@@ -263,6 +287,7 @@ class ConstraintEngine {
             value: value,
             anchorReference: anchor,
             orientationSign: orientationSign,
+            allowAdjacentEndpointUpdates: allowAdjacentEndpointUpdates,
           ),
         );
     if (anchorReference != null) return attempt(anchorReference);
@@ -286,6 +311,32 @@ class ConstraintEngine {
         'Sketch over constrained. No legal anchor preserves all relations. '
         '${diagnostics.toSet().join(' ')}',
       );
+    }
+  }
+
+  void _rejectUnconfirmedAdjacentRadius({
+    required SketchDimensionType type,
+    required List<String> references,
+    required double value,
+    String? ignoredConstraintId,
+    required bool confirmAdjacent,
+  }) {
+    final plan = dimensionAdapter.planRadiusDimension(
+      sketch: sketch,
+      constraints: constraints.values,
+      type: type,
+      references: references,
+      value: value,
+      ignoredConstraintId: ignoredConstraintId,
+    );
+    if (plan == null) return;
+    if (!plan.accepted) {
+      throw StateError(
+        plan.diagnostic ?? 'Não foi possível planejar a edição segura do raio.',
+      );
+    }
+    if (plan.hasExternalUpdates && !confirmAdjacent) {
+      throw ArcRadiusEditConfirmationRequired(plan);
     }
   }
 
