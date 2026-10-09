@@ -374,6 +374,37 @@ void main() {
     expect(dimensions.dimensions.single.value, 1.0);
   });
 
+  test('reconstructed isolated arc dimension drives radius in place', () {
+    final arc = sketch.builders.arc.build(
+      const SketchVector(0, 0),
+      7.216,
+      0,
+      math.pi / 2,
+    );
+    arc.metadata['reconstructionKind'] = 'arc';
+    final dimension = dimensions.createDrivingDimension(
+      type: SketchDimensionType.radius,
+      references: [arc.id],
+      value: 7.216,
+    );
+    dimensions.driveDimension(dimension.id, 7.5);
+    expect(
+      (sketch.entity(arc.id)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+    expect(dimension.value, closeTo(7.5, 1e-9));
+    expect(dimensions.undoDimensionEdit(), isTrue);
+    expect(
+      (sketch.entity(arc.id)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.216, 1e-9),
+    );
+    expect(dimensions.redoDimensionEdit(), isTrue);
+    expect(
+      (sketch.entity(arc.id)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+  });
+
   test('text move is graphical only and survives save and reopen', () async {
     final line = sketch.builders.line.build(
       const SketchVector(0, 0),

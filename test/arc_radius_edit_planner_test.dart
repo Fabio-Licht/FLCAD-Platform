@@ -371,6 +371,100 @@ void main() {
     expect(first.endpointUpdates, second.endpointUpdates);
     expect(first.affectedEntityIds, second.affectedEntityIds);
   });
+
+  test('keeps endpoints for an isolated reconstructed arc', () {
+    final arc = SketchArc(
+      const SketchVector(0, 0),
+      7.216,
+      0,
+      math.pi / 2,
+      id: 'arc:reconstructed-isolated',
+    );
+    arc.metadata['reconstructionKind'] = 'arc';
+    final plan = const ArcRadiusEditPlanner().plan(
+      arc: arc,
+      radius: 7.5,
+      context: ArcRadiusEditContext(entities: [arc]),
+    );
+
+    expect(plan.accepted, isTrue, reason: plan.diagnostic);
+    expect(plan.endpointUpdates, isEmpty);
+    expect(plan.hasExternalUpdates, isFalse);
+    expect(plan.arc!.radius, 7.5);
+    expect(plan.previousRadius, 7.216);
+  });
+
+  test(
+    'does not drag C0 chord neighbors of a reconstructed assistant arc',
+    () {
+      const radius = 7.216;
+      final arc = SketchArc(
+        const SketchVector(0, 0),
+        radius,
+        0,
+        0.6,
+        id: 'arc:reconstructed-c0',
+      );
+      arc.metadata['reconstructionKind'] = 'arc';
+      final before = SketchLine(
+        SketchVector(radius * math.cos(-0.3), radius * math.sin(-0.3)),
+        SketchVector(radius, 0),
+        id: 'line:c0-before',
+      );
+      final after = SketchLine(
+        SketchVector(radius * math.cos(0.6), radius * math.sin(0.6)),
+        SketchVector(radius * math.cos(0.9), radius * math.sin(0.9)),
+        id: 'line:c0-after',
+      );
+      final plan = const ArcRadiusEditPlanner().plan(
+        arc: arc,
+        radius: 7.5,
+        context: ArcRadiusEditContext(entities: [arc, before, after]),
+      );
+
+      expect(plan.accepted, isTrue, reason: plan.diagnostic);
+      expect(plan.endpointUpdates, isEmpty);
+      expect(plan.hasExternalUpdates, isFalse);
+      expect(plan.arc!.radius, 7.5);
+      expect(before.parameters['end'], [radius, 0.0, 0.0]);
+      expect(after.parameters['start'], [
+        radius * math.cos(0.6),
+        radius * math.sin(0.6),
+        0.0,
+      ]);
+    },
+  );
+
+  test(
+    'still requires both tangent frontiers of a reconstructed fillet',
+    () {
+      final fixture = _TwoLineFixture();
+      fixture.arc.metadata['reconstructionKind'] = 'arc';
+      final connected = const ArcRadiusEditPlanner().plan(
+        arc: fixture.arc,
+        radius: 1.5,
+        context: ArcRadiusEditContext(entities: fixture.entities),
+      );
+      expect(connected.accepted, isTrue, reason: connected.diagnostic);
+      expect(
+        connected.endpointUpdates.keys,
+        containsAll([fixture.vertical.id, fixture.horizontal.id]),
+      );
+
+      final oneFrontier = const ArcRadiusEditPlanner().plan(
+        arc: fixture.arc,
+        radius: 1.5,
+        context: ArcRadiusEditContext(
+          entities: [fixture.arc, fixture.vertical],
+        ),
+      );
+      expect(oneFrontier.accepted, isFalse);
+      expect(
+        oneFrontier.diagnostic,
+        contains('Não foi possível manter a tangência nas duas fronteiras.'),
+      );
+    },
+  );
 }
 
 class _TwoLineFixture {

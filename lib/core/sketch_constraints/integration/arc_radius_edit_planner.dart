@@ -353,29 +353,37 @@ class ArcRadiusEditPlanner {
     }
 
     final matched = boundaries.where((item) => item.entity != null).toList();
+    // Assistant-promoted arcs hide their source fragments. Remaining section
+    // chords are C0 neighbours, not G1 fillets, so they must not force the
+    // two-tangent solver or block an otherwise isolated radius edit.
     final reconstructedArc = arc.metadata['reconstructionKind'] == 'arc';
-    if (reconstructedArc && matched.length != 2) {
+    final tangentMatched = matched
+        .where((item) => item.kind == ArcRadiusBoundaryKind.tangent)
+        .toList();
+    if (reconstructedArc && tangentMatched.length == 1) {
       return ArcRadiusEditPlan.rejected(
         'Não foi possível manter a tangência nas duas fronteiras.',
       );
     }
-    if (matched.length == 2 && matched[0].entity!.id == matched[1].entity!.id) {
+    final solverBoundaries = reconstructedArc ? tangentMatched : matched;
+    if (solverBoundaries.length == 2 &&
+        solverBoundaries[0].entity!.id == solverBoundaries[1].entity!.id) {
       return ArcRadiusEditPlan.rejected(
         'A mesma entidade não pode ser as duas fronteiras do arco.',
       );
     }
-    if (matched.any((item) => item.entity is SketchSpline)) {
+    if (solverBoundaries.any((item) => item.entity is SketchSpline)) {
       return ArcRadiusEditPlan.rejected(
         'A fronteira spline exige continuidade de controle; esta edição segura ainda não é suportada.',
       );
     }
-    if (matched.any((item) => item.entity is! SketchLine)) {
+    if (solverBoundaries.any((item) => item.entity is! SketchLine)) {
       return ArcRadiusEditPlan.rejected(
         'A fronteira circular não possui um solucionador seguro nesta etapa.',
       );
     }
 
-    final geometry = switch (matched.length) {
+    final geometry = switch (solverBoundaries.length) {
       0 => _keepEndpoints(
         center: center,
         oldRadius: oldRadius,
@@ -388,7 +396,7 @@ class ArcRadiusEditPlanner {
         oldStart: oldStart,
         oldEnd: oldEnd,
         radius: radius,
-        matched: matched.single,
+        matched: solverBoundaries.single,
         oldEndpoints: oldEndpoints,
         tangencyTolerance: context.tangencyTolerance,
       ),
@@ -397,13 +405,13 @@ class ArcRadiusEditPlanner {
         oldStart: oldStart,
         oldEnd: oldEnd,
         radius: radius,
-        boundaries: matched,
+        boundaries: solverBoundaries,
         tangencyTolerance: context.tangencyTolerance,
       ),
     };
     if (geometry == null) {
       return ArcRadiusEditPlan.rejected(
-        matched.isEmpty
+        solverBoundaries.isEmpty
             ? 'O raio não é compatível com os dois endpoints do arco.'
             : 'Não foi encontrada uma solução tangente não degenerada para as fronteiras.',
       );
@@ -421,6 +429,7 @@ class ArcRadiusEditPlanner {
     var maxMove = 0.0;
     var maxC0 = 0.0;
     var maxG1 = 0.0;
+    final solverIds = {for (final item in solverBoundaries) item.entity!.id};
     for (var index = 0; index < boundaries.length; index++) {
       final boundary = boundaries[index];
       final endpointName = index == 0 ? 'start' : 'end';
@@ -428,7 +437,8 @@ class ArcRadiusEditPlanner {
       final residual = contact.distanceTo(oldEndpoints[index]);
       boundary.plannedDisplacement = residual;
       maxMove = math.max(maxMove, residual);
-      if (boundary.entity case final SketchLine line) {
+      if (boundary.entity case final SketchLine line
+          when solverIds.contains(line.id)) {
         final key = boundary.entityEndpoint!;
         updates[line.id] = {
           '${key}X': contact.x,
