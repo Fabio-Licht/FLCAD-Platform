@@ -735,6 +735,11 @@ class SketchReconstructionEngine {
     );
     if (failure != null) return null;
     final error = _radialError(points, circularFit.$1, circularFit.$2);
+    final maximumError = _maxRadialError(
+      points,
+      circularFit.$1,
+      circularFit.$2,
+    );
     return SketchReconstructionSuggestion(
       kind: SketchReconstructionKind.arc,
       entityIds: entities.map((entity) => entity.id).toList(growable: false),
@@ -760,6 +765,8 @@ class SketchReconstructionEngine {
       tangencyStartDegrees: tangencyStartDegrees,
       tangencyEndDegrees: tangencyEndDegrees,
       usedEntityIds: selection.usedEntityIds,
+      rmsError: error,
+      maxError: maximumError,
       coveredEntityIds: context
           .where(
             (entity) =>
@@ -1427,6 +1434,14 @@ class SketchReconstructionEngine {
     return math.sqrt(sum / points.length);
   }
 
+  double _maxRadialError(
+    List<SketchVector> points,
+    SketchVector center,
+    double radius,
+  ) => points
+      .map((point) => (_distance(point, center) - radius).abs())
+      .fold<double>(0, math.max);
+
   /// Largest perpendicular distance of [points] from the chord
   /// [start] -> [end]: the empirical sagitta that tells an arc from a line.
   double _sagitta(
@@ -2004,13 +2019,27 @@ class SketchReconstructionEngine {
     // semantic primitive without replacing the source geometry.
     for (final spline in values.whereType<SketchSpline>()) {
       final points = _splinePoints(spline);
-      final lineConfidence = _lineConfidence(points);
-      if (lineConfidence != null) {
+      final lineDiagnosis = diagnoseSelectedLineOrSpline([spline]);
+      const lineTolerance = SketchLineReconstructionTolerance();
+      final lineFit = lineDiagnosis.result;
+      if (lineFit != null &&
+          lineFit.maxError <= lineTolerance.reconstructionToleranceMm + 1e-12) {
         result.add(
           SketchReconstructionSuggestion(
             kind: SketchReconstructionKind.line,
             entityIds: [spline.id],
-            confidence: lineConfidence,
+            confidence:
+                (1 -
+                        lineFit.rmsError /
+                            math.max(
+                              lineTolerance.reconstructionToleranceMm,
+                              1e-12,
+                            ))
+                    .clamp(0.0, 1.0),
+            usedEntityIds: lineFit.usedEntityIds,
+            rmsError: lineFit.rmsError,
+            maxError: lineFit.maxError,
+            maxGapMillimeters: lineFit.maxGapMillimeters,
           ),
         );
         continue;
@@ -2022,12 +2051,12 @@ class SketchReconstructionEngine {
         continue;
       }
       final center = fit.$1, radius = fit.$2;
-      final error =
-          points
-              .map((point) => (_distance(point, center) - radius).abs())
-              .fold<double>(0, (sum, value) => sum + value) /
-          points.length;
-      if (error > math.max(0.5, radius * 0.05)) continue;
+      final error = _radialError(points, center, radius);
+      final maximumError = _maxRadialError(points, center, radius);
+      final radialTolerance = const SketchCircularFitTolerance().radialFor(
+        radius,
+      );
+      if (maximumError > radialTolerance) continue;
       final angles =
           points
               .map(
@@ -2049,24 +2078,31 @@ class SketchReconstructionEngine {
           ? SketchReconstructionKind.arc
           : null;
       if (kind != null) {
-        result.add(
-          SketchReconstructionSuggestion(
-            kind: kind,
-            entityIds: [spline.id],
-            confidence: (1 - error / math.max(math.max(.5, radius * .05), 1e-9))
-                .clamp(0.0, 1.0),
-            center: center,
-            radius: radius,
-            startAngle: _arcAngles(points, center).$1,
-            endAngle: _arcAngles(points, center).$2,
-          ),
+        final confidence = (1 - error / math.max(radialTolerance, 1e-9)).clamp(
+          0.0,
+          1.0,
         );
+        if (confidence >= .75) {
+          result.add(
+            SketchReconstructionSuggestion(
+              kind: kind,
+              entityIds: [spline.id],
+              confidence: confidence,
+              center: center,
+              radius: radius,
+              startAngle: _arcAngles(points, center).$1,
+              endAngle: _arcAngles(points, center).$2,
+              rmsError: error,
+              maxError: _maxRadialError(points, center, radius),
+            ),
+          );
+        }
       }
     }
     final relations = <SketchReconstructionSuggestion>[];
     // Dense section polylines are curve samples, not independent engineering
     // lines.  Do not manufacture hundreds of false relations from them.
-    if (lines.length > 64) return result;
+    if (lines.length > 64) return _arbitrateSuggestions(result);
     for (var i = 0; i < lines.length; i++) {
       for (var j = i + 1; j < lines.length; j++) {
         final first = _direction(lines[i]);
@@ -2101,7 +2137,56 @@ class SketchReconstructionEngine {
       return a.entityIds.join('\u0000').compareTo(b.entityIds.join('\u0000'));
     });
     result.addAll(relations.take(128));
-    return result;
+    return _arbitrateSuggestions(result);
+  }
+
+  /// Removes exact duplicate hypotheses and arbitrates competing primitive
+  /// kinds over the same source set. Relations remain independent because
+  /// they describe constraints rather than replacement geometry.
+  List<SketchReconstructionSuggestion> _arbitrateSuggestions(
+    List<SketchReconstructionSuggestion> suggestions,
+  ) {
+    final selected = <String, SketchReconstructionSuggestion>{};
+    for (final suggestion in suggestions) {
+      final ids = suggestion.entityIds.toSet().toList()..sort();
+      final key = '${suggestion.kind.index}:${ids.join('\u0000')}';
+      final previous = selected[key];
+      if (previous == null ||
+          _suggestionQuality(suggestion) > _suggestionQuality(previous)) {
+        selected[key] = suggestion;
+      }
+    }
+    final primitiveGroups = <String, List<SketchReconstructionSuggestion>>{};
+    for (final suggestion in selected.values) {
+      if (!_isReplacementSuggestion(suggestion)) continue;
+      final key = (suggestion.entityIds.toSet().toList()..sort()).join(
+        '\u0000',
+      );
+      primitiveGroups.putIfAbsent(key, () => []).add(suggestion);
+    }
+    for (final group in primitiveGroups.values) {
+      if (group.length < 2) continue;
+      group.sort(
+        (a, b) => _suggestionQuality(b).compareTo(_suggestionQuality(a)),
+      );
+      for (final rejected in group.skip(1)) {
+        final key =
+            '${rejected.kind.index}:${(rejected.entityIds.toSet().toList()..sort()).join('\u0000')}';
+        selected.remove(key);
+      }
+    }
+    return selected.values.toList(growable: false);
+  }
+
+  bool _isReplacementSuggestion(SketchReconstructionSuggestion suggestion) =>
+      suggestion.kind == SketchReconstructionKind.line ||
+      suggestion.kind == SketchReconstructionKind.arc ||
+      suggestion.kind == SketchReconstructionKind.circle;
+
+  double _suggestionQuality(SketchReconstructionSuggestion suggestion) {
+    final error = suggestion.maxError;
+    final fitQuality = error == null ? 0.5 : 1 / (1 + error.abs());
+    return fitQuality + suggestion.confidence * 0.01;
   }
 
   /// Builds connected paths from the actual endpoint graph.  A shared
@@ -2360,7 +2445,7 @@ class SketchReconstructionEngine {
         entityIds: component.map((line) => line.id).toList(growable: false),
         confidence:
             (1 -
-                    fit.maxError /
+                    fit.rmsError /
                         math.max(
                           lineTolerance.reconstructionToleranceMm,
                           1e-12,
@@ -2380,6 +2465,7 @@ class SketchReconstructionEngine {
         component.first.parameters['start'],
       );
       final lastEnd = SketchVector.fromJson(component.last.parameters['end']);
+      if (circular.confidence < .75) return null;
       if (circular.kind == SketchReconstructionKind.arc &&
           _distance(firstStart, lastEnd) <=
               const SketchCircularFitTolerance()
@@ -2425,30 +2511,75 @@ class SketchReconstructionEngine {
         !_isSaneCircularFit(points, circleFit.$1, circleFit.$2)) {
       return null;
     }
-    final radialError = points
-        .map((point) => (_distance(point, circleFit.$1) - circleFit.$2).abs())
-        .fold<double>(0, math.max);
-    final errorLimit = math.max(0.5, circleFit.$2 * 0.05);
-    if (!radialError.isFinite || radialError > errorLimit) return null;
+    final start = points.first;
+    final end = points.last;
+    var anchor = points.first;
+    var anchorDistance = _distanceToLine(anchor, start, end);
+    for (final point in points) {
+      final distance = _distanceToLine(point, start, end);
+      if (distance > anchorDistance) {
+        anchor = point;
+        anchorDistance = distance;
+      }
+    }
+    final tolerance = const SketchCircularFitTolerance();
     final closed =
-        _distance(points.first, points.last) <=
-        const SketchCircularFitTolerance().endpointCoincidenceMillimeters;
-    final angles = _arcAngles(points, circleFit.$1);
+        _distance(start, end) <= tolerance.endpointCoincidenceMillimeters;
+    final angles = closed
+        ? (
+            startAngle: math.atan2(
+              start.y - circleFit.$1.y,
+              start.x - circleFit.$1.x,
+            ),
+            endAngle:
+                math.atan2(start.y - circleFit.$1.y, start.x - circleFit.$1.x) +
+                2 * math.pi,
+            startPoint: start,
+            endPoint: end,
+          )
+        : _arcDefinition((start: start, end: end), anchor, circleFit.$1);
+    if (angles == null) return null;
+    final failure = _circularFitFailure(
+      points: points,
+      center: circleFit.$1,
+      radius: circleFit.$2,
+      start: start,
+      end: end,
+      sweep: angles.endAngle - angles.startAngle,
+      tolerance: tolerance,
+    );
+    final circularFailure = closed
+        ? _circularFitFailure(
+            points: points,
+            center: circleFit.$1,
+            radius: circleFit.$2,
+            start: start,
+            end: start + const SketchVector(1e-3, 0),
+            sweep: 2 * math.pi,
+            tolerance: tolerance,
+          )
+        : failure;
+    if (circularFailure != null) return null;
+    final rmsError = _radialError(points, circleFit.$1, circleFit.$2);
+    final maxError = _maxRadialError(points, circleFit.$1, circleFit.$2);
+    final errorLimit = tolerance.radialFor(circleFit.$2);
+    final confidence = (1 - maxError / math.max(errorLimit, 1e-9)).clamp(
+      0.0,
+      1.0,
+    );
+    if (confidence < .75) return null;
     return SketchReconstructionSuggestion(
       kind: closed
           ? SketchReconstructionKind.circle
           : SketchReconstructionKind.arc,
       entityIds: component.map((line) => line.id).toList(growable: false),
-      confidence: (1 - radialError / math.max(errorLimit, 1e-9)).clamp(
-        0.0,
-        1.0,
-      ),
+      confidence: confidence,
       center: circleFit.$1,
       radius: circleFit.$2,
-      startAngle: angles.$1,
-      endAngle: angles.$2,
-      rmsError: radialError,
-      maxError: radialError,
+      startAngle: angles.startAngle,
+      endAngle: angles.endAngle,
+      rmsError: rmsError,
+      maxError: maxError,
     );
   }
 
@@ -2562,25 +2693,6 @@ class SketchReconstructionEngine {
         (spline.parameters['sampledPoints'] ?? spline.parameters['points']);
     if (raw is! List) return const [];
     return raw.whereType<List>().map(SketchVector.fromJson).toList();
-  }
-
-  double? _lineConfidence(List<SketchVector> points) {
-    if (points.length < 3) return null;
-    final first = points.first, last = points.last;
-    final dx = last.x - first.x, dy = last.y - first.y;
-    final length = math.sqrt(dx * dx + dy * dy);
-    if (length <= 1e-9) return null;
-    final residual = points
-        .map(
-          (point) =>
-              ((point.x - first.x) * dy - (point.y - first.y) * dx).abs() /
-              length,
-        )
-        .fold<double>(0, math.max);
-    final tolerance = math.max(.5, length * .025);
-    return residual <= tolerance
-        ? (1 - residual / tolerance).clamp(0.0, 1.0)
-        : null;
   }
 
   (SketchVector, double)? _fitCircle(List<SketchVector> points) {

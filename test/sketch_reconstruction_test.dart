@@ -843,6 +843,9 @@ void main() {
     expect(circle, isNotEmpty);
     expect(circle.first.center, isNotNull);
     expect(circle.first.radius, closeTo(10, .1));
+    expect(circle.first.rmsError, isNotNull);
+    expect(circle.first.maxError, isNotNull);
+    expect(circle.first.confidence, greaterThanOrEqualTo(.75));
   });
 
   test('recognizes a circular polyline region as a circle', () {
@@ -865,6 +868,16 @@ void main() {
       suggestions.any((item) => item.kind == SketchReconstructionKind.circle),
       isTrue,
     );
+    final replacementSuggestions = suggestions.where(
+      (item) =>
+          (item.kind == SketchReconstructionKind.line ||
+              item.kind == SketchReconstructionKind.arc ||
+              item.kind == SketchReconstructionKind.circle) &&
+          item.entityIds.toSet().length == lines.length,
+    );
+    expect(replacementSuggestions, hasLength(1));
+    expect(replacementSuggestions.single.maxError, isNotNull);
+    expect(replacementSuggestions.single.rmsError, isNotNull);
     expect(
       suggestions
           .map((item) => '${item.kind}:${item.entityIds.join(',')}')
@@ -891,6 +904,26 @@ void main() {
       isTrue,
     );
   });
+
+  test(
+    'automatic classification does not offer an over-tolerance spline line',
+    () {
+      final spline = SketchSpline(const [
+        SketchVector(0, 0),
+        SketchVector(10, .3),
+        SketchVector(20, 0),
+      ]);
+      final suggestions = const SketchReconstructionEngine().analyze([spline]);
+      expect(
+        suggestions.any(
+          (item) =>
+              item.kind == SketchReconstructionKind.line &&
+              item.entityIds.single == spline.id,
+        ),
+        isFalse,
+      );
+    },
+  );
 
   test('automatic recognition deduplicates IDs and skips invalid geometry', () {
     final line = SketchLine(

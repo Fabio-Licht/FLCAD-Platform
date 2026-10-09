@@ -579,6 +579,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   final SketchReconstructionEngine _sketchReconstruction =
       const SketchReconstructionEngine();
   String? sketchCircularFitMessage;
+
   /// Operator-facing result for the last Assistant reconstruction action.
   ///
   /// This is deliberately runtime-only: it explains whether a suggestion was
@@ -691,8 +692,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }.toList()..sort();
     try {
       return jsonEncode([
-        for (final id in ids)
-          [id, byId[id]?.type.name, byId[id]?.parameters],
+        for (final id in ids) [id, byId[id]?.type.name, byId[id]?.parameters],
       ]);
     } catch (_) {
       return ids.map((id) => '$id:${byId[id]?.version}').join('|');
@@ -787,13 +787,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       return false;
     }
     final expectedFingerprint =
-        _sketchReconstructionSuggestionFingerprints[
-          _reconstructionSuggestionKey(suggestion)
-        ];
+        _sketchReconstructionSuggestionFingerprints[_reconstructionSuggestionKey(
+          suggestion,
+        )];
     if (expectedFingerprint != null &&
-        expectedFingerprint != _reconstructionFingerprint(suggestion, {
-          for (final entity in entities) entity.id: entity,
-        })) {
+        expectedFingerprint !=
+            _reconstructionFingerprint(suggestion, {
+              for (final entity in entities) entity.id: entity,
+            })) {
       _rejectSketchReconstructionSuggestion(
         'Sugestão rejeitada: a geometria de origem foi alterada desde o reconhecimento.',
       );
@@ -852,6 +853,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
       entities,
+      maxRegions: math.max(
+        SketchCircularFitTolerance.maxRegions,
+        entities.length,
+      ),
     );
     final fit = diagnosis.result;
     if (diagnosis.failure != null || fit == null) {
@@ -865,11 +870,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final phrase = _lineReconstructionTolerancePhrase(fit.maxError, limit);
     // 1e-12 absorbs binary rounding of a residual that is dimensionally 0.10 mm.
     if (fit.maxError > limit + 1e-12) {
-      return (
-        rejected: true,
-        fit: null,
-        message: 'Linha rejeitada: $phrase.',
-      );
+      return (rejected: true, fit: null, message: 'Linha rejeitada: $phrase.');
     }
     return (
       rejected: false,
@@ -1074,9 +1075,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchReconstructionSuggestion suggestion,
   ) {
     _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
-        .where(
-          (item) => !_sameSketchReconstructionSuggestion(item, suggestion),
-        )
+        .where((item) => !_sameSketchReconstructionSuggestion(item, suggestion))
         .toList(growable: false);
     _clearSketchReconstructionHighlight();
   }
@@ -1291,7 +1290,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .map(api.entity)
         .whereType<SketchEntity>()
         .where((entity) => selectedSketchEntityIds.contains(entity.id))
-        .where((entity) => entity is SketchLine || entity is SketchArc || entity is SketchSpline)
+        .where(
+          (entity) =>
+              entity is SketchLine ||
+              entity is SketchArc ||
+              entity is SketchSpline,
+        )
         .toList(growable: false);
     final diagnosis = _sketchReconstruction.diagnoseSelectedLineOrSpline(
       selected,
@@ -1307,15 +1311,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await _run('reverse.sketch.regionFit', <String, Object?>{});
   }
 
-  String _regionFitFailureMessage(SketchRegionFitFailure? failure) =>
-      switch (failure) {
-        SketchRegionFitFailure.invalidSamples =>
-          'Não foi possível ajustar: as regiões contêm pontos inválidos.',
-        SketchRegionFitFailure.degenerateGeometry =>
-          'Não foi possível ajustar: a geometria selecionada é degenerada.',
-        SketchRegionFitFailure.insufficientPoints || null =>
-          'Não foi possível ajustar: selecione regiões com pelo menos dois pontos externos distintos.',
-      };
+  String _regionFitFailureMessage(
+    SketchRegionFitFailure? failure,
+  ) => switch (failure) {
+    SketchRegionFitFailure.invalidSamples =>
+      'Não foi possível ajustar: as regiões contêm pontos inválidos.',
+    SketchRegionFitFailure.degenerateGeometry =>
+      'Não foi possível ajustar: a geometria selecionada é degenerada.',
+    SketchRegionFitFailure.insufficientPoints || null =>
+      'Não foi possível ajustar: selecione regiões com pelo menos dois pontos externos distintos.',
+  };
 
   List<SketchEntity> _selectedRegionFitEntities() {
     final api = sketchApi;
@@ -1350,9 +1355,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             .toList(growable: false);
         value.metadata['regionFitReferenceRegions'] = fit.referenceRegions
             .map(
-              (region) => region
-                  .map((point) => point.toJson())
-                  .toList(growable: false),
+              (region) =>
+                  region.map((point) => point.toJson()).toList(growable: false),
             )
             .toList(growable: false);
         value.metadata['regionFitSourceIds'] = fit.usedEntityIds;
@@ -1435,9 +1439,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final api = sketchApi ?? (throw StateError('Sketch is not available.'));
     final selected = _selectedRegionFitEntities();
     if (selected.isEmpty) {
-      throw StateError(
-        'Selecione as regiões da seção que formam o arco.',
-      );
+      throw StateError('Selecione as regiões da seção que formam o arco.');
     }
     final context = activeSketch!.entityIds
         .map(api.entity)
@@ -1599,7 +1601,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ];
       }
       if (entity is SketchSpline) {
-        final raw = entity.parameters['sampledPoints'] ?? entity.parameters['points'];
+        final raw =
+            entity.parameters['sampledPoints'] ?? entity.parameters['points'];
         if (raw is List) {
           return raw
               .whereType<List>()
@@ -1628,7 +1631,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final direction = second - first;
       final lengthSquared = direction.dot(direction);
       if (lengthSquared <= 1e-16) return first;
-      final t = ((point - first).dot(direction) / lengthSquared).clamp(0.0, 1.0);
+      final t = ((point - first).dot(direction) / lengthSquared).clamp(
+        0.0,
+        1.0,
+      );
       return first + direction.scale(t);
     }
 
@@ -1640,7 +1646,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       SketchVector? nearest;
       var nearestDistance = double.infinity;
       for (var index = 1; index < fitted.length; index++) {
-        final candidate = closestOnSegment(point, fitted[index - 1], fitted[index]);
+        final candidate = closestOnSegment(
+          point,
+          fitted[index - 1],
+          fitted[index],
+        );
         final distance = (point - candidate).dot(point - candidate);
         if (distance < nearestDistance) {
           nearestDistance = distance;
@@ -1695,7 +1705,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                 for (final region in regions)
                   for (var index = 1; index < region.length; index++)
                     [
-                      sketch.coordinates.localToGlobal(region[index - 1]).toJson(),
+                      sketch.coordinates
+                          .localToGlobal(region[index - 1])
+                          .toJson(),
                       sketch.coordinates.localToGlobal(region[index]).toJson(),
                     ],
               ],
@@ -1716,8 +1728,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                 'segments': [
                   for (final deviation in comparison.deviations)
                     [
-                      sketch.coordinates.localToGlobal(deviation.source).toJson(),
-                      sketch.coordinates.localToGlobal(deviation.fitted).toJson(),
+                      sketch.coordinates
+                          .localToGlobal(deviation.source)
+                          .toJson(),
+                      sketch.coordinates
+                          .localToGlobal(deviation.fitted)
+                          .toJson(),
                     ],
                 ],
                 'displayColor': 'assistantSuggestion',
@@ -6485,7 +6501,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
     final entityId = runtime.read<String>('sketch.drag.entityId');
     final entity = entityId == null ? null : sketchApi?.entity(entityId);
-    if (point == null || anchor == null || entity == null || activeSketch == null) {
+    if (point == null ||
+        anchor == null ||
+        entity == null ||
+        activeSketch == null) {
       return;
     }
     final delta = point - anchor;
@@ -12899,7 +12918,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
           rethrow;
         }
-        return applied.createdId ?? applied.constraintId ?? suggestion.kind.name;
+        return applied.createdId ??
+            applied.constraintId ??
+            suggestion.kind.name;
       },
       undo: (parameters) async {
         final hiddenIds = (parameters['hiddenIds']! as List).cast<String>();
