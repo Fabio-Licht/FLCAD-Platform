@@ -289,6 +289,136 @@ class SketchReconstructionSuggestion {
   };
 }
 
+/// Classification of a transient set of Assistant suggestions.  This is
+/// deliberately separate from the recognition kind: it describes how the
+/// selected hypotheses relate topologically, without promoting or editing
+/// any Sketch entity.
+enum SketchReconstructionSelectionClassification {
+  openChain,
+  closedLoop,
+  ambiguous,
+  incompatible,
+}
+
+class SketchReconstructionSelectionConnection {
+  const SketchReconstructionSelectionConnection({
+    required this.fromKey,
+    required this.toKey,
+    required this.fromEndpoint,
+    required this.toEndpoint,
+    required this.distanceMillimeters,
+    required this.isConnected,
+  });
+
+  final String fromKey;
+  final String toKey;
+  final String fromEndpoint;
+  final String toEndpoint;
+  final double distanceMillimeters;
+
+  final bool isConnected;
+
+  bool get connected => isConnected;
+}
+
+class SketchReconstructionSelectionItem {
+  const SketchReconstructionSelectionItem({
+    required this.suggestion,
+    required this.reversed,
+  });
+
+  final SketchReconstructionSuggestion suggestion;
+  final bool reversed;
+}
+
+/// Read-only diagnosis for the ordered Assistant multiselection.  All values
+/// are computed from the current Sketch geometry and are intentionally not
+/// persisted or submitted to the command history.
+class SketchReconstructionSelectionAnalysis {
+  const SketchReconstructionSelectionAnalysis({
+    required this.classification,
+    required this.items,
+    required this.connections,
+    required this.gapsMillimeters,
+    required this.overlapKeys,
+    required this.duplicateKeys,
+    required this.branchKeys,
+    required this.crossingKeys,
+    required this.missingEntityIds,
+    required this.diagnostics,
+  });
+
+  final SketchReconstructionSelectionClassification classification;
+  final List<SketchReconstructionSelectionItem> items;
+  final List<SketchReconstructionSelectionConnection> connections;
+  final List<double> gapsMillimeters;
+  final List<String> overlapKeys;
+  final List<String> duplicateKeys;
+  final List<String> branchKeys;
+  final List<String> crossingKeys;
+  final List<String> missingEntityIds;
+  final List<String> diagnostics;
+
+  List<SketchReconstructionSuggestion> get orderedSuggestions => [
+    for (final item in items) item.suggestion,
+  ];
+
+  double get maximumGapMillimeters => gapsMillimeters.isEmpty
+      ? 0
+      : gapsMillimeters.reduce(math.max);
+
+  bool get isValid =>
+      classification == SketchReconstructionSelectionClassification.openChain ||
+      classification == SketchReconstructionSelectionClassification.closedLoop;
+
+  String get summary {
+    final label = switch (classification) {
+      SketchReconstructionSelectionClassification.openChain =>
+        'cadeia aberta válida',
+      SketchReconstructionSelectionClassification.closedLoop =>
+        'loop fechado válido',
+      SketchReconstructionSelectionClassification.ambiguous => 'ambíguo',
+      SketchReconstructionSelectionClassification.incompatible =>
+        'incompatível',
+    };
+    final gap = maximumGapMillimeters.toStringAsFixed(3);
+    return '$label · ${items.length} sugestões · '
+        '${connections.length} conexões · gap máx. $gap mm';
+  }
+}
+
+class _SelectionEdge {
+  const _SelectionEdge(this.start, this.end);
+  final SketchVector start;
+  final SketchVector end;
+}
+
+class _SelectionSuggestionGeometry {
+  const _SelectionSuggestionGeometry({
+    required this.suggestion,
+    required this.start,
+    required this.end,
+    required this.closed,
+    required this.edges,
+  });
+
+  final SketchReconstructionSuggestion suggestion;
+  final SketchVector start;
+  final SketchVector end;
+  final bool closed;
+  final List<_SelectionEdge> edges;
+
+  String get key => _selectionSuggestionKey(suggestion);
+}
+
+String _selectionSuggestionKey(SketchReconstructionSuggestion suggestion) {
+  final ids = {
+    ...suggestion.entityIds,
+    ...suggestion.usedEntityIds,
+  }.toList()..sort();
+  return '${suggestion.kind.name}:${ids.join(',')}';
+}
+
 /// Result of replacing several Section fragments with one line or spline.
 class SketchRegionFitResult {
   static const int maxSplineKnots = 256;
@@ -352,6 +482,473 @@ class SketchRegionFitDiagnosis {
 /// explicit user confirmation.
 class SketchReconstructionEngine {
   const SketchReconstructionEngine();
+
+  /// Analyzes an ordered transient Assistant selection without touching the
+  /// Sketch.  Endpoints are recovered from the actual source entities, then
+  /// matched with the existing circular-fit coincidence/gap tolerances.  The
+  /// result is deterministic even when [suggestions] arrives in click order.
+  SketchReconstructionSelectionAnalysis analyzeSelectedSuggestions(
+    Iterable<SketchReconstructionSuggestion> suggestions,
+    Map<String, SketchEntity> entities, {
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) {
+    final source = suggestions.toList(growable: false);
+    final records = <_SelectionSuggestionGeometry>[];
+    final missing = <String>{};
+    final duplicateKeys = <String>{};
+    final seenKeys = <String>{};
+    final overlapKeys = <String>{};
+    for (final suggestion in source) {
+      final key = _selectionSuggestionKey(suggestion);
+      if (!seenKeys.add(key)) duplicateKeys.add(key);
+      final ids = <String>{
+        ...suggestion.entityIds,
+        ...suggestion.usedEntityIds,
+      };
+      final absent = ids.where((id) => !entities.containsKey(id));
+      missing.addAll(absent);
+      final geometry = _selectionSuggestionGeometry(
+        suggestion,
+        entities,
+        tolerance.endpointCoincidenceMillimeters,
+      );
+      if (geometry != null) records.add(geometry);
+    }
+    for (var first = 0; first < source.length; first++) {
+      for (var second = first + 1; second < source.length; second++) {
+        final shared = {
+          ...source[first].entityIds,
+          ...source[first].usedEntityIds,
+        }.intersection({
+          ...source[second].entityIds,
+          ...source[second].usedEntityIds,
+        });
+        if (shared.isNotEmpty) {
+          overlapKeys.add(
+            '${_selectionSuggestionKey(source[first])}~${_selectionSuggestionKey(source[second])}',
+          );
+        }
+      }
+    }
+    final connections = <SketchReconstructionSelectionConnection>[];
+    final adjacency = <String, Set<String>>{};
+    final endpointDegree = <String, int>{};
+    final endpointUse = <String, int>{};
+    final nonConnections = <({
+      double distance,
+      String first,
+      String second,
+    })>[];
+    final gapDetails = <({double distance, String first, String second})>[];
+    final recordByKey = <String, _SelectionSuggestionGeometry>{};
+    for (final record in records) {
+      recordByKey[record.key] = record;
+      adjacency[record.key] = <String>{};
+    }
+    final gaps = <double>[];
+    final crossingKeys = <String>{};
+    for (var first = 0; first < records.length; first++) {
+      for (var second = first + 1; second < records.length; second++) {
+        final a = records[first], b = records[second];
+        if (a.edges.any(
+          (edgeA) => b.edges.any((edgeB) => _properSegmentCrossing(edgeA, edgeB)),
+        )) {
+          crossingKeys.add('${a.key}~${b.key}');
+        }
+        if (a.closed || b.closed) {
+          nonConnections.add(
+            (
+              distance: _distance(a.start, b.start),
+              first: a.key,
+              second: b.key,
+            ),
+          );
+          continue;
+        }
+        if (_selectionGeometriesOverlap(
+          a,
+          b,
+          tolerance.endpointCoincidenceMillimeters,
+        )) {
+          overlapKeys.add('${a.key}~${b.key}');
+        }
+        final candidates = <({double distance, int a, int b})>[
+          (distance: _distance(a.start, b.start), a: 0, b: 0),
+          (distance: _distance(a.start, b.end), a: 0, b: 1),
+          (distance: _distance(a.end, b.start), a: 1, b: 0),
+          (distance: _distance(a.end, b.end), a: 1, b: 1),
+        ]..sort((x, y) => x.distance.compareTo(y.distance));
+        final closest = candidates.first;
+        final fromEndpoint = closest.a == 0 ? 'start' : 'end';
+        final toEndpoint = closest.b == 0 ? 'start' : 'end';
+        final connection = SketchReconstructionSelectionConnection(
+          fromKey: a.key,
+          toKey: b.key,
+          fromEndpoint: fromEndpoint,
+          toEndpoint: toEndpoint,
+          distanceMillimeters: closest.distance,
+          isConnected: closest.distance <=
+              tolerance.endpointCoincidenceMillimeters,
+        );
+        if (connection.connected) {
+          connections.add(connection);
+          adjacency[a.key]!.add(b.key);
+          adjacency[b.key]!.add(a.key);
+          endpointDegree[a.key] = (endpointDegree[a.key] ?? 0) + 1;
+          endpointDegree[b.key] = (endpointDegree[b.key] ?? 0) + 1;
+          endpointUse['${a.key}|$fromEndpoint'] =
+              (endpointUse['${a.key}|$fromEndpoint'] ?? 0) + 1;
+          endpointUse['${b.key}|$toEndpoint'] =
+              (endpointUse['${b.key}|$toEndpoint'] ?? 0) + 1;
+        } else {
+          nonConnections.add(
+            (distance: closest.distance, first: a.key, second: b.key),
+          );
+        }
+      }
+    }
+    final componentIds = _selectionComponentIds(records, adjacency);
+    for (final gap in nonConnections) {
+      if (gap.distance <= tolerance.maxGapMillimeters ||
+          componentIds[gap.first] != componentIds[gap.second]) {
+        gaps.add(gap.distance);
+        gapDetails.add(gap);
+      }
+    }
+    final branchKeys = <String>{
+      ...endpointDegree.entries
+          .where((entry) => entry.value > 2)
+          .map((entry) => entry.key),
+      ...endpointUse.entries
+          .where((entry) => entry.value > 1)
+          .map((entry) => entry.key.split('|').first),
+    }.toList(growable: false)
+      ..sort();
+    final orderedKeys = _orderSelectionSuggestionKeys(
+      records,
+      adjacency,
+      endpointDegree,
+    );
+    final items = <SketchReconstructionSelectionItem>[];
+    SketchVector? previousExit;
+    for (final key in orderedKeys) {
+      final record = recordByKey[key];
+      if (record == null) continue;
+      final reversed = previousExit == null
+          ? false
+          : _distance(previousExit, record.start) >
+                _distance(previousExit, record.end);
+      items.add(
+        SketchReconstructionSelectionItem(
+          suggestion: record.suggestion,
+          reversed: reversed,
+        ),
+      );
+      previousExit = reversed ? record.start : record.end;
+    }
+    final connectedComponents = _selectionComponentCount(records, adjacency);
+    final hasInvalidSources = missing.isNotEmpty || records.length != source.length;
+    final hasAmbiguity = duplicateKeys.isNotEmpty ||
+        overlapKeys.isNotEmpty ||
+        branchKeys.isNotEmpty ||
+        crossingKeys.isNotEmpty ||
+        (connectedComponents > 1 && gaps.isEmpty);
+    final allClosed = records.length == 1 && records.single.closed;
+    final degreeOne = endpointDegree.values.where((value) => value == 1).length;
+    final isOpen = records.isNotEmpty &&
+        connectedComponents == 1 &&
+        (records.length == 1 && !records.single.closed || degreeOne == 2) &&
+        branchKeys.isEmpty &&
+        !hasInvalidSources &&
+        !hasAmbiguity;
+    final isLoop = (allClosed ||
+            (records.isNotEmpty &&
+                connectedComponents == 1 &&
+                degreeOne == 0 &&
+                branchKeys.isEmpty)) &&
+        !hasInvalidSources &&
+        !hasAmbiguity;
+    final classification = hasInvalidSources
+        ? SketchReconstructionSelectionClassification.incompatible
+        : hasAmbiguity
+        ? SketchReconstructionSelectionClassification.ambiguous
+        : isLoop
+        ? SketchReconstructionSelectionClassification.closedLoop
+        : isOpen
+        ? SketchReconstructionSelectionClassification.openChain
+        : SketchReconstructionSelectionClassification.incompatible;
+    final diagnostics = <String>[
+      if (missing.isNotEmpty) 'Entidades ausentes: ${missing.toList()..sort()}',
+      if (duplicateKeys.isNotEmpty)
+        'Sugestões duplicadas: ${duplicateKeys.toList()..sort()}',
+      if (overlapKeys.isNotEmpty)
+        'Sobreposição de fontes: ${overlapKeys.toList()..sort()}',
+      if (branchKeys.isNotEmpty)
+        'Ramificações em: ${branchKeys.join(', ')}',
+      if (crossingKeys.isNotEmpty)
+        'Cruzamentos internos: ${crossingKeys.toList()..sort()}',
+      if (gaps.isNotEmpty)
+        'Gaps: ${gapDetails.map((item) => '${item.first}~${item.second} ${item.distance.toStringAsFixed(3)} mm').join('; ')}',
+      if (connections.isNotEmpty)
+        'Conexões: ${connections.map((item) => '${item.fromKey}(${item.fromEndpoint})→${item.toKey}(${item.toEndpoint}) ${item.distanceMillimeters.toStringAsFixed(3)} mm').join('; ')}',
+    ];
+    return SketchReconstructionSelectionAnalysis(
+      classification: classification,
+      items: items,
+      connections: connections,
+      gapsMillimeters: gaps,
+      overlapKeys: overlapKeys.toList(growable: false),
+      duplicateKeys: duplicateKeys.toList(growable: false),
+      branchKeys: branchKeys,
+      crossingKeys: crossingKeys.toList(growable: false),
+      missingEntityIds: missing.toList(growable: false),
+      diagnostics: diagnostics,
+    );
+  }
+
+  _SelectionSuggestionGeometry? _selectionSuggestionGeometry(
+    SketchReconstructionSuggestion suggestion,
+    Map<String, SketchEntity> entities,
+    double endpointTolerance,
+  ) {
+    final edges = <_SelectionEdge>[];
+    final ids = {
+      ...suggestion.entityIds,
+      ...suggestion.usedEntityIds,
+    };
+    for (final id in ids) {
+      final entity = entities[id];
+      if (entity == null) return null;
+      final edge = _selectionEdge(entity);
+      if (edge == null) return null;
+      edges.add(edge);
+    }
+    if (edges.isEmpty) return null;
+    if (edges.length == 1 && _distance(edges.single.start, edges.single.end) <= endpointTolerance) {
+      return _SelectionSuggestionGeometry(
+        suggestion: suggestion,
+        start: edges.single.start,
+        end: edges.single.end,
+        closed: true,
+        edges: edges,
+      );
+    }
+    final clusters = <SketchVector>[];
+    final degree = <int, int>{};
+    int clusterFor(SketchVector point) {
+      for (var index = 0; index < clusters.length; index++) {
+        if (_distance(clusters[index], point) <= endpointTolerance) {
+          degree[index] = (degree[index] ?? 0) + 1;
+          return index;
+        }
+      }
+      clusters.add(point);
+      degree[clusters.length - 1] = 1;
+      return clusters.length - 1;
+    }
+    for (final edge in edges) {
+      clusterFor(edge.start);
+      clusterFor(edge.end);
+    }
+    final external = degree.entries
+        .where((entry) => entry.value == 1)
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    if (external.isEmpty) {
+      return _SelectionSuggestionGeometry(
+        suggestion: suggestion,
+        start: clusters.first,
+        end: clusters.first,
+        closed: true,
+        edges: edges,
+      );
+    }
+    if (external.length != 2) return null;
+    return _SelectionSuggestionGeometry(
+      suggestion: suggestion,
+      start: clusters[external[0]],
+      end: clusters[external[1]],
+      closed: false,
+      edges: edges,
+    );
+  }
+
+  _SelectionEdge? _selectionEdge(SketchEntity entity) {
+    SketchVector? vector(Object? value) {
+      try {
+        final point = SketchVector.fromJson(value);
+        return _isFinite(point) ? point : null;
+      } on Object {
+        return null;
+      }
+    }
+    if (entity is SketchLine) {
+      final start = vector(entity.parameters['start']);
+      final end = vector(entity.parameters['end']);
+      return start == null || end == null ? null : _SelectionEdge(start, end);
+    }
+    if (entity is SketchArc) {
+      final center = vector(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num?)?.toDouble();
+      final startAngle = (entity.parameters['startAngle'] as num?)?.toDouble();
+      final endAngle = (entity.parameters['endAngle'] as num?)?.toDouble();
+      if (center == null || radius == null || radius <= 0 ||
+          !radius.isFinite || startAngle == null || endAngle == null ||
+          !startAngle.isFinite || !endAngle.isFinite) {
+        return null;
+      }
+      return _SelectionEdge(
+        SketchVector(
+          center.x + radius * math.cos(startAngle),
+          center.y + radius * math.sin(startAngle),
+          center.z,
+        ),
+        SketchVector(
+          center.x + radius * math.cos(endAngle),
+          center.y + radius * math.sin(endAngle),
+          center.z,
+        ),
+      );
+    }
+    if (entity is SketchCircle) {
+      final center = vector(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num?)?.toDouble();
+      if (center == null || radius == null || radius <= 0 || !radius.isFinite) {
+        return null;
+      }
+      return _SelectionEdge(center, center);
+    }
+    if (entity is SketchSpline) {
+      final raw = entity.parameters['points'] ?? entity.parameters['sampledPoints'];
+      if (raw is! List || raw.length < 2) return null;
+      final points = <SketchVector>[];
+      for (final value in raw) {
+        final point = vector(value);
+        if (point == null) return null;
+        points.add(point);
+      }
+      return _SelectionEdge(points.first, points.last);
+    }
+    return null;
+  }
+
+  bool _selectionGeometriesOverlap(
+    _SelectionSuggestionGeometry first,
+    _SelectionSuggestionGeometry second,
+    double tolerance,
+  ) {
+    final direct = _distance(first.start, second.start) <= tolerance &&
+        _distance(first.end, second.end) <= tolerance;
+    final reverse = _distance(first.start, second.end) <= tolerance &&
+        _distance(first.end, second.start) <= tolerance;
+    if (direct || reverse) return true;
+    final direction = first.end - first.start;
+    final length = math.sqrt(direction.dot(direction));
+    if (length <= tolerance) return false;
+    final crossStart = (second.start - first.start).x * direction.y -
+        (second.start - first.start).y * direction.x;
+    final crossEnd = (second.end - first.start).x * direction.y -
+        (second.end - first.start).y * direction.x;
+    if (crossStart.abs() > tolerance * length ||
+        crossEnd.abs() > tolerance * length) {
+      return false;
+    }
+    double projection(SketchVector point) =>
+        (point - first.start).dot(direction) / length;
+    final firstInterval = [0.0, length]..sort();
+    final secondInterval = [projection(second.start), projection(second.end)]
+      ..sort();
+    return math.min(firstInterval[1], secondInterval[1]) -
+            math.max(firstInterval[0], secondInterval[0]) >
+        tolerance;
+  }
+
+  bool _properSegmentCrossing(_SelectionEdge first, _SelectionEdge second) {
+    final a = first.start, b = first.end, c = second.start, d = second.end;
+    final direction = b - a;
+    final other = d - c;
+    final denominator = direction.x * other.y - direction.y * other.x;
+    if (denominator.abs() <= 1e-12) return false;
+    final delta = c - a;
+    final t = (delta.x * other.y - delta.y * other.x) / denominator;
+    final u = (delta.x * direction.y - delta.y * direction.x) / denominator;
+    // End-point contacts are valid connections, not internal crossings.
+    const epsilon = 1e-9;
+    return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
+  }
+
+  List<String> _orderSelectionSuggestionKeys(
+    List<_SelectionSuggestionGeometry> records,
+    Map<String, Set<String>> adjacency,
+    Map<String, int> degree,
+  ) {
+    if (records.isEmpty) return const [];
+    final keys = records.map((record) => record.key).toList()..sort();
+    final starts = keys.where((key) => degree[key] == 1).toList()..sort();
+    final ordered = <String>[];
+    final visited = <String>{};
+    void walk(String start) {
+      var current = start;
+      String? previous;
+      while (visited.add(current)) {
+        ordered.add(current);
+        final next = adjacency[current]!
+            .where((key) => key != previous && !visited.contains(key))
+            .toList()..sort();
+        if (next.isEmpty) break;
+        previous = current;
+        current = next.first;
+      }
+    }
+    for (final start in [...starts, ...keys]) {
+      if (!visited.contains(start)) walk(start);
+    }
+    return ordered;
+  }
+
+  int _selectionComponentCount(
+    List<_SelectionSuggestionGeometry> records,
+    Map<String, Set<String>> adjacency,
+  ) {
+    final unseen = records.map((record) => record.key).toSet();
+    var count = 0;
+    while (unseen.isNotEmpty) {
+      count++;
+      final queue = <String>[unseen.first];
+      unseen.remove(queue.first);
+      while (queue.isNotEmpty) {
+        final current = queue.removeLast();
+        for (final next in adjacency[current] ?? const <String>{}) {
+          if (unseen.remove(next)) queue.add(next);
+        }
+      }
+    }
+    return count;
+  }
+
+  Map<String, int> _selectionComponentIds(
+    List<_SelectionSuggestionGeometry> records,
+    Map<String, Set<String>> adjacency,
+  ) {
+    final result = <String, int>{};
+    var component = 0;
+    for (final record in records) {
+      if (result.containsKey(record.key)) continue;
+      final queue = <String>[record.key];
+      result[record.key] = component;
+      while (queue.isNotEmpty) {
+        final current = queue.removeLast();
+        for (final next in adjacency[current] ?? const <String>{}) {
+          if (!result.containsKey(next)) {
+            result[next] = component;
+            queue.add(next);
+          }
+        }
+      }
+      component++;
+    }
+    return result;
+  }
 
   /// Orders every selected region and computes a stable PCA line fit.  The
   /// real external endpoints are projected onto that line; spline knots stay

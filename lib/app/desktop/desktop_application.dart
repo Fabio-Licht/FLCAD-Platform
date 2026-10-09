@@ -10377,6 +10377,15 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                 controller: controller,
                 onFocusSuggestion: onFocusSuggestion,
               ),
+              if (controller.sketchReconstructionSelectionAnalysis
+                  case final analysis?)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(8, 3, 8, 0),
+                  child: Text(
+                    'Seleção: ${analysis.summary}${analysis.diagnostics.isEmpty ? '' : ' · ${analysis.diagnostics.join(' · ')}'}',
+                    style: const TextStyle(fontSize: 9),
+                  ),
+                ),
               TextButton(
                 onPressed: controller.clearSketchReconstructionSuggestions,
                 child: const Text('Limpar sugestões'),

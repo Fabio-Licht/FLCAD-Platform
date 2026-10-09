@@ -4554,6 +4554,20 @@ void main() {
         suggestions,
       );
       expect(
+        harness.controller.sketchReconstructionSelectionAnalysis?.classification,
+        SketchReconstructionSelectionClassification.openChain,
+      );
+      final ordered = harness.controller
+          .sketchReconstructionSelectionAnalysis!
+          .orderedSuggestions
+          .map((item) => item.entityIds.single)
+          .toList();
+      expect(
+        ordered.join('|') == [first.id, second.id, third.id].join('|') ||
+            ordered.join('|') == [third.id, second.id, first.id].join('|'),
+        isTrue,
+      );
+      expect(
         harness.controller.sketchReconstructionSelectionOrder(suggestions[1]),
         2,
       );

@@ -9,6 +9,164 @@ import 'package:flcad_mobile/core/sketch_engine/repository/sketch_repository.dar
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  group('ordered reconstruction suggestion selection analysis', () {
+    SketchReconstructionSuggestion suggestion(
+      SketchReconstructionKind kind,
+      String id,
+    ) => SketchReconstructionSuggestion(
+      kind: kind,
+      entityIds: [id],
+      confidence: 1,
+    );
+
+    test('orders line, arc and spline independently of click order', () {
+      final line = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+        id: 'line',
+      );
+      final arc = SketchArc(
+        const SketchVector(10, 5),
+        5,
+        -math.pi / 2,
+        0,
+        id: 'arc',
+      );
+      final spline = SketchSpline(
+        const [SketchVector(15, 5), SketchVector(20, 5)],
+        id: 'spline',
+      );
+      final result = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        [suggestion(SketchReconstructionKind.line, line.id),
+          suggestion(SketchReconstructionKind.arc, arc.id),
+          suggestion(SketchReconstructionKind.line, spline.id)],
+        {line.id: line, arc.id: arc, spline.id: spline},
+      );
+      expect(result.classification,
+          SketchReconstructionSelectionClassification.openChain);
+      expect(result.orderedSuggestions.map((item) => item.entityIds.single),
+          ['line', 'arc', 'spline']);
+      expect(result.connections, hasLength(2));
+      expect(result.connections.every((item) => item.distanceMillimeters < 1e-9),
+          isTrue);
+      expect(result.diagnostics.join(' '), contains('Conexões'));
+    });
+
+    test('recognizes a closed loop and an inverted segment', () {
+      final entities = <String, SketchEntity>{
+        for (final entry in const [
+          ('a', [0.0, 0.0, 10.0, 0.0]),
+          ('b', [10.0, 10.0, 10.0, 0.0]),
+          ('c', [10.0, 10.0, 0.0, 10.0]),
+          ('d', [0.0, 0.0, 0.0, 10.0]),
+        ])
+          entry.$1: SketchLine(
+            SketchVector(entry.$2[0], entry.$2[1]),
+            SketchVector(entry.$2[2], entry.$2[3]),
+            id: entry.$1,
+          ),
+      };
+      final suggestions = [
+        for (final id in ['c', 'a', 'd', 'b'])
+          suggestion(SketchReconstructionKind.line, id),
+      ];
+      final result = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        suggestions,
+        entities,
+      );
+      expect(result.classification,
+          SketchReconstructionSelectionClassification.closedLoop);
+      expect(result.orderedSuggestions, hasLength(4));
+      expect(result.connections, hasLength(4));
+      expect(result.items.any((item) => item.reversed), isTrue);
+    });
+
+    test('reports gaps, branches, duplicates and missing sources', () {
+      final first = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+        id: 'first',
+      );
+      final second = SketchLine(
+        const SketchVector(2, 0),
+        const SketchVector(3, 0),
+        id: 'second',
+      );
+      final gap = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        [suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, second.id)],
+        {first.id: first, second.id: second},
+      );
+      expect(gap.classification,
+          SketchReconstructionSelectionClassification.incompatible);
+      expect(gap.gapsMillimeters, [1]);
+
+      final branchEntities = <String, SketchEntity>{
+        'x': SketchLine(const SketchVector(0, 0), const SketchVector(1, 0), id: 'x'),
+        'y': SketchLine(const SketchVector(0, 0), const SketchVector(0, 1), id: 'y'),
+        'z': SketchLine(const SketchVector(0, 0), const SketchVector(-1, 0), id: 'z'),
+      };
+      final branchSuggestions = [
+        for (final id in ['x', 'y', 'z'])
+          suggestion(SketchReconstructionKind.line, id),
+      ];
+      final branch = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        branchSuggestions,
+        branchEntities,
+      );
+      expect(branch.classification,
+          SketchReconstructionSelectionClassification.ambiguous);
+      expect(branch.branchKeys, isNotEmpty);
+
+      final duplicate = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        [suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, first.id)],
+        {first.id: first},
+      );
+      expect(duplicate.classification,
+          SketchReconstructionSelectionClassification.ambiguous);
+      expect(duplicate.duplicateKeys, isNotEmpty);
+
+      final overlapSecond = SketchLine(
+        const SketchVector(.5, 0),
+        const SketchVector(1.5, 0),
+        id: 'overlap',
+      );
+      final overlap = const SketchReconstructionEngine()
+          .analyzeSelectedSuggestions(
+            [suggestion(SketchReconstructionKind.line, first.id),
+              suggestion(SketchReconstructionKind.line, overlapSecond.id)],
+            {first.id: first, overlapSecond.id: overlapSecond},
+          );
+      expect(overlap.overlapKeys, isNotEmpty);
+      expect(overlap.classification,
+          SketchReconstructionSelectionClassification.ambiguous);
+
+      final crossingSecond = SketchLine(
+        const SketchVector(.5, -1),
+        const SketchVector(.5, 1),
+        id: 'crossing',
+      );
+      final crossing = const SketchReconstructionEngine()
+          .analyzeSelectedSuggestions(
+            [suggestion(SketchReconstructionKind.line, first.id),
+              suggestion(SketchReconstructionKind.line, crossingSecond.id)],
+            {first.id: first, crossingSecond.id: crossingSecond},
+          );
+      expect(crossing.crossingKeys, isNotEmpty);
+      expect(crossing.classification,
+          SketchReconstructionSelectionClassification.ambiguous);
+
+      final missing = const SketchReconstructionEngine().analyzeSelectedSuggestions(
+        [suggestion(SketchReconstructionKind.line, 'gone')],
+        const {},
+      );
+      expect(missing.classification,
+          SketchReconstructionSelectionClassification.incompatible);
+      expect(missing.missingEntityIds, ['gone']);
+    });
+  });
+
   group('line and spline region fit', () {
     test('uses 2, 5 and 10 unordered fragments with large gaps', () {
       final engine = const SketchReconstructionEngine();

@@ -709,12 +709,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   List<SketchReconstructionSuggestion> _sketchReconstructionSuggestions =
       const [];
   Map<String, String> _sketchReconstructionSuggestionFingerprints = const {};
+  SketchReconstructionSelectionAnalysis?
+  _sketchReconstructionSelectionAnalysis;
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
   SketchReconstructionSuggestion? _reconstructionSuggestionBeingAccepted;
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
+  SketchReconstructionSelectionAnalysis?
+  get sketchReconstructionSelectionAnalysis =>
+      _sketchReconstructionSelectionAnalysis;
 
   /// Classifies a suggestion for the Sketch Assistant presentation without
   /// changing its geometric hypothesis.  The reconstruction model currently
@@ -7780,8 +7785,39 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ordered.isEmpty ? null : ordered.last,
     );
     runtime.write('sketch.reconstruction.hovered', null);
+    _refreshSketchReconstructionSelectionAnalysis(ordered);
     _publishSketchReconstructionHighlight(notify: false);
     if (notify) notifyListeners();
+  }
+
+  void _refreshSketchReconstructionSelectionAnalysis(
+    Iterable<SketchReconstructionSuggestion> suggestions,
+  ) {
+    final selected = suggestions.toList(growable: false);
+    if (selected.isEmpty) {
+      _sketchReconstructionSelectionAnalysis = null;
+      return;
+    }
+    final api = sketchApi;
+    final sketch = activeSketch;
+    if (api == null || sketch == null) {
+      _sketchReconstructionSelectionAnalysis = null;
+      return;
+    }
+    final ids = <String>{
+      for (final suggestion in selected) ...suggestion.entityIds,
+      for (final suggestion in selected) ...suggestion.usedEntityIds,
+    };
+    final entities = <String, SketchEntity>{};
+    for (final id in ids) {
+      final entity = api.entity(id);
+      if (entity != null) entities[id] = entity;
+    }
+    _sketchReconstructionSelectionAnalysis =
+        _sketchReconstruction.analyzeSelectedSuggestions(
+          selected,
+          entities,
+        );
   }
 
   /// Returns bounds for only the entities that contributed to [suggestion].
@@ -7909,6 +7945,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.reconstruction.hovered', null);
     runtime.write('sketch.reconstruction.selected', null);
     runtime.write('sketch.reconstruction.selectedMany', null);
+    _sketchReconstructionSelectionAnalysis = null;
     runtime.hideTransient(sketchReconstructionHighlightId);
     if (clearEntitySelection &&
         highlightedIds.isNotEmpty &&
