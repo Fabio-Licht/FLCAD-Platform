@@ -135,6 +135,7 @@ class _IntegratedCadViewportWidgetState
   ManagedCadFaceHighlight? _managedFaceSelection;
   final ViewportPickingController _overlayPicking = ViewportPickingController();
   CadViewportPick? _captureHover;
+  late final FocusNode _viewportFocusNode;
 
   void _managedFaceControllerChanged() {
     final next = widget.managedFaceSelectionController?.selection;
@@ -493,6 +494,7 @@ class _IntegratedCadViewportWidgetState
   @override
   void initState() {
     super.initState();
+    _viewportFocusNode = FocusNode(debugLabel: 'CadViewportKeyboard');
     native = widget.nativeBridgeFactory?.call() ?? NativeViewportBridge();
     native.addListener(_changed);
     operationalEntities =
@@ -775,6 +777,7 @@ class _IntegratedCadViewportWidgetState
       operationalSelection.dispose();
       operationalEntities.dispose();
     }
+    _viewportFocusNode.dispose();
     super.dispose();
   }
 
@@ -811,212 +814,230 @@ class _IntegratedCadViewportWidgetState
         );
       }
       final useNative = _nativeActive && !_initializing;
-      return MouseRegion(
-        cursor:
-            widget.onSketchTap != null ||
-                widget.onSketchSupportPick != null ||
-                widget.onSketchEntityDragStart != null
-            ? SystemMouseCursors.precise
-            : useNative
-            ? _nativeCursor
-            : MouseCursor.defer,
-        onHover: useNative || widget.onSketchHover != null
-            ? (event) {
-                widget.onSketchHover?.call(event.localPosition);
-                if (useNative) _updateNativeHover(event.localPosition);
-              }
-            : null,
-        onExit: useNative
-            ? (_) {
-                _pendingHover = null;
-                native.clearHover();
-                setState(() {
-                  _captureHover = null;
-                  _nativeHover = null;
-                  _operationalHover = null;
-                  _managedFaceHover = null;
-                });
-                widget.onPickCaptureHover?.call(null);
-              }
-            : null,
-        child: Stack(
-          children: [
-            Positioned.fill(
-              child: useNative
-                  ? Texture(
-                      textureId: native.textureId!,
-                      filterQuality: FilterQuality.none,
-                    )
-                  : const SizedBox.shrink(),
-            ),
-            Positioned.fill(
-              child: IgnorePointer(
-                ignoring:
-                    _switching ||
-                    _initializing ||
-                    (backend == ViewportBackend.nativeGpu && !native.available),
-                child: ProfessionalCadViewportWidget(
-                  onViewportReady: _viewportReady,
-                  scene: widget.scene,
-                  camera: widget.camera,
-                  onPick: widget.onPick,
-                  onPickCapture: useNative ? null : widget.onPickCapture,
-                  pickCaptureCandidateIds: widget.pickCaptureCandidateIds,
-                  onPickCaptureHover: useNative
-                      ? null
-                      : widget.onPickCaptureHover,
-                  captureHoveredEntityId: _captureHover?.entityId,
-                  onManagedFacePick: useNative ? null : _pickCanvas,
-                  onEmptyNormalTap: () {
-                    _selectManagedFace(null);
-                    widget.onViewportSelectionCleared?.call();
-                  },
-                  onManagedFaceHover: useNative ? null : _hoverCanvas,
-                  managedFaceHover: _managedFaceHover,
-                  managedFaceSelection: _managedFaceSelection,
-                  onNormalTap: useNative ? _pickNativeTap : null,
-                  onSketchSupportPick: widget.onSketchSupportPick,
-                  onSketchEntityPick: widget.onSketchEntityPick,
-                  onSketchEntityDoublePick: widget.onSketchEntityDoublePick,
-                  onSketchTap: widget.onSketchTap,
-                  onSketchSecondaryTap: widget.onSketchSecondaryTap,
-                  onSketchHover: widget.onSketchHover,
-                  onSketchEntityDragStart: widget.onSketchEntityDragStart,
-                  onSketchEntityDragUpdate: widget.onSketchEntityDragUpdate,
-                  onSketchEntityDragEnd: widget.onSketchEntityDragEnd,
-                  showSketchGrid: widget.showSketchGrid,
-                  renderStyle: _renderStyle,
-                  onRenderStyleChanged: _setRenderStyle,
-                  showRenderControls: false,
-                  renderMeshes:
-                      backend == ViewportBackend.flutterCanvas && !_switching,
-                  paintBackground: !useNative,
-                  // Picking remains on in the transparent Flutter interaction
-                  // layer even when meshes are rendered by the native GPU.
-                  // Sketch profiles and construction geometry do not exist in
-                  // the native triangle-only pick buffer.
-                  enablePicking: true,
-                  enableEntityHover: !useNative,
-                  onNavigationChanged: useNative
-                      ? (navigating) {
-                          _nativeNavigating = navigating;
-                          if (navigating) {
-                            _tapGeneration++;
-                            _pendingHover = null;
-                            native.clearHover();
-                            if (_nativeHover != null) {
-                              setState(() {
-                                _nativeHover = null;
-                                _operationalHover = null;
-                              });
-                            }
-                          } else if (_lastHoverPosition != null) {
-                            _updateNativeHover(_lastHoverPosition!);
-                          }
-                        }
-                      : null,
-                ),
-              ),
-            ),
-            Positioned(
-              top: 10,
-              left: 10,
-              child: SegmentedButton<CadRenderStyle>(
-                showSelectedIcon: false,
-                segments: const [
-                  ButtonSegment(
-                    value: CadRenderStyle.shaded,
-                    label: Text('Shaded'),
-                  ),
-                  ButtonSegment(
-                    value: CadRenderStyle.wireframe,
-                    label: Text('Wireframe'),
-                  ),
-                  ButtonSegment(
-                    value: CadRenderStyle.hiddenLine,
-                    label: Text('Arestas'),
-                  ),
-                  ButtonSegment(
-                    value: CadRenderStyle.transparent,
-                    label: Text('Transparência'),
-                  ),
-                ],
-                selected: {_renderStyle},
-                onSelectionChanged: (value) => _setRenderStyle(value.first),
-              ),
-            ),
-            Positioned(
-              bottom: 10,
-              right: 10,
-              child: SegmentedButton<ViewportBackend>(
-                showSelectedIcon: false,
-                segments: [
-                  const ButtonSegment(
-                    value: ViewportBackend.flutterCanvas,
-                    label: Text('Flutter Canvas'),
-                  ),
-                  ButtonSegment(
-                    value: ViewportBackend.nativeGpu,
-                    label: const Text('Native GPU'),
-                    enabled: Platform.isWindows,
-                  ),
-                ],
-                selected: {backend},
-                onSelectionChanged: (selection) {
-                  _requestedBackend = selection.first;
-                  final next =
-                      _requestedBackend == ViewportBackend.nativeGpu &&
-                          !_nativeSupportsMode
-                      ? ViewportBackend.flutterCanvas
-                      : _requestedBackend;
-                  if (next != backend) {
-                    _switchBackend(
-                      next,
-                      modeFallback: next != _requestedBackend,
-                    );
-                  } else if (next != _requestedBackend) {
-                    setState(
-                      () => _backendNotice =
-                          'Flutter Canvas para toda a cena: ${_unsupportedReason ?? 'modo não suportado'}',
-                    );
-                  } else {
-                    setState(() => _backendNotice = null);
+      return Focus(
+        focusNode: _viewportFocusNode,
+        child: Listener(
+          // A native viewport is visually active but is not a text-editing
+          // FocusNode. Claim focus on pointer down so a previous Inspector or
+          // TextField cannot keep blocking global history shortcuts.
+          onPointerDown: (_) => _viewportFocusNode.requestFocus(),
+          child: MouseRegion(
+            cursor:
+                widget.onSketchTap != null ||
+                    widget.onSketchSupportPick != null ||
+                    widget.onSketchEntityDragStart != null
+                ? SystemMouseCursors.precise
+                : useNative
+                ? _nativeCursor
+                : MouseCursor.defer,
+            onHover: useNative || widget.onSketchHover != null
+                ? (event) {
+                    widget.onSketchHover?.call(event.localPosition);
+                    if (useNative) _updateNativeHover(event.localPosition);
                   }
-                },
-              ),
-            ),
-            if (_backendNotice != null || _switching || _initializing)
-              Positioned(
-                top: 60,
-                left: 10,
-                child: Material(
-                  color: Theme.of(context).colorScheme.surface,
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Text(
-                      _backendNotice ?? 'Preparando backend de visualização…',
+                : null,
+            onExit: useNative
+                ? (_) {
+                    _pendingHover = null;
+                    native.clearHover();
+                    setState(() {
+                      _captureHover = null;
+                      _nativeHover = null;
+                      _operationalHover = null;
+                      _managedFaceHover = null;
+                    });
+                    widget.onPickCaptureHover?.call(null);
+                  }
+                : null,
+            child: Stack(
+              children: [
+                Positioned.fill(
+                  child: useNative
+                      ? Texture(
+                          textureId: native.textureId!,
+                          filterQuality: FilterQuality.none,
+                        )
+                      : const SizedBox.shrink(),
+                ),
+                Positioned.fill(
+                  child: IgnorePointer(
+                    ignoring:
+                        _switching ||
+                        _initializing ||
+                        (backend == ViewportBackend.nativeGpu &&
+                            !native.available),
+                    child: ProfessionalCadViewportWidget(
+                      onViewportReady: _viewportReady,
+                      scene: widget.scene,
+                      camera: widget.camera,
+                      onPick: widget.onPick,
+                      onPickCapture: useNative ? null : widget.onPickCapture,
+                      pickCaptureCandidateIds: widget.pickCaptureCandidateIds,
+                      onPickCaptureHover: useNative
+                          ? null
+                          : widget.onPickCaptureHover,
+                      captureHoveredEntityId: _captureHover?.entityId,
+                      onManagedFacePick: useNative ? null : _pickCanvas,
+                      onEmptyNormalTap: () {
+                        _selectManagedFace(null);
+                        widget.onViewportSelectionCleared?.call();
+                      },
+                      onManagedFaceHover: useNative ? null : _hoverCanvas,
+                      managedFaceHover: _managedFaceHover,
+                      managedFaceSelection: _managedFaceSelection,
+                      onNormalTap: useNative ? _pickNativeTap : null,
+                      onSketchSupportPick: widget.onSketchSupportPick,
+                      onSketchEntityPick: widget.onSketchEntityPick,
+                      onSketchEntityDoublePick: widget.onSketchEntityDoublePick,
+                      onSketchTap: widget.onSketchTap,
+                      onSketchSecondaryTap: widget.onSketchSecondaryTap,
+                      onSketchHover: widget.onSketchHover,
+                      onSketchEntityDragStart: widget.onSketchEntityDragStart,
+                      onSketchEntityDragUpdate: widget.onSketchEntityDragUpdate,
+                      onSketchEntityDragEnd: widget.onSketchEntityDragEnd,
+                      showSketchGrid: widget.showSketchGrid,
+                      renderStyle: _renderStyle,
+                      onRenderStyleChanged: _setRenderStyle,
+                      showRenderControls: false,
+                      renderMeshes:
+                          backend == ViewportBackend.flutterCanvas &&
+                          !_switching,
+                      paintBackground: !useNative,
+                      // Picking remains on in the transparent Flutter interaction
+                      // layer even when meshes are rendered by the native GPU.
+                      // Sketch profiles and construction geometry do not exist in
+                      // the native triangle-only pick buffer.
+                      enablePicking: true,
+                      enableEntityHover: !useNative,
+                      onNavigationChanged: useNative
+                          ? (navigating) {
+                              _nativeNavigating = navigating;
+                              if (navigating) {
+                                _tapGeneration++;
+                                _pendingHover = null;
+                                native.clearHover();
+                                if (_nativeHover != null) {
+                                  setState(() {
+                                    _nativeHover = null;
+                                    _operationalHover = null;
+                                  });
+                                }
+                              } else if (_lastHoverPosition != null) {
+                                _updateNativeHover(_lastHoverPosition!);
+                              }
+                            }
+                          : null,
                     ),
                   ),
                 ),
-              ),
-            if (useNative &&
-                !_nativeNavigating &&
-                _operationalHover != null &&
-                _lastHoverPosition != null)
-              Positioned(
-                left: (_lastHoverPosition!.dx + 16)
-                    .clamp(8.0, (size.width - 236).clamp(8.0, double.infinity))
-                    .toDouble(),
-                top: (_lastHoverPosition!.dy + 18)
-                    .clamp(8.0, (size.height - 112).clamp(8.0, double.infinity))
-                    .toDouble(),
-                child: IgnorePointer(
-                  child: _OperationalHoverCard(
-                    entity: _operationalHover!.entity,
+                Positioned(
+                  top: 10,
+                  left: 10,
+                  child: SegmentedButton<CadRenderStyle>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(
+                        value: CadRenderStyle.shaded,
+                        label: Text('Shaded'),
+                      ),
+                      ButtonSegment(
+                        value: CadRenderStyle.wireframe,
+                        label: Text('Wireframe'),
+                      ),
+                      ButtonSegment(
+                        value: CadRenderStyle.hiddenLine,
+                        label: Text('Arestas'),
+                      ),
+                      ButtonSegment(
+                        value: CadRenderStyle.transparent,
+                        label: Text('Transparência'),
+                      ),
+                    ],
+                    selected: {_renderStyle},
+                    onSelectionChanged: (value) => _setRenderStyle(value.first),
                   ),
                 ),
-              ),
-          ],
+                Positioned(
+                  bottom: 10,
+                  right: 10,
+                  child: SegmentedButton<ViewportBackend>(
+                    showSelectedIcon: false,
+                    segments: [
+                      const ButtonSegment(
+                        value: ViewportBackend.flutterCanvas,
+                        label: Text('Flutter Canvas'),
+                      ),
+                      ButtonSegment(
+                        value: ViewportBackend.nativeGpu,
+                        label: const Text('Native GPU'),
+                        enabled: Platform.isWindows,
+                      ),
+                    ],
+                    selected: {backend},
+                    onSelectionChanged: (selection) {
+                      _requestedBackend = selection.first;
+                      final next =
+                          _requestedBackend == ViewportBackend.nativeGpu &&
+                              !_nativeSupportsMode
+                          ? ViewportBackend.flutterCanvas
+                          : _requestedBackend;
+                      if (next != backend) {
+                        _switchBackend(
+                          next,
+                          modeFallback: next != _requestedBackend,
+                        );
+                      } else if (next != _requestedBackend) {
+                        setState(
+                          () => _backendNotice =
+                              'Flutter Canvas para toda a cena: ${_unsupportedReason ?? 'modo não suportado'}',
+                        );
+                      } else {
+                        setState(() => _backendNotice = null);
+                      }
+                    },
+                  ),
+                ),
+                if (_backendNotice != null || _switching || _initializing)
+                  Positioned(
+                    top: 60,
+                    left: 10,
+                    child: Material(
+                      color: Theme.of(context).colorScheme.surface,
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Text(
+                          _backendNotice ??
+                              'Preparando backend de visualização…',
+                        ),
+                      ),
+                    ),
+                  ),
+                if (useNative &&
+                    !_nativeNavigating &&
+                    _operationalHover != null &&
+                    _lastHoverPosition != null)
+                  Positioned(
+                    left: (_lastHoverPosition!.dx + 16)
+                        .clamp(
+                          8.0,
+                          (size.width - 236).clamp(8.0, double.infinity),
+                        )
+                        .toDouble(),
+                    top: (_lastHoverPosition!.dy + 18)
+                        .clamp(
+                          8.0,
+                          (size.height - 112).clamp(8.0, double.infinity),
+                        )
+                        .toDouble(),
+                    child: IgnorePointer(
+                      child: _OperationalHoverCard(
+                        entity: _operationalHover!.entity,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
         ),
       );
     },

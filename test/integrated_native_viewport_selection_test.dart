@@ -6,6 +6,7 @@ import 'package:flcad_mobile/app/cad_viewport/native/native_viewport_bridge.dart
 import 'package:flcad_mobile/app/cad_viewport/professional_cad_viewport_widget.dart';
 import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
 import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
+import 'package:flcad_mobile/app/desktop/desktop_application.dart';
 import 'package:flcad_mobile/app/operational_entities/operational_entity.dart';
 import 'package:flcad_mobile/app/operational_entities/operational_entity_resolver.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
@@ -276,6 +277,66 @@ Future<void> tap(
 }
 
 void main() {
+  testWidgets(
+    'viewport pointer restores global history shortcut focus after text editing',
+    (tester) async {
+      final fixture = _Fixture();
+      var undoCalls = 0;
+      var redoCalls = 0;
+      final text = TextEditingController(text: 'editable');
+      addTearDown(text.dispose);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(1200, 800));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DesktopHistoryShortcuts(
+            onUndo: () async => undoCalls++,
+            onRedo: () async => redoCalls++,
+            child: Scaffold(
+              body: Column(
+                children: [
+                  SizedBox(
+                    height: 56,
+                    child: TextField(controller: text),
+                  ),
+                  Expanded(
+                    child: IntegratedCadViewportWidget(
+                      scene: fixture.scene,
+                      camera: fixture.camera,
+                      nativeBridgeFactory: () => fixture.bridge,
+                      operationalEntities: fixture.registry,
+                      operationalSelection: fixture.selection,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.byType(TextField));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(undoCalls, 0);
+
+      await tester.tapAt(const Offset(600, 400));
+      await tester.pump();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pump();
+      expect(undoCalls, 1);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlRight);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlRight);
+      await tester.pump();
+      expect(redoCalls, 1);
+    },
+  );
+
   testWidgets(
     'native tap has one owner, uses exact click and ignores prior hover',
     (tester) async {
