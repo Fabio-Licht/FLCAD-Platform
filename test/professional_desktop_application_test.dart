@@ -265,6 +265,40 @@ void main() {
       expect(find.text('OpenCascade'), findsOneWidget);
     });
 
+    testWidgets('global history shortcuts use the injected CAD callbacks', (
+      tester,
+    ) async {
+      var undoCalls = 0;
+      var redoCalls = 0;
+      final text = TextEditingController(text: 'editable');
+      addTearDown(text.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: DesktopHistoryShortcuts(
+            onUndo: () async => undoCalls++,
+            onRedo: () async => redoCalls++,
+            child: Scaffold(body: TextField(controller: text)),
+          ),
+        ),
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyY);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(undoCalls, 1);
+      expect(redoCalls, 1);
+
+      await tester.tap(find.byType(TextField));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyZ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      expect(undoCalls, 1);
+      expect(text.text, 'editable');
+    });
+
     testWidgets('settings switches the application theme preference', (
       tester,
     ) async {

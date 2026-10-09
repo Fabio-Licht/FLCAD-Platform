@@ -443,6 +443,64 @@ class DesktopShell extends StatefulWidget {
   State<DesktopShell> createState() => _DesktopShellState();
 }
 
+/// Routes desktop history shortcuts through the same callbacks used by the
+/// global Undo/Redo buttons.  The callbacks are intentionally injected so
+/// this widget cannot create a second history or bypass the CAD runtime.
+class DesktopHistoryShortcuts extends StatefulWidget {
+  const DesktopHistoryShortcuts({
+    super.key,
+    required this.onUndo,
+    required this.onRedo,
+    required this.child,
+  });
+
+  final Future<void> Function() onUndo;
+  final Future<void> Function() onRedo;
+  final Widget child;
+
+  @override
+  State<DesktopHistoryShortcuts> createState() =>
+      _DesktopHistoryShortcutsState();
+}
+
+class _DesktopHistoryShortcutsState extends State<DesktopHistoryShortcuts> {
+  final Set<String> _pending = <String>{};
+
+  static bool _textEditorHasFocus() {
+    final context = FocusManager.instance.primaryFocus?.context;
+    if (context == null) return false;
+    return context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null ||
+        context.findAncestorWidgetOfExactType<TextField>() != null ||
+        context.findAncestorWidgetOfExactType<TextFormField>() != null;
+  }
+
+  void _invoke(String key, Future<void> Function() action) {
+    if (!_pending.add(key)) return;
+    try {
+      unawaited(action().whenComplete(() => _pending.remove(key)));
+    } catch (_) {
+      // Keep a synchronous callback failure from permanently blocking the
+      // corresponding shortcut on the next key press.
+      _pending.remove(key);
+      rethrow;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => CallbackShortcuts(
+    bindings: {
+      SingleActivator(LogicalKeyboardKey.keyZ, control: true): () {
+        if (!_textEditorHasFocus()) _invoke('undo', widget.onUndo);
+      },
+      SingleActivator(LogicalKeyboardKey.keyY, control: true): () {
+        if (!_textEditorHasFocus()) _invoke('redo', widget.onRedo);
+      },
+    },
+    child: Focus(autofocus: true, child: widget.child),
+  );
+}
+
 class _DesktopShellState extends State<DesktopShell> {
   int destination = 0;
   late final DesktopCadController cad;
@@ -631,7 +689,13 @@ class _DesktopShellState extends State<DesktopShell> {
             ],
           ),
           const VerticalDivider(),
-          Expanded(child: screens[destination]),
+          Expanded(
+            child: DesktopHistoryShortcuts(
+              onUndo: commands.undo,
+              onRedo: commands.redo,
+              child: screens[destination],
+            ),
+          ),
         ],
       ),
     );
@@ -5218,10 +5282,6 @@ class _OfficialEngineeringWorkspaceState
         operational.deleteSelectedSketchEntities();
         widget.cad.setStatus('Sketch selection removed.');
       },
-      const SingleActivator(LogicalKeyboardKey.keyZ, control: true):
-          operational.undo,
-      const SingleActivator(LogicalKeyboardKey.keyY, control: true):
-          operational.redo,
       const SingleActivator(LogicalKeyboardKey.space): () {
         operational.selectSketchTool(operational.activeTool);
         widget.cad.setStatus(
