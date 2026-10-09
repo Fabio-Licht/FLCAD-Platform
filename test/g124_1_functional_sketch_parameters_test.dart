@@ -7,6 +7,7 @@ import 'package:flcad_mobile/app/desktop/desktop_application.dart';
 import 'package:flcad_mobile/app/cad_viewport/camera/cad_camera_controller.dart';
 import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
 import 'package:flcad_mobile/app/engineering_bridge/contracts/bridge_selection.dart';
+import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
 import 'package:flcad_mobile/app/engineering_bridge/operational_reverse_engineering_controller.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/managed_cad_reference.dart';
@@ -2300,6 +2301,347 @@ void main() {
         isTrue,
       );
       expect(reopened.commands.manager.canUndo, isFalse);
+    },
+  );
+
+  test(
+    'assistant suggestion hover highlights sources and click persists without a command',
+    () async {
+      final harness = await _g124Harness('g124-5a-highlight');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final cad = harness.cad;
+
+      final firstSources = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(0, 0),
+          const SketchVector(10, 0),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(10, 0),
+          const SketchVector(20, 0),
+        ),
+      ];
+      final secondSources = [
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(0, 40),
+          const SketchVector(12, 40),
+        ),
+        controller.sketchApi!.builders.line.build(
+          const SketchVector(12, 40),
+          const SketchVector(24, 40),
+        ),
+      ];
+      controller.analyzeSketchReconstruction();
+      final first = controller.sketchReconstructionSuggestions.firstWhere(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.length == firstSources.length &&
+            item.entityIds.every(
+              (id) => firstSources.any((source) => source.id == id),
+            ),
+      );
+      final second = controller.sketchReconstructionSuggestions.firstWhere(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.length == secondSources.length &&
+            item.entityIds.every(
+              (id) => secondSources.any((source) => source.id == id),
+            ),
+      );
+      expect(first.rmsError, isNull);
+      expect(first.maxError, isNull);
+
+      dynamic overlay() =>
+          cad.runtime.scene.find(sketchReconstructionHighlightId);
+      final historyBefore = controller.commands.manager.history.length;
+      final selectionBefore = Set<String>.from(
+        controller.selectedSketchEntityIds,
+      );
+
+      controller.highlightSketchReconstructionSuggestion(first);
+      expect(overlay(), isNotNull);
+      expect(overlay()!.geometry['reconstructionHighlight'], 'hover');
+      expect(overlay()!.geometry['displayColor'], 'assistantSuggestion');
+      expect(overlay()!.geometry['entityIds'], first.entityIds);
+      expect(overlay()!.geometry['segments'], isNotEmpty);
+      expect(controller.selectedSketchEntityIds, selectionBefore);
+      expect(controller.commands.manager.history.length, historyBefore);
+
+      controller.clearHoveredSketchReconstructionSuggestion();
+      expect(overlay(), isNull);
+      expect(controller.selectedSketchEntityIds, selectionBefore);
+
+      controller.highlightSketchReconstructionSuggestion(
+        first,
+        persistent: true,
+      );
+      expect(overlay()!.geometry['reconstructionHighlight'], 'persistent');
+      expect(overlay()!.geometry['displayColor'], 'conflictRed');
+      expect(controller.selectedSketchEntityIds, first.entityIds.toSet());
+      expect(
+        controller.isSketchReconstructionSuggestionSelected(first),
+        isTrue,
+      );
+      expect(controller.commands.manager.history.length, historyBefore);
+
+      controller.highlightSketchReconstructionSuggestion(second);
+      expect(overlay()!.geometry['reconstructionHighlight'], 'hover');
+      expect(overlay()!.geometry['entityIds'], second.entityIds);
+      expect(controller.selectedSketchEntityIds, first.entityIds.toSet());
+
+      controller.clearHoveredSketchReconstructionSuggestion();
+      expect(overlay()!.geometry['reconstructionHighlight'], 'persistent');
+      expect(overlay()!.geometry['entityIds'], first.entityIds);
+      expect(controller.selectedSketchEntityIds, first.entityIds.toSet());
+
+      controller.highlightSketchReconstructionSuggestion(
+        second,
+        persistent: true,
+      );
+      expect(overlay()!.geometry['entityIds'], second.entityIds);
+      expect(controller.selectedSketchEntityIds, second.entityIds.toSet());
+      expect(
+        controller.isSketchReconstructionSuggestionSelected(first),
+        isFalse,
+      );
+      expect(
+        controller.isSketchReconstructionSuggestionSelected(second),
+        isTrue,
+      );
+
+      controller.clearSketchReconstructionSuggestions();
+      expect(overlay(), isNull);
+      expect(controller.selectedSketchEntityIds, isEmpty);
+      expect(controller.sketchReconstructionSuggestions, isEmpty);
+      expect(controller.commands.manager.history.length, historyBefore);
+
+      controller.analyzeSketchReconstruction();
+      final restored = controller.sketchReconstructionSuggestions.firstWhere(
+        (item) =>
+            item.kind == SketchReconstructionKind.line &&
+            item.entityIds.every(
+              (id) => firstSources.any((source) => source.id == id),
+            ),
+      );
+      controller.highlightSketchReconstructionSuggestion(
+        restored,
+        persistent: true,
+      );
+      expect(overlay(), isNotNull);
+
+      final weak = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.arc,
+        entityIds: restored.entityIds,
+        confidence: 0.2,
+        center: const SketchVector(0, 0),
+        radius: 10,
+        startAngle: 0,
+        endAngle: 1,
+      );
+      expect(
+        await controller.acceptSketchReconstructionSuggestion(weak),
+        isNull,
+      );
+      expect(controller.error, contains('confiança'));
+      expect(overlay(), isNull);
+      expect(controller.selectedSketchEntityIds, isEmpty);
+      expect(controller.commands.manager.history.length, historyBefore);
+
+      controller.highlightSketchReconstructionSuggestion(
+        restored,
+        persistent: true,
+      );
+      expect(overlay(), isNotNull);
+      final promotedId = await controller.acceptSketchReconstructionSuggestion(
+        restored,
+      );
+      expect(promotedId, isNotNull);
+      expect(overlay(), isNull);
+      expect(
+        firstSources.every(
+          (source) => controller.sketchApi!.entity(source.id)?.visible == false,
+        ),
+        isTrue,
+      );
+      expect(controller.selectedSketchEntityIds, {promotedId});
+
+      await controller.undo();
+      expect(overlay(), isNull);
+      await controller.redo();
+      expect(overlay(), isNull);
+
+      await controller.persist();
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open('g124-5a-highlight', harness.directory);
+      await reopened.configureProject(
+        projectId: 'g124-5a-highlight',
+        projectDirectory: harness.directory,
+      );
+      expect(
+        reopenedCad.runtime.scene.find(sketchReconstructionHighlightId),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'assistant highlight copies every source even when the list shows eight tiles',
+    () async {
+      final harness = await _g124Harness('g124-5a-highlight-128');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final cad = harness.cad;
+      const count = 128;
+      final ids = <String>[];
+      for (var index = 0; index < count; index++) {
+        final start = SketchVector(index.toDouble(), 0);
+        final end = SketchVector(index + 1.0, 0);
+        final line = controller.sketchApi!.builders.line.build(start, end);
+        ids.add(line.id);
+        cad.runtime.scene.upsert(
+          CadSceneEntity(
+            id: line.id,
+            kind: CadSceneEntityKind.sketch,
+            geometry: {
+              'points': [start.toJson(), end.toJson()],
+              // Empty segments used to hide a one-by-one scene copy that
+              // replaced the same transient id and kept only the last curve.
+              'segments': const <List<dynamic>>[],
+            },
+          ),
+        );
+      }
+      cad.runtime.showTransient(
+        CadSceneEntity(
+          id: 'sketch-health-highlight',
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'points': [
+              [0.0, 0.0, 0.0],
+            ],
+            'displayColor': 'conflictRed',
+          },
+        ),
+      );
+      cad.runtime.showTransient(
+        CadSceneEntity(
+          id: 'region-fit-reference-g124',
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': [
+              [
+                [0.0, 1.0, 0.0],
+                [1.0, 1.0, 0.0],
+              ],
+            ],
+            'displayColor': 'referenceCurve',
+          },
+        ),
+      );
+      final suggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: ids,
+        confidence: 1.0,
+      );
+      final historyBefore = controller.commands.manager.history.length;
+      final selectionBefore = Set<String>.from(
+        controller.selectedSketchEntityIds,
+      );
+      final documentBefore = cad.runtime.document?.entities.keys.toSet();
+
+      controller.highlightSketchReconstructionSuggestion(suggestion);
+      final overlay = cad.runtime.scene.find(sketchReconstructionHighlightId);
+      expect(overlay, isNotNull);
+      expect(overlay!.geometry['entityIds'], ids);
+      expect(overlay.geometry['entityIds'], hasLength(count));
+      expect(overlay.geometry['segments'], hasLength(count));
+      expect(overlay.geometry['reconstructionHighlight'], 'hover');
+      expect(controller.selectedSketchEntityIds, selectionBefore);
+      expect(controller.commands.manager.history.length, historyBefore);
+      expect(cad.runtime.document?.entities.keys.toSet(), documentBefore);
+      expect(cad.runtime.scene.find('sketch-health-highlight'), isNotNull);
+      expect(cad.runtime.scene.find('region-fit-reference-g124'), isNotNull);
+
+      controller.highlightSketchReconstructionSuggestion(
+        suggestion,
+        persistent: true,
+      );
+      expect(
+        cad.runtime.scene
+            .find(sketchReconstructionHighlightId)!
+            .geometry['segments'],
+        hasLength(count),
+      );
+      expect(controller.selectedSketchEntityIds, ids.toSet());
+      expect(controller.commands.manager.history.length, historyBefore);
+      expect(cad.runtime.document?.entities.keys.toSet(), documentBefore);
+      expect(cad.runtime.scene.find('sketch-health-highlight'), isNotNull);
+      expect(cad.runtime.scene.find('region-fit-reference-g124'), isNotNull);
+    },
+  );
+
+  test(
+    'assistant reconstruction highlight overlay is removed on dispose',
+    () async {
+      final harness = await _g124Harness('g124-5a-highlight-dispose');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.cad.dispose);
+      addTearDown(() {
+        try {
+          harness.controller.dispose();
+        } on Object {
+          // Disposed in the test body after hideTransient is asserted.
+        }
+      });
+      final controller = harness.controller;
+      final cad = harness.cad;
+      final line = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final suggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: [line.id],
+        confidence: 1.0,
+      );
+      controller.highlightSketchReconstructionSuggestion(
+        suggestion,
+        persistent: true,
+      );
+      expect(
+        cad.runtime.scene.find(sketchReconstructionHighlightId),
+        isNotNull,
+      );
+      controller.dispose();
+      expect(cad.runtime.scene.find(sketchReconstructionHighlightId), isNull);
     },
   );
 

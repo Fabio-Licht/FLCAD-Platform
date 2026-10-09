@@ -238,6 +238,8 @@ class SketchReconstructionSuggestion {
     this.tangencyEndDegrees,
     this.usedEntityIds = const <String>[],
     this.coveredEntityIds = const <String>[],
+    this.rmsError,
+    this.maxError,
   });
 
   final SketchReconstructionKind kind;
@@ -271,6 +273,12 @@ class SketchReconstructionSuggestion {
 
   /// Visible source fragments already represented by the promoted arc.
   final List<String> coveredEntityIds;
+
+  /// Residual of the recognized fit, in millimetres. Automatic analyze()
+  /// leaves these null until a later split fills them; the UI must not invent
+  /// a PCA preview just to display a number.
+  final double? rmsError;
+  final double? maxError;
 
   String get label => switch (kind) {
     SketchReconstructionKind.line => 'Linha reconhecida',

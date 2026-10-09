@@ -107,6 +107,11 @@ import '../runtime/world_coordinate_system.dart';
 /// open wire at a stricter one turns a healthy profile into a kernel failure.
 const double _sketchPointTolerance = 1e-4;
 
+/// Transient overlay that identifies Assistant reconstruction sources in the
+/// viewport without mutating Sketch geometry.
+const String sketchReconstructionHighlightId =
+    'sketch-reconstruction-highlight';
+
 enum RecognitionDecision { pending, accepted, rejected }
 
 /// A transient closed loop resolved exclusively from the profile entities the
@@ -196,6 +201,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }) : recognition = RecognitionBridge(recognition),
        _referenceApi = referenceApi ?? ReferenceApi(),
        _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi();
+
+  @override
+  void dispose() {
+    try {
+      runtime.write('sketch.reconstruction.hovered', null);
+      runtime.write('sketch.reconstruction.selected', null);
+      runtime.hideTransient(sketchReconstructionHighlightId);
+    } on Object {
+      // Widget tests dispose CadRuntime before the controller.
+    }
+    super.dispose();
+  }
 
   final RecognitionBridge recognition;
   final DesktopCommandCoordinator commands;
@@ -575,8 +592,26 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchReconstructionSuggestion? _reconstructionSuggestionBeingAccepted;
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
+  SketchReconstructionSuggestion? get hoveredSketchReconstructionSuggestion =>
+      runtime.read<SketchReconstructionSuggestion>(
+        'sketch.reconstruction.hovered',
+      );
+  SketchReconstructionSuggestion? get selectedSketchReconstructionSuggestion =>
+      runtime.read<SketchReconstructionSuggestion>(
+        'sketch.reconstruction.selected',
+      );
+  bool isSketchReconstructionSuggestionSelected(
+    SketchReconstructionSuggestion suggestion,
+  ) => _sameSketchReconstructionSuggestion(
+    selectedSketchReconstructionSuggestion,
+    suggestion,
+  );
   void analyzeSketchReconstruction() {
     sketchReconstructionMessage = null;
+    final highlighted = selectedSketchReconstructionSuggestion;
+    _clearSketchReconstructionHighlight(
+      clearEntitySelection: highlighted != null,
+    );
     _sketchReconstructionSuggestions = _sketchReconstruction.analyze(
       sketchEntities,
       angularTolerance: sketchAssistantPrecision.tolerance / 8,
@@ -634,6 +669,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void _rejectSketchReconstructionSuggestion(String message) {
     error = message;
     sketchReconstructionMessage = message;
+    final highlighted = selectedSketchReconstructionSuggestion != null;
+    _clearSketchReconstructionHighlight(clearEntitySelection: highlighted);
     notifyListeners();
   }
 
@@ -934,12 +971,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   ) {
     _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
         .where(
-          (item) =>
-              !(item.kind == suggestion.kind &&
-                  item.entityIds.length == suggestion.entityIds.length &&
-                  item.entityIds.every(suggestion.entityIds.contains)),
+          (item) => !_sameSketchReconstructionSuggestion(item, suggestion),
         )
         .toList(growable: false);
+    _clearSketchReconstructionHighlight();
   }
 
   Future<void> _presentSketchReconstruction({
@@ -1602,8 +1637,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void clearSketchReconstructionSuggestions() {
+    final highlighted = selectedSketchReconstructionSuggestion;
     _sketchReconstructionSuggestions = const [];
     sketchReconstructionMessage = null;
+    _clearSketchReconstructionHighlight(
+      clearEntitySelection: highlighted != null,
+    );
     notifyListeners();
   }
 
@@ -6555,6 +6594,145 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       );
     }
     notifyListeners();
+  }
+
+  /// Identifies existing suggestion sources in the viewport.
+  ///
+  /// Hover is overlay-only (`assistantSuggestion`) so the list MouseRegion
+  /// does not rebuild. A click persists with the same selection path as
+  /// [highlightSketchHealthIssue] plus a health-style overlay. Neither path
+  /// records a command or mutates Sketch geometry.
+  void highlightSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion, {
+    bool persistent = false,
+  }) {
+    if (persistent) {
+      runtime.write('sketch.reconstruction.selected', suggestion);
+      runtime.write('sketch.reconstruction.hovered', null);
+    } else {
+      runtime.write('sketch.reconstruction.hovered', suggestion);
+    }
+    _publishSketchReconstructionHighlight(notify: persistent);
+  }
+
+  void clearHoveredSketchReconstructionSuggestion() {
+    if (hoveredSketchReconstructionSuggestion == null) return;
+    runtime.write('sketch.reconstruction.hovered', null);
+    _publishSketchReconstructionHighlight(notify: false);
+  }
+
+  void _clearSketchReconstructionHighlight({
+    bool clearEntitySelection = false,
+    bool notify = false,
+  }) {
+    final highlightedIds = selectedSketchReconstructionSuggestion?.entityIds;
+    runtime.write('sketch.reconstruction.hovered', null);
+    runtime.write('sketch.reconstruction.selected', null);
+    runtime.hideTransient(sketchReconstructionHighlightId);
+    if (clearEntitySelection &&
+        highlightedIds != null &&
+        highlightedIds.length == selectedSketchEntityIds.length &&
+        highlightedIds.every(selectedSketchEntityIds.contains)) {
+      selectedSketchEntityIds.clear();
+      runtime.select(const <String>{});
+    }
+    if (notify) notifyListeners();
+  }
+
+  void _publishSketchReconstructionHighlight({required bool notify}) {
+    final hovered = hoveredSketchReconstructionSuggestion;
+    final selected = selectedSketchReconstructionSuggestion;
+    final active = hovered ?? selected;
+    if (active == null) {
+      runtime.hideTransient(sketchReconstructionHighlightId);
+      if (notify) notifyListeners();
+      return;
+    }
+    final persistent = hovered == null;
+    _showSketchReconstructionHighlightOverlay(active, persistent: persistent);
+    if (persistent) {
+      selectedConstraintIds.clear();
+      selectedSketchEntityIds
+        ..clear()
+        ..addAll(active.entityIds);
+      runtime.select(active.entityIds.toSet());
+    }
+    if (notify) notifyListeners();
+  }
+
+  void _showSketchReconstructionHighlightOverlay(
+    SketchReconstructionSuggestion suggestion, {
+    required bool persistent,
+  }) {
+    final segments = _sketchReconstructionHighlightSegments(suggestion);
+    if (segments.isEmpty) {
+      runtime.hideTransient(sketchReconstructionHighlightId);
+      return;
+    }
+    runtime.showTransient(
+      CadSceneEntity(
+        id: sketchReconstructionHighlightId,
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'segments': segments,
+          'displayColor': persistent ? 'conflictRed' : 'assistantSuggestion',
+          'strokeWidth': persistent ? 2.5 : 2.0,
+          'entityIds': List<String>.from(suggestion.entityIds),
+          'reconstructionHighlight': persistent ? 'persistent' : 'hover',
+        },
+      ),
+    );
+  }
+
+  List<List<dynamic>> _sketchReconstructionHighlightSegments(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    final sketch = activeSketch;
+    final segments = <List<dynamic>>[];
+    for (final id in suggestion.entityIds) {
+      final entity = sketchApi?.entity(id);
+      if (entity == null || !entity.visible) continue;
+      final visual = runtime.scene.find(id);
+      if (visual != null && !visual.visible) continue;
+      var copied = _segmentsFromGeometry(visual?.geometry);
+      if (copied.isEmpty) {
+        copied = _segmentsFromGeometry(
+          _sketchScene.adapt(entity, coordinates: sketch?.coordinates).geometry,
+        );
+      }
+      segments.addAll(copied);
+    }
+    return segments;
+  }
+
+  List<List<dynamic>> _segmentsFromGeometry(Map<String, dynamic>? geometry) {
+    if (geometry == null) return const [];
+    final segments = <List<dynamic>>[];
+    final existingSegments = geometry['segments'];
+    if (existingSegments is List) {
+      for (final segment in existingSegments) {
+        if (segment is List && segment.length >= 2) {
+          segments.add(List<dynamic>.from(segment));
+        }
+      }
+    }
+    if (segments.isNotEmpty) return segments;
+    final points = geometry['points'] as List? ?? const [];
+    for (var index = 0; index + 1 < points.length; index++) {
+      segments.add([points[index], points[index + 1]]);
+    }
+    return segments;
+  }
+
+  bool _sameSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion? first,
+    SketchReconstructionSuggestion? second,
+  ) {
+    if (first == null || second == null) return false;
+    return first.kind == second.kind &&
+        first.entityIds.length == second.entityIds.length &&
+        first.entityIds.every(second.entityIds.contains);
   }
 
   Future<void> autoHealSketchGap(SketchHealthIssue issue) =>

@@ -21,6 +21,7 @@ import '../../core/professional_surface/models/professional_surface_models.dart'
 import '../../core/sketch_constraints/models/constraint_models.dart';
 import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
+import '../../core/sketch_assistant/sketch_reconstruction.dart';
 import '../../core/recognition_engine/recognition_result.dart';
 import '../../core/reverse_engineering_studio/reverse_engineering_studio.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
@@ -10204,32 +10205,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               ...controller.sketchReconstructionSuggestions
                   .take(8)
                   .map(
-                    (suggestion) => ListTile(
-                      dense: true,
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        suggestion.label,
-                        style: const TextStyle(fontSize: 11),
-                      ),
-                      subtitle: Text(
-                        '${suggestion.entityIds.length} entidade(s) · ${(suggestion.confidence * 100).toStringAsFixed(0)}%',
-                        style: const TextStyle(fontSize: 9),
-                      ),
-                      trailing: IconButton(
-                        key: ValueKey(
-                          'sketch-reconstruction-accept-${suggestion.kind.name}-${suggestion.entityIds.join('-')}',
-                        ),
-                        tooltip: 'Aceitar sugestão',
-                        icon: const Icon(Icons.check, size: 16),
-                        onPressed: controller.busy
-                            ? null
-                            : () async {
-                                await controller
-                                    .acceptSketchReconstructionSuggestion(
-                                      suggestion,
-                                    );
-                              },
-                      ),
+                    (suggestion) => _SketchReconstructionSuggestionTile(
+                      controller: controller,
+                      suggestion: suggestion,
                     ),
                   ),
               TextButton(
@@ -11018,6 +10996,78 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _SketchReconstructionSuggestionTile extends StatelessWidget {
+  const _SketchReconstructionSuggestionTile({
+    required this.controller,
+    required this.suggestion,
+  });
+
+  final OperationalReverseEngineeringController controller;
+  final SketchReconstructionSuggestion suggestion;
+
+  @override
+  Widget build(BuildContext context) {
+    final selected = controller.isSketchReconstructionSuggestionSelected(
+      suggestion,
+    );
+    return MouseRegion(
+      onEnter: (_) =>
+          controller.highlightSketchReconstructionSuggestion(suggestion),
+      onExit: (_) => controller.clearHoveredSketchReconstructionSuggestion(),
+      child: ListTile(
+        dense: true,
+        selected: selected,
+        contentPadding: EdgeInsets.zero,
+        onTap: () => controller.highlightSketchReconstructionSuggestion(
+          suggestion,
+          persistent: true,
+        ),
+        title: Text(suggestion.label, style: const TextStyle(fontSize: 11)),
+        subtitle: Text(
+          _sketchReconstructionSuggestionSubtitle(suggestion),
+          style: const TextStyle(fontSize: 9),
+        ),
+        trailing: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () {
+            // Absorb the ListTile tap so ✓ stays accept-only.
+          },
+          child: IconButton(
+            key: ValueKey(
+              'sketch-reconstruction-accept-${suggestion.kind.name}-${suggestion.entityIds.join('-')}',
+            ),
+            tooltip: 'Aceitar sugestão',
+            icon: const Icon(Icons.check, size: 16),
+            onPressed: controller.busy
+                ? null
+                : () async {
+                    await controller.acceptSketchReconstructionSuggestion(
+                      suggestion,
+                    );
+                  },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _sketchReconstructionSuggestionSubtitle(
+  SketchReconstructionSuggestion suggestion,
+) {
+  final parts = <String>[
+    '${suggestion.entityIds.length} entidade(s)',
+    '${(suggestion.confidence * 100).toStringAsFixed(0)}%',
+  ];
+  if (suggestion.rmsError != null) {
+    parts.add('RMS ${suggestion.rmsError!.toStringAsFixed(3)} mm');
+  }
+  if (suggestion.maxError != null) {
+    parts.add('máx ${suggestion.maxError!.toStringAsFixed(3)} mm');
+  }
+  return parts.join(' · ');
 }
 
 class _SketchHealthIssueTile extends StatelessWidget {
