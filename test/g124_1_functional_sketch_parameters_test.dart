@@ -489,11 +489,29 @@ void main() {
         controller.commands.manager.history.length,
         commandHistoryBeforeConfirmation,
       );
-      await controller.updateSketchEntityParameters(
-        arc.id,
-        {'radius': 1.5},
-        confirmAdjacent: true,
+      final firstPreview = controller.arcRadiusEditPreview;
+      expect(firstPreview, isNotNull);
+      expect(
+        cad.runtime.scene.find('arc-radius-preview-${firstPreview!.token}'),
+        isNotNull,
       );
+      controller.cancelArcRadiusEditPreview();
+      expect(controller.arcRadiusEditPreview, isNull);
+      expect(
+        cad.runtime.scene.find('arc-radius-preview-${firstPreview.token}'),
+        isNull,
+      );
+      await expectLater(
+        controller.updateSketchEntityParameters(arc.id, {'radius': 1.5}),
+        throwsA(isA<ArcRadiusEditConfirmationRequired>()),
+      );
+      await controller.confirmArcRadiusEditPreview();
+      expect(controller.arcRadiusEditPreview, isNull);
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
+      await controller.undo();
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1);
+      await controller.redo();
+      expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
       SketchVector arcEnd(String key) {
         final current = controller.sketchApi!.entity(arc.id)!;
         final center = SketchVector.fromJson(current.parameters['center']);
@@ -1417,6 +1435,69 @@ void main() {
     expect(controller.sketchCircularFitMessage, contains('não existe mais'));
     expect(controller.sketchTangencyStartId, isNull);
     expect(controller.sketchTangencyPickActive, isFalse);
+    // Directed radius dimensions use the same transient preview contract as
+    // the Inspector and only create the dimension after explicit confirmation.
+    final dimensionArc = controller.sketchApi!.builders.arc.build(
+      const SketchVector(100, 100),
+      1,
+      0,
+      math.pi / 2,
+    );
+    controller.sketchApi!.builders.line.build(
+      const SketchVector(101, 99),
+      const SketchVector(101, 100),
+    );
+    controller.sketchApi!.builders.line.build(
+      const SketchVector(99, 101),
+      const SketchVector(98, 101),
+    );
+    controller.selectedSketchEntityIds
+      ..clear()
+      ..add(dimensionArc.id);
+    controller.runtime.select({dimensionArc.id});
+    await controller.createDrivingDimension(
+      SketchDimensionType.radius,
+      1.5,
+    );
+    expect(controller.arcRadiusEditPreview, isNotNull);
+    expect(controller.dimensions, isEmpty);
+    controller.cancelArcRadiusEditPreview();
+    expect(controller.arcRadiusEditPreview, isNull);
+    await controller.createDrivingDimension(
+      SketchDimensionType.radius,
+      1.5,
+    );
+    expect(controller.arcRadiusEditPreview, isNotNull);
+    await controller.confirmArcRadiusEditPreview();
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(controller.dimensions, hasLength(1));
+
+    // A geometry change between preview and Apply invalidates the token and
+    // leaves the original arc untouched instead of silently replanning.
+    final staleArc = controller.sketchApi!.builders.arc.build(
+      const SketchVector(120, 120),
+      1,
+      0,
+      math.pi / 2,
+    );
+    final staleLine = controller.sketchApi!.builders.line.build(
+      const SketchVector(121, 119),
+      const SketchVector(121, 120),
+    );
+    controller.sketchApi!.builders.line.build(
+      const SketchVector(119, 121),
+      const SketchVector(118, 121),
+    );
+    await expectLater(
+      controller.updateSketchEntityParameters(staleArc.id, {'radius': 1.5}),
+      throwsA(isA<ArcRadiusEditConfirmationRequired>()),
+    );
+    expect(controller.arcRadiusEditPreview, isNotNull);
+    controller.sketchApi!.updateParameters(staleLine.id, {'endY': 120.1});
+    await controller.confirmArcRadiusEditPreview();
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(controller.error, contains('obsoleto'));
+    expect(staleArc.parameters['radius'], 1.0);
   });
 
   test('multi region selection drives one arc through the command', () async {

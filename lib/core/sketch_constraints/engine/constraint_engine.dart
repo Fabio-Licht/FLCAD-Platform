@@ -135,12 +135,14 @@ class ConstraintEngine {
     double labelX = 0,
     double labelY = 0,
     bool confirmAdjacent = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) {
     _rejectUnconfirmedAdjacentRadius(
       type: type,
       references: references,
       value: value,
       confirmAdjacent: confirmAdjacent,
+      expectedRadiusPlan: expectedRadiusPlan,
     );
     return transaction(
     'create-driving-dimension',
@@ -209,6 +211,7 @@ class ConstraintEngine {
         orientationSign: orientationSign,
         ignoredConstraintId: constraint.id,
         allowAdjacentEndpointUpdates: confirmAdjacent,
+        expectedRadiusPlan: expectedRadiusPlan,
       );
       return addDimension(
         SketchDimension(
@@ -231,6 +234,7 @@ class ConstraintEngine {
     double value, {
     String? anchorReference,
     bool confirmAdjacent = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) {
     final dimension =
         dimensions[id] ?? (throw StateError('Unknown dimension: $id'));
@@ -240,6 +244,7 @@ class ConstraintEngine {
       value: value,
       ignoredConstraintId: dimension.constraintId,
       confirmAdjacent: confirmAdjacent,
+      expectedRadiusPlan: expectedRadiusPlan,
     );
     return transaction(
     'edit-driving-dimension',
@@ -254,6 +259,7 @@ class ConstraintEngine {
             _angularOrientationSign(dimension.type, dimension.references),
         ignoredConstraintId: dimension.constraintId,
         allowAdjacentEndpointUpdates: confirmAdjacent,
+        expectedRadiusPlan: expectedRadiusPlan,
       );
       return updateDimension(
         id,
@@ -272,6 +278,7 @@ class ConstraintEngine {
     double? orientationSign,
     String? ignoredConstraintId,
     bool allowAdjacentEndpointUpdates = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) {
     final active = constraints.values
         .where((constraint) => constraint.id != ignoredConstraintId)
@@ -288,6 +295,7 @@ class ConstraintEngine {
             anchorReference: anchor,
             orientationSign: orientationSign,
             allowAdjacentEndpointUpdates: allowAdjacentEndpointUpdates,
+            expectedRadiusPlan: expectedRadiusPlan,
           ),
         );
     if (anchorReference != null) return attempt(anchorReference);
@@ -320,6 +328,7 @@ class ConstraintEngine {
     required double value,
     String? ignoredConstraintId,
     required bool confirmAdjacent,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) {
     final plan = dimensionAdapter.planRadiusDimension(
       sketch: sketch,
@@ -330,6 +339,12 @@ class ConstraintEngine {
       ignoredConstraintId: ignoredConstraintId,
     );
     if (plan == null) return;
+    if (expectedRadiusPlan != null &&
+        !plan.equivalentTo(expectedRadiusPlan)) {
+      throw StateError(
+        'O preview da ediÃ§Ã£o do raio ficou obsoleto; gere um novo preview.',
+      );
+    }
     if (!plan.accepted) {
       throw StateError(
         plan.diagnostic ?? 'Não foi possível planejar a edição segura do raio.',

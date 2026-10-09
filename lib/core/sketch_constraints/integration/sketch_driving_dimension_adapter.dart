@@ -68,6 +68,7 @@ class SketchDrivingDimensionAdapter {
     String? anchorReference,
     double? orientationSign,
     bool allowAdjacentEndpointUpdates = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) {
     lastArcRadiusEditPlan = null;
     if (!value.isFinite ||
@@ -353,12 +354,19 @@ class SketchDrivingDimensionAdapter {
         if (entity.locked) {
           throw StateError('Sketch over constrained: ${entity.id} is fixed.');
         }
-        final plan = _planArcRadiusEdit(
+        final computedPlan = _planArcRadiusEdit(
           sketch: sketch,
           constraints: constraints,
           arc: entity,
           radius: radius,
         );
+        if (expectedRadiusPlan != null &&
+            !computedPlan.equivalentTo(expectedRadiusPlan)) {
+          throw StateError(
+            'O preview da ediÃ§Ã£o do raio ficou obsoleto; gere um novo preview.',
+          );
+        }
+        final plan = expectedRadiusPlan ?? computedPlan;
         lastArcRadiusEditPlan = plan;
         if (!plan.accepted || plan.arc == null) {
           throw StateError(

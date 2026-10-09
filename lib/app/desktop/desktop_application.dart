@@ -3487,6 +3487,32 @@ class _OfficialEngineeringWorkspaceState
     );
   }
 
+  Widget _withArcRadiusEditPreview(Widget content) {
+    final diagnostic = operational.arcRadiusEditDiagnostic;
+    if (operational.arcRadiusEditPreview == null && diagnostic == null) {
+      return content;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (operational.arcRadiusEditPreview != null)
+          _ArcRadiusEditPreviewPanel(controller: operational),
+        if (diagnostic != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              diagnostic,
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontSize: 10,
+              ),
+            ),
+          ),
+        content,
+      ],
+    );
+  }
+
   Widget? _sketchEnvironmentInspector() {
     final sketch = operational.activeSketch;
     if (sketch == null ||
@@ -3504,9 +3530,10 @@ class _OfficialEngineeringWorkspaceState
               .where((item) => item.id == selectedConstraintId)
               .firstOrNull;
     if (selectedConstraint != null) {
-      return _InspectorSection(
-        title: 'Constraint',
-        children: [
+      return _withArcRadiusEditPreview(
+        _InspectorSection(
+          title: 'Constraint',
+          children: [
           _InspectorProperty(
             label: 'Type',
             value: selectedConstraint.type.name,
@@ -3547,7 +3574,8 @@ class _OfficialEngineeringWorkspaceState
               ),
             ],
           ),
-        ],
+          ],
+        ),
       );
     }
     final selectedId = operational.selectedSketchEntityIds.singleOrNull;
@@ -3576,9 +3604,10 @@ class _OfficialEngineeringWorkspaceState
 
     if (selected is SketchLine) {
       final chamfer = selected.metadata['featureType'] == 'chamfer';
-      return _InspectorSection(
-        title: chamfer ? 'Chamfer' : 'Line',
-        children: [
+      return _withArcRadiusEditPreview(
+        _InspectorSection(
+          title: chamfer ? 'Chamfer' : 'Line',
+          children: [
           SketchInspectorNumberProperty(
             label: chamfer ? 'Distance' : 'Length',
             value: chamfer
@@ -3592,7 +3621,8 @@ class _OfficialEngineeringWorkspaceState
             suffix: '°',
             onSubmitted: (v) => edit('angleDegrees', v),
           ),
-        ],
+          ],
+        ),
       );
     }
     if (selected is SketchArc) {
@@ -3600,9 +3630,10 @@ class _OfficialEngineeringWorkspaceState
       final radius = (selected.parameters['radius'] as num).toDouble();
       final start = (selected.parameters['startAngle'] as num).toDouble();
       final end = (selected.parameters['endAngle'] as num).toDouble();
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+      return _withArcRadiusEditPreview(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
           _InspectorSection(
             title: fillet ? 'Fillet' : 'Arc',
             children: [
@@ -3639,8 +3670,12 @@ class _OfficialEngineeringWorkspaceState
               ),
             ],
           ),
-        ],
+          ],
+        ),
       );
+    }
+    if (operational.arcRadiusEditPreview != null) {
+      return _withArcRadiusEditPreview(const SizedBox.shrink());
     }
     if (selected is SketchCircle) {
       final radius = (selected.parameters['radius'] as num).toDouble();
@@ -11234,6 +11269,84 @@ String _sketchReconstructionSuggestionSubtitle(
     parts.add('máx ${suggestion.maxError!.toStringAsFixed(3)} mm');
   }
   return parts.join(' · ');
+}
+
+class _ArcRadiusEditPreviewPanel extends StatelessWidget {
+  const _ArcRadiusEditPreviewPanel({required this.controller});
+
+  final OperationalReverseEngineeringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final preview = controller.arcRadiusEditPreview;
+    if (preview == null) return const SizedBox.shrink();
+    final plan = preview.plan;
+    final theme = Theme.of(context);
+    return Card(
+      key: const ValueKey('arc-radius-edit-preview'),
+      color: theme.colorScheme.primaryContainer.withValues(alpha: .55),
+      margin: const EdgeInsets.only(bottom: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Preview de edicao do raio',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: theme.colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Atual: ${plan.previousRadius?.toStringAsFixed(3)} mm  ->  '
+              'Novo: ${plan.requestedRadius?.toStringAsFixed(3)} mm',
+              style: const TextStyle(fontSize: 10.5),
+            ),
+            Text(
+              'Afetadas: ${plan.affectedEntityIds.join(', ')}\n'
+              'Deslocamento max.: ${plan.maxEndpointDisplacement.toStringAsFixed(4)} mm\n'
+              'Residuos C0/G1: ${plan.maxCoincidenceResidual.toStringAsExponential(2)} / '
+              '${plan.maxTangencyResidual.toStringAsExponential(2)}',
+              style: const TextStyle(fontSize: 10),
+            ),
+            const SizedBox(height: 3),
+            const Text(
+              'Preview transitorio; nao e uma constraint parametrica.',
+              style: TextStyle(fontSize: 9.5),
+            ),
+            const SizedBox(height: 7),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    key: const ValueKey('arc-radius-preview-confirm'),
+                    onPressed: controller.busy
+                        ? null
+                        : controller.confirmArcRadiusEditPreview,
+                    icon: const Icon(Icons.check, size: 15),
+                    label: const Text('Confirmar'),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    key: const ValueKey('arc-radius-preview-cancel'),
+                    onPressed: controller.busy
+                        ? null
+                        : controller.cancelArcRadiusEditPreview,
+                    icon: const Icon(Icons.close, size: 15),
+                    label: const Text('Cancelar'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _SketchHealthIssueTile extends StatelessWidget {

@@ -161,6 +161,49 @@ class ArcRadiusEditPlan {
 
   bool get hasExternalUpdates => endpointUpdates.isNotEmpty;
 
+  /// Compares two immutable proposals without comparing object identity.
+  /// Confirmation uses this to reject a preview whose geometry was changed
+  /// before Apply instead of silently accepting a different solution.
+  bool equivalentTo(ArcRadiusEditPlan other, {double tolerance = 1e-9}) {
+    bool close(double? first, double? second) {
+      if (first == null || second == null) return first == second;
+      return (first - second).abs() <= tolerance;
+    }
+
+    bool geometryEqual(ArcRadiusGeometry? first, ArcRadiusGeometry? second) {
+      if (first == null || second == null) return first == second;
+      return close(first.center.x, second.center.x) &&
+          close(first.center.y, second.center.y) &&
+          close(first.center.z, second.center.z) &&
+          close(first.radius, second.radius) &&
+          close(first.startAngle, second.startAngle) &&
+          close(first.endAngle, second.endAngle);
+    }
+
+    if (accepted != other.accepted ||
+        !geometryEqual(arc, other.arc) ||
+        !close(previousRadius, other.previousRadius) ||
+        !close(requestedRadius, other.requestedRadius) ||
+        affectedEntityIds.length != other.affectedEntityIds.length ||
+        !affectedEntityIds.containsAll(other.affectedEntityIds) ||
+        !close(maxEndpointDisplacement, other.maxEndpointDisplacement) ||
+        !close(maxCoincidenceResidual, other.maxCoincidenceResidual) ||
+        !close(maxTangencyResidual, other.maxTangencyResidual) ||
+        endpointUpdates.length != other.endpointUpdates.length) {
+      return false;
+    }
+    for (final entry in endpointUpdates.entries) {
+      final otherValues = other.endpointUpdates[entry.key];
+      if (otherValues == null || otherValues.length != entry.value.length) {
+        return false;
+      }
+      for (final value in entry.value.entries) {
+        if (!close(value.value, otherValues[value.key])) return false;
+      }
+    }
+    return true;
+  }
+
   Map<String, Object?> get diagnosticDetails => {
     'previousRadiusMm': previousRadius,
     'requestedRadiusMm': requestedRadius,

@@ -1,6 +1,7 @@
 import '../builders/constraint_builders.dart';
 import '../diagnostics/constraint_diagnostics.dart';
 import '../engine/constraint_engine.dart';
+import '../integration/arc_radius_edit_planner.dart';
 import '../models/constraint_models.dart';
 
 class ConstraintApi {
@@ -43,6 +44,7 @@ class ConstraintApi {
     double labelX = 0,
     double labelY = 0,
     bool confirmAdjacent = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) => engine.createDrivingDimension(
     type: type,
     references: references,
@@ -51,17 +53,20 @@ class ConstraintApi {
     labelX: labelX,
     labelY: labelY,
     confirmAdjacent: confirmAdjacent,
+    expectedRadiusPlan: expectedRadiusPlan,
   );
   SketchDimension driveDimension(
     String id,
     double value, {
     String? anchorReference,
     bool confirmAdjacent = false,
+    ArcRadiusEditPlan? expectedRadiusPlan,
   }) => engine.driveDimension(
     id,
     value,
     anchorReference: anchorReference,
     confirmAdjacent: confirmAdjacent,
+    expectedRadiusPlan: expectedRadiusPlan,
   );
   bool undoDimensionEdit() {
     final sketchUndone = engine.sketch.engine.undo();

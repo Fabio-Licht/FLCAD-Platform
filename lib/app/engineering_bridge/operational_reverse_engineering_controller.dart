@@ -266,6 +266,34 @@ class SketchRegionFitComparison {
   final List<({SketchVector source, SketchVector fitted})> deviations;
 }
 
+/// Runtime-only confirmation state for a connected arc-radius edit.
+///
+/// The plan and the entity/constraint snapshots are intentionally kept out of
+/// the document.  They make Apply a guarded continuation of the exact
+/// proposal shown to the operator, rather than a new implicit edit.
+class ArcRadiusEditPreview {
+  const ArcRadiusEditPreview({
+    required this.token,
+    required this.commandId,
+    required this.parameters,
+    required this.sketchId,
+    required this.arcId,
+    required this.plan,
+    required this.entitySnapshots,
+    required this.constraintSnapshot,
+  });
+
+  final String token;
+  final String commandId;
+  final Map<String, Object?> parameters;
+  final String sketchId;
+  final String arcId;
+  final ArcRadiusEditPlan plan;
+  final Map<String, String> entitySnapshots;
+  final String constraintSnapshot;
+
+}
+
 enum SketchRegionFitOutput { line, spline }
 
 class OperationalReverseEngineeringController extends ChangeNotifier {
@@ -285,6 +313,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     try {
       runtime.write('sketch.reconstruction.hovered', null);
       runtime.write('sketch.reconstruction.selected', null);
+      _clearArcRadiusEditPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
     } on Object {
       // Widget tests dispose CadRuntime before the controller.
@@ -657,6 +686,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   final SketchReconstructionEngine _sketchReconstruction =
       const SketchReconstructionEngine();
   String? sketchCircularFitMessage;
+
+  ArcRadiusEditPreview? get arcRadiusEditPreview =>
+      runtime.read<ArcRadiusEditPreview>('sketch.arcRadius.preview');
+  String? get arcRadiusEditDiagnostic =>
+      runtime.read<String>('sketch.arcRadius.diagnostic');
+
+  ArcRadiusEditPreview? _previewFromParameters(
+    Map<String, Object?> parameters,
+  ) {
+    final token = parameters['arcRadiusPreviewToken'];
+    final preview = arcRadiusEditPreview;
+    return token is String && preview?.token == token ? preview : null;
+  }
 
   /// Operator-facing result for the last Assistant reconstruction action.
   ///
@@ -4413,6 +4455,218 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     };
   }
 
+  String _arcRadiusConstraintSnapshot() => jsonEncode([
+    for (final constraint in constraints.toList()
+      ..sort((first, second) => first.id.compareTo(second.id)))
+      constraint.toJson(),
+  ]);
+
+  Map<String, String> _arcRadiusEntitySnapshots(
+    Iterable<String> ids,
+  ) => {
+    for (final id in ids)
+      if (sketchApi?.entity(id) case final entity?) id: jsonEncode(
+        entity.toJson(),
+      ),
+  };
+
+  String? _arcIdForRadiusPlan(ArcRadiusEditPlan plan) {
+    final api = sketchApi;
+    if (api == null) return null;
+    for (final id in plan.affectedEntityIds) {
+      if (api.entity(id) is SketchArc) return id;
+    }
+    return null;
+  }
+
+  void _publishArcRadiusEditPreview(ArcRadiusEditPreview preview) {
+    final sketch = activeSketch;
+    final api = sketchApi;
+    final geometry = preview.plan.arc;
+    if (sketch == null || api == null || geometry == null) return;
+    final localArc = List<SketchVector>.generate(49, (index) {
+      final angle = geometry.startAngle +
+          (geometry.endAngle - geometry.startAngle) * index / 48;
+      return SketchVector(
+        geometry.center.x + geometry.radius * math.cos(angle),
+        geometry.center.y + geometry.radius * math.sin(angle),
+        geometry.center.z,
+      );
+    });
+    final arcSegments = [
+      for (var index = 1; index < localArc.length; index++)
+        [
+          sketch.coordinates.localToGlobal(localArc[index - 1]).toJson(),
+          sketch.coordinates.localToGlobal(localArc[index]).toJson(),
+        ],
+    ];
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'arc-radius-preview-${preview.token}',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'segments': arcSegments,
+          'displayColor': 'arcRadiusPreview',
+          'strokeWidth': 1.8,
+          'nonSelectable': true,
+          'arcRadiusPreview': true,
+        },
+      ),
+    );
+    final affectedSegments = <List<List<double>>>[];
+    for (final entry in preview.plan.endpointUpdates.entries) {
+      final entity = api.entity(entry.key);
+      if (entity is! SketchLine) continue;
+      final start = SketchVector.fromJson(entity.parameters['start']);
+      final end = SketchVector.fromJson(entity.parameters['end']);
+      var proposedStart = start;
+      var proposedEnd = end;
+      final updates = entry.value;
+      if (updates.containsKey('startX')) {
+        proposedStart = SketchVector(
+          updates['startX']!,
+          updates['startY']!,
+          updates['startZ'] ?? start.z,
+        );
+      }
+      if (updates.containsKey('endX')) {
+        proposedEnd = SketchVector(
+          updates['endX']!,
+          updates['endY']!,
+          updates['endZ'] ?? end.z,
+        );
+      }
+      affectedSegments.add([
+        sketch.coordinates.localToGlobal(proposedStart).toJson(),
+        sketch.coordinates.localToGlobal(proposedEnd).toJson(),
+      ]);
+    }
+    runtime.showTransient(
+      CadSceneEntity(
+        id: 'arc-radius-preview-affected-${preview.token}',
+        kind: CadSceneEntityKind.preview,
+        transparent: true,
+        geometry: {
+          'segments': affectedSegments,
+          'displayColor': 'arcRadiusAffected',
+          'strokeWidth': 1.5,
+          'nonSelectable': true,
+          'arcRadiusPreviewAffected': true,
+          'entityIds': preview.plan.endpointUpdates.keys.toList(),
+        },
+      ),
+    );
+    runtime.write('sketch.arcRadius.previewOverlayIds', [
+      'arc-radius-preview-${preview.token}',
+      'arc-radius-preview-affected-${preview.token}',
+    ]);
+  }
+
+  void _beginArcRadiusEditPreview(
+    ArcRadiusEditPlan plan,
+    String commandId,
+    Map<String, Object?> parameters,
+  ) {
+    final sketch = activeSketch;
+    final arcId = _arcIdForRadiusPlan(plan);
+    if (sketch == null || arcId == null || plan.requestedRadius == null) return;
+    _clearArcRadiusEditPreview();
+    final stableParameters = Map<String, Object?>.from(parameters)
+      ..remove('arcRadiusPreviewToken')
+      ..remove('confirmAdjacent');
+    final preview = ArcRadiusEditPreview(
+      token: DateTime.now().microsecondsSinceEpoch.toString(),
+      commandId: commandId,
+      parameters: Map.unmodifiable(stableParameters),
+      sketchId: sketch.id,
+      arcId: arcId,
+      plan: plan,
+      entitySnapshots: _arcRadiusEntitySnapshots(plan.affectedEntityIds),
+      constraintSnapshot: _arcRadiusConstraintSnapshot(),
+    );
+    runtime.write('sketch.arcRadius.preview', preview);
+    runtime.write('sketch.arcRadius.diagnostic', null);
+    _publishArcRadiusEditPreview(preview);
+    notifyListeners();
+  }
+
+  void _clearArcRadiusEditPreview() {
+    final ids = runtime.read<List<dynamic>>(
+      'sketch.arcRadius.previewOverlayIds',
+    );
+    for (final id in ids ?? const []) {
+      if (id is String) runtime.hideTransient(id);
+    }
+    runtime.write('sketch.arcRadius.previewOverlayIds', const <String>[]);
+    runtime.write('sketch.arcRadius.preview', null);
+    runtime.write('sketch.arcRadius.diagnostic', null);
+  }
+
+  void cancelArcRadiusEditPreview() {
+    _clearArcRadiusEditPreview();
+    error = null;
+    notifyListeners();
+  }
+
+  ArcRadiusEditPlan _validateArcRadiusEditPreview(
+    ArcRadiusEditPreview preview,
+  ) {
+    final sketch = activeSketch;
+    if (sketch == null || sketch.id != preview.sketchId) {
+      throw StateError('O preview do raio nÃ£o pertence ao Sketch ativo.');
+    }
+    final api = sketchApi;
+    for (final entry in preview.entitySnapshots.entries) {
+      final entity = api?.entity(entry.key);
+      if (entity == null || jsonEncode(entity.toJson()) != entry.value) {
+        throw StateError(
+          'O preview do raio ficou obsoleto porque a geometria foi alterada.',
+        );
+      }
+    }
+    if (_arcRadiusConstraintSnapshot() != preview.constraintSnapshot) {
+      throw StateError(
+        'O preview do raio ficou obsoleto porque as constraints foram alteradas.',
+      );
+    }
+    final arc = api?.entity(preview.arcId);
+    if (arc is! SketchArc || preview.plan.requestedRadius == null) {
+      throw StateError('A entidade do preview do raio não está disponível.');
+    }
+    final current = _planArcRadiusEdit(arc, preview.plan.requestedRadius!);
+    if (!current.accepted || !current.equivalentTo(preview.plan)) {
+      throw StateError(
+        'O preview do raio ficou obsoleto; gere um novo preview.',
+      );
+    }
+    return preview.plan;
+  }
+
+  Future<void> confirmArcRadiusEditPreview() async {
+    final preview = arcRadiusEditPreview;
+    if (preview == null) return;
+    busy = true;
+    error = null;
+    notifyListeners();
+    try {
+      _validateArcRadiusEditPreview(preview);
+      final parameters = Map<String, Object?>.from(preview.parameters)
+        ..['confirmAdjacent'] = true
+        ..['arcRadiusPreviewToken'] = preview.token;
+      await commands.dispatch(preview.commandId, parameters);
+      _clearArcRadiusEditPreview();
+      runtime.select({preview.arcId});
+    } catch (value) {
+      _clearArcRadiusEditPreview();
+      error = value.toString().replaceFirst('Bad state: ', '');
+      runtime.write('sketch.arcRadius.diagnostic', error);
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+  }
+
   bool get sketchPointReferenceCaptureActive =>
       runtime.read<String>('sketch.pointCapture.mode') != null;
   String? get sketchPointReferenceCaptureMode =>
@@ -4639,6 +4893,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void detachProject() {
+    _clearArcRadiusEditPreview();
     cancelSketchPointReferenceCapture(notify: false);
     configuredProjectId = null;
     activeReference = null;
@@ -4993,6 +5248,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// default reuses the Sketch already bound to that support so returning to
   /// the Sketch module cannot persist a duplicate root.
   Future<void> openSketch({bool forceNew = false}) async {
+    _clearArcRadiusEditPreview();
     await _run('reverse.sketch.open', {'forceNew': forceNew});
     if (error != null) throw StateError(error!);
   }
@@ -5681,6 +5937,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void cancelSketchCommand() {
+    _clearArcRadiusEditPreview();
     _sketchCoordinateMagnet.clear();
     previewPoints = const [];
     runtime.write('sketch.line.cursor', null);
@@ -6951,6 +7208,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       });
       runtime.select({id});
     } catch (value) {
+      if (value case ArcRadiusEditConfirmationRequired failure) {
+        _beginArcRadiusEditPreview(
+          failure.plan,
+          'reverse.sketch.parameters',
+          {'id': id, 'values': values},
+        );
+      }
       error = value.toString().replaceFirst('Bad state: ', '');
       rethrow;
     } finally {
@@ -13222,6 +13486,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     try {
       await commands.dispatch(id, parameters);
     } catch (value) {
+      if (value case ArcRadiusEditConfirmationRequired failure) {
+        _beginArcRadiusEditPreview(failure.plan, id, parameters);
+      }
       error = value.toString().replaceFirst('Bad state: ', '');
     } finally {
       _operationalCommandDepth--;
@@ -14062,8 +14329,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             entity is SketchArc &&
             values.length == 1 &&
             values.containsKey('radius');
+        final expectedPreview = _previewFromParameters(parameters);
         final radiusPlan = entity is SketchArc && radiusOnly
-            ? _planArcRadiusEdit(entity, values['radius']!)
+            ? expectedPreview == null
+                  ? _planArcRadiusEdit(entity, values['radius']!)
+                  : _validateArcRadiusEditPreview(expectedPreview)
             : null;
         if (radiusPlan != null && !radiusPlan.accepted) {
           throw StateError(
@@ -14147,6 +14417,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       id: 'reverse.sketch.dimension.create',
       execute: (parameters) async {
         late final SketchDimension dimension;
+        final expectedPreview = _previewFromParameters(parameters);
         try {
           dimension = constraintApi!.createDrivingDimension(
             type: SketchDimensionType.values.byName(
@@ -14158,6 +14429,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             labelX: (parameters['labelX'] as num?)?.toDouble() ?? 0,
             labelY: (parameters['labelY'] as num?)?.toDouble() ?? 0,
             confirmAdjacent: parameters['confirmAdjacent'] == true,
+            expectedRadiusPlan: expectedPreview?.plan,
           );
         } on ArcRadiusEditConfirmationRequired catch (failure) {
           parameters['radiusEditMetrics'] = failure.details;
@@ -14188,11 +14460,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.sketch.dimension.edit',
       execute: (parameters) async {
+        final expectedPreview = _previewFromParameters(parameters);
         try {
           constraintApi!.driveDimension(
             parameters['id']! as String,
             (parameters['value']! as num).toDouble(),
             confirmAdjacent: parameters['confirmAdjacent'] == true,
+            expectedRadiusPlan: expectedPreview?.plan,
           );
         } on ArcRadiusEditConfirmationRequired catch (failure) {
           parameters['radiusEditMetrics'] = failure.details;

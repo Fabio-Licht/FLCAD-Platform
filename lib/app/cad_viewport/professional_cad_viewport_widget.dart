@@ -2347,6 +2347,10 @@ class _CadScenePainter extends CustomPainter {
               entity.geometry['displayColor'] == 'assistantSuggestion';
           final regionFitOutput =
               entity.geometry['displayColor'] == 'regionFitNavy';
+          final arcRadiusPreview =
+              entity.geometry['displayColor'] == 'arcRadiusPreview';
+          final arcRadiusAffected =
+              entity.geometry['displayColor'] == 'arcRadiusAffected';
           final referenceColor = entity.selected
               ? const Color(0xffffb02e)
               : highlighted
@@ -2361,6 +2365,10 @@ class _CadScenePainter extends CustomPainter {
               ? const Color(0xffe5007d)
               : originalSectionReference
               ? const Color(0xffb7a5bd)
+              : arcRadiusPreview
+              ? const Color(0xffff4f9a)
+              : arcRadiusAffected
+              ? const Color(0xffffb347)
               : assistantSuggestion
               ? const Color(0xff4de1d2)
               : regionFitOutput
@@ -2378,6 +2386,8 @@ class _CadScenePainter extends CustomPainter {
                 ? 0.9
                 : originalSectionReference
                 ? 0.9
+                : arcRadiusPreview || arcRadiusAffected
+                ? (entity.geometry['strokeWidth'] as num?)?.toDouble() ?? 1.5
                 : (entity.geometry['strokeWidth'] as num?)?.toDouble() ?? 1.35
             ..strokeCap = StrokeCap.round
             ..isAntiAlias = true;
@@ -2416,6 +2426,8 @@ class _CadScenePainter extends CustomPainter {
             'reconstructedLine' => const Color(0xff5ec8ff),
             'reconstructedSpline' => const Color(0xff5ec8ff),
             'regionFitNavy' => const Color(0xff163a70),
+            'arcRadiusPreview' => const Color(0xffff4f9a),
+            'arcRadiusAffected' => const Color(0xffffb347),
             'reconstructedCircle' => const Color(0xffffc857),
             'reconstructedArc' => const Color(0xffff8f66),
             'previewOrange' => const Color(0xffff9f43),
