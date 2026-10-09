@@ -5504,6 +5504,17 @@ class _OfficialEngineeringWorkspaceState
                                       _captureContextualReferencePick,
                                   pickCaptureCandidateIds:
                                       _contextualCaptureCandidateIds,
+                                  onSketchSuggestionHover:
+                                      module == 'Sketch' &&
+                                          operational.stage ==
+                                              SketchSurfaceStage.sketchActive &&
+                                          !choosingSketchSupport &&
+                                          _contextualCaptureCandidateIds == null
+                                      ? (pick) => operational
+                                            .hoverSketchReconstructionSuggestionForEntity(
+                                              pick?.entityId,
+                                            )
+                                      : null,
                                   scene: scene,
                                   camera: camera,
                                   operationalEntities:
@@ -11264,6 +11275,9 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
     final selectionOrder = controller.sketchReconstructionSelectionOrder(
       suggestion,
     );
+    final hovered = controller.isSketchReconstructionSuggestionHovered(
+      suggestion,
+    );
     return MouseRegion(
       onEnter: (_) =>
           controller.highlightSketchReconstructionSuggestion(suggestion),
@@ -11282,7 +11296,25 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
                   style: const TextStyle(fontSize: 9),
                 ),
               ),
-        title: Text(suggestion.label, style: const TextStyle(fontSize: 11)),
+        title: Row(
+          children: [
+            Text(
+              controller.sketchReconstructionSuggestionDisplayLabel(suggestion),
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                color: hovered ? const Color(0xff4de1d2) : null,
+              ),
+            ),
+            const SizedBox(width: 5),
+            Expanded(
+              child: Text(
+                suggestion.label,
+                style: const TextStyle(fontSize: 11),
+              ),
+            ),
+          ],
+        ),
         subtitle: Text(
           _sketchReconstructionSuggestionSubtitle(suggestion),
           style: const TextStyle(fontSize: 9),

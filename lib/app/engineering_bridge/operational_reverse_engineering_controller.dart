@@ -113,6 +113,12 @@ const double _sketchPointTolerance = 1e-4;
 const String sketchReconstructionHighlightId =
     'sketch-reconstruction-highlight';
 
+/// Secondary transient overlay used when a suggestion that is already part of
+/// the ordered selection is hovered. Keeping it separate preserves the
+/// persistent selection overlay while still making the hovered item obvious.
+const String sketchReconstructionHoverHighlightId =
+    'sketch-reconstruction-hover-highlight';
+
 /// Runtime-only visual overlay for the immutable Section that originated the
 /// active Sketch.  The durable Section remains the source of truth; this
 /// presentation has no document entity and therefore cannot enter Sketch
@@ -316,6 +322,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.reconstruction.selectedMany', null);
       _clearArcRadiusEditPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
+      runtime.hideTransient(sketchReconstructionHoverHighlightId);
     } on Object {
       // Widget tests dispose CadRuntime before the controller.
     }
@@ -772,6 +779,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return legacy == null ? const [] : [legacy];
   }
 
+  /// Short, deterministic label used by both the list and the viewport
+  /// overlay. The index is local to the presentation category, rather than
+  /// depending on entity IDs or confidence ordering.
+  String sketchReconstructionSuggestionDisplayLabel(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    final category = sketchReconstructionSuggestionCategory(suggestion);
+    final siblings = _sketchReconstructionSuggestions
+        .where(
+          (item) =>
+              sketchReconstructionSuggestionCategory(item) == category,
+        )
+        .toList(growable: false);
+    final index = siblings.indexWhere(
+      (item) => _sameSketchReconstructionSuggestion(item, suggestion),
+    );
+    final prefix = switch (category) {
+      SketchReconstructionSuggestionCategory.lines => 'Linha',
+      SketchReconstructionSuggestionCategory.splines => 'Spline',
+      SketchReconstructionSuggestionCategory.arcs => 'Arco',
+    };
+    final number = (index < 0 ? 0 : index + 1).toString().padLeft(3, '0');
+    return '$prefix $number';
+  }
+
   int? sketchReconstructionSelectionOrder(
     SketchReconstructionSuggestion suggestion,
   ) {
@@ -786,6 +818,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchReconstructionSuggestion suggestion,
   ) => selectedSketchReconstructionSuggestions.any(
     (item) => _sameSketchReconstructionSuggestion(item, suggestion),
+  );
+
+  bool isSketchReconstructionSuggestionHovered(
+    SketchReconstructionSuggestion suggestion,
+  ) => _sameSketchReconstructionSuggestion(
+    hoveredSketchReconstructionSuggestion,
+    suggestion,
   );
 
   void analyzeSketchReconstruction() {
@@ -7700,10 +7739,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   /// Identifies existing suggestion sources in the viewport.
   ///
-  /// Hover is overlay-only (`assistantSuggestion`) so the list MouseRegion
-  /// does not rebuild. A click persists with the same selection path as
+  /// Hover is overlay-only (`assistantSuggestion`) and therefore does not
+  /// mutate Sketch geometry. The list may rebuild only to expose the active
+  /// row label; a click persists with the same selection path as
   /// [highlightSketchHealthIssue] plus a health-style overlay. Neither path
-  /// records a command or mutates Sketch geometry.
+  /// records a command.
   void highlightSketchReconstructionSuggestion(
     SketchReconstructionSuggestion suggestion, {
     bool persistent = false,
@@ -7711,10 +7751,53 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (persistent) {
       selectSketchReconstructionSuggestion(suggestion);
     } else {
+      if (_sameSketchReconstructionSuggestion(
+        hoveredSketchReconstructionSuggestion,
+        suggestion,
+      )) {
+        return;
+      }
       runtime.write('sketch.reconstruction.hovered', suggestion);
-      _publishSketchReconstructionHighlight(notify: false);
+      _publishSketchReconstructionHighlight(notify: true);
     }
-    if (persistent) notifyListeners();
+  }
+
+  /// Resolves a viewport hover to the same stable suggestion key used by the
+  /// Assistant list. This is deliberately hover-only: it never changes CAD
+  /// selection, camera state, document data, or history.
+  bool hoverSketchReconstructionSuggestionForEntity(String? entityId) {
+    final commandActive =
+        stage != SketchSurfaceStage.sketchActive ||
+        sketchCreationCommandActive ||
+        sketchEditingCommandActive ||
+        sketchEntityDragActive ||
+        sketchPointReferenceCaptureActive ||
+        sketchCircularSelectionMode ||
+        sketchTangencyPickActive;
+    if (commandActive || entityId == null) {
+      clearHoveredSketchReconstructionSuggestion();
+      return false;
+    }
+    final matches = _sketchReconstructionSuggestions
+        .where(
+          (suggestion) => {
+            ...suggestion.entityIds,
+            ...suggestion.usedEntityIds,
+            ...suggestion.coveredEntityIds,
+          }.contains(entityId),
+        )
+        .toList(growable: false);
+    if (matches.isEmpty) {
+      clearHoveredSketchReconstructionSuggestion();
+      return false;
+    }
+    matches.sort(
+      (first, second) => _reconstructionSuggestionKey(
+        first,
+      ).compareTo(_reconstructionSuggestionKey(second)),
+    );
+    highlightSketchReconstructionSuggestion(matches.first);
+    return true;
   }
 
   /// Selects one Assistant suggestion, optionally adding/removing it from the
@@ -7931,7 +8014,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void clearHoveredSketchReconstructionSuggestion() {
     if (hoveredSketchReconstructionSuggestion == null) return;
     runtime.write('sketch.reconstruction.hovered', null);
-    _publishSketchReconstructionHighlight(notify: false);
+    _publishSketchReconstructionHighlight(notify: true);
   }
 
   void _clearSketchReconstructionHighlight({
@@ -7947,6 +8030,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.reconstruction.selectedMany', null);
     _sketchReconstructionSelectionAnalysis = null;
     runtime.hideTransient(sketchReconstructionHighlightId);
+    runtime.hideTransient(sketchReconstructionHoverHighlightId);
     if (clearEntitySelection &&
         highlightedIds.isNotEmpty &&
         highlightedIds.length == selectedSketchEntityIds.length &&
@@ -7960,19 +8044,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void _publishSketchReconstructionHighlight({required bool notify}) {
     final hovered = hoveredSketchReconstructionSuggestion;
     final selected = selectedSketchReconstructionSuggestions;
-    // Hover is a temporary preview and intentionally takes visual precedence
-    // while the pointer is over one row.  Clearing hover restores the full,
-    // ordered multi-selection overlay.
-    final active = hovered == null
+    // Hover is a temporary preview. For an unselected item it keeps the
+    // historical single-item overlay; for a selected item the persistent
+    // ordered overlay remains intact and a second transient overlay accents
+    // only the hovered suggestion.
+    final hoveredIsSelected = hovered != null &&
+        selected.any((item) => _sameSketchReconstructionSuggestion(item, hovered));
+    final active = hovered == null || hoveredIsSelected
         ? selected
         : <SketchReconstructionSuggestion>[hovered];
     if (active.isEmpty) {
       runtime.hideTransient(sketchReconstructionHighlightId);
+      runtime.hideTransient(sketchReconstructionHoverHighlightId);
       if (notify) notifyListeners();
       return;
     }
-    final persistent = hovered == null && selected.isNotEmpty;
+    final persistent = selected.isNotEmpty &&
+        (hovered == null || hoveredIsSelected);
     _showSketchReconstructionHighlightOverlay(active, persistent: persistent);
+    if (hoveredIsSelected) {
+      _showSketchReconstructionHighlightOverlay(
+        [hovered],
+        persistent: false,
+        overlayId: sketchReconstructionHoverHighlightId,
+      );
+    } else {
+      runtime.hideTransient(sketchReconstructionHoverHighlightId);
+    }
     if (persistent) {
       selectedConstraintIds.clear();
       selectedSketchEntityIds
@@ -7986,6 +8084,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void _showSketchReconstructionHighlightOverlay(
     Iterable<SketchReconstructionSuggestion> suggestions, {
     required bool persistent,
+    String overlayId = sketchReconstructionHighlightId,
   }) {
     final items = suggestions.toList(growable: false);
     final segments = <List<dynamic>>[];
@@ -7993,12 +8092,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       segments.addAll(_sketchReconstructionHighlightSegments(suggestion));
     }
     if (segments.isEmpty) {
-      runtime.hideTransient(sketchReconstructionHighlightId);
+      runtime.hideTransient(overlayId);
       return;
     }
     runtime.showTransient(
       CadSceneEntity(
-        id: sketchReconstructionHighlightId,
+        id: overlayId,
         kind: CadSceneEntityKind.preview,
         transparent: true,
         geometry: {
@@ -8009,6 +8108,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             for (final suggestion in items) ...suggestion.entityIds,
           }.toList(growable: false),
           'reconstructionHighlight': persistent ? 'persistent' : 'hover',
+          'hoverLabel': persistent
+              ? null
+              : sketchReconstructionSuggestionDisplayLabel(items.first),
           'selectionOrder': <String, int>{
             for (var i = 0; i < items.length; i++)
               for (final id in items[i].entityIds) id: i + 1,

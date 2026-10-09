@@ -46,6 +46,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.onSketchTap,
     this.onSketchSecondaryTap,
     this.onSketchHover,
+    this.onSketchSuggestionHover,
     this.onSketchEntityDragStart,
     this.onSketchEntityDragUpdate,
     this.onSketchEntityDragEnd,
@@ -83,6 +84,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchTap;
   final VoidCallback? onSketchSecondaryTap;
   final ValueChanged<Offset>? onSketchHover;
+  final ValueChanged<CadViewportPick?>? onSketchSuggestionHover;
   final void Function(CadViewportPick pick, Offset position)?
   onSketchEntityDragStart;
   final ValueChanged<Offset>? onSketchEntityDragUpdate;
@@ -312,6 +314,7 @@ class _ProfessionalCadViewportWidgetState
     );
     final next = hit?.entityId;
     widget.onPickCaptureHover?.call(hit);
+    widget.onSketchSuggestionHover?.call(hit);
     widget.onManagedFaceHover?.call(hit);
     if (next != hoveredEntityId && mounted) {
       setState(() => hoveredEntityId = next);
@@ -405,6 +408,7 @@ class _ProfessionalCadViewportWidgetState
           },
           onExit: (_) {
             widget.onPickCaptureHover?.call(null);
+            widget.onSketchSuggestionHover?.call(null);
             widget.onManagedFaceHover?.call(null);
             if (hoveredEntityId != null) {
               setState(() => hoveredEntityId = null);

@@ -236,6 +236,7 @@ class _Fixture {
     bool Function(CadViewportPick)? onPickCapture,
     Set<String>? pickCaptureCandidateIds,
     ValueChanged<CadViewportPick?>? onPickCaptureHover,
+    ValueChanged<CadViewportPick?>? onSketchSuggestionHover,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     await tester.pumpWidget(
@@ -253,6 +254,7 @@ class _Fixture {
           onPickCapture: onPickCapture,
           pickCaptureCandidateIds: pickCaptureCandidateIds,
           onPickCaptureHover: onPickCaptureHover,
+          onSketchSuggestionHover: onSketchSuggestionHover,
           onSketchTap: sketchTap,
           onSketchEntityPick: sketchEntity,
           onSketchSupportPick: sketchSupport,
@@ -850,6 +852,36 @@ void main() {
       },
     );
     expect(managedCadFaceHighlight(stl, 1), isNull);
+  });
+
+  testWidgets('Sketch suggestion hover is published without changing selection', (
+    tester,
+  ) async {
+    final f = _Fixture();
+    f.scene.upsert(
+      const CadSceneEntity(
+        id: 'suggestion-source',
+        kind: CadSceneEntityKind.sketch,
+        geometry: {
+          'segments': [
+            [
+              [-1.0, 0.0, 0.0],
+              [1.0, 0.0, 0.0],
+            ],
+          ],
+        },
+      ),
+    );
+    final hovered = <CadViewportPick?>[];
+    final mouse = TestPointer(71, PointerDeviceKind.mouse);
+    await f.mount(tester, onSketchSuggestionHover: hovered.add);
+    await tester.sendEventToBinding(mouse.hover(const Offset(600, 400)));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(hovered.last?.entityId, 'suggestion-source');
+    expect(f.selection.calls, 0);
+    await tester.sendEventToBinding(mouse.hover(const Offset(1100, 700)));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(hovered.last, isNull);
   });
 
   for (final mode in ['entity', 'support', 'tap', 'double', 'drag']) {

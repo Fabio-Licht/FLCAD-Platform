@@ -2878,7 +2878,44 @@ void main() {
       );
       expect(controller.commands.manager.history.length, historyBefore);
 
-      controller.highlightSketchReconstructionSuggestion(second);
+      // Viewport hover resolves through the same source IDs as the list. It
+      // must keep the persistent selection overlay and add only a transient
+      // accent for the hovered, already-selected suggestion.
+      expect(
+        controller.hoverSketchReconstructionSuggestionForEntity(
+          first.entityIds.first,
+        ),
+        isTrue,
+      );
+      expect(controller.isSketchReconstructionSuggestionHovered(first), isTrue);
+      expect(
+        cad.runtime.scene
+            .find(sketchReconstructionHighlightId)!
+            .geometry['reconstructionHighlight'],
+        'persistent',
+      );
+      final selectedHover = cad.runtime.scene.find(
+        sketchReconstructionHoverHighlightId,
+      );
+      expect(selectedHover, isNotNull);
+      expect(selectedHover!.geometry['hoverLabel'], startsWith('Linha '));
+      expect(controller.selectedSketchEntityIds, first.entityIds.toSet());
+      controller.clearHoveredSketchReconstructionSuggestion();
+      expect(
+        cad.runtime.scene.find(sketchReconstructionHoverHighlightId),
+        isNull,
+      );
+
+      expect(
+        controller.hoverSketchReconstructionSuggestionForEntity(
+          second.entityIds.first,
+        ),
+        isTrue,
+      );
+      expect(
+        controller.isSketchReconstructionSuggestionHovered(second),
+        isTrue,
+      );
       expect(overlay()!.geometry['reconstructionHighlight'], 'hover');
       expect(overlay()!.geometry['entityIds'], second.entityIds);
       expect(controller.selectedSketchEntityIds, first.entityIds.toSet());

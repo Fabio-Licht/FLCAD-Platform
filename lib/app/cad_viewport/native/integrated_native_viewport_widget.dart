@@ -45,6 +45,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.onSketchTap,
     this.onSketchSecondaryTap,
     this.onSketchHover,
+    this.onSketchSuggestionHover,
     this.onSketchEntityDragStart,
     this.onSketchEntityDragUpdate,
     this.onSketchEntityDragEnd,
@@ -73,6 +74,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchTap;
   final VoidCallback? onSketchSecondaryTap;
   final ValueChanged<Offset>? onSketchHover;
+  final ValueChanged<CadViewportPick?>? onSketchSuggestionHover;
   final void Function(CadViewportPick pick, Offset position)?
   onSketchEntityDragStart;
   final ValueChanged<Offset>? onSketchEntityDragUpdate;
@@ -401,6 +403,15 @@ class _IntegratedCadViewportWidgetState
     while (_pendingHover != null && _nativeActive) {
       final current = _pendingHover!;
       _pendingHover = null;
+      // Sketch/reference curves are Flutter overlays even when the CAD body
+      // is rendered by the native backend. Resolve the latest pointer
+      // position through the deterministic screen-space picker, without
+      // making overlays part of CAD selection or capture candidates.
+      final sketchOverlayHover = _overlayPicking.pick(
+        position: current,
+        camera: widget.camera,
+        scene: widget.scene,
+      );
       final result = await native.pick(current.dx, current.dy);
       final source = result == null ? null : widget.scene.find(result.entityId);
       final managedFace = result?.kind == NativePickKind.face && source != null
@@ -439,6 +450,7 @@ class _IntegratedCadViewportWidgetState
           _managedFaceHover = managedFace;
         });
       }
+      widget.onSketchSuggestionHover?.call(sketchOverlayHover);
     }
     _hoverRequestActive = false;
   }
@@ -847,6 +859,7 @@ class _IntegratedCadViewportWidgetState
                       _managedFaceHover = null;
                     });
                     widget.onPickCaptureHover?.call(null);
+                    widget.onSketchSuggestionHover?.call(null);
                   }
                 : null,
             child: Stack(
@@ -876,6 +889,9 @@ class _IntegratedCadViewportWidgetState
                       onPickCaptureHover: useNative
                           ? null
                           : widget.onPickCaptureHover,
+                      onSketchSuggestionHover: useNative
+                          ? null
+                          : widget.onSketchSuggestionHover,
                       captureHoveredEntityId: _captureHover?.entityId,
                       onManagedFacePick: useNative ? null : _pickCanvas,
                       onEmptyNormalTap: () {
