@@ -3155,10 +3155,14 @@ class _OfficialEngineeringWorkspaceState
     // Selection/highlight is still handled by the controller.  Focusing is a
     // separate presentation action so hover never moves the camera and the
     // accept button cannot accidentally trigger it through ListTile.onTap.
-    operational.highlightSketchReconstructionSuggestion(
+    final additive = HardwareKeyboard.instance.isControlPressed;
+    operational.selectSketchReconstructionSuggestion(
       suggestion,
-      persistent: true,
+      additive: additive,
     );
+    // Ctrl-click is intentionally selection-only.  A normal click retains
+    // the established focus-to-suggestion behavior.
+    if (additive) return;
     final bounds = operational.sketchReconstructionSuggestionBounds(suggestion);
     if (bounds == null) return;
     final extent = bounds.maximum - bounds.minimum;
@@ -5303,6 +5307,22 @@ class _OfficialEngineeringWorkspaceState
   Widget build(BuildContext context) => CallbackShortcuts(
     bindings: {
       const SingleActivator(LogicalKeyboardKey.escape): () {
+        final hasSuggestionSelection =
+            operational.selectedSketchReconstructionSuggestions.isNotEmpty;
+        final cadCommandActive =
+            operational.sketchCreationCommandActive ||
+            operational.sketchEditingCommandActive ||
+            operational.sketchCircularSelectionMode ||
+            operational.sketchPointReferenceCaptureActive ||
+            choosingSketchSupport ||
+            operational.professionalExtrudePreview != null ||
+            operational.professionalRevolvePreview != null ||
+            operational.professionalSurfacePreview != null;
+        if (hasSuggestionSelection && !cadCommandActive) {
+          operational.clearSketchReconstructionSelection();
+          widget.cad.setStatus('Seleção de sugestões limpa.');
+          return;
+        }
         contextualReferencePreview.cancel();
         widget.cad.runtime.clearManagedAlignmentPreview();
         intersectionSelection.clear();
@@ -5576,6 +5596,22 @@ class _OfficialEngineeringWorkspaceState
                                               );
                                             }
                                           } else {
+                                            final suggestionPicked =
+                                                !operational
+                                                    .sketchCircularSelectionMode &&
+                                                operational
+                                                    .selectSketchReconstructionSuggestionForEntity(
+                                                      pick.entityId,
+                                                      additive: HardwareKeyboard
+                                                          .instance
+                                                          .isControlPressed,
+                                                    );
+                                            if (suggestionPicked) {
+                                              widget.cad.setStatus(
+                                                'Sugestão selecionada${HardwareKeyboard.instance.isControlPressed ? ' (Ctrl)' : ''}.',
+                                              );
+                                              return;
+                                            }
                                             operational.cancelSketchCommand();
                                             operational.selectSketchEntity(
                                               pick.entityId,
@@ -11216,6 +11252,9 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
     final selected = controller.isSketchReconstructionSuggestionSelected(
       suggestion,
     );
+    final selectionOrder = controller.sketchReconstructionSelectionOrder(
+      suggestion,
+    );
     return MouseRegion(
       onEnter: (_) =>
           controller.highlightSketchReconstructionSuggestion(suggestion),
@@ -11225,6 +11264,15 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
         selected: selected,
         contentPadding: EdgeInsets.zero,
         onTap: onFocus,
+        leading: selectionOrder == null
+            ? null
+            : CircleAvatar(
+                radius: 9,
+                child: Text(
+                  '$selectionOrder',
+                  style: const TextStyle(fontSize: 9),
+                ),
+              ),
         title: Text(suggestion.label, style: const TextStyle(fontSize: 11)),
         subtitle: Text(
           _sketchReconstructionSuggestionSubtitle(suggestion),

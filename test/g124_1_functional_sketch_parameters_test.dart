@@ -4498,6 +4498,96 @@ void main() {
       expect(submitted, 7.5);
     },
   );
+
+  test(
+    'Assistant keeps ordered Ctrl-style multi-selection and blocks multi-accept',
+    () async {
+      final harness = await _g124Harness('g124-reconstruction-multiselect');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final first = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final second = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final third = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 0),
+        const SketchVector(30, 0),
+      );
+      final suggestions = [
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [first.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [second.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [third.id],
+          confidence: 1,
+        ),
+      ];
+
+      harness.controller.highlightSketchReconstructionSuggestion(
+        suggestions[0],
+        persistent: true,
+      );
+      harness.controller.selectSketchReconstructionSuggestion(
+        suggestions[1],
+        additive: true,
+      );
+      harness.controller.selectSketchReconstructionSuggestion(
+        suggestions[2],
+        additive: true,
+      );
+      expect(
+        harness.controller.selectedSketchReconstructionSuggestions,
+        suggestions,
+      );
+      expect(
+        harness.controller.sketchReconstructionSelectionOrder(suggestions[1]),
+        2,
+      );
+      expect(
+        harness.cad.runtime.scene
+            .find(sketchReconstructionHighlightId)!
+            .geometry['entityIds'],
+        containsAll([first.id, second.id, third.id]),
+      );
+      harness.controller.selectSketchReconstructionSuggestion(
+        suggestions[1],
+        additive: true,
+      );
+      expect(
+        harness.controller.selectedSketchReconstructionSuggestions,
+        [suggestions[0], suggestions[2]],
+      );
+      final historyBefore = harness.controller.commands.manager.history.length;
+      expect(
+        await harness.controller.acceptSketchReconstructionSuggestion(
+          suggestions[0],
+        ),
+        isNull,
+      );
+      expect(
+        harness.controller.sketchReconstructionMessage,
+        contains('aplicação conjunta'),
+      );
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyBefore,
+      );
+    },
+  );
 }
 
 Future<

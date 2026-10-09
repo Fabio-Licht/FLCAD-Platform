@@ -313,6 +313,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     try {
       runtime.write('sketch.reconstruction.hovered', null);
       runtime.write('sketch.reconstruction.selected', null);
+      runtime.write('sketch.reconstruction.selectedMany', null);
       _clearArcRadiusEditPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
     } on Object {
@@ -745,21 +746,48 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'sketch.reconstruction.hovered',
       );
   SketchReconstructionSuggestion? get selectedSketchReconstructionSuggestion =>
+      selectedSketchReconstructionSuggestions.lastOrNull ??
       runtime.read<SketchReconstructionSuggestion>(
-        'sketch.reconstruction.selected',
+          'sketch.reconstruction.selected');
+
+  /// Suggestions selected through the Assistant, in the exact order in which
+  /// they were selected.  This is presentation-only state: it never becomes
+  /// Sketch geometry or a command history entry.
+  List<SketchReconstructionSuggestion>
+  get selectedSketchReconstructionSuggestions {
+    final value = runtime.read<Object?>('sketch.reconstruction.selectedMany');
+    if (value is List) {
+      return List<SketchReconstructionSuggestion>.unmodifiable(
+        value.whereType<SketchReconstructionSuggestion>(),
       );
+    }
+    final legacy = runtime.read<SketchReconstructionSuggestion>(
+      'sketch.reconstruction.selected',
+    );
+    return legacy == null ? const [] : [legacy];
+  }
+
+  int? sketchReconstructionSelectionOrder(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    final key = _reconstructionSuggestionKey(suggestion);
+    final index = selectedSketchReconstructionSuggestions.indexWhere(
+      (item) => _reconstructionSuggestionKey(item) == key,
+    );
+    return index < 0 ? null : index + 1;
+  }
+
   bool isSketchReconstructionSuggestionSelected(
     SketchReconstructionSuggestion suggestion,
-  ) => _sameSketchReconstructionSuggestion(
-    selectedSketchReconstructionSuggestion,
-    suggestion,
+  ) => selectedSketchReconstructionSuggestions.any(
+    (item) => _sameSketchReconstructionSuggestion(item, suggestion),
   );
+
   void analyzeSketchReconstruction() {
     sketchReconstructionMessage = null;
-    final highlighted = selectedSketchReconstructionSuggestion;
-    _clearSketchReconstructionHighlight(
-      clearEntitySelection: highlighted != null,
-    );
+    final previousSelection = selectedSketchReconstructionSuggestions;
+    final previousFingerprints = _sketchReconstructionSuggestionFingerprints;
+    _clearSketchReconstructionHighlight(clearEntitySelection: previousSelection.isNotEmpty);
     final candidates = _sketchReconstructionCandidates();
     _sketchReconstructionSuggestions = _sketchReconstruction.analyze(
       candidates,
@@ -775,6 +803,22 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           byId,
         ),
     };
+    // Reconcile transient selection with the new hypothesis set.  A changed
+    // or removed suggestion must never remain selected or highlighted.
+    final currentByKey = <String, SketchReconstructionSuggestion>{
+      for (final item in _sketchReconstructionSuggestions)
+        _reconstructionSuggestionKey(item): item,
+    };
+    final reconciled = <SketchReconstructionSuggestion>[
+      for (final item in previousSelection)
+        if (currentByKey[_reconstructionSuggestionKey(item)] case final fresh?)
+        if (previousFingerprints[_reconstructionSuggestionKey(item)] ==
+              _sketchReconstructionSuggestionFingerprints[
+                _reconstructionSuggestionKey(fresh)
+              ])
+            fresh,
+    ];
+    _setSketchReconstructionSelection(reconciled, notify: false);
     notifyListeners();
   }
 
@@ -849,6 +893,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchReconstructionSuggestion suggestion, {
     bool allowLowConfidence = false,
   }) async {
+    if (selectedSketchReconstructionSuggestions.length > 1) {
+      const message =
+          'Selecione apenas uma sugestão para aceitar; a aplicação conjunta será implementada posteriormente.';
+      error = message;
+      sketchReconstructionMessage = message;
+      notifyListeners();
+      return null;
+    }
     if (!_canAcceptSketchReconstructionSuggestion(
       suggestion,
       allowLowConfidence: allowLowConfidence,
@@ -2884,6 +2936,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void selectSketch(String id) {
+    clearSketchReconstructionSelection(notify: false);
+    _sketchReconstructionSuggestions = const [];
+    _sketchReconstructionSuggestionFingerprints = const {};
     var sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
     final persisted = runtime.document?.entities[id]?.data['sketch'];
     if (sketch == null && persisted is Map) {
@@ -4911,6 +4966,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void detachProject() {
     _clearArcRadiusEditPreview();
+    clearSketchReconstructionSelection(notify: false);
+    _sketchReconstructionSuggestions = const [];
+    _sketchReconstructionSuggestionFingerprints = const {};
     cancelSketchPointReferenceCapture(notify: false);
     configuredProjectId = null;
     activeReference = null;
@@ -5265,6 +5323,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// default reuses the Sketch already bound to that support so returning to
   /// the Sketch module cannot persist a duplicate root.
   Future<void> openSketch({bool forceNew = false}) async {
+    clearSketchReconstructionSelection(notify: false);
+    _sketchReconstructionSuggestions = const [];
+    _sketchReconstructionSuggestionFingerprints = const {};
     _clearArcRadiusEditPreview();
     await _run('reverse.sketch.open', {'forceNew': forceNew});
     if (error != null) throw StateError(error!);
@@ -7643,12 +7704,84 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     bool persistent = false,
   }) {
     if (persistent) {
-      runtime.write('sketch.reconstruction.selected', suggestion);
-      runtime.write('sketch.reconstruction.hovered', null);
+      selectSketchReconstructionSuggestion(suggestion);
     } else {
       runtime.write('sketch.reconstruction.hovered', suggestion);
+      _publishSketchReconstructionHighlight(notify: false);
     }
-    _publishSketchReconstructionHighlight(notify: persistent);
+    if (persistent) notifyListeners();
+  }
+
+  /// Selects one Assistant suggestion, optionally adding/removing it from the
+  /// ordered transient selection.  This never mutates the Sketch document.
+  void selectSketchReconstructionSuggestion(
+    SketchReconstructionSuggestion suggestion, {
+    bool additive = false,
+  }) {
+    final current = selectedSketchReconstructionSuggestions.toList();
+    final key = _reconstructionSuggestionKey(suggestion);
+    final index = current.indexWhere(
+      (item) => _reconstructionSuggestionKey(item) == key,
+    );
+    if (additive) {
+      if (index >= 0) {
+        current.removeAt(index);
+      } else {
+        current.add(suggestion);
+      }
+    } else {
+      current
+        ..clear()
+        ..add(suggestion);
+    }
+    _setSketchReconstructionSelection(current);
+  }
+
+  /// Maps a viewport pick on a suggestion source to the same ordered model
+  /// used by the Assistant list. Returns false when the pick is ordinary CAD
+  /// geometry and must follow the normal Sketch selection path.
+  bool selectSketchReconstructionSuggestionForEntity(
+    String entityId, {
+    bool additive = false,
+  }) {
+    final suggestion = _sketchReconstructionSuggestions
+        .where(
+          (item) => {
+            ...item.entityIds,
+            ...item.usedEntityIds,
+            ...item.coveredEntityIds,
+          }.contains(entityId),
+        )
+        .firstOrNull;
+    if (suggestion == null) return false;
+    selectSketchReconstructionSuggestion(suggestion, additive: additive);
+    return true;
+  }
+
+  void clearSketchReconstructionSelection({bool notify = true}) {
+    _setSketchReconstructionSelection(const [], notify: notify);
+  }
+
+  void _setSketchReconstructionSelection(
+    Iterable<SketchReconstructionSuggestion> suggestions, {
+    bool notify = true,
+  }) {
+    final unique = <String, SketchReconstructionSuggestion>{};
+    for (final suggestion in suggestions) {
+      unique[_reconstructionSuggestionKey(suggestion)] = suggestion;
+    }
+    final ordered = unique.values.toList(growable: false);
+    runtime.write(
+      'sketch.reconstruction.selectedMany',
+      ordered.isEmpty ? null : List<SketchReconstructionSuggestion>.unmodifiable(ordered),
+    );
+    runtime.write(
+      'sketch.reconstruction.selected',
+      ordered.isEmpty ? null : ordered.last,
+    );
+    runtime.write('sketch.reconstruction.hovered', null);
+    _publishSketchReconstructionHighlight(notify: false);
+    if (notify) notifyListeners();
   }
 
   /// Returns bounds for only the entities that contributed to [suggestion].
@@ -7769,12 +7902,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     bool clearEntitySelection = false,
     bool notify = false,
   }) {
-    final highlightedIds = selectedSketchReconstructionSuggestion?.entityIds;
+    final highlightedIds = <String>{
+      for (final item in selectedSketchReconstructionSuggestions)
+        ...item.entityIds,
+    };
     runtime.write('sketch.reconstruction.hovered', null);
     runtime.write('sketch.reconstruction.selected', null);
+    runtime.write('sketch.reconstruction.selectedMany', null);
     runtime.hideTransient(sketchReconstructionHighlightId);
     if (clearEntitySelection &&
-        highlightedIds != null &&
+        highlightedIds.isNotEmpty &&
         highlightedIds.length == selectedSketchEntityIds.length &&
         highlightedIds.every(selectedSketchEntityIds.contains)) {
       selectedSketchEntityIds.clear();
@@ -7785,30 +7922,39 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void _publishSketchReconstructionHighlight({required bool notify}) {
     final hovered = hoveredSketchReconstructionSuggestion;
-    final selected = selectedSketchReconstructionSuggestion;
-    final active = hovered ?? selected;
-    if (active == null) {
+    final selected = selectedSketchReconstructionSuggestions;
+    // Hover is a temporary preview and intentionally takes visual precedence
+    // while the pointer is over one row.  Clearing hover restores the full,
+    // ordered multi-selection overlay.
+    final active = hovered == null
+        ? selected
+        : <SketchReconstructionSuggestion>[hovered];
+    if (active.isEmpty) {
       runtime.hideTransient(sketchReconstructionHighlightId);
       if (notify) notifyListeners();
       return;
     }
-    final persistent = hovered == null;
+    final persistent = hovered == null && selected.isNotEmpty;
     _showSketchReconstructionHighlightOverlay(active, persistent: persistent);
     if (persistent) {
       selectedConstraintIds.clear();
       selectedSketchEntityIds
         ..clear()
-        ..addAll(active.entityIds);
-      runtime.select(active.entityIds.toSet());
+        ..addAll({for (final item in selected) ...item.entityIds});
+      runtime.select(selectedSketchEntityIds.toSet());
     }
     if (notify) notifyListeners();
   }
 
   void _showSketchReconstructionHighlightOverlay(
-    SketchReconstructionSuggestion suggestion, {
+    Iterable<SketchReconstructionSuggestion> suggestions, {
     required bool persistent,
   }) {
-    final segments = _sketchReconstructionHighlightSegments(suggestion);
+    final items = suggestions.toList(growable: false);
+    final segments = <List<dynamic>>[];
+    for (final suggestion in items) {
+      segments.addAll(_sketchReconstructionHighlightSegments(suggestion));
+    }
     if (segments.isEmpty) {
       runtime.hideTransient(sketchReconstructionHighlightId);
       return;
@@ -7822,8 +7968,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'segments': segments,
           'displayColor': persistent ? 'conflictRed' : 'assistantSuggestion',
           'strokeWidth': persistent ? 2.5 : 2.0,
-          'entityIds': List<String>.from(suggestion.entityIds),
+          'entityIds': <String>{
+            for (final suggestion in items) ...suggestion.entityIds,
+          }.toList(growable: false),
           'reconstructionHighlight': persistent ? 'persistent' : 'hover',
+          'selectionOrder': <String, int>{
+            for (var i = 0; i < items.length; i++)
+              for (final id in items[i].entityIds) id: i + 1,
+          },
         },
       ),
     );
