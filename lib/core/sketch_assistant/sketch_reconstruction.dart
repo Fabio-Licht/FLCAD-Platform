@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:math' as math;
 
+import '../sketch_constraints/models/constraint_models.dart';
 import '../sketch_engine/entities/sketch_entities.dart';
 import '../sketch_engine/models/sketch_models.dart';
 
@@ -3766,5 +3767,642 @@ class SketchReconstructionEngine {
   double _distance(SketchVector first, SketchVector second) {
     final dx = first.x - second.x, dy = first.y - second.y;
     return math.sqrt(dx * dx + dy * dy);
+  }
+}
+
+/// Measured positional/tangential continuity for a pair of Sketch curves.
+/// This is deliberately separate from [SketchConstraintType]: a declared
+/// tangent relation is reported alongside the measurement and never promotes
+/// a non-tangent pair to G1.
+enum SketchContinuityLevel { disconnected, c0, g1 }
+
+enum SketchContinuityIssue {
+  none,
+  gap,
+  overlap,
+  crossing,
+  branching,
+  degenerate,
+  constraintMismatch,
+}
+
+class SketchContinuityEndpoint {
+  const SketchContinuityEndpoint({
+    required this.entityId,
+    required this.name,
+    required this.point,
+    required this.tangent,
+  });
+
+  final String entityId;
+  final String name;
+  final SketchVector point;
+  final SketchVector tangent;
+}
+
+/// A read-only diagnostic for one closest endpoint pair.  [gapMillimeters]
+/// is the measured C0 residual; [tangentAngleRadians] is the unoriented
+/// tangent-line angle.  [measuredG1] and [continuity] require oriented chain
+/// continuation (same traversal direction), not merely `|dot|≈1`.
+class SketchContinuityJoinDiagnostic {
+  const SketchContinuityJoinDiagnostic({
+    required this.first,
+    required this.second,
+    required this.gapMillimeters,
+    required this.gapToleranceMillimeters,
+    required this.tangencyToleranceRadians,
+    required this.tangentAngleRadians,
+    required this.orientedTangentAngleRadians,
+    required this.measuredC0,
+    required this.measuredG1,
+    required this.orientedG1,
+    required this.declaredCoincident,
+    required this.declaredTangent,
+    required this.continuity,
+    required this.issue,
+    required this.nearby,
+    required this.overlapping,
+    required this.crossing,
+  });
+
+  final SketchContinuityEndpoint first;
+  final SketchContinuityEndpoint second;
+  final double gapMillimeters;
+  final double gapToleranceMillimeters;
+  final double tangencyToleranceRadians;
+  final double? tangentAngleRadians;
+  final double? orientedTangentAngleRadians;
+  final bool measuredC0;
+  final bool measuredG1;
+  final bool orientedG1;
+  final bool declaredCoincident;
+  final bool declaredTangent;
+  final SketchContinuityLevel continuity;
+  final SketchContinuityIssue issue;
+  final bool nearby;
+  final bool overlapping;
+  final bool crossing;
+
+  double? get tangentAngleDegrees =>
+      tangentAngleRadians == null ? null : tangentAngleRadians! * 180 / math.pi;
+
+  bool get hasProblem => issue != SketchContinuityIssue.none;
+}
+
+/// Pure diagnosis of endpoint connectivity for reconstructed lines, arcs and
+/// splines.  It reads entity parameters and optional constraints only; it
+/// never changes entities, constraints, the document or command history.
+class SketchContinuityDiagnostic {
+  const SketchContinuityDiagnostic();
+
+  SketchContinuityAnalysis analyze(
+    Iterable<SketchEntity> input, {
+    Iterable<SketchConstraint> constraints = const <SketchConstraint>[],
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) {
+    final paths = <_ContinuityPath>[];
+    final invalid = <String>[];
+    final unsupported = <String>[];
+    final seenIds = <String>{};
+    final duplicateIds = <String>[];
+    for (final entity in input) {
+      if (!seenIds.add(entity.id)) {
+        duplicateIds.add(entity.id);
+        continue;
+      }
+      if (entity.type != SketchEntityType.line &&
+          entity.type != SketchEntityType.arc &&
+          entity.type != SketchEntityType.spline) {
+        unsupported.add(entity.id);
+        continue;
+      }
+      final path = _pathFor(entity);
+      if (path == null) {
+        invalid.add(entity.id);
+      } else {
+        paths.add(path);
+      }
+    }
+    paths.sort((first, second) => first.entity.id.compareTo(second.entity.id));
+    invalid.sort();
+    unsupported.sort();
+    duplicateIds.sort();
+    final declared = constraints.where((constraint) => constraint.enabled);
+    final joins = <SketchContinuityJoinDiagnostic>[];
+    final endpointUse = <String, int>{};
+    for (var firstIndex = 0; firstIndex < paths.length; firstIndex++) {
+      for (
+        var secondIndex = firstIndex + 1;
+        secondIndex < paths.length;
+        secondIndex++
+      ) {
+        final first = paths[firstIndex];
+        final second = paths[secondIndex];
+        final candidate = _closestEndpoint(first, second);
+        final measuredC0 =
+            candidate.distance <= tolerance.endpointCoincidenceMillimeters;
+        final nearby = candidate.distance <= tolerance.maxGapMillimeters;
+        final orientedAngle = _tangentAngle(
+          candidate.first.tangent,
+          candidate.second.tangent,
+          candidate.first.name == 'start',
+          candidate.second.name == 'start',
+        );
+        final unsignedAngle = _angleBetweenLines(
+          candidate.first.tangent,
+          candidate.second.tangent,
+        );
+        // G1 uses the 1° circular-tangency budget
+        // ([SketchCircularFitTolerance.tangencyAngleRadians]), not the 0.10 mm
+        // reconstruction residual or cursor angularTolerance.  Classification
+        // requires C0 and the same chain direction — collinear opposite travel
+        // is C0 only, even when |dot|≈1.
+        final orientedG1 =
+            measuredC0 &&
+            orientedAngle != null &&
+            orientedAngle <= tolerance.tangencyAngleRadians;
+        final measuredG1 = orientedG1;
+        final declaredCoincident = _hasConstraintBetween(
+          declared,
+          SketchConstraintType.coincident,
+          first.entity.id,
+          second.entity.id,
+        );
+        final declaredTangent = _hasConstraintBetween(
+          declared,
+          SketchConstraintType.tangent,
+          first.entity.id,
+          second.entity.id,
+        );
+        final overlapping = _pathsOverlap(
+          first,
+          second,
+          tolerance.endpointCoincidenceMillimeters,
+        );
+        final crossing = _pathsCross(first, second);
+        if (measuredC0) {
+          endpointUse['${first.entity.id}:${candidate.first.name}'] =
+              (endpointUse['${first.entity.id}:${candidate.first.name}'] ?? 0) +
+              1;
+          endpointUse['${second.entity.id}:${candidate.second.name}'] =
+              (endpointUse['${second.entity.id}:${candidate.second.name}'] ??
+                  0) +
+              1;
+        }
+        var issue = SketchContinuityIssue.none;
+        if (overlapping) {
+          issue = SketchContinuityIssue.overlap;
+        } else if (crossing) {
+          issue = SketchContinuityIssue.crossing;
+        } else if (declaredCoincident && !measuredC0 ||
+            declaredTangent && !measuredG1) {
+          issue = SketchContinuityIssue.constraintMismatch;
+        } else if (!measuredC0) {
+          issue = SketchContinuityIssue.gap;
+        }
+        joins.add(
+          SketchContinuityJoinDiagnostic(
+            first: candidate.first,
+            second: candidate.second,
+            gapMillimeters: candidate.distance,
+            gapToleranceMillimeters: tolerance.endpointCoincidenceMillimeters,
+            tangencyToleranceRadians: tolerance.tangencyAngleRadians,
+            tangentAngleRadians: unsignedAngle,
+            orientedTangentAngleRadians: orientedAngle,
+            measuredC0: measuredC0,
+            measuredG1: measuredG1,
+            orientedG1: orientedG1,
+            declaredCoincident: declaredCoincident,
+            declaredTangent: declaredTangent,
+            continuity: measuredG1
+                ? SketchContinuityLevel.g1
+                : measuredC0
+                ? SketchContinuityLevel.c0
+                : SketchContinuityLevel.disconnected,
+            issue: issue,
+            nearby: nearby,
+            overlapping: overlapping,
+            crossing: crossing,
+          ),
+        );
+      }
+    }
+    final branchEndpoints = endpointUse.entries
+        .where((entry) => entry.value > 1)
+        .map((entry) => entry.key)
+        .toSet();
+    final withBranches = joins
+        .map(
+          (join) =>
+              branchEndpoints.contains(
+                    '${join.first.entityId}:${join.first.name}',
+                  ) ||
+                  branchEndpoints.contains(
+                    '${join.second.entityId}:${join.second.name}',
+                  )
+              ? (join.issue == SketchContinuityIssue.none ||
+                        join.issue == SketchContinuityIssue.gap)
+                    ? _withIssue(join, SketchContinuityIssue.branching)
+                    : join
+              : join,
+        )
+        .toList(growable: false);
+    final diagnostics = <String>[
+      if (duplicateIds.isNotEmpty)
+        'IDs duplicados: ${duplicateIds.toSet().join(', ')}',
+      if (invalid.isNotEmpty)
+        'Geometrias degeneradas/inválidas: ${invalid.join(', ')}',
+      if (unsupported.isNotEmpty)
+        'Entidades fora do escopo (ignoradas): ${unsupported.join(', ')}',
+      for (final join in withBranches.where((item) => item.hasProblem))
+        '${join.first.entityId}:${join.first.name} ↔ '
+            '${join.second.entityId}:${join.second.name}: '
+            '${join.issue.name}, gap ${join.gapMillimeters.toStringAsFixed(3)} mm',
+    ];
+    return SketchContinuityAnalysis(
+      joins: List.unmodifiable(withBranches),
+      invalidEntityIds: List.unmodifiable({...invalid, ...duplicateIds}),
+      unsupportedEntityIds: List.unmodifiable(unsupported),
+      branchingEndpoints: List.unmodifiable(branchEndpoints.toList()..sort()),
+      diagnostics: List.unmodifiable(diagnostics),
+    );
+  }
+
+  _ContinuityPath? _pathFor(SketchEntity entity) {
+    try {
+      if (entity is SketchLine) {
+        final start = SketchVector.fromJson(entity.parameters['start']);
+        final end = SketchVector.fromJson(entity.parameters['end']);
+        final tangent = _unit(end - start);
+        if (tangent == null) return null;
+        return _ContinuityPath(
+          entity: entity,
+          samples: [start, end],
+          startTangent: tangent,
+          endTangent: tangent,
+        );
+      }
+      if (entity is SketchArc) {
+        final center = SketchVector.fromJson(entity.parameters['center']);
+        final radius = (entity.parameters['radius'] as num).toDouble();
+        final startAngle = (entity.parameters['startAngle'] as num).toDouble();
+        final endAngle = (entity.parameters['endAngle'] as num).toDouble();
+        final sweep = endAngle - startAngle;
+        if (!_finite(center) ||
+            !radius.isFinite ||
+            radius <= 0 ||
+            !startAngle.isFinite ||
+            !endAngle.isFinite ||
+            sweep.abs() <= 1e-9 ||
+            sweep.abs() > 2 * math.pi + 1e-6) {
+          return null;
+        }
+        final sign = sweep < 0 ? -1.0 : 1.0;
+        final startTangent = _unit(
+          SketchVector(
+            -math.sin(startAngle) * sign,
+            math.cos(startAngle) * sign,
+          ),
+        );
+        final endTangent = _unit(
+          SketchVector(-math.sin(endAngle) * sign, math.cos(endAngle) * sign),
+        );
+        if (startTangent == null || endTangent == null) return null;
+        final steps = (sweep.abs() / 0.1).ceil().clamp(2, 128);
+        return _ContinuityPath(
+          entity: entity,
+          samples: [
+            for (var index = 0; index <= steps; index++)
+              _arcPoint(center, radius, startAngle + sweep * index / steps),
+          ],
+          startTangent: startTangent,
+          endTangent: endTangent,
+        );
+      }
+      if (entity is SketchSpline) {
+        final raw =
+            entity.parameters['sampledPoints'] ?? entity.parameters['points'];
+        if (raw is! List) return null;
+        final samples = <SketchVector>[];
+        for (final value in raw) {
+          if (value is! List) return null;
+          final point = SketchVector.fromJson(value);
+          if (!_finite(point)) return null;
+          if (samples.isEmpty || _cdistance(samples.last, point) > 1e-12) {
+            samples.add(point);
+          }
+        }
+        if (samples.length < 2) return null;
+        final startTangent = _unit(samples[1] - samples.first);
+        final endTangent = _unit(samples.last - samples[samples.length - 2]);
+        if (startTangent == null || endTangent == null) return null;
+        return _ContinuityPath(
+          entity: entity,
+          samples: samples,
+          startTangent: startTangent,
+          endTangent: endTangent,
+        );
+      }
+    } on Object {
+      return null;
+    }
+    return null;
+  }
+
+  _ContinuityEndpointPair _closestEndpoint(
+    _ContinuityPath first,
+    _ContinuityPath second,
+  ) {
+    final candidates = <_ContinuityEndpointPair>[
+      _ContinuityEndpointPair(
+        first.endpoint('start'),
+        second.endpoint('start'),
+      ),
+      _ContinuityEndpointPair(first.endpoint('start'), second.endpoint('end')),
+      _ContinuityEndpointPair(first.endpoint('end'), second.endpoint('start')),
+      _ContinuityEndpointPair(first.endpoint('end'), second.endpoint('end')),
+    ];
+    candidates.sort((a, b) {
+      final byDistance = a.distance.compareTo(b.distance);
+      if (byDistance != 0) return byDistance;
+      final byFirst = a.first.name.compareTo(b.first.name);
+      if (byFirst != 0) return byFirst;
+      return a.second.name.compareTo(b.second.name);
+    });
+    return candidates.first;
+  }
+
+  SketchContinuityJoinDiagnostic _withIssue(
+    SketchContinuityJoinDiagnostic join,
+    SketchContinuityIssue issue,
+  ) => SketchContinuityJoinDiagnostic(
+    first: join.first,
+    second: join.second,
+    gapMillimeters: join.gapMillimeters,
+    gapToleranceMillimeters: join.gapToleranceMillimeters,
+    tangencyToleranceRadians: join.tangencyToleranceRadians,
+    tangentAngleRadians: join.tangentAngleRadians,
+    orientedTangentAngleRadians: join.orientedTangentAngleRadians,
+    measuredC0: join.measuredC0,
+    measuredG1: join.measuredG1,
+    orientedG1: join.orientedG1,
+    declaredCoincident: join.declaredCoincident,
+    declaredTangent: join.declaredTangent,
+    continuity: join.continuity,
+    issue: issue,
+    nearby: join.nearby,
+    overlapping: join.overlapping,
+    crossing: join.crossing,
+  );
+
+  bool _hasConstraintBetween(
+    Iterable<SketchConstraint> constraints,
+    SketchConstraintType type,
+    String first,
+    String second,
+  ) => constraints.any(
+    (constraint) =>
+        constraint.type == type &&
+        _constraintReferences(constraint, first) &&
+        _constraintReferences(constraint, second),
+  );
+
+  bool _constraintReferences(SketchConstraint constraint, String id) =>
+      constraint.references.any(
+        (reference) => reference == id || reference.startsWith('$id:'),
+      );
+
+  double? _tangentAngle(
+    SketchVector first,
+    SketchVector second,
+    bool firstAtStart,
+    bool secondAtStart,
+  ) {
+    final a = _unit(first), b = _unit(second);
+    if (a == null || b == null) return null;
+    var cosine = a.dot(b);
+    // A continuous path reverses one stored direction when both contacts use
+    // the same endpoint side (start/start or end/end).
+    if (firstAtStart == secondAtStart) cosine = -cosine;
+    return math.acos(cosine.clamp(-1.0, 1.0));
+  }
+
+  double? _angleBetweenLines(SketchVector first, SketchVector second) {
+    final direct = _angleBetween(first, second);
+    if (direct == null) return null;
+    return math.min(direct, math.pi - direct);
+  }
+
+  double? _angleBetween(SketchVector first, SketchVector second) {
+    final a = _unit(first), b = _unit(second);
+    if (a == null || b == null) return null;
+    final cosine = (a.dot(b)).clamp(-1.0, 1.0);
+    return math.acos(cosine);
+  }
+
+  bool _pathsOverlap(
+    _ContinuityPath first,
+    _ContinuityPath second,
+    double tolerance,
+  ) {
+    if (first.entity is SketchLine && second.entity is SketchLine) {
+      final a = first.samples, b = second.samples;
+      final direction = a[1] - a[0];
+      final length = math.sqrt(direction.dot(direction));
+      if (length <= tolerance) return false;
+      final cross =
+          (b[0] - a[0]).x * direction.y - (b[0] - a[0]).y * direction.x;
+      final crossEnd =
+          (b[1] - a[0]).x * direction.y - (b[1] - a[0]).y * direction.x;
+      if (cross.abs() > tolerance * length ||
+          crossEnd.abs() > tolerance * length) {
+        return false;
+      }
+      double projection(SketchVector point) =>
+          (point - a[0]).dot(direction) / length;
+      final left = math.max(0.0, math.min(projection(b[0]), projection(b[1])));
+      final right = math.min(
+        length,
+        math.max(projection(b[0]), projection(b[1])),
+      );
+      return right - left > tolerance;
+    }
+    if (_pathsEquivalent(first, second, tolerance)) return true;
+    final interiorFirst = first.samples.skip(1).take(first.samples.length - 2);
+    final interiorSecond = second.samples
+        .skip(1)
+        .take(second.samples.length - 2);
+    return interiorFirst.any(
+          (point) => _distanceToPath(point, second) <= tolerance,
+        ) &&
+        interiorSecond.any(
+          (point) => _distanceToPath(point, first) <= tolerance,
+        );
+  }
+
+  bool _pathsEquivalent(
+    _ContinuityPath first,
+    _ContinuityPath second,
+    double tolerance,
+  ) {
+    final direct =
+        _cdistance(first.start, second.start) <= tolerance &&
+        _cdistance(first.end, second.end) <= tolerance;
+    final reverse =
+        _cdistance(first.start, second.end) <= tolerance &&
+        _cdistance(first.end, second.start) <= tolerance;
+    if (!direct && !reverse) return false;
+    final source = first.samples;
+    final target = reverse ? second.samples.reversed : second.samples;
+    final targetList = target.toList(growable: false);
+    return source.every(
+      (point) =>
+          _distanceToPath(point, _ContinuityPath.samplesOnly(targetList)) <=
+          tolerance * 2,
+    );
+  }
+
+  bool _pathsCross(_ContinuityPath first, _ContinuityPath second) => first
+      .samples
+      .asMap()
+      .entries
+      .where((entry) => entry.key + 1 < first.samples.length)
+      .any(
+        (entry) => second.samples
+            .asMap()
+            .entries
+            .where((other) => other.key + 1 < second.samples.length)
+            .any(
+              (other) => _properCrossing(
+                _SelectionEdge(entry.value, first.samples[entry.key + 1]),
+                _SelectionEdge(other.value, second.samples[other.key + 1]),
+              ),
+            ),
+      );
+
+  double _distanceToPath(SketchVector point, _ContinuityPath path) {
+    var best = double.infinity;
+    for (var index = 0; index + 1 < path.samples.length; index++) {
+      best = math.min(
+        best,
+        _distanceToSegment(point, path.samples[index], path.samples[index + 1]),
+      );
+    }
+    return best;
+  }
+
+  bool _properCrossing(_SelectionEdge first, _SelectionEdge second) {
+    final direction = first.end - first.start;
+    final other = second.end - second.start;
+    final denominator = direction.x * other.y - direction.y * other.x;
+    if (denominator.abs() <= 1e-12) return false;
+    final delta = second.start - first.start;
+    final t = (delta.x * other.y - delta.y * other.x) / denominator;
+    final u = (delta.x * direction.y - delta.y * direction.x) / denominator;
+    const epsilon = 1e-9;
+    return t > epsilon && t < 1 - epsilon && u > epsilon && u < 1 - epsilon;
+  }
+
+  double _distanceToSegment(
+    SketchVector point,
+    SketchVector start,
+    SketchVector end,
+  ) {
+    final direction = end - start;
+    final length2 = direction.dot(direction);
+    if (length2 <= 1e-24) return _cdistance(point, start);
+    final t = ((point - start).dot(direction) / length2).clamp(0.0, 1.0);
+    return _cdistance(point, start + direction.scale(t));
+  }
+
+  SketchVector _arcPoint(SketchVector center, double radius, double angle) =>
+      SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
+        center.z,
+      );
+
+  SketchVector? _unit(SketchVector value) {
+    final length = math.sqrt(value.dot(value));
+    if (!length.isFinite || length <= 1e-12) return null;
+    return value.scale(1 / length);
+  }
+
+  bool _finite(SketchVector point) =>
+      point.x.isFinite && point.y.isFinite && point.z.isFinite;
+
+  double _cdistance(SketchVector first, SketchVector second) {
+    final delta = first - second;
+    return math.sqrt(delta.dot(delta));
+  }
+}
+
+class SketchContinuityAnalysis {
+  const SketchContinuityAnalysis({
+    required this.joins,
+    required this.invalidEntityIds,
+    required this.unsupportedEntityIds,
+    required this.branchingEndpoints,
+    required this.diagnostics,
+  });
+
+  final List<SketchContinuityJoinDiagnostic> joins;
+  final List<String> invalidEntityIds;
+  final List<String> unsupportedEntityIds;
+  final List<String> branchingEndpoints;
+  final List<String> diagnostics;
+
+  bool get hasProblems =>
+      invalidEntityIds.isNotEmpty ||
+      joins.any((join) => join.hasProblem) ||
+      branchingEndpoints.isNotEmpty;
+
+  int get c0Count => joins.where((join) => join.measuredC0).length;
+  int get g1Count => joins.where((join) => join.measuredG1).length;
+}
+
+class _ContinuityPath {
+  const _ContinuityPath({
+    required this.entity,
+    required this.samples,
+    required this.startTangent,
+    required this.endTangent,
+  });
+
+  _ContinuityPath.samplesOnly(List<SketchVector> values)
+    : entity = SketchLine(values.first, values.last),
+      samples = values,
+      startTangent = values.length > 1
+          ? values[1] - values.first
+          : const SketchVector(0, 0),
+      endTangent = values.length > 1
+          ? values.last - values[values.length - 2]
+          : const SketchVector(0, 0);
+
+  final SketchEntity entity;
+  final List<SketchVector> samples;
+  final SketchVector startTangent;
+  final SketchVector endTangent;
+
+  SketchVector get start => samples.first;
+  SketchVector get end => samples.last;
+
+  SketchContinuityEndpoint endpoint(String name) => SketchContinuityEndpoint(
+    entityId: entity.id,
+    name: name,
+    point: name == 'start' ? start : end,
+    tangent: name == 'start' ? startTangent : endTangent,
+  );
+}
+
+class _ContinuityEndpointPair {
+  _ContinuityEndpointPair(this.first, this.second);
+
+  final SketchContinuityEndpoint first;
+  final SketchContinuityEndpoint second;
+
+  double get distance {
+    final delta = first.point - second.point;
+    return math.sqrt(delta.dot(delta));
   }
 }
