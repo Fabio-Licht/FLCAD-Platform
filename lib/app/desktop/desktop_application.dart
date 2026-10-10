@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import 'managed_placement_editor.dart';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -14,6 +16,7 @@ import '../../core/cad_document/plane_axis_intersection_point.dart';
 import '../../core/cad_document/alignment_coordinate_system.dart';
 import '../../core/feature_lifecycle/feature_lifecycle.dart';
 import '../../core/geometric_kernel/geometry/vectors.dart';
+import '../../core/import_export/import_export.dart';
 import '../../core/professional_recognition/api/professional_recognition_api.dart';
 import '../../core/professional_extrude/professional_extrude.dart';
 import '../../core/professional_revolve/professional_revolve.dart';
@@ -70,6 +73,17 @@ import 'inspector_value_formatter.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'reference_tree_taxonomy.dart';
+
+// Development-only startup validation. Commercial builds leave both defines
+// at their defaults and therefore retain the normal project/import startup.
+const bool _devAutoLoadCalota = bool.fromEnvironment(
+  'FLCAD_DEV_AUTOLOAD_CALOTA',
+  defaultValue: false,
+);
+const String _devCalotaPath = String.fromEnvironment(
+  'FLCAD_DEV_STL_PATH',
+  defaultValue: '',
+);
 
 class FLCADDesktopApplication extends StatefulWidget {
   const FLCADDesktopApplication({
@@ -506,6 +520,8 @@ class _DesktopShellState extends State<DesktopShell> {
   int destination = 0;
   late final DesktopCadController cad;
   late final DesktopCommandCoordinator commands;
+  bool _devCalotaAutoloadConsumed = false;
+  bool _devCalotaUsePathForNextImport = false;
   @override
   void initState() {
     super.initState();
@@ -513,6 +529,9 @@ class _DesktopShellState extends State<DesktopShell> {
     cad = DesktopCadController(
       kernels: EngineeringBootstrap.instance.services.get<KernelManager>(),
       projects: ProjectManager.instance,
+      managedStlFilePicker: _devAutoLoadCalota
+          ? _developmentStlFilePicker
+          : null,
     );
     commands = DesktopCommandCoordinator(
       cad: cad,
@@ -521,10 +540,83 @@ class _DesktopShellState extends State<DesktopShell> {
     cad.addListener(_refreshShell);
     ProjectManager.instance.addListener(_refreshShell);
     unawaited(
-      commands.initialize().then((_) {
+      commands.initialize().then((_) async {
+        await _autoloadDevelopmentCalota();
         if (mounted) setState(() {});
       }),
     );
+  }
+
+  Future<String?> _developmentStlFilePicker(List<String> extensions) async {
+    if (_devCalotaUsePathForNextImport) {
+      _devCalotaUsePathForNextImport = false;
+      return _devCalotaPath.trim().isEmpty ? null : _devCalotaPath.trim();
+    }
+    final selected = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: extensions,
+      dialogTitle: 'Importar STL',
+    );
+    return selected?.path;
+  }
+
+  Future<void> _autoloadDevelopmentCalota() async {
+    if (!_devAutoLoadCalota || _devCalotaAutoloadConsumed) return;
+    _devCalotaAutoloadConsumed = true;
+    final locator = _devCalotaPath.trim();
+    if (locator.isEmpty) {
+      cad.setStatus(
+        'Autoload CALOTA desabilitado: defina FLCAD_DEV_STL_PATH para o Release de desenvolvimento.',
+      );
+      return;
+    }
+    final source = File(locator);
+    if (!await source.exists()) {
+      cad.setStatus(
+        'Aviso: CALOTA de desenvolvimento não encontrada em $locator. A inicialização continua normalmente.',
+      );
+      return;
+    }
+    try {
+      final project = ProjectManager.instance.current;
+      if (project == null) {
+        await commands.createProject(
+          'CALOTA — validação de desenvolvimento',
+          'FLCAD',
+        );
+      } else {
+        if (cad.runtime.document?.projectId != project.id) {
+          await cad.restoreProjectGeometry(project.id);
+        }
+        await commands.refreshContext();
+      }
+      if (_documentContainsDevelopmentCalota(locator)) {
+        cad.setStatus('CALOTA de desenvolvimento já está carregada.');
+        return;
+      }
+      _devCalotaUsePathForNextImport = true;
+      await commands.dispatch('import.stl');
+    } catch (error) {
+      cad.setStatus(
+        'Aviso: não foi possível carregar a CALOTA de desenvolvimento ($error). A inicialização continua normalmente.',
+      );
+    }
+  }
+
+  bool _documentContainsDevelopmentCalota(String locator) {
+    final target = File(locator).absolute.path.toLowerCase();
+    final document = cad.runtime.document;
+    if (document == null) return false;
+    bool samePath(Object? value) =>
+        value is String && File(value).absolute.path.toLowerCase() == target;
+    return document.entities.values.any((entity) {
+      if (entity.kind != CadDocumentEntityKind.import ||
+          entity.data['format'] != CadImportFormat.stl.name) {
+        return false;
+      }
+      return samePath(entity.data['sourcePath']) ||
+          samePath(entity.data['registeredPath']);
+    });
   }
 
   @override
@@ -11740,6 +11832,16 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
           'Preservar endpoint protegido',
       };
 
+  Future<void> _confirmSelectedAlternative() async {
+    final token = controller.sketchContinuityRepairPreviewToken;
+    if (token == null || !controller.canConfirmSketchContinuityRepair) return;
+    try {
+      await controller.confirmSketchContinuityRepairPreview(token: token);
+    } catch (_) {
+      // The controller publishes the diagnostic and releases its busy guard.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -11838,7 +11940,7 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
                     ? 'Plano impossível'
                     : preview!.status == SketchContinuityRepairStatus.valid
                     ? 'Junção já coincidente'
-                    : 'Plano requer confirmação futura',
+                    : 'Plano requer confirmação',
                 style: TextStyle(
                   fontSize: 10,
                   fontWeight: FontWeight.w700,
@@ -11896,15 +11998,19 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
               Row(
                 children: [
                   TextButton(
-                    onPressed: controller.cancelSketchContinuityRepairPreview,
+                    onPressed: controller.busy
+                        ? null
+                        : controller.cancelSketchContinuityRepairPreview,
                     child: const Text('Cancelar'),
                   ),
                   const SizedBox(width: 5),
                   OutlinedButton.icon(
                     key: const ValueKey('sketch-continuity-repair-confirm'),
-                    onPressed: null,
+                    onPressed: controller.canConfirmSketchContinuityRepair
+                        ? _confirmSelectedAlternative
+                        : null,
                     icon: const Icon(Icons.check, size: 14),
-                    label: const Text('Confirmar (futuro)'),
+                    label: const Text('Confirmar'),
                   ),
                 ],
               ),

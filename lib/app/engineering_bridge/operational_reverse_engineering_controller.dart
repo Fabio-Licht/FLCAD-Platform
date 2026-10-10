@@ -851,14 +851,27 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       selectedSketchContinuityJoin != null &&
       _sketchContinuityRepairPreview == null;
 
-  /// Apply is intentionally unavailable in G124.7E.4C.1. The planner is
-  /// still disabled in the UI for G124.7E.4C.2A. This internal API is kept
-  /// available for transactional tests and the future confirmation control.
-  bool get canConfirmSketchContinuityRepair => false;
+  /// Apply is available only for the currently selected, viable alternative
+  /// from the live preview session. The command still performs the complete
+  /// token/fingerprint/geometry revalidation immediately before mutating the
+  /// Sketch.
+  bool get canConfirmSketchContinuityRepair {
+    final preview = sketchContinuityRepairPreview;
+    final alternative = selectedSketchContinuityRepairAlternative;
+    final token = _sketchContinuityRepairPreviewToken;
+    return !_sketchContinuityRepairApplying &&
+        !busy &&
+        preview != null &&
+        preview.status != SketchContinuityRepairStatus.impossible &&
+        alternative != null &&
+        alternative.status != SketchContinuityRepairStatus.impossible &&
+        alternative.updates.isNotEmpty &&
+        token != null &&
+        token.isNotEmpty;
+  }
 
   /// Applies exactly the alternative selected in the active C0/G1 preview.
-  /// The UI deliberately keeps its Confirm button disabled in this substage;
-  /// callers must provide the unguessable session token returned by the
+  /// Callers must provide the unguessable session token returned by the
   /// preview session. The command itself revalidates the session immediately
   /// before entering the Sketch transaction.
   Future<List<String>> confirmSketchContinuityRepairPreview({
@@ -894,7 +907,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             ..sort();
       return affectedIds;
     } catch (value) {
-      error = value.toString().replaceFirst('Bad state: ', '');
+      final diagnostic = value.toString().replaceFirst('Bad state: ', '');
+      error = diagnostic;
+      sketchReconstructionMessage = diagnostic;
       rethrow;
     } finally {
       _sketchContinuityRepairApplying = false;
@@ -991,7 +1006,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     sketchReconstructionMessage =
         plan.status == SketchContinuityRepairStatus.impossible
         ? 'Correção C0 bloqueada: ${plan.diagnostics.join(' ')}'
-        : 'Preview C0/G1 pronto; Confirmar permanece desabilitado nesta etapa.';
+        : 'Preview C0/G1 pronto; selecione uma alternativa válida para confirmar.';
     notifyListeners();
   }
 

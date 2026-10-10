@@ -24,6 +24,7 @@ import 'package:flcad_mobile/core/reference_engine/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart';
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
 import 'package:flcad_mobile/core/sketch_assistant/sketch_reconstruction.dart';
+import 'package:flcad_mobile/core/sketch_assistant/sketch_continuity_repair_planner.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_engine/history/sketch_history.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
@@ -5061,7 +5062,7 @@ void main() {
       final preview = harness.controller.sketchContinuityRepairPreview;
       expect(preview, isNotNull);
       expect(preview!.alternatives, isNotEmpty);
-      expect(harness.controller.canConfirmSketchContinuityRepair, isFalse);
+      expect(harness.controller.canConfirmSketchContinuityRepair, isTrue);
       expect(harness.controller.sketchContinuityRepairPreviewToken, isNotNull);
       expect(
         harness.cad.runtime.scene.find(
@@ -5132,6 +5133,33 @@ void main() {
       );
     },
   );
+
+  test('C0 repair keeps confirmation disabled for an impossible gap', () async {
+    final harness = await _g124Harness('g124-continuity-repair-blocked');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final api = harness.controller.sketchApi!;
+    final first = api.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(1, 0),
+    );
+    final second = api.builders.line.build(
+      const SketchVector(1.2, 0),
+      const SketchVector(2.2, 0),
+    );
+    harness.controller.selectedSketchEntityIds
+      ..clear()
+      ..addAll({first.id, second.id});
+    harness.controller.selectSketchContinuityJoinFromSketchSelection();
+    harness.controller.previewSketchContinuityRepair();
+
+    expect(
+      harness.controller.sketchContinuityRepairPreview?.status,
+      SketchContinuityRepairStatus.impossible,
+    );
+    expect(harness.controller.canConfirmSketchContinuityRepair, isFalse);
+  });
 
   test(
     'C0 repair applies one exact line-line transaction and supports undo redo',
