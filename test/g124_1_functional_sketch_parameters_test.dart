@@ -5094,6 +5094,60 @@ void main() {
   );
 
   test(
+    'C0 panel data hides healthy joins and keeps friendly entity labels',
+    () async {
+      final harness = await _g124Harness('g124-continuity-panel-filter');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final coincident = api.builders.line.build(
+        const SketchVector(1, 0),
+        const SketchVector(2, 0),
+      );
+      final gapped = api.builders.line.build(
+        const SketchVector(2.2, 0),
+        const SketchVector(3, 0),
+      );
+
+      final all = harness.controller.sketchContinuityRepairAllJoins;
+      final attention = harness.controller.sketchContinuityRepairAttentionJoins;
+      expect(all, isNotEmpty);
+      expect(attention, isNotEmpty);
+      expect(
+        attention.every((join) => join.hasProblem),
+        isTrue,
+      );
+      expect(
+        all.where((join) => {
+          join.first.entityId,
+          join.second.entityId,
+        }.containsAll({first.id, coincident.id})),
+        isNotEmpty,
+      );
+      expect(
+        attention.where((join) => {
+          join.first.entityId,
+          join.second.entityId,
+        }.containsAll({first.id, coincident.id})),
+        isEmpty,
+      );
+      expect(
+        harness.controller.sketchContinuityEntityDisplayLabel(first.id),
+        startsWith('Linha '),
+      );
+      expect(
+        harness.controller.sketchContinuityEntityDisplayLabel(gapped.id),
+        startsWith('Linha '),
+      );
+    },
+  );
+
+  test(
     'C0 repair preview invalidates when a source geometry changes',
     () async {
       final harness = await _g124Harness('g124-continuity-repair-stale');

@@ -810,13 +810,81 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         constraints: constraints,
       );
 
-  /// Nearby junctions are the only candidates exposed by the panel. This
-  /// keeps distant entity pairs out of the interaction while still exposing
-  /// gaps above the repair limit when Sketch Health reports them nearby.
+  /// All nearby junctions available to the C0/G1 panel.  The presentation
+  /// layer normally shows only [sketchContinuityRepairAttentionJoins], while
+  /// keeping this complete set available for explicit inspection and for
+  /// resolving a CAD selection deterministically.
+  List<SketchContinuityJoinDiagnostic>
+  get sketchContinuityRepairAllJoins => List.unmodifiable(
+    _sortContinuityJoins(
+      sketchContinuityAnalysis.joins.where((join) => join.nearby),
+    ),
+  );
+
+  /// Nearby joins that require operator attention.  A measured C0 join with
+  /// no overlap, crossing, branch or constraint mismatch is intentionally
+  /// omitted: lack of G1 is a valid corner, not an error.
+  List<SketchContinuityJoinDiagnostic>
+  get sketchContinuityRepairAttentionJoins => List.unmodifiable(
+    sketchContinuityRepairAllJoins.where((join) => join.hasProblem),
+  );
+
+  /// Backwards-compatible name used by selection and planner flows.  It
+  /// remains the complete nearby set so selecting two CAD curves does not
+  /// depend on the panel's presentation filter.
   List<SketchContinuityJoinDiagnostic> get sketchContinuityRepairJoins =>
-      List.unmodifiable(
-        sketchContinuityAnalysis.joins.where((join) => join.nearby),
-      );
+      sketchContinuityRepairAllJoins;
+
+  List<SketchContinuityJoinDiagnostic> _sortContinuityJoins(
+    Iterable<SketchContinuityJoinDiagnostic> joins,
+  ) {
+    final values = joins.toList(growable: false);
+    int severity(SketchContinuityIssue issue) => switch (issue) {
+      SketchContinuityIssue.overlap => 0,
+      SketchContinuityIssue.crossing => 0,
+      SketchContinuityIssue.branching => 1,
+      SketchContinuityIssue.constraintMismatch => 1,
+      SketchContinuityIssue.gap => 2,
+      SketchContinuityIssue.degenerate => 0,
+      SketchContinuityIssue.none => 3,
+    };
+    values.sort((first, second) {
+      final bySeverity = severity(first.issue).compareTo(severity(second.issue));
+      if (bySeverity != 0) return bySeverity;
+      final byDistance = second.gapMillimeters.compareTo(first.gapMillimeters);
+      if (byDistance != 0) return byDistance;
+      final firstKey = '${first.first.entityId}:${first.first.name}|${first.second.entityId}:${first.second.name}';
+      final secondKey = '${second.first.entityId}:${second.first.name}|${second.second.entityId}:${second.second.name}';
+      return firstKey.compareTo(secondKey);
+    });
+    return values;
+  }
+
+  /// Stable, human-readable label for the C0/G1 panel.  Technical IDs remain
+  /// available in the selected detail block, but are not used as the normal
+  /// row label.
+  String sketchContinuityEntityDisplayLabel(String entityId) {
+    final entities = sketchEntities
+        .where(
+          (entity) =>
+              entity.type == SketchEntityType.line ||
+              entity.type == SketchEntityType.arc ||
+              entity.type == SketchEntityType.spline,
+        )
+        .toList(growable: false)
+      ..sort((first, second) => first.id.compareTo(second.id));
+    final entity = entities.where((item) => item.id == entityId).firstOrNull;
+    if (entity == null) return 'Entidade';
+    final sameType = entities.where((item) => item.type == entity.type).toList();
+    final index = sameType.indexWhere((item) => item.id == entityId);
+    final prefix = switch (entity.type) {
+      SketchEntityType.line => 'Linha',
+      SketchEntityType.arc => 'Arco',
+      SketchEntityType.spline => 'Spline',
+      _ => 'Entidade',
+    };
+    return '$prefix ${(index + 1).toString().padLeft(3, '0')}';
+  }
 
   SketchContinuityJoinDiagnostic? get selectedSketchContinuityJoin {
     final selected = _selectedSketchContinuityJoin;
@@ -8092,14 +8160,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       clearHoveredSketchReconstructionSuggestion();
       return false;
     }
+    final api = sketchApi;
+    final visibleSourceIds = api == null
+        ? const <String>{}
+        : {
+            for (final id in activeSketch?.entityIds ?? const <String>[])
+              if (api.entity(id)?.visible == true) id,
+          };
     final matches = _sketchReconstructionSuggestions
-        .where(
-          (suggestion) => {
+        .where((suggestion) {
+          final sourceIds = <String>{
             ...suggestion.entityIds,
             ...suggestion.usedEntityIds,
+          };
+          // A promoted suggestion can leave covered fragments in its old
+          // metadata.  They must not make hidden geometry hoverable after the
+          // suggestion itself has been removed or invalidated.
+          if (sourceIds.isNotEmpty &&
+              !sourceIds.any(visibleSourceIds.contains)) {
+            return false;
+          }
+          return {
+            ...sourceIds,
             ...suggestion.coveredEntityIds,
-          }.contains(entityId),
-        )
+          }.contains(entityId);
+        })
         .toList(growable: false);
     if (matches.isEmpty) {
       clearHoveredSketchReconstructionSuggestion();

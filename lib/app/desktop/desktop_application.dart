@@ -5622,15 +5622,6 @@ class _OfficialEngineeringWorkspaceState
                                               .sketchEditingCommandActive &&
                                           _contextualCaptureCandidateIds == null
                                       ? (pick) {
-                                          if (_sketchSuggestionHoverPosition ==
-                                              null) {
-                                            operational
-                                                .clearHoveredSketchReconstructionSuggestion();
-                                            _sketchSuggestionHoverPresentation
-                                                    .value =
-                                                null;
-                                            return;
-                                          }
                                           final found = operational
                                               .hoverSketchReconstructionSuggestionForEntity(
                                                 pick?.entityId,
@@ -9887,7 +9878,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     final hud = controller.lineHud;
     final dragHud = controller.sketchDragHud;
     final jointAcceptancePreview = controller.sketchReconstructionJointPreview;
-    final continuityRepairJoins = controller.sketchContinuityRepairJoins;
+    final continuityRepairJoins =
+        controller.sketchContinuityRepairAttentionJoins;
+    final continuityRepairAllJoins = controller.sketchContinuityRepairAllJoins;
     final continuityRepairPreview = controller.sketchContinuityRepairPreview;
     final health = controller.sketchHealth;
     final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
@@ -10624,13 +10617,19 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   ),
                 ),
               ),
-            if (continuityRepairJoins.isNotEmpty ||
+            if (continuityRepairAllJoins.isNotEmpty ||
                 controller.selectedSketchContinuityJoin != null ||
                 continuityRepairPreview != null)
-              _SketchContinuityRepairPanel(
-                controller: controller,
-                joins: continuityRepairJoins,
-                preview: continuityRepairPreview,
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child: SingleChildScrollView(
+                  child: _SketchContinuityRepairPanel(
+                    controller: controller,
+                    joins: continuityRepairJoins,
+                    allJoins: continuityRepairAllJoins,
+                    preview: continuityRepairPreview,
+                  ),
+                ),
               ),
             if (controller.sketchReconstructionSuggestions.isNotEmpty) ...[
               const SizedBox(height: 6),
@@ -11459,8 +11458,14 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
 }
 
 String _sketchSuggestionUiKey(SketchReconstructionSuggestion suggestion) {
-  final ids = suggestion.entityIds.toList()..sort();
-  return '${suggestion.kind.name}:${ids.join(',')}';
+  String ids(Iterable<String> values) => (values.toSet().toList()..sort()).join(',');
+  // Include every source role.  Two hypotheses may intentionally cover the
+  // same entityIds while using different fit contributors; collapsing them
+  // here makes hover, expansion and scroll target the wrong row.
+  return '${suggestion.kind.name}:e=${ids(suggestion.entityIds)}:'
+      'u=${ids(suggestion.usedEntityIds)}:c=${ids(suggestion.coveredEntityIds)}:'
+      '${suggestion.startPoint?.x}:${suggestion.startPoint?.y}:'
+      '${suggestion.endPoint?.x}:${suggestion.endPoint?.y}';
 }
 
 class _SketchReconstructionSuggestionGroups extends StatefulWidget {
@@ -11791,16 +11796,30 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
   }
 }
 
-class _SketchContinuityRepairPanel extends StatelessWidget {
+class _SketchContinuityRepairPanel extends StatefulWidget {
   const _SketchContinuityRepairPanel({
     required this.controller,
     required this.joins,
+    required this.allJoins,
     required this.preview,
   });
 
   final OperationalReverseEngineeringController controller;
   final List<SketchContinuityJoinDiagnostic> joins;
+  final List<SketchContinuityJoinDiagnostic> allJoins;
   final SketchContinuityRepairPlan? preview;
+
+  @override
+  State<_SketchContinuityRepairPanel> createState() =>
+      _SketchContinuityRepairPanelState();
+}
+
+class _SketchContinuityRepairPanelState
+    extends State<_SketchContinuityRepairPanel> {
+  bool _showAll = false;
+
+  OperationalReverseEngineeringController get controller => widget.controller;
+  SketchContinuityRepairPlan? get preview => widget.preview;
 
   String _continuityLabel(SketchContinuityLevel level) => switch (level) {
     SketchContinuityLevel.g1 => 'G1 tangente',
@@ -11811,6 +11830,10 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
   String _joinLabel(SketchContinuityJoinDiagnostic join) =>
       '${join.first.entityId}:${join.first.name} ↔ '
       '${join.second.entityId}:${join.second.name}';
+
+  String _joinDisplayLabel(SketchContinuityJoinDiagnostic join) =>
+      '${controller.sketchContinuityEntityDisplayLabel(join.first.entityId)} '
+      '↔ ${controller.sketchContinuityEntityDisplayLabel(join.second.entityId)}';
 
   String _alternativeLabel(SketchContinuityRepairAlternative alternative) =>
       switch (alternative.kind) {
@@ -11848,6 +11871,13 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
     final selectedJoin = controller.selectedSketchContinuityJoin;
     final selectedAlternative =
         controller.selectedSketchContinuityRepairAlternative;
+    final displayedJoins = _showAll ? widget.allJoins : widget.joins;
+    final healthyCount = widget.allJoins.length - widget.joins.length;
+    final gapCount = widget.joins
+        .where((join) => join.issue == SketchContinuityIssue.gap)
+        .length;
+    final blockingCount = widget.joins.length - gapCount;
+    final joins = displayedJoins;
     return Card(
       key: const ValueKey('sketch-continuity-repair-panel'),
       margin: const EdgeInsets.fromLTRB(0, 4, 0, 4),
@@ -11867,6 +11897,33 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
               style: TextStyle(fontSize: 9.5),
             ),
             const SizedBox(height: 4),
+            Text(
+              '$gapCount gaps · $blockingCount bloqueios · $healthyCount conexões sem problemas',
+              style: TextStyle(
+                fontSize: 9,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _showAll
+                        ? 'Todas as junções próximas'
+                        : widget.joins.isEmpty
+                        ? 'Nenhuma junção exige atenção'
+                        : 'Junções que exigem atenção',
+                    style: const TextStyle(fontSize: 9.5),
+                  ),
+                ),
+                TextButton(
+                  onPressed: widget.allJoins.isEmpty
+                      ? null
+                      : () => setState(() => _showAll = !_showAll),
+                  child: Text(_showAll ? 'Ocultar saudáveis' : 'Ver todas'),
+                ),
+              ],
+            ),
             for (final join in joins)
               ListTile(
                 key: ValueKey(
@@ -11882,7 +11939,7 @@ class _SketchContinuityRepairPanel extends StatelessWidget {
                     selectedJoin.first.name == join.first.name &&
                     selectedJoin.second.name == join.second.name,
                 title: Text(
-                  _joinLabel(join),
+                  _joinDisplayLabel(join),
                   style: const TextStyle(fontSize: 9.5),
                 ),
                 subtitle: Text(
