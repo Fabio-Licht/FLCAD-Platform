@@ -629,6 +629,8 @@ class SketchContinuityRepairPlanner {
     if (entity.locked ||
         entity.reference ||
         entity.construction ||
+        !entity.visible ||
+        entity.metadata['reconstructionHidden'] == true ||
         entity.metadata['repairProtected'] == true) {
       reasons.add('entidade protegida');
     }

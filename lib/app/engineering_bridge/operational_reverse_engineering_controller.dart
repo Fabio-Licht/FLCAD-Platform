@@ -59,6 +59,7 @@ import '../../core/sketch_editor/snapping/editor_snapping.dart';
 import '../../core/sketch_editor/snapping/sketch_coordinate_magnet.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
 import '../../core/sketch_assistant/sketch_reconstruction.dart';
+import '../../core/sketch_assistant/sketch_continuity_repair_planner.dart';
 import '../../core/sketch_engine/api/sketch_engine_api.dart';
 import '../../core/sketch_engine/entities/sketch_entities.dart'
     hide ReferenceGeometry;
@@ -129,12 +130,22 @@ const String sketchReconstructionJointPreviewPrefix =
 const String sketchReconstructionJointConnectionsPreviewId =
     'sketch-reconstruction-joint-connections-preview';
 
+/// Runtime-only overlays and session state for the C0/G1 junction repair
+/// preview. They never become Sketch entities or history entries.
+const String sketchContinuityRepairPreviewOverlayKey =
+    'sketch.continuityRepair.preview.overlayIds';
+const String sketchContinuityRepairPreviewPrefix =
+    'sketch-continuity-repair-preview-';
+const String sketchContinuityRepairPreviewEndpointsId =
+    'sketch-continuity-repair-preview-endpoints';
+const String sketchContinuityRepairPreviewConnectionsId =
+    'sketch-continuity-repair-preview-connections';
+
 /// Runtime-only visual overlay for the immutable Section that originated the
 /// active Sketch.  The durable Section remains the source of truth; this
 /// presentation has no document entity and therefore cannot enter Sketch
 /// picking, constraints, Health, Extrude or Revolve.
-const String sketchOriginalSectionReferencePrefix =
-    'sketch-original-section-';
+const String sketchOriginalSectionReferencePrefix = 'sketch-original-section-';
 
 enum RecognitionDecision { pending, accepted, rejected }
 
@@ -307,7 +318,6 @@ class ArcRadiusEditPreview {
   final ArcRadiusEditPlan plan;
   final Map<String, String> entitySnapshots;
   final String constraintSnapshot;
-
 }
 
 enum SketchRegionFitOutput { line, spline }
@@ -331,6 +341,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.reconstruction.selected', null);
       runtime.write('sketch.reconstruction.selectedMany', null);
       _clearArcRadiusEditPreview();
+      _invalidateSketchContinuityRepairPreview();
       _invalidateSketchReconstructionJointPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
       runtime.hideTransient(sketchReconstructionHoverHighlightId);
@@ -727,16 +738,22 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   List<SketchReconstructionSuggestion> _sketchReconstructionSuggestions =
       const [];
   Map<String, String> _sketchReconstructionSuggestionFingerprints = const {};
-  SketchReconstructionSelectionAnalysis?
-  _sketchReconstructionSelectionAnalysis;
-  SketchReconstructionJointAcceptancePlan?
-  _sketchReconstructionJointPreview;
+  SketchReconstructionSelectionAnalysis? _sketchReconstructionSelectionAnalysis;
+  SketchReconstructionJointAcceptancePlan? _sketchReconstructionJointPreview;
   String? _sketchReconstructionJointPreviewToken;
   String? _sketchReconstructionJointPreviewConstraintFingerprint;
   bool _jointAcceptanceConfirming = false;
   List<String> _sketchReconstructionJointPreviewSelectionKeys = const [];
   String? _sketchReconstructionJointPreviewSketchId;
   Set<String> _sketchReconstructionJointPreviewEntityIds = const {};
+  SketchContinuityJoinDiagnostic? _selectedSketchContinuityJoin;
+  SketchContinuityRepairPlan? _sketchContinuityRepairPreview;
+  SketchContinuityRepairAlternative? _selectedSketchContinuityRepairAlternative;
+  String? _sketchContinuityRepairPreviewToken;
+  String? _sketchContinuityRepairPreviewSketchId;
+  String? _sketchContinuityRepairPreviewConstraintFingerprint;
+  Map<String, String> _sketchContinuityRepairPreviewEntityFingerprints =
+      const {};
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
@@ -779,7 +796,168 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   bool get canPreviewSketchReconstructionJointAcceptance =>
-      activeSketch != null && selectedSketchReconstructionSuggestions.length >= 2;
+      activeSketch != null &&
+      selectedSketchReconstructionSuggestions.length >= 2;
+
+  /// Read-only C0/G1 diagnostics for the active Sketch. The diagnostic is
+  /// recomputed from current entities so a stale preview can never be treated
+  /// as current after an edit or a Sketch switch.
+  SketchContinuityAnalysis get sketchContinuityAnalysis =>
+      const SketchContinuityDiagnostic().analyze(
+        sketchEntities,
+        constraints: constraints,
+      );
+
+  /// Nearby junctions are the only candidates exposed by the panel. This
+  /// keeps distant entity pairs out of the interaction while still exposing
+  /// gaps above the repair limit when Sketch Health reports them nearby.
+  List<SketchContinuityJoinDiagnostic> get sketchContinuityRepairJoins =>
+      List.unmodifiable(
+        sketchContinuityAnalysis.joins.where((join) => join.nearby),
+      );
+
+  SketchContinuityJoinDiagnostic? get selectedSketchContinuityJoin {
+    final selected = _selectedSketchContinuityJoin;
+    if (selected == null) return null;
+    return _currentSketchContinuityJoin(selected);
+  }
+
+  SketchContinuityRepairPlan? get sketchContinuityRepairPreview {
+    final preview = _sketchContinuityRepairPreview;
+    if (preview == null) return null;
+    if (!_isSketchContinuityRepairPreviewCurrent(preview)) {
+      _invalidateSketchContinuityRepairPreview();
+      return null;
+    }
+    return preview;
+  }
+
+  SketchContinuityRepairAlternative?
+  get selectedSketchContinuityRepairAlternative {
+    final preview = sketchContinuityRepairPreview;
+    final selected = _selectedSketchContinuityRepairAlternative;
+    if (preview == null || selected == null) return null;
+    return preview.alternatives.contains(selected) ? selected : null;
+  }
+
+  String? get sketchContinuityRepairPreviewToken {
+    sketchContinuityRepairPreview;
+    return _sketchContinuityRepairPreviewToken;
+  }
+
+  bool get canPreviewSketchContinuityRepair =>
+      selectedSketchContinuityJoin != null &&
+      _sketchContinuityRepairPreview == null;
+
+  /// Apply is intentionally unavailable in G124.7E.4C.1. The planner is
+  /// preview-only until a later substage introduces an explicit transaction.
+  bool get canConfirmSketchContinuityRepair => false;
+
+  void selectSketchContinuityJoin(SketchContinuityJoinDiagnostic join) {
+    final current = _currentSketchContinuityJoin(join);
+    if (current == null) {
+      sketchReconstructionMessage =
+          'A junção selecionada ficou obsoleta; atualize o diagnóstico.';
+      notifyListeners();
+      return;
+    }
+    _invalidateSketchContinuityRepairPreview();
+    _selectedSketchContinuityJoin = current;
+    sketchReconstructionMessage = null;
+    notifyListeners();
+  }
+
+  void clearSketchContinuityJoinSelection() {
+    _invalidateSketchContinuityRepairPreview();
+    _selectedSketchContinuityJoin = null;
+    notifyListeners();
+  }
+
+  /// Uses the normal CAD selection (for example, two curves picked in the
+  /// viewport) only to identify a junction. It does not replace or mutate
+  /// that selection.
+  void selectSketchContinuityJoinFromSketchSelection() {
+    if (selectedSketchEntityIds.length != 2) {
+      sketchReconstructionMessage =
+          'Selecione exatamente duas curvas para identificar uma junção.';
+      notifyListeners();
+      return;
+    }
+    final ids = selectedSketchEntityIds.toSet();
+    final join = sketchContinuityRepairJoins
+        .where(
+          (candidate) => {
+            candidate.first.entityId,
+            candidate.second.entityId,
+          }.containsAll(ids),
+        )
+        .firstOrNull;
+    if (join == null) {
+      sketchReconstructionMessage =
+          'As duas curvas selecionadas não possuem uma junção próxima diagnosticada.';
+      notifyListeners();
+      return;
+    }
+    selectSketchContinuityJoin(join);
+  }
+
+  /// Runs the pure planner and publishes only non-selectable transient
+  /// overlays. No Sketch entity, constraint, selection or history is changed.
+  void previewSketchContinuityRepair() {
+    final selected = selectedSketchContinuityJoin;
+    if (selected == null) {
+      sketchReconstructionMessage =
+          'Selecione uma junção próxima para planejar a correção.';
+      notifyListeners();
+      return;
+    }
+    final entities = _sketchContinuityRepairEntities();
+    final plan = const SketchContinuityRepairPlanner().plan(
+      selected,
+      entities: entities,
+      constraints: constraints,
+    );
+    _invalidateSketchContinuityRepairPreview();
+    _sketchContinuityRepairPreview = plan;
+    _sketchContinuityRepairPreviewToken =
+        'continuity-${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(plan)}';
+    _sketchContinuityRepairPreviewSketchId = activeSketch?.id;
+    _sketchContinuityRepairPreviewConstraintFingerprint =
+        _jointConstraintFingerprint();
+    _sketchContinuityRepairPreviewEntityFingerprints = {
+      for (final entry in entities.entries)
+        entry.key: _sketchContinuityEntityFingerprint(entry.value),
+    };
+    _selectedSketchContinuityRepairAlternative = plan.alternatives
+        .where(
+          (alternative) =>
+              alternative.status != SketchContinuityRepairStatus.impossible,
+        )
+        .firstOrNull;
+    _publishSketchContinuityRepairPreview(plan);
+    sketchReconstructionMessage =
+        plan.status == SketchContinuityRepairStatus.impossible
+        ? 'Correção C0 bloqueada: ${plan.diagnostics.join(' ')}'
+        : 'Preview C0/G1 pronto; Confirmar permanece desabilitado nesta etapa.';
+    notifyListeners();
+  }
+
+  void selectSketchContinuityRepairAlternative(int index) {
+    final preview = sketchContinuityRepairPreview;
+    if (preview == null || index < 0 || index >= preview.alternatives.length) {
+      return;
+    }
+    final alternative = preview.alternatives[index];
+    _selectedSketchContinuityRepairAlternative = alternative;
+    _publishSketchContinuityRepairPreview(preview);
+    notifyListeners();
+  }
+
+  void cancelSketchContinuityRepairPreview() {
+    _invalidateSketchContinuityRepairPreview();
+    sketchReconstructionMessage = 'Preview de correção C0 cancelado.';
+    notifyListeners();
+  }
 
   /// Classifies a suggestion for the Sketch Assistant presentation without
   /// changing its geometric hypothesis.  The reconstruction model currently
@@ -813,7 +991,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchReconstructionSuggestion? get selectedSketchReconstructionSuggestion =>
       selectedSketchReconstructionSuggestions.lastOrNull ??
       runtime.read<SketchReconstructionSuggestion>(
-          'sketch.reconstruction.selected');
+        'sketch.reconstruction.selected',
+      );
 
   /// Suggestions selected through the Assistant, in the exact order in which
   /// they were selected.  This is presentation-only state: it never becomes
@@ -841,8 +1020,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final category = sketchReconstructionSuggestionCategory(suggestion);
     final siblings = _sketchReconstructionSuggestions
         .where(
-          (item) =>
-              sketchReconstructionSuggestionCategory(item) == category,
+          (item) => sketchReconstructionSuggestionCategory(item) == category,
         )
         .toList(growable: false);
     final index = siblings.indexWhere(
@@ -885,7 +1063,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _invalidateSketchReconstructionJointPreview();
     final previousSelection = selectedSketchReconstructionSuggestions;
     final previousFingerprints = _sketchReconstructionSuggestionFingerprints;
-    _clearSketchReconstructionHighlight(clearEntitySelection: previousSelection.isNotEmpty);
+    _clearSketchReconstructionHighlight(
+      clearEntitySelection: previousSelection.isNotEmpty,
+    );
     final candidates = _sketchReconstructionCandidates();
     _sketchReconstructionSuggestions = _sketchReconstruction.analyze(
       candidates,
@@ -910,10 +1090,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final reconciled = <SketchReconstructionSuggestion>[
       for (final item in previousSelection)
         if (currentByKey[_reconstructionSuggestionKey(item)] case final fresh?)
-        if (previousFingerprints[_reconstructionSuggestionKey(item)] ==
-              _sketchReconstructionSuggestionFingerprints[
-                _reconstructionSuggestionKey(fresh)
-              ])
+          if (previousFingerprints[_reconstructionSuggestionKey(item)] ==
+              _sketchReconstructionSuggestionFingerprints[_reconstructionSuggestionKey(
+                fresh,
+              )])
             fresh,
     ];
     _setSketchReconstructionSelection(reconciled, notify: false);
@@ -1106,8 +1286,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           suggestion,
         )];
     if (expectedFingerprint != null &&
-        expectedFingerprint !=
-            _reconstructionFingerprint(suggestion, byId)) {
+        expectedFingerprint != _reconstructionFingerprint(suggestion, byId)) {
       _rejectSketchReconstructionSuggestion(
         'Sugestão rejeitada: a geometria de origem foi alterada desde o reconhecimento.',
       );
@@ -1333,7 +1512,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ...dimension.references,
         if (dimension.anchorReference != null) dimension.anchorReference!,
       ];
-      if (references.any((reference) => selectedIds.contains(owner(reference)))) {
+      if (references.any(
+        (reference) => selectedIds.contains(owner(reference)),
+      )) {
         conflicts.add('${dimension.type.name} (${dimension.id})');
       }
     }
@@ -2455,10 +2636,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         rawSegments is! List ||
         rawSegments.isEmpty) {
       runtime.hideTransient(overlayId);
-      runtime.write(
-        'sketch.originalSectionReference.overlayId',
-        overlayId,
-      );
+      runtime.write('sketch.originalSectionReference.overlayId', overlayId);
       return;
     }
     final segments = <List<List<double>>>[];
@@ -2466,20 +2644,26 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (raw is! List || raw.length < 2) continue;
       final first = raw[0];
       final last = raw[1];
-      if (first is! List || last is! List || first.length < 3 || last.length < 3) {
+      if (first is! List ||
+          last is! List ||
+          first.length < 3 ||
+          last.length < 3) {
         continue;
       }
-      final firstPoint = first.whereType<num>().map((value) => value.toDouble()).toList();
-      final lastPoint = last.whereType<num>().map((value) => value.toDouble()).toList();
+      final firstPoint = first
+          .whereType<num>()
+          .map((value) => value.toDouble())
+          .toList();
+      final lastPoint = last
+          .whereType<num>()
+          .map((value) => value.toDouble())
+          .toList();
       if (firstPoint.length != 3 || lastPoint.length != 3) continue;
       segments.add([firstPoint, lastPoint]);
     }
     if (segments.isEmpty) {
       runtime.hideTransient(overlayId);
-      runtime.write(
-        'sketch.originalSectionReference.overlayId',
-        overlayId,
-      );
+      runtime.write('sketch.originalSectionReference.overlayId', overlayId);
       return;
     }
     runtime.showTransient(
@@ -4629,18 +4813,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   String _arcRadiusConstraintSnapshot() => jsonEncode([
-    for (final constraint in constraints.toList()
-      ..sort((first, second) => first.id.compareTo(second.id)))
+    for (final constraint
+        in constraints.toList()
+          ..sort((first, second) => first.id.compareTo(second.id)))
       constraint.toJson(),
   ]);
 
-  Map<String, String> _arcRadiusEntitySnapshots(
-    Iterable<String> ids,
-  ) => {
+  Map<String, String> _arcRadiusEntitySnapshots(Iterable<String> ids) => {
     for (final id in ids)
-      if (sketchApi?.entity(id) case final entity?) id: jsonEncode(
-        entity.toJson(),
-      ),
+      if (sketchApi?.entity(id) case final entity?)
+        id: jsonEncode(entity.toJson()),
   };
 
   String? _arcIdForRadiusPlan(ArcRadiusEditPlan plan) {
@@ -4658,7 +4840,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final geometry = preview.plan.arc;
     if (sketch == null || api == null || geometry == null) return;
     final localArc = List<SketchVector>.generate(49, (index) {
-      final angle = geometry.startAngle +
+      final angle =
+          geometry.startAngle +
           (geometry.endAngle - geometry.startAngle) * index / 48;
       return SketchVector(
         geometry.center.x + geometry.radius * math.cos(angle),
@@ -7395,11 +7578,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.select({id});
     } catch (value) {
       if (value case ArcRadiusEditConfirmationRequired failure) {
-        _beginArcRadiusEditPreview(
-          failure.plan,
-          'reverse.sketch.parameters',
-          {'id': id, 'values': values},
-        );
+        _beginArcRadiusEditPreview(failure.plan, 'reverse.sketch.parameters', {
+          'id': id,
+          'values': values,
+        });
       }
       error = value.toString().replaceFirst('Bad state: ', '');
       rethrow;
@@ -7926,7 +8108,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final ordered = unique.values.toList(growable: false);
     runtime.write(
       'sketch.reconstruction.selectedMany',
-      ordered.isEmpty ? null : List<SketchReconstructionSuggestion>.unmodifiable(ordered),
+      ordered.isEmpty
+          ? null
+          : List<SketchReconstructionSuggestion>.unmodifiable(ordered),
     );
     runtime.write(
       'sketch.reconstruction.selected',
@@ -7961,11 +8145,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final entity = api.entity(id);
       if (entity != null) entities[id] = entity;
     }
-    _sketchReconstructionSelectionAnalysis =
-        _sketchReconstruction.analyzeSelectedSuggestions(
-          selected,
-          entities,
-        );
+    _sketchReconstructionSelectionAnalysis = _sketchReconstruction
+        .analyzeSelectedSuggestions(selected, entities);
   }
 
   /// Returns bounds for only the entities that contributed to [suggestion].
@@ -7975,8 +8156,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// reference overlay.  Bounds are sampled from the real Sketch geometry in
   /// the active coordinate system, so the camera never frames unrelated scene
   /// entities.
-  ({Vector3 minimum, Vector3 maximum})?
-  sketchReconstructionSuggestionBounds(
+  ({Vector3 minimum, Vector3 maximum})? sketchReconstructionSuggestionBounds(
     SketchReconstructionSuggestion suggestion,
   ) {
     final sketch = activeSketch;
@@ -7989,8 +8169,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       try {
         points.addAll(
           _surfaceInputPoints(entity).where(
-            (point) =>
-                point.x.isFinite && point.y.isFinite && point.z.isFinite,
+            (point) => point.x.isFinite && point.y.isFinite && point.z.isFinite,
           ),
         );
         if (entity is SketchCircle || entity is SketchArc) {
@@ -8104,7 +8283,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _sketchReconstructionJointPreviewConstraintFingerprint =
         _jointConstraintFingerprint();
     _sketchReconstructionJointPreviewSelectionKeys = [
-      for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
+      for (final suggestion in selected)
+        _reconstructionSuggestionKey(suggestion),
     ];
     _sketchReconstructionJointPreviewSketchId = activeSketch?.id;
     _sketchReconstructionJointPreviewEntityIds = entities.keys.toSet();
@@ -8227,7 +8407,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       for (final id in item.coveredEntityIds) {
         if (!existing.containsKey(id)) {
           _invalidateSketchReconstructionJointPreview();
-          throw StateError('O fragmento coberto $id foi removido desde o preview.');
+          throw StateError(
+            'O fragmento coberto $id foi removido desde o preview.',
+          );
         }
       }
       final geometry = item.proposedGeometry;
@@ -8365,8 +8547,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   ) {
     bool finite(SketchVector point) =>
         point.x.isFinite && point.y.isFinite && point.z.isFinite;
-    if (!finite(geometry.startPoint) || !finite(geometry.endPoint)) return false;
-    if (geometry.center != null && !finite(geometry.center!)) return false;
+    if (!finite(geometry.startPoint) || !finite(geometry.endPoint)) {
+      return false;
+    }
+    if (geometry.center != null && !finite(geometry.center!)) {
+      return false;
+    }
     if (geometry.radius != null &&
         (!geometry.radius!.isFinite || geometry.radius! <= 0)) {
       return false;
@@ -8397,7 +8583,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         reference.replaceFirst(RegExp(r':(start|end|point)$'), '');
     final conflicts = <String>{};
     for (final constraint in constraints) {
-      if (constraint.references.any((reference) => ids.contains(owner(reference)))) {
+      if (constraint.references.any(
+        (reference) => ids.contains(owner(reference)),
+      )) {
         conflicts.add('${constraint.type.name} (${constraint.id})');
       }
     }
@@ -8449,6 +8637,326 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return result;
   }
 
+  SketchContinuityJoinDiagnostic? _currentSketchContinuityJoin(
+    SketchContinuityJoinDiagnostic selected,
+  ) {
+    for (final join in sketchContinuityAnalysis.joins) {
+      final direct =
+          join.first.entityId == selected.first.entityId &&
+          join.second.entityId == selected.second.entityId &&
+          join.first.name == selected.first.name &&
+          join.second.name == selected.second.name;
+      final reverse =
+          join.first.entityId == selected.second.entityId &&
+          join.second.entityId == selected.first.entityId &&
+          join.first.name == selected.second.name &&
+          join.second.name == selected.first.name;
+      if (direct || reverse) return join;
+    }
+    return null;
+  }
+
+  Map<String, SketchEntity> _sketchContinuityRepairEntities() => {
+    for (final entity in sketchEntities)
+      if (entity.type == SketchEntityType.line ||
+          entity.type == SketchEntityType.arc ||
+          entity.type == SketchEntityType.spline)
+        entity.id: entity,
+  };
+
+  String _sketchContinuityEntityFingerprint(SketchEntity entity) {
+    try {
+      return jsonEncode(entity.toJson());
+    } on Object {
+      return '${entity.id}:${entity.type.name}:${entity.version}';
+    }
+  }
+
+  bool _isSketchContinuityRepairPreviewCurrent(
+    SketchContinuityRepairPlan preview,
+  ) {
+    if (_sketchContinuityRepairPreviewSketchId != activeSketch?.id) {
+      return false;
+    }
+    if (_sketchContinuityRepairPreviewConstraintFingerprint !=
+        _jointConstraintFingerprint()) {
+      return false;
+    }
+    final selected = _selectedSketchContinuityJoin;
+    final current = selected == null
+        ? null
+        : _currentSketchContinuityJoin(selected);
+    if (current == null ||
+        current.first.entityId != preview.firstEntityId ||
+        current.second.entityId != preview.secondEntityId) {
+      return false;
+    }
+    for (final entry
+        in _sketchContinuityRepairPreviewEntityFingerprints.entries) {
+      final entity = sketchApi?.entity(entry.key);
+      if (entity == null ||
+          _sketchContinuityEntityFingerprint(entity) != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  SketchEntity _continuityEntityWithUpdates(
+    SketchEntity entity,
+    Iterable<SketchContinuityRepairEndpointUpdate> updates,
+  ) {
+    final relevant = updates.where((update) => update.entityId == entity.id);
+    if (relevant.isEmpty) return entity;
+    if (entity is SketchLine) {
+      var start = SketchVector.fromJson(entity.parameters['start']);
+      var end = SketchVector.fromJson(entity.parameters['end']);
+      for (final update in relevant) {
+        if (update.endpoint == 'start') start = update.after;
+        if (update.endpoint == 'end') end = update.after;
+      }
+      return SketchLine(start, end, id: entity.id);
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final originalStart = (entity.parameters['startAngle'] as num).toDouble();
+      final originalEnd = (entity.parameters['endAngle'] as num).toDouble();
+      var startAngle = originalStart;
+      var endAngle = originalEnd;
+      for (final update in relevant) {
+        final raw = math.atan2(
+          update.after.y - center.y,
+          update.after.x - center.x,
+        );
+        final reference = update.endpoint == 'start'
+            ? originalStart
+            : originalEnd;
+        final angle =
+            raw + 2 * math.pi * ((reference - raw) / (2 * math.pi)).round();
+        if (update.endpoint == 'start') startAngle = angle;
+        if (update.endpoint == 'end') endAngle = angle;
+      }
+      return SketchArc(center, radius, startAngle, endAngle, id: entity.id);
+    }
+    return entity;
+  }
+
+  SketchVector? _continuityEndpoint(SketchEntity? entity, String endpoint) {
+    if (entity == null) return null;
+    if (entity is SketchLine) {
+      return SketchVector.fromJson(entity.parameters[endpoint]);
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final angle = (entity.parameters['${endpoint}Angle'] as num).toDouble();
+      return SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
+        center.z,
+      );
+    }
+    if (entity is SketchSpline) {
+      final raw =
+          entity.parameters['sampledPoints'] ?? entity.parameters['points'];
+      if (raw is! List || raw.isEmpty) return null;
+      final points = raw.whereType<List>().map(SketchVector.fromJson).toList();
+      return endpoint == 'start' ? points.firstOrNull : points.lastOrNull;
+    }
+    return null;
+  }
+
+  List<List<dynamic>> _continuityGlobalSegments(SketchEntity entity) {
+    final geometry = _sketchScene
+        .adapt(entity, coordinates: activeSketch?.coordinates)
+        .geometry;
+    return _segmentsFromGeometry(geometry);
+  }
+
+  List<List<dynamic>> _continuityEndpointMarkers(
+    Iterable<SketchContinuityRepairEndpointUpdate> updates,
+  ) {
+    final coordinates = activeSketch?.coordinates;
+    if (coordinates == null) return const [];
+    final result = <List<dynamic>>[];
+    for (final update in updates) {
+      final point = coordinates.localToGlobal(update.after);
+      const size = .25;
+      result.add([
+        SketchVector(point.x - size, point.y, point.z).toJson(),
+        SketchVector(point.x + size, point.y, point.z).toJson(),
+      ]);
+      result.add([
+        SketchVector(point.x, point.y - size, point.z).toJson(),
+        SketchVector(point.x, point.y + size, point.z).toJson(),
+      ]);
+    }
+    return result;
+  }
+
+  void _publishSketchContinuityRepairPreview(SketchContinuityRepairPlan plan) {
+    _invalidateSketchContinuityRepairPreviewOverlaysOnly();
+    final entities = _sketchContinuityRepairEntities();
+    final selectedIds = {plan.firstEntityId, plan.secondEntityId};
+    final originalSegments = <List<dynamic>>[];
+    for (final id in selectedIds) {
+      final entity = entities[id];
+      if (entity != null) {
+        originalSegments.addAll(_continuityGlobalSegments(entity));
+      }
+    }
+    if (originalSegments.isNotEmpty) {
+      runtime.showTransient(
+        CadSceneEntity(
+          id: '${sketchContinuityRepairPreviewPrefix}original',
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': originalSegments,
+            'displayColor': 'referenceCurveHighlight',
+            'strokeWidth': 1.1,
+            'dashed': true,
+            'continuityRepairPreview': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+    }
+    final alternative = selectedSketchContinuityRepairAlternative;
+    if (alternative == null) {
+      runtime.write(sketchContinuityRepairPreviewOverlayKey, [
+        '${sketchContinuityRepairPreviewPrefix}original',
+      ]);
+      return;
+    }
+    final updatesByEntity =
+        <String, List<SketchContinuityRepairEndpointUpdate>>{};
+    for (final update in alternative.updates) {
+      updatesByEntity.putIfAbsent(update.entityId, () => []).add(update);
+    }
+    final virtualEntities = <String, SketchEntity>{
+      for (final entry in entities.entries)
+        entry.key: _continuityEntityWithUpdates(
+          entry.value,
+          updatesByEntity[entry.key] ?? const [],
+        ),
+    };
+    final proposedSegments = <List<dynamic>>[];
+    if (alternative.status != SketchContinuityRepairStatus.impossible) {
+      for (final id in selectedIds) {
+        final entity = virtualEntities[id];
+        if (entity == null) continue;
+        proposedSegments.addAll(_continuityGlobalSegments(entity));
+      }
+    }
+    final overlayIds = <String>[
+      '${sketchContinuityRepairPreviewPrefix}original',
+    ];
+    if (proposedSegments.isNotEmpty) {
+      final proposedId = '${sketchContinuityRepairPreviewPrefix}proposed';
+      runtime.showTransient(
+        CadSceneEntity(
+          id: proposedId,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': proposedSegments,
+            'displayColor': 'assistantSuggestion',
+            'strokeWidth': 2.8,
+            'continuityRepairPreview': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+      overlayIds.add(proposedId);
+    }
+    final markers =
+        alternative.status == SketchContinuityRepairStatus.impossible
+        ? const <List<dynamic>>[]
+        : _continuityEndpointMarkers(alternative.updates);
+    if (markers.isNotEmpty) {
+      runtime.showTransient(
+        CadSceneEntity(
+          id: sketchContinuityRepairPreviewEndpointsId,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': markers,
+            'displayColor': 'arcRadiusAffected',
+            'strokeWidth': 1.8,
+            'continuityRepairEndpoints': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+      overlayIds.add(sketchContinuityRepairPreviewEndpointsId);
+    }
+    final connectionSegments = <List<dynamic>>[];
+    for (final effect in alternative.adjacentEffects) {
+      final first = _continuityEndpoint(
+        virtualEntities[effect.firstEntityId] ??
+            sketchApi?.entity(effect.firstEntityId),
+        effect.firstEndpoint,
+      );
+      final second = _continuityEndpoint(
+        virtualEntities[effect.secondEntityId] ??
+            sketchApi?.entity(effect.secondEntityId),
+        effect.secondEndpoint,
+      );
+      final coordinates = activeSketch?.coordinates;
+      if (first == null || second == null || coordinates == null) continue;
+      connectionSegments.add([
+        coordinates.localToGlobal(first).toJson(),
+        coordinates.localToGlobal(second).toJson(),
+      ]);
+    }
+    if (connectionSegments.isNotEmpty) {
+      runtime.showTransient(
+        CadSceneEntity(
+          id: sketchContinuityRepairPreviewConnectionsId,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': connectionSegments,
+            'displayColor':
+                alternative.status == SketchContinuityRepairStatus.impossible
+                ? 'conflictRed'
+                : 'referenceCurveHighlight',
+            'strokeWidth': 1.4,
+            'dashed': true,
+            'continuityRepairConnections': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+      overlayIds.add(sketchContinuityRepairPreviewConnectionsId);
+    }
+    runtime.write(sketchContinuityRepairPreviewOverlayKey, overlayIds);
+  }
+
+  void _invalidateSketchContinuityRepairPreview() {
+    _invalidateSketchContinuityRepairPreviewOverlaysOnly();
+    _sketchContinuityRepairPreview = null;
+    _selectedSketchContinuityRepairAlternative = null;
+    _sketchContinuityRepairPreviewToken = null;
+    _sketchContinuityRepairPreviewSketchId = null;
+    _sketchContinuityRepairPreviewConstraintFingerprint = null;
+    _sketchContinuityRepairPreviewEntityFingerprints = const {};
+  }
+
+  void _invalidateSketchContinuityRepairPreviewOverlaysOnly() {
+    final raw = runtime.read<Object?>(sketchContinuityRepairPreviewOverlayKey);
+    if (raw is Iterable) {
+      for (final id in raw.whereType<String>()) {
+        runtime.hideTransient(id);
+      }
+    }
+    runtime.hideTransient(sketchContinuityRepairPreviewEndpointsId);
+    runtime.hideTransient(sketchContinuityRepairPreviewConnectionsId);
+    runtime.write(sketchContinuityRepairPreviewOverlayKey, const <String>[]);
+  }
+
   bool _isSketchReconstructionJointPreviewCurrent(
     SketchReconstructionJointAcceptancePlan preview,
   ) {
@@ -8461,14 +8969,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     final selected = selectedSketchReconstructionSuggestions;
     final keys = [
-      for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
+      for (final suggestion in selected)
+        _reconstructionSuggestionKey(suggestion),
     ];
     if (keys.length != _sketchReconstructionJointPreviewSelectionKeys.length ||
         !keys.asMap().entries.every(
           (entry) =>
-              entry.value == _sketchReconstructionJointPreviewSelectionKeys[
-                entry.key
-              ],
+              entry.value ==
+              _sketchReconstructionJointPreviewSelectionKeys[entry.key],
         )) {
       return false;
     }
@@ -8477,7 +8985,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         _reconstructionSuggestionKey(suggestion): suggestion,
     };
     for (final item in preview.suggestions) {
-      final current = selectedByKey[_reconstructionSuggestionKey(item.suggestion)];
+      final current =
+          selectedByKey[_reconstructionSuggestionKey(item.suggestion)];
       if (current == null ||
           _jointSuggestionSnapshotFingerprint(current) !=
               _jointSuggestionSnapshotFingerprint(item.suggestion)) {
@@ -8485,7 +8994,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
     }
     final entities = _jointAcceptanceEntities(selected);
-    if (!entities.keys.toSet().containsAll(_sketchReconstructionJointPreviewEntityIds)) {
+    if (!entities.keys.toSet().containsAll(
+      _sketchReconstructionJointPreviewEntityIds,
+    )) {
       return false;
     }
     // Fingerprints are checked directly rather than rebuilding the geometric
@@ -8522,14 +9033,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String _jointConstraintFingerprint() {
     try {
       return jsonEncode([
-        for (final constraint in constraints)
-          constraint.toJson(),
-        for (final dimension in dimensions)
-          dimension.toJson(),
+        for (final constraint in constraints) constraint.toJson(),
+        for (final dimension in dimensions) dimension.toJson(),
       ]);
     } on Object {
       return constraints
-          .map((constraint) => '${constraint.id}:${constraint.version}:${constraint.signature}')
+          .map(
+            (constraint) =>
+                '${constraint.id}:${constraint.version}:${constraint.signature}',
+          )
           .join('|');
     }
   }
@@ -8560,6 +9072,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void _invalidateSketchReconstructionJointPreview() {
+    _invalidateSketchContinuityRepairPreview();
     final overlayIds = runtime.read<Object?>(
       sketchReconstructionJointPreviewOverlayKey,
     );
@@ -8663,13 +9176,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (coordinates == null) return const [];
     SketchVector global(SketchVector point) => coordinates.localToGlobal(point);
     if (geometry.points.length >= 2) {
-      final points = geometry.points.map(global).map((point) => point.toJson()).toList();
+      final points = geometry.points
+          .map(global)
+          .map((point) => point.toJson())
+          .toList();
       return [
         for (var index = 0; index + 1 < points.length; index++)
           [points[index], points[index + 1]],
       ];
     }
-    final sourceContainsSpline = item.sourceTypes.contains(SketchEntityType.spline);
+    final sourceContainsSpline = item.sourceTypes.contains(
+      SketchEntityType.spline,
+    );
     if (sourceContainsSpline) {
       final sourceSegments = <List<dynamic>>[];
       for (final id in item.sourceEntityIds) {
@@ -8684,7 +9202,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (sourceSegments.isNotEmpty) return sourceSegments;
     }
     if (geometry.kind == SketchReconstructionKind.line) {
-      return [[global(geometry.startPoint).toJson(), global(geometry.endPoint).toJson()]];
+      return [
+        [
+          global(geometry.startPoint).toJson(),
+          global(geometry.endPoint).toJson(),
+        ],
+      ];
     }
     final radius = geometry.radius;
     if ((geometry.kind == SketchReconstructionKind.arc ||
@@ -8700,13 +9223,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         for (var index = 0; index < count; index++)
           global(
             SketchVector(
-              geometry.center!.x + radius * math.cos(start + (end - start) * index / (count - 1)),
-              geometry.center!.y + radius * math.sin(start + (end - start) * index / (count - 1)),
+              geometry.center!.x +
+                  radius *
+                      math.cos(start + (end - start) * index / (count - 1)),
+              geometry.center!.y +
+                  radius *
+                      math.sin(start + (end - start) * index / (count - 1)),
               geometry.center!.z,
             ),
           ).toJson(),
       ];
-      return [for (var index = 0; index + 1 < points.length; index++) [points[index], points[index + 1]]];
+      return [
+        for (var index = 0; index + 1 < points.length; index++)
+          [points[index], points[index + 1]],
+      ];
     }
     final segments = <List<dynamic>>[];
     for (final id in item.sourceEntityIds) {
@@ -8716,7 +9246,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       segments.addAll(_segmentsFromGeometry(visual.geometry));
     }
     if (segments.isNotEmpty) return segments;
-    return [[global(geometry.startPoint).toJson(), global(geometry.endPoint).toJson()]];
+    return [
+      [
+        global(geometry.startPoint).toJson(),
+        global(geometry.endPoint).toJson(),
+      ],
+    ];
   }
 
   SketchVector? _jointPreviewEndpoint(
@@ -8762,8 +9297,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     // historical single-item overlay; for a selected item the persistent
     // ordered overlay remains intact and a second transient overlay accents
     // only the hovered suggestion.
-    final hoveredIsSelected = hovered != null &&
-        selected.any((item) => _sameSketchReconstructionSuggestion(item, hovered));
+    final hoveredIsSelected =
+        hovered != null &&
+        selected.any(
+          (item) => _sameSketchReconstructionSuggestion(item, hovered),
+        );
     final active = hovered == null || hoveredIsSelected
         ? selected
         : <SketchReconstructionSuggestion>[hovered];
@@ -8773,8 +9311,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (notify) notifyListeners();
       return;
     }
-    final persistent = selected.isNotEmpty &&
-        (hovered == null || hoveredIsSelected);
+    final persistent =
+        selected.isNotEmpty && (hovered == null || hoveredIsSelected);
     _showSketchReconstructionHighlightOverlay(active, persistent: persistent);
     if (hoveredIsSelected) {
       _showSketchReconstructionHighlightOverlay(
@@ -14855,7 +15393,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
         final hiddenIds = (parameters['hiddenIds'] as List?)?.cast<String>();
         if (createdIds == null || hiddenIds == null) {
-          throw StateError('O historico da aceitacao conjunta esta incompleto.');
+          throw StateError(
+            'O historico da aceitacao conjunta esta incompleto.',
+          );
         }
         if (sketchApi?.engine.undo() != true) {
           throw StateError('Nao ha aceitacao conjunta para desfazer.');
@@ -14872,7 +15412,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
         final hiddenIds = (parameters['hiddenIds'] as List?)?.cast<String>();
         if (createdIds == null || hiddenIds == null) {
-          throw StateError('O historico da aceitacao conjunta esta incompleto.');
+          throw StateError(
+            'O historico da aceitacao conjunta esta incompleto.',
+          );
         }
         if (sketchApi?.engine.redo() != true) {
           throw StateError('Nao ha aceitacao conjunta para refazer.');
@@ -14888,10 +15430,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         if (suggestionKeys != null && suggestionKeys.isNotEmpty) {
           _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
               .where(
-                (item) =>
-                    !suggestionKeys.contains(
-                      _reconstructionSuggestionKey(item),
-                    ),
+                (item) => !suggestionKeys.contains(
+                  _reconstructionSuggestionKey(item),
+                ),
               )
               .toList(growable: false);
         }

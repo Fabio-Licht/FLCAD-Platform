@@ -556,21 +556,17 @@ void main() {
       expect(controller.sketchApi!.entity(preceding.id), isNotNull);
       expect(controller.sketchApi!.entity(following.id), isNotNull);
       expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1);
-      await controller.updateSketchEntityParameters(
-        arc.id,
-        {'radius': 1.5},
-        confirmAdjacent: true,
-      );
+      await controller.updateSketchEntityParameters(arc.id, {
+        'radius': 1.5,
+      }, confirmAdjacent: true);
       expect(controller.sketchApi!.entity(arc.id)!.parameters['radius'], 1.5);
 
       // A larger radius moves both tangent contacts beyond the original line
       // spans. The edit must extend the frontiers instead of falling back to
       // the old arc endpoints and losing C1 continuity.
-      await controller.updateSketchEntityParameters(
-        arc.id,
-        {'radius': 3},
-        confirmAdjacent: true,
-      );
+      await controller.updateSketchEntityParameters(arc.id, {
+        'radius': 3,
+      }, confirmAdjacent: true);
       expect(arcEnd('start').x, closeTo(1, 1e-9));
       expect(arcEnd('start').y, closeTo(-2, 1e-9));
       expect(arcEnd('end').x, closeTo(-2, 1e-9));
@@ -611,11 +607,9 @@ void main() {
 
       // Reducing the radius shortens the same frontiers and keeps the contact
       // perpendicular to both line directions.
-      await controller.updateSketchEntityParameters(
-        arc.id,
-        {'radius': .5},
-        confirmAdjacent: true,
-      );
+      await controller.updateSketchEntityParameters(arc.id, {
+        'radius': .5,
+      }, confirmAdjacent: true);
       expect(arcEnd('start').y, closeTo(.5, 1e-9));
       expect(arcEnd('end').x, closeTo(.5, 1e-9));
 
@@ -979,7 +973,8 @@ void main() {
         ),
       );
       final section = await harness.controller.sections.create(
-        planeId: '${WorldCoordinateSystem.prefix('g124-7f-real-section')}xy-plane',
+        planeId:
+            '${WorldCoordinateSystem.prefix('g124-7f-real-section')}xy-plane',
         origin: Vector3.zero,
         normal: const Vector3(0, 0, 1),
       );
@@ -1005,7 +1000,10 @@ void main() {
       expect(overlay.geometry['displayColor'], 'originalSectionReference');
       expect(overlay.geometry['segments'], sourceSegments);
       expect(overlay.geometry['nonSelectable'], isTrue);
-      expect(harness.cad.runtime.document!.entities.containsKey(overlay.id), isFalse);
+      expect(
+        harness.cad.runtime.document!.entities.containsKey(overlay.id),
+        isFalse,
+      );
     },
   );
 
@@ -1059,7 +1057,10 @@ void main() {
       expect(overlay, isNotNull);
       expect(overlay!.geometry['segments'], segments);
       expect(overlay.geometry['displayColor'], 'originalSectionReference');
-      expect(controller.activeSketchSourceSection!.data['section']['open'], isTrue);
+      expect(
+        controller.activeSketchSourceSection!.data['section']['open'],
+        isTrue,
+      );
     },
   );
 
@@ -1102,15 +1103,8 @@ void main() {
               'referenceCurve': true,
               'sceneKind': 'curve',
               'sceneVisible': false,
-              'sceneGeometry': {
-                'segments': segments,
-                'referenceCurve': true,
-              },
-              'section': {
-                'segments': segments,
-                'closed': true,
-                'open': false,
-              },
+              'sceneGeometry': {'segments': segments, 'referenceCurve': true},
+              'section': {'segments': segments, 'closed': true, 'open': false},
             },
           ),
         ],
@@ -1201,12 +1195,18 @@ void main() {
         reopenedCad.runtime.scene.find(overlayId)!.geometry['segments'],
         segments,
       );
-      expect(reopenedCad.runtime.scene.find(overlayId)!.kind,
-          CadSceneEntityKind.preview);
-      expect(reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
-          isFalse);
-      expect(reopenedCad.runtime.document!.entities.containsKey(overlayId),
-          isFalse);
+      expect(
+        reopenedCad.runtime.scene.find(overlayId)!.kind,
+        CadSceneEntityKind.preview,
+      );
+      expect(
+        reopenedCad.runtime.document!.entities[sectionId]!.data['sceneVisible'],
+        isFalse,
+      );
+      expect(
+        reopenedCad.runtime.document!.entities.containsKey(overlayId),
+        isFalse,
+      );
       await reopened.toggleOriginalSectionReferenceVisibility();
       expect(reopenedCad.runtime.scene.find(overlayId), isNull);
     },
@@ -1456,18 +1456,12 @@ void main() {
       ..clear()
       ..add(dimensionArc.id);
     controller.runtime.select({dimensionArc.id});
-    await controller.createDrivingDimension(
-      SketchDimensionType.radius,
-      1.5,
-    );
+    await controller.createDrivingDimension(SketchDimensionType.radius, 1.5);
     expect(controller.arcRadiusEditPreview, isNotNull);
     expect(controller.dimensions, isEmpty);
     controller.cancelArcRadiusEditPreview();
     expect(controller.arcRadiusEditPreview, isNull);
-    await controller.createDrivingDimension(
-      SketchDimensionType.radius,
-      1.5,
-    );
+    await controller.createDrivingDimension(SketchDimensionType.radius, 1.5);
     expect(controller.arcRadiusEditPreview, isNotNull);
     await controller.confirmArcRadiusEditPreview();
     expect(controller.arcRadiusEditPreview, isNull);
@@ -2809,8 +2803,9 @@ void main() {
       );
       expect(first.rmsError, isNotNull);
       expect(first.maxError, isNotNull);
-      final firstBounds = controller
-          .sketchReconstructionSuggestionBounds(first)!;
+      final firstBounds = controller.sketchReconstructionSuggestionBounds(
+        first,
+      )!;
       expect(firstBounds.minimum.x, closeTo(0, 1e-9));
       expect(firstBounds.maximum.x, closeTo(20, 1e-9));
       expect(firstBounds.minimum.y, closeTo(0, 1e-9));
@@ -3045,10 +3040,8 @@ void main() {
       addTearDown(harness.cad.dispose);
       final controller = harness.controller;
       final api = controller.sketchApi!;
-      SketchVector point(double angle) => SketchVector(
-        20 + 12 * math.cos(angle),
-        12 * math.sin(angle),
-      );
+      SketchVector point(double angle) =>
+          SketchVector(20 + 12 * math.cos(angle), 12 * math.sin(angle));
       final sources = [
         for (var index = 0; index < 5; index++)
           api.builders.line.build(
@@ -3075,14 +3068,10 @@ void main() {
 
       // A prior overlapping promotion may already have hidden this visual
       // fragment. It must not invalidate the arc's actual fitting sources.
-      api.engine.modify(
-        covered.id,
-        SketchHistoryAction.modify,
-        (entity) {
-          entity.visible = false;
-          entity.metadata['reconstructionHidden'] = true;
-        },
-      );
+      api.engine.modify(covered.id, SketchHistoryAction.modify, (entity) {
+        entity.visible = false;
+        entity.metadata['reconstructionHidden'] = true;
+      });
       final createdId = await controller.acceptSketchReconstructionSuggestion(
         suggestion,
       );
@@ -4091,14 +4080,14 @@ void main() {
       );
       final historyBeforeIncompatible =
           controller.commands.manager.history.length;
-      final incompatibleId =
-          await controller.acceptSketchReconstructionSuggestion(
-        SketchReconstructionSuggestion(
-          kind: SketchReconstructionKind.line,
-          entityIds: [incompatibleA.id, incompatibleB.id],
-          confidence: 1,
-        ),
-      );
+      final incompatibleId = await controller
+          .acceptSketchReconstructionSuggestion(
+            SketchReconstructionSuggestion(
+              kind: SketchReconstructionKind.line,
+              entityIds: [incompatibleA.id, incompatibleB.id],
+              confidence: 1,
+            ),
+          );
       expect(incompatibleId, isNull);
       expect(controller.error, contains('condicionado'));
       expect(
@@ -4203,313 +4192,297 @@ void main() {
     },
   );
 
-  test(
-    'reconstructed assistant arc accepts Inspector radius edits',
-    () async {
-      final harness = await _g124Harness('g124-recon-arc-radius');
-      addTearDown(() => harness.directory.delete(recursive: true));
-      addTearDown(harness.controller.dispose);
-      addTearDown(harness.cad.dispose);
-      final controller = harness.controller;
-      final cad = harness.cad;
-      final api = controller.sketchApi!;
+  test('reconstructed assistant arc accepts Inspector radius edits', () async {
+    final harness = await _g124Harness('g124-recon-arc-radius');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final controller = harness.controller;
+    final cad = harness.cad;
+    final api = controller.sketchApi!;
 
-      SketchVector arcPoint(double radius, double angle) => SketchVector(
-        radius * math.cos(angle),
-        radius * math.sin(angle),
+    SketchVector arcPoint(double radius, double angle) =>
+        SketchVector(radius * math.cos(angle), radius * math.sin(angle));
+    List<SketchLine> chordChain({
+      required double radius,
+      required double a0,
+      required double a1,
+      int count = 5,
+    }) => [
+      for (var index = 0; index < count; index++)
+        api.builders.line.build(
+          arcPoint(radius, a0 + (a1 - a0) * index / count),
+          arcPoint(radius, a0 + (a1 - a0) * (index + 1) / count),
+        ),
+    ];
+
+    SketchVector arcEnd(SketchEntity entity, String key) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final angle = (entity.parameters['${key}Angle'] as num).toDouble();
+      return SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
       );
-      List<SketchLine> chordChain({
-        required double radius,
-        required double a0,
-        required double a1,
-        int count = 5,
-      }) => [
-        for (var index = 0; index < count; index++)
-          api.builders.line.build(
-            arcPoint(radius, a0 + (a1 - a0) * index / count),
-            arcPoint(radius, a0 + (a1 - a0) * (index + 1) / count),
-          ),
-      ];
+    }
 
-      SketchVector arcEnd(SketchEntity entity, String key) {
-        final center = SketchVector.fromJson(entity.parameters['center']);
-        final radius = (entity.parameters['radius'] as num).toDouble();
-        final angle = (entity.parameters['${key}Angle'] as num).toDouble();
-        return SketchVector(
-          center.x + radius * math.cos(angle),
-          center.y + radius * math.sin(angle),
+    const reconstructedRadius = 7.216;
+    final isolatedSources = chordChain(
+      radius: reconstructedRadius,
+      a0: 0.2,
+      a1: 1.4,
+    );
+    controller.analyzeSketchReconstruction();
+    final isolatedSuggestion = controller.sketchReconstructionSuggestions
+        .firstWhere(
+          (item) =>
+              (item.kind == SketchReconstructionKind.arc ||
+                  item.kind == SketchReconstructionKind.circle) &&
+              item.entityIds.every(
+                (id) => isolatedSources.any((source) => source.id == id),
+              ) &&
+              item.center != null &&
+              item.confidence >= .75,
         );
-      }
+    final isolatedId = (await controller.acceptSketchReconstructionSuggestion(
+      isolatedSuggestion,
+    ))!;
+    final isolatedArc = api.entity(isolatedId)! as SketchArc;
+    expect(isolatedArc.metadata['reconstructionKind'], 'arc');
+    expect(isolatedArc.metadata['reconstructionHidden'], isNot(true));
+    expect(
+      (isolatedArc.parameters['radius'] as num).toDouble(),
+      closeTo(reconstructedRadius, 1e-3),
+    );
+    for (final source in isolatedSources) {
+      expect(api.entity(source.id)!.visible, isFalse);
+      expect(api.entity(source.id)!.metadata['reconstructionHidden'], isTrue);
+    }
 
-      const reconstructedRadius = 7.216;
-      final isolatedSources = chordChain(
-        radius: reconstructedRadius,
-        a0: 0.2,
-        a1: 1.4,
-      );
-      controller.analyzeSketchReconstruction();
-      final isolatedSuggestion = controller.sketchReconstructionSuggestions
-          .firstWhere(
-            (item) =>
-                (item.kind == SketchReconstructionKind.arc ||
-                    item.kind == SketchReconstructionKind.circle) &&
-                item.entityIds.every(
-                  (id) => isolatedSources.any((source) => source.id == id),
-                ) &&
-                item.center != null &&
-                item.confidence >= .75,
-          );
-      final isolatedId =
-          (await controller.acceptSketchReconstructionSuggestion(
-            isolatedSuggestion,
-          ))!;
-      final isolatedArc = api.entity(isolatedId)! as SketchArc;
-      expect(isolatedArc.metadata['reconstructionKind'], 'arc');
-      expect(isolatedArc.metadata['reconstructionHidden'], isNot(true));
-      expect(
-        (isolatedArc.parameters['radius'] as num).toDouble(),
-        closeTo(reconstructedRadius, 1e-3),
-      );
-      for (final source in isolatedSources) {
-        expect(api.entity(source.id)!.visible, isFalse);
-        expect(api.entity(source.id)!.metadata['reconstructionHidden'], isTrue);
-      }
+    await controller.updateSketchEntityParameters(isolatedId, {'radius': 7.5});
+    expect(
+      (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(cad.runtime.scene.find(isolatedId), isNotNull);
+    expect(
+      cad
+          .runtime
+          .document!
+          .entities[isolatedId]!
+          .data['sketchEntity']['parameters']['radius'],
+      closeTo(7.5, 1e-9),
+    );
+    await controller.updateSketchEntityParameters(isolatedId, {'radius': 6.8});
+    expect(
+      (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
+      closeTo(6.8, 1e-9),
+    );
+    await controller.undo();
+    expect(
+      (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+    await controller.redo();
+    expect(
+      (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
+      closeTo(6.8, 1e-9),
+    );
+    await controller.undo();
+    await controller.redo();
+    expect(
+      (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
+      closeTo(6.8, 1e-9),
+    );
 
-      await controller.updateSketchEntityParameters(isolatedId, {
-        'radius': 7.5,
-      });
-      expect(
-        (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
-        closeTo(7.5, 1e-9),
-      );
-      expect(controller.arcRadiusEditPreview, isNull);
-      expect(cad.runtime.scene.find(isolatedId), isNotNull);
-      expect(
-        cad.runtime.document!.entities[isolatedId]!.data['sketchEntity']['parameters']['radius'],
-        closeTo(7.5, 1e-9),
-      );
-      await controller.updateSketchEntityParameters(isolatedId, {
-        'radius': 6.8,
-      });
-      expect(
-        (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
-        closeTo(6.8, 1e-9),
-      );
-      await controller.undo();
-      expect(
-        (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
-        closeTo(7.5, 1e-9),
-      );
-      await controller.redo();
-      expect(
-        (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
-        closeTo(6.8, 1e-9),
-      );
-      await controller.undo();
-      await controller.redo();
-      expect(
-        (api.entity(isolatedId)!.parameters['radius'] as num).toDouble(),
-        closeTo(6.8, 1e-9),
-      );
+    final manual = api.builders.arc.build(
+      const SketchVector(80, 0),
+      7.216,
+      0,
+      math.pi / 2,
+    );
+    await controller.updateSketchEntityParameters(manual.id, {'radius': 7.5});
+    expect(
+      (api.entity(manual.id)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
 
-      final manual = api.builders.arc.build(
-        const SketchVector(80, 0),
-        7.216,
-        0,
-        math.pi / 2,
-      );
-      await controller.updateSketchEntityParameters(manual.id, {
-        'radius': 7.5,
-      });
-      expect(
-        (api.entity(manual.id)!.parameters['radius'] as num).toDouble(),
-        closeTo(7.5, 1e-9),
-      );
+    final neighborRadius = 7.216;
+    final beforeChord = api.builders.line.build(
+      arcPoint(neighborRadius, -0.3),
+      arcPoint(neighborRadius, 0),
+    );
+    final c0Sources = chordChain(
+      radius: neighborRadius,
+      a0: 0,
+      a1: 0.6,
+      count: 4,
+    );
+    final afterChord = api.builders.line.build(
+      arcPoint(neighborRadius, 0.6),
+      arcPoint(neighborRadius, 0.9),
+    );
+    controller.beginSketchCircularSelection();
+    for (final source in c0Sources) {
+      controller.selectSketchEntity(source.id);
+    }
+    await controller.fitSelectedSketchCircularGeometry();
+    final c0Id = controller.selectedSketchEntityIds.single;
+    expect(api.entity(c0Id), isA<SketchArc>());
+    expect(api.entity(c0Id)!.metadata['reconstructionKind'], 'arc');
+    expect(api.entity(beforeChord.id)!.visible, isTrue);
+    expect(api.entity(afterChord.id)!.visible, isTrue);
+    final beforeSnapshot = List<double>.from(
+      (api.entity(beforeChord.id)!.parameters['end'] as List).cast<num>().map(
+        (value) => value.toDouble(),
+      ),
+    );
+    final afterSnapshot = List<double>.from(
+      (api.entity(afterChord.id)!.parameters['start'] as List).cast<num>().map(
+        (value) => value.toDouble(),
+      ),
+    );
+    await controller.updateSketchEntityParameters(c0Id, {'radius': 7.5});
+    expect(
+      (api.entity(c0Id)!.parameters['radius'] as num).toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(
+      (api.entity(beforeChord.id)!.parameters['end'] as List).cast<num>().map(
+        (value) => value.toDouble(),
+      ),
+      beforeSnapshot,
+    );
+    expect(
+      (api.entity(afterChord.id)!.parameters['start'] as List).cast<num>().map(
+        (value) => value.toDouble(),
+      ),
+      afterSnapshot,
+    );
 
-      final neighborRadius = 7.216;
-      final beforeChord = api.builders.line.build(
-        arcPoint(neighborRadius, -0.3),
-        arcPoint(neighborRadius, 0),
-      );
-      final c0Sources = chordChain(
-        radius: neighborRadius,
-        a0: 0,
-        a1: 0.6,
-        count: 4,
-      );
-      final afterChord = api.builders.line.build(
-        arcPoint(neighborRadius, 0.6),
-        arcPoint(neighborRadius, 0.9),
-      );
-      controller.beginSketchCircularSelection();
-      for (final source in c0Sources) {
-        controller.selectSketchEntity(source.id);
-      }
-      await controller.fitSelectedSketchCircularGeometry();
-      final c0Id = controller.selectedSketchEntityIds.single;
-      expect(api.entity(c0Id), isA<SketchArc>());
-      expect(api.entity(c0Id)!.metadata['reconstructionKind'], 'arc');
-      expect(api.entity(beforeChord.id)!.visible, isTrue);
-      expect(api.entity(afterChord.id)!.visible, isTrue);
-      final beforeSnapshot = List<double>.from(
-        (api.entity(beforeChord.id)!.parameters['end'] as List).cast<num>().map(
-          (value) => value.toDouble(),
+    final fillet = api.builders.arc.build(
+      const SketchVector(40, 40),
+      1,
+      0,
+      math.pi / 2,
+    );
+    fillet.metadata['reconstructionKind'] = 'arc';
+    final preceding = api.builders.line.build(
+      const SketchVector(41, 39),
+      const SketchVector(41, 40),
+    );
+    final following = api.builders.line.build(
+      const SketchVector(40, 41),
+      const SketchVector(39, 41),
+    );
+    await expectLater(
+      controller.updateSketchEntityParameters(fillet.id, {'radius': 1.5}),
+      throwsA(isA<ArcRadiusEditConfirmationRequired>()),
+    );
+    expect(api.entity(fillet.id)!.parameters['radius'], 1.0);
+    expect(controller.arcRadiusEditPreview, isNotNull);
+    expect(
+      cad.runtime.scene.find(
+        'arc-radius-preview-${controller.arcRadiusEditPreview!.token}',
+      ),
+      isNotNull,
+    );
+    controller.cancelArcRadiusEditPreview();
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(api.entity(fillet.id)!.parameters['radius'], 1.0);
+    await expectLater(
+      controller.updateSketchEntityParameters(fillet.id, {'radius': 1.5}),
+      throwsA(isA<ArcRadiusEditConfirmationRequired>()),
+    );
+    await controller.confirmArcRadiusEditPreview();
+    expect(controller.arcRadiusEditPreview, isNull);
+    expect(
+      (api.entity(fillet.id)!.parameters['radius'] as num).toDouble(),
+      closeTo(1.5, 1e-9),
+    );
+    expect(arcEnd(api.entity(fillet.id)!, 'start').x, closeTo(41, 1e-9));
+    expect(
+      SketchVector.fromJson(api.entity(preceding.id)!.parameters['end']).y,
+      closeTo(arcEnd(api.entity(fillet.id)!, 'start').y, 1e-9),
+    );
+    expect(
+      SketchVector.fromJson(api.entity(following.id)!.parameters['start']).x,
+      closeTo(arcEnd(api.entity(fillet.id)!, 'end').x, 1e-9),
+    );
+
+    final rejected = api.builders.arc.build(
+      const SketchVector(60, 60),
+      1,
+      0,
+      math.pi / 2,
+    );
+    rejected.metadata['reconstructionKind'] = 'arc';
+    final onlyFrontier = api.builders.line.build(
+      const SketchVector(61, 59),
+      const SketchVector(61, 60),
+    );
+    await expectLater(
+      controller.updateSketchEntityParameters(rejected.id, {'radius': 1.5}),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.toString(),
+          'message',
+          contains('Não foi possível manter a tangência nas duas fronteiras.'),
         ),
-      );
-      final afterSnapshot = List<double>.from(
-        (api.entity(afterChord.id)!.parameters['start'] as List)
-            .cast<num>()
-            .map((value) => value.toDouble()),
-      );
-      await controller.updateSketchEntityParameters(c0Id, {'radius': 7.5});
-      expect(
-        (api.entity(c0Id)!.parameters['radius'] as num).toDouble(),
-        closeTo(7.5, 1e-9),
-      );
-      expect(controller.arcRadiusEditPreview, isNull);
-      expect(
-        (api.entity(beforeChord.id)!.parameters['end'] as List).cast<num>().map(
-          (value) => value.toDouble(),
-        ),
-        beforeSnapshot,
-      );
-      expect(
-        (api.entity(afterChord.id)!.parameters['start'] as List)
-            .cast<num>()
-            .map((value) => value.toDouble()),
-        afterSnapshot,
-      );
+      ),
+    );
+    expect(controller.error, contains('tangência nas duas fronteiras'));
+    expect(api.entity(rejected.id)!.parameters['radius'], 1.0);
+    expect(
+      SketchVector.fromJson(api.entity(onlyFrontier.id)!.parameters['end']).y,
+      60,
+    );
 
-      final fillet = api.builders.arc.build(
-        const SketchVector(40, 40),
-        1,
-        0,
-        math.pi / 2,
-      );
-      fillet.metadata['reconstructionKind'] = 'arc';
-      final preceding = api.builders.line.build(
-        const SketchVector(41, 39),
-        const SketchVector(41, 40),
-      );
-      final following = api.builders.line.build(
-        const SketchVector(40, 41),
-        const SketchVector(39, 41),
-      );
-      await expectLater(
-        controller.updateSketchEntityParameters(fillet.id, {'radius': 1.5}),
-        throwsA(isA<ArcRadiusEditConfirmationRequired>()),
-      );
-      expect(api.entity(fillet.id)!.parameters['radius'], 1.0);
-      expect(controller.arcRadiusEditPreview, isNotNull);
-      expect(
-        cad.runtime.scene.find(
-          'arc-radius-preview-${controller.arcRadiusEditPreview!.token}',
+    await controller.persist();
+    final reopenedKernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final reopenedCad = DesktopCadController(
+      kernels: reopenedKernels,
+      projects: ProjectManager.instance,
+    );
+    final reopenedCommands = DesktopCommandCoordinator(
+      cad: reopenedCad,
+      projects: ProjectManager.instance,
+    );
+    final reopened = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: reopenedCommands,
+      runtime: reopenedCad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: harness.projects),
         ),
-        isNotNull,
-      );
-      controller.cancelArcRadiusEditPreview();
-      expect(controller.arcRadiusEditPreview, isNull);
-      expect(api.entity(fillet.id)!.parameters['radius'], 1.0);
-      await expectLater(
-        controller.updateSketchEntityParameters(fillet.id, {'radius': 1.5}),
-        throwsA(isA<ArcRadiusEditConfirmationRequired>()),
-      );
-      await controller.confirmArcRadiusEditPreview();
-      expect(controller.arcRadiusEditPreview, isNull);
-      expect(
-        (api.entity(fillet.id)!.parameters['radius'] as num).toDouble(),
-        closeTo(1.5, 1e-9),
-      );
-      expect(arcEnd(api.entity(fillet.id)!, 'start').x, closeTo(41, 1e-9));
-      expect(
-        SketchVector.fromJson(
-          api.entity(preceding.id)!.parameters['end'],
-        ).y,
-        closeTo(arcEnd(api.entity(fillet.id)!, 'start').y, 1e-9),
-      );
-      expect(
-        SketchVector.fromJson(
-          api.entity(following.id)!.parameters['start'],
-        ).x,
-        closeTo(arcEnd(api.entity(fillet.id)!, 'end').x, 1e-9),
-      );
-
-      final rejected = api.builders.arc.build(
-        const SketchVector(60, 60),
-        1,
-        0,
-        math.pi / 2,
-      );
-      rejected.metadata['reconstructionKind'] = 'arc';
-      final onlyFrontier = api.builders.line.build(
-        const SketchVector(61, 59),
-        const SketchVector(61, 60),
-      );
-      await expectLater(
-        controller.updateSketchEntityParameters(rejected.id, {'radius': 1.5}),
-        throwsA(
-          isA<StateError>().having(
-            (error) => error.toString(),
-            'message',
-            contains(
-              'Não foi possível manter a tangência nas duas fronteiras.',
-            ),
-          ),
-        ),
-      );
-      expect(controller.error, contains('tangência nas duas fronteiras'));
-      expect(api.entity(rejected.id)!.parameters['radius'], 1.0);
-      expect(
-        SketchVector.fromJson(
-          api.entity(onlyFrontier.id)!.parameters['end'],
-        ).y,
-        60,
-      );
-
-      await controller.persist();
-      final reopenedKernels = KernelManager()
-        ..register(_HealthySurfaceKernel(), makeDefault: true);
-      final reopenedCad = DesktopCadController(
-        kernels: reopenedKernels,
-        projects: ProjectManager.instance,
-      );
-      final reopenedCommands = DesktopCommandCoordinator(
-        cad: reopenedCad,
-        projects: ProjectManager.instance,
-      );
-      final reopened = OperationalReverseEngineeringController(
-        recognition: ProfessionalRecognitionApi(),
-        commands: reopenedCommands,
-        runtime: reopenedCad.runtime,
-        referenceApi: ReferenceApi(
-          engine: ReferenceEngine(
-            repository: ReferenceRepository(projects: harness.projects),
-          ),
-        ),
-      );
-      addTearDown(reopened.dispose);
-      addTearDown(reopenedCad.dispose);
-      await reopenedCad.runtime.open('g124-recon-arc-radius', harness.directory);
-      await reopened.configureProject(
-        projectId: 'g124-recon-arc-radius',
-        projectDirectory: harness.directory,
-      );
-      expect(
-        (reopened.sketchApi!.entity(isolatedId)!.parameters['radius'] as num)
-            .toDouble(),
-        closeTo(6.8, 1e-9),
-      );
-      expect(
-        (reopened.sketchApi!.entity(c0Id)!.parameters['radius'] as num)
-            .toDouble(),
-        closeTo(7.5, 1e-9),
-      );
-      expect(
-        reopened.sketchApi!.entity(isolatedId)!.metadata['reconstructionKind'],
-        'arc',
-      );
-    },
-  );
+      ),
+    );
+    addTearDown(reopened.dispose);
+    addTearDown(reopenedCad.dispose);
+    await reopenedCad.runtime.open('g124-recon-arc-radius', harness.directory);
+    await reopened.configureProject(
+      projectId: 'g124-recon-arc-radius',
+      projectDirectory: harness.directory,
+    );
+    expect(
+      (reopened.sketchApi!.entity(isolatedId)!.parameters['radius'] as num)
+          .toDouble(),
+      closeTo(6.8, 1e-9),
+    );
+    expect(
+      (reopened.sketchApi!.entity(c0Id)!.parameters['radius'] as num)
+          .toDouble(),
+      closeTo(7.5, 1e-9),
+    );
+    expect(
+      reopened.sketchApi!.entity(isolatedId)!.metadata['reconstructionKind'],
+      'arc',
+    );
+  });
 
   testWidgets(
     'Inspector radius field submits 7.216 to 7.500 with comma decimals',
@@ -4591,10 +4564,14 @@ void main() {
         suggestions,
       );
       expect(
-        harness.controller.sketchReconstructionSelectionAnalysis?.classification,
+        harness
+            .controller
+            .sketchReconstructionSelectionAnalysis
+            ?.classification,
         SketchReconstructionSelectionClassification.openChain,
       );
-      final ordered = harness.controller
+      final ordered = harness
+          .controller
           .sketchReconstructionSelectionAnalysis!
           .orderedSuggestions
           .map((item) => item.entityIds.single)
@@ -4618,10 +4595,10 @@ void main() {
         suggestions[1],
         additive: true,
       );
-      expect(
-        harness.controller.selectedSketchReconstructionSuggestions,
-        [suggestions[0], suggestions[2]],
-      );
+      expect(harness.controller.selectedSketchReconstructionSuggestions, [
+        suggestions[0],
+        suggestions[2],
+      ]);
       final historyBefore = harness.controller.commands.manager.history.length;
       expect(
         await harness.controller.acceptSketchReconstructionSuggestion(
@@ -4633,10 +4610,7 @@ void main() {
         harness.controller.sketchReconstructionMessage,
         contains('aplicação conjunta'),
       );
-      expect(
-        harness.controller.commands.manager.history.length,
-        historyBefore,
-      );
+      expect(harness.controller.commands.manager.history.length, historyBefore);
     },
   );
 
@@ -4675,7 +4649,8 @@ void main() {
         );
       }
       final historyBefore = harness.controller.commands.manager.history.length;
-      final documentBefore = harness.cad.runtime.document!.entities.keys.toSet();
+      final documentBefore = harness.cad.runtime.document!.entities.keys
+          .toSet();
 
       harness.controller.previewSketchReconstructionAcceptance();
 
@@ -4745,10 +4720,11 @@ void main() {
         ),
         isNull,
       );
-      expect(
-        harness.controller.selectedSketchReconstructionSuggestions,
-        [suggestions[0], suggestions[2], suggestions[1]],
-      );
+      expect(harness.controller.selectedSketchReconstructionSuggestions, [
+        suggestions[0],
+        suggestions[2],
+        suggestions[1],
+      ]);
       expect(
         harness.controller.canConfirmSketchReconstructionJointAcceptance,
         isFalse,
@@ -4861,7 +4837,10 @@ void main() {
         harness.controller.canConfirmSketchReconstructionJointAcceptance,
         isFalse,
       );
-      expect(harness.controller.sketchReconstructionMessage, contains('conclu'));
+      expect(
+        harness.controller.sketchReconstructionMessage,
+        contains('conclu'),
+      );
       final createdEntities = created!
           .map((id) => harness.controller.sketchApi!.entity(id))
           .toList();
@@ -4880,7 +4859,10 @@ void main() {
       final reused = await harness.controller
           .confirmSketchReconstructionJointAcceptance(token);
       expect(reused, isNull);
-      expect(harness.controller.sketchReconstructionMessage, contains('expirou'));
+      expect(
+        harness.controller.sketchReconstructionMessage,
+        contains('expirou'),
+      );
 
       await harness.controller.undo();
       for (final id in created) {
@@ -5048,6 +5030,106 @@ void main() {
       expect(first.visible, isTrue);
       expect(second.visible, isTrue);
       expect(harness.controller.sketchReconstructionJointPreviewToken, isNull);
+    },
+  );
+
+  test(
+    'C0 repair preview lists alternatives without mutating Sketch or history',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-preview');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(1.05, 0),
+        const SketchVector(2, 0),
+      );
+      final before = [first.toJson(), second.toJson()];
+
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({first.id, second.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      expect(harness.controller.selectedSketchContinuityJoin, isNotNull);
+      harness.controller.previewSketchContinuityRepair();
+
+      final preview = harness.controller.sketchContinuityRepairPreview;
+      expect(preview, isNotNull);
+      expect(preview!.alternatives, isNotEmpty);
+      expect(harness.controller.canConfirmSketchContinuityRepair, isFalse);
+      expect(harness.controller.sketchContinuityRepairPreviewToken, isNotNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchContinuityRepairPreviewPrefix}original',
+        ),
+        isNotNull,
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNotNull,
+      );
+      expect([first.toJson(), second.toJson()], before);
+
+      harness.controller.selectSketchContinuityRepairAlternative(1);
+      expect(harness.controller.sketchContinuityRepairPreview, isNotNull);
+      harness.controller.cancelSketchContinuityRepairPreview();
+      expect(harness.controller.sketchContinuityRepairPreview, isNull);
+      expect(harness.controller.sketchContinuityRepairPreviewToken, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchContinuityRepairPreviewPrefix}original',
+        ),
+        isNull,
+      );
+      expect([first.toJson(), second.toJson()], before);
+    },
+  );
+
+  test(
+    'C0 repair preview invalidates when a source geometry changes',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-stale');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(1.05, 0),
+        const SketchVector(2, 0),
+      );
+      final join = harness.controller.sketchContinuityRepairJoins.singleWhere(
+        (candidate) => {
+          candidate.first.entityId,
+          candidate.second.entityId,
+        }.containsAll({first.id, second.id}),
+      );
+      harness.controller.selectSketchContinuityJoin(join);
+      harness.controller.previewSketchContinuityRepair();
+      expect(harness.controller.sketchContinuityRepairPreview, isNotNull);
+
+      await harness.controller.updateSketchEntityParameters(first.id, {
+        'length': 1.2,
+      });
+
+      expect(harness.controller.sketchContinuityRepairPreview, isNull);
+      expect(harness.controller.sketchContinuityRepairPreviewToken, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNull,
+      );
     },
   );
 }

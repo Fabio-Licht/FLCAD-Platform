@@ -22,6 +22,7 @@ import '../../core/sketch_constraints/models/constraint_models.dart';
 import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
 import '../../core/sketch_assistant/sketch_reconstruction.dart';
+import '../../core/sketch_assistant/sketch_continuity_repair_planner.dart';
 import '../../core/recognition_engine/recognition_result.dart';
 import '../../core/reverse_engineering_studio/reverse_engineering_studio.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
@@ -1116,8 +1117,7 @@ class _OfficialEngineeringWorkspaceState
   bool automaticSplinePreview = true;
   bool advancedInspector = false;
   bool choosingSketchSupport = false;
-  final ScrollController _sketchSuggestionScrollController =
-      ScrollController();
+  final ScrollController _sketchSuggestionScrollController = ScrollController();
   final ValueNotifier<({Offset position, String label})?>
   _sketchSuggestionHoverPresentation = ValueNotifier(null);
   Offset? _sketchSuggestionHoverPosition;
@@ -3552,46 +3552,46 @@ class _OfficialEngineeringWorkspaceState
         _InspectorSection(
           title: 'Constraint',
           children: [
-          _InspectorProperty(
-            label: 'Type',
-            value: selectedConstraint.type.name,
-          ),
-          _InspectorProperty(
-            label: 'Entities',
-            value: selectedConstraint.references.join(' → '),
-          ),
-          _InspectorProperty(
-            label: 'State',
-            value: selectedConstraint.status.name,
-          ),
-          Row(
-            children: [
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () => operational.setConstraintVisibility(
-                    selectedConstraint.id,
-                    !selectedConstraint.visible,
+            _InspectorProperty(
+              label: 'Type',
+              value: selectedConstraint.type.name,
+            ),
+            _InspectorProperty(
+              label: 'Entities',
+              value: selectedConstraint.references.join(' → '),
+            ),
+            _InspectorProperty(
+              label: 'State',
+              value: selectedConstraint.status.name,
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () => operational.setConstraintVisibility(
+                      selectedConstraint.id,
+                      !selectedConstraint.visible,
+                    ),
+                    icon: Icon(
+                      selectedConstraint.visible
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                      size: 16,
+                    ),
+                    label: Text(selectedConstraint.visible ? 'Hide' : 'Show'),
                   ),
-                  icon: Icon(
-                    selectedConstraint.visible
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    size: 16,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () =>
+                        operational.deleteConstraint(selectedConstraint.id),
+                    icon: const Icon(Icons.delete_outline, size: 16),
+                    label: const Text('Delete'),
                   ),
-                  label: Text(selectedConstraint.visible ? 'Hide' : 'Show'),
                 ),
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: OutlinedButton.icon(
-                  onPressed: () =>
-                      operational.deleteConstraint(selectedConstraint.id),
-                  icon: const Icon(Icons.delete_outline, size: 16),
-                  label: const Text('Delete'),
-                ),
-              ),
-            ],
-          ),
+              ],
+            ),
           ],
         ),
       );
@@ -3626,19 +3626,19 @@ class _OfficialEngineeringWorkspaceState
         _InspectorSection(
           title: chamfer ? 'Chamfer' : 'Line',
           children: [
-          SketchInspectorNumberProperty(
-            label: chamfer ? 'Distance' : 'Length',
-            value: chamfer
-                ? (selected.metadata['featureValue'] as num).toDouble()
-                : (selected.parameters['length'] as num).toDouble(),
-            onSubmitted: (v) => edit('length', v),
-          ),
-          SketchInspectorNumberProperty(
-            label: 'Angle',
-            value: (selected.parameters['angleDegrees'] as num).toDouble(),
-            suffix: '°',
-            onSubmitted: (v) => edit('angleDegrees', v),
-          ),
+            SketchInspectorNumberProperty(
+              label: chamfer ? 'Distance' : 'Length',
+              value: chamfer
+                  ? (selected.metadata['featureValue'] as num).toDouble()
+                  : (selected.parameters['length'] as num).toDouble(),
+              onSubmitted: (v) => edit('length', v),
+            ),
+            SketchInspectorNumberProperty(
+              label: 'Angle',
+              value: (selected.parameters['angleDegrees'] as num).toDouble(),
+              suffix: '°',
+              onSubmitted: (v) => edit('angleDegrees', v),
+            ),
           ],
         ),
       );
@@ -3652,42 +3652,42 @@ class _OfficialEngineeringWorkspaceState
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-          _InspectorSection(
-            title: fillet ? 'Fillet' : 'Arc',
-            children: [
-              SketchInspectorNumberProperty(
-                label: 'Radius',
-                value: radius,
-                onSubmitted: (v) => edit('radius', v),
-              ),
-              SketchInspectorNumberProperty(
-                label: 'Start angle',
-                value: start * 180 / math.pi,
-                suffix: '°',
-                onSubmitted: (v) => edit('startAngleDegrees', v),
-              ),
-              SketchInspectorNumberProperty(
-                label: 'End angle',
-                value: end * 180 / math.pi,
-                suffix: '°',
-                onSubmitted: (v) => edit('endAngleDegrees', v),
-              ),
-              _InspectorProperty(
-                label: 'Arc length',
-                value: (radius * (end - start).abs()).toStringAsFixed(3),
-              ),
-              _InspectorProperty(
-                label: 'Plane',
-                value:
-                    support?.data['name'] ??
-                    sketch.plane.type.name.toUpperCase(),
-              ),
-              _InspectorProperty(
-                label: 'Layer',
-                value: selected.metadata['layer'] ?? 'Default',
-              ),
-            ],
-          ),
+            _InspectorSection(
+              title: fillet ? 'Fillet' : 'Arc',
+              children: [
+                SketchInspectorNumberProperty(
+                  label: 'Radius',
+                  value: radius,
+                  onSubmitted: (v) => edit('radius', v),
+                ),
+                SketchInspectorNumberProperty(
+                  label: 'Start angle',
+                  value: start * 180 / math.pi,
+                  suffix: '°',
+                  onSubmitted: (v) => edit('startAngleDegrees', v),
+                ),
+                SketchInspectorNumberProperty(
+                  label: 'End angle',
+                  value: end * 180 / math.pi,
+                  suffix: '°',
+                  onSubmitted: (v) => edit('endAngleDegrees', v),
+                ),
+                _InspectorProperty(
+                  label: 'Arc length',
+                  value: (radius * (end - start).abs()).toStringAsFixed(3),
+                ),
+                _InspectorProperty(
+                  label: 'Plane',
+                  value:
+                      support?.data['name'] ??
+                      sketch.plane.type.name.toUpperCase(),
+                ),
+                _InspectorProperty(
+                  label: 'Layer',
+                  value: selected.metadata['layer'] ?? 'Default',
+                ),
+              ],
+            ),
           ],
         ),
       );
@@ -5535,7 +5535,8 @@ class _OfficialEngineeringWorkspaceState
                                             operational
                                                 .clearHoveredSketchReconstructionSuggestion();
                                             _sketchSuggestionHoverPresentation
-                                                .value = null;
+                                                    .value =
+                                                null;
                                             return;
                                           }
                                           final found = operational
@@ -5551,15 +5552,16 @@ class _OfficialEngineeringWorkspaceState
                                               position != null) {
                                             _sketchSuggestionHoverPresentation
                                                 .value = (
-                                                  position: position,
-                                                  label: operational
-                                                      .sketchReconstructionSuggestionDisplayLabel(
-                                                        suggestion,
-                                                      ),
-                                                );
+                                              position: position,
+                                              label: operational
+                                                  .sketchReconstructionSuggestionDisplayLabel(
+                                                    suggestion,
+                                                  ),
+                                            );
                                           } else {
                                             _sketchSuggestionHoverPresentation
-                                                .value = null;
+                                                    .value =
+                                                null;
                                           }
                                         }
                                       : null,
@@ -5578,7 +5580,8 @@ class _OfficialEngineeringWorkspaceState
                                               position;
                                           if (position == null) {
                                             _sketchSuggestionHoverPresentation
-                                                .value = null;
+                                                    .value =
+                                                null;
                                           }
                                         }
                                       : null,
@@ -5870,74 +5873,82 @@ class _OfficialEngineeringWorkspaceState
                                 ),
                               ),
                               Positioned.fill(
-                                child: ValueListenableBuilder<
-                                  ({Offset position, String label})?
-                                >(
-                                  valueListenable:
-                                      _sketchSuggestionHoverPresentation,
-                                  builder: (context, presentation, _) {
-                                    if (presentation == null ||
-                                        module != 'Sketch') {
-                                      return const SizedBox.shrink();
-                                    }
-                                    final left = presentation.position.dx + 12;
-                                    final top = presentation.position.dy + 12;
-                                    return Stack(
-                                      clipBehavior: Clip.none,
-                                      children: [
-                                        Positioned(
-                                          left: left.clamp(
-                                            4.0,
-                                            math.max(
-                                              4.0,
-                                              camera.viewportWidth - 132,
-                                            ),
-                                          ),
-                                          top: top.clamp(
-                                            4.0,
-                                            math.max(
-                                              4.0,
-                                              camera.viewportHeight - 30,
-                                            ),
-                                          ),
-                                          child: IgnorePointer(
-                                            child: DecoratedBox(
-                                              decoration: BoxDecoration(
-                                                color: const Color(
-                                                  0xff101820,
-                                                ).withValues(alpha: .88),
-                                                borderRadius:
-                                                    BorderRadius.circular(3),
-                                                border: Border.all(
-                                                  color: const Color(
-                                                    0xff4de1d2,
-                                                  ).withValues(alpha: .75),
-                                                  width: .7,
+                                child:
+                                    ValueListenableBuilder<
+                                      ({Offset position, String label})?
+                                    >(
+                                      valueListenable:
+                                          _sketchSuggestionHoverPresentation,
+                                      builder: (context, presentation, _) {
+                                        if (presentation == null ||
+                                            module != 'Sketch') {
+                                          return const SizedBox.shrink();
+                                        }
+                                        final left =
+                                            presentation.position.dx + 12;
+                                        final top =
+                                            presentation.position.dy + 12;
+                                        return Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            Positioned(
+                                              left: left.clamp(
+                                                4.0,
+                                                math.max(
+                                                  4.0,
+                                                  camera.viewportWidth - 132,
                                                 ),
                                               ),
-                                              child: Padding(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                      horizontal: 5,
-                                                      vertical: 2,
+                                              top: top.clamp(
+                                                4.0,
+                                                math.max(
+                                                  4.0,
+                                                  camera.viewportHeight - 30,
+                                                ),
+                                              ),
+                                              child: IgnorePointer(
+                                                child: DecoratedBox(
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(
+                                                      0xff101820,
+                                                    ).withValues(alpha: .88),
+                                                    borderRadius:
+                                                        BorderRadius.circular(
+                                                          3,
+                                                        ),
+                                                    border: Border.all(
+                                                      color: const Color(
+                                                        0xff4de1d2,
+                                                      ).withValues(alpha: .75),
+                                                      width: .7,
                                                     ),
-                                                child: Text(
-                                                  presentation.label,
-                                                  style: const TextStyle(
-                                                    color: Color(0xffb8fff7),
-                                                    fontSize: 10,
-                                                    fontWeight: FontWeight.w700,
-                                                    height: 1.1,
+                                                  ),
+                                                  child: Padding(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 5,
+                                                          vertical: 2,
+                                                        ),
+                                                    child: Text(
+                                                      presentation.label,
+                                                      style: const TextStyle(
+                                                        color: Color(
+                                                          0xffb8fff7,
+                                                        ),
+                                                        fontSize: 10,
+                                                        fontWeight:
+                                                            FontWeight.w700,
+                                                        height: 1.1,
+                                                      ),
+                                                    ),
                                                   ),
                                                 ),
                                               ),
                                             ),
-                                          ),
-                                        ),
-                                      ],
-                                    );
-                                  },
-                                ),
+                                          ],
+                                        );
+                                      },
+                                    ),
                               ),
                               if (module == 'Sketch' &&
                                   operational.sketchCreationCommandActive)
@@ -9783,8 +9794,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
   Widget build(BuildContext context) {
     final hud = controller.lineHud;
     final dragHud = controller.sketchDragHud;
-    final jointAcceptancePreview =
-        controller.sketchReconstructionJointPreview;
+    final jointAcceptancePreview = controller.sketchReconstructionJointPreview;
+    final continuityRepairJoins = controller.sketchContinuityRepairJoins;
+    final continuityRepairPreview = controller.sketchContinuityRepairPreview;
     final health = controller.sketchHealth;
     final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
     final blockingIssues = health.blockingIssues.toList(growable: false);
@@ -10458,7 +10470,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   controller.setSketchRegionFitOutput(values.single),
             ),
             OutlinedButton.icon(
-              onPressed: controller.sketchCircularSelectionMode &&
+              onPressed:
+                  controller.sketchCircularSelectionMode &&
                       controller.selectedSketchEntityIds.isNotEmpty
                   ? controller.fitSelectedSketchLineOrSpline
                   : null,
@@ -10519,6 +10532,14 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   ),
                 ),
               ),
+            if (continuityRepairJoins.isNotEmpty ||
+                controller.selectedSketchContinuityJoin != null ||
+                continuityRepairPreview != null)
+              _SketchContinuityRepairPanel(
+                controller: controller,
+                joins: continuityRepairJoins,
+                preview: continuityRepairPreview,
+              ),
             if (controller.sketchReconstructionSuggestions.isNotEmpty) ...[
               const SizedBox(height: 6),
               Align(
@@ -10530,7 +10551,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
               ),
               OutlinedButton.icon(
                 key: const ValueKey('sketch-reconstruction-accept-selected'),
-                onPressed: controller.canPreviewSketchReconstructionJointAcceptance &&
+                onPressed:
+                    controller.canPreviewSketchReconstructionJointAcceptance &&
                         jointAcceptancePreview == null
                     ? controller.previewSketchReconstructionAcceptance
                     : null,
@@ -11419,8 +11441,8 @@ class _SketchReconstructionSuggestionGroupsState
     final currentKeys = signature.isEmpty
         ? const <String>{}
         : widget.controller.sketchReconstructionSuggestions
-            .map(_sketchSuggestionUiKey)
-            .toSet();
+              .map(_sketchSuggestionUiKey)
+              .toSet();
     _tileKeys.removeWhere((key, _) => !currentKeys.contains(key));
     if (_lastSuggestionSignature != signature) {
       _cancelHoverScroll();
@@ -11480,8 +11502,8 @@ class _SketchReconstructionSuggestionGroupsState
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || _pointerInsideList) return;
-      final context = _tileKeys[_sketchSuggestionUiKey(suggestion)]
-          ?.currentContext;
+      final context =
+          _tileKeys[_sketchSuggestionUiKey(suggestion)]?.currentContext;
       if (context == null || !widget.scrollController.hasClients) return;
       Scrollable.ensureVisible(
         context,
@@ -11518,7 +11540,9 @@ class _SketchReconstructionSuggestionGroupsState
     final categorySuggestions = suggestions
         .where(
           (suggestion) =>
-              widget.controller.sketchReconstructionSuggestionCategory(suggestion) ==
+              widget.controller.sketchReconstructionSuggestionCategory(
+                suggestion,
+              ) ==
               category,
         )
         .toList(growable: false);
@@ -11675,6 +11699,223 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
   }
 }
 
+class _SketchContinuityRepairPanel extends StatelessWidget {
+  const _SketchContinuityRepairPanel({
+    required this.controller,
+    required this.joins,
+    required this.preview,
+  });
+
+  final OperationalReverseEngineeringController controller;
+  final List<SketchContinuityJoinDiagnostic> joins;
+  final SketchContinuityRepairPlan? preview;
+
+  String _continuityLabel(SketchContinuityLevel level) => switch (level) {
+    SketchContinuityLevel.g1 => 'G1 tangente',
+    SketchContinuityLevel.c0 => 'C0 coincidente',
+    SketchContinuityLevel.disconnected => 'desconectada',
+  };
+
+  String _joinLabel(SketchContinuityJoinDiagnostic join) =>
+      '${join.first.entityId}:${join.first.name} ↔ '
+      '${join.second.entityId}:${join.second.name}';
+
+  String _alternativeLabel(SketchContinuityRepairAlternative alternative) =>
+      switch (alternative.kind) {
+        SketchContinuityRepairAlternativeKind.moveFirstEndpoint =>
+          'Mover endpoint inicial',
+        SketchContinuityRepairAlternativeKind.moveSecondEndpoint =>
+          'Mover endpoint final',
+        SketchContinuityRepairAlternativeKind.moveBothEndpoints =>
+          'Mover os dois endpoints',
+        SketchContinuityRepairAlternativeKind.extendFirstLine =>
+          'Estender primeira linha',
+        SketchContinuityRepairAlternativeKind.trimFirstLine =>
+          'Aparar primeira linha',
+        SketchContinuityRepairAlternativeKind.extendSecondLine =>
+          'Estender segunda linha',
+        SketchContinuityRepairAlternativeKind.trimSecondLine =>
+          'Aparar segunda linha',
+        SketchContinuityRepairAlternativeKind.preserveProtectedEndpoint =>
+          'Preservar endpoint protegido',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final selectedJoin = controller.selectedSketchContinuityJoin;
+    final selectedAlternative =
+        controller.selectedSketchContinuityRepairAlternative;
+    return Card(
+      key: const ValueKey('sketch-continuity-repair-panel'),
+      margin: const EdgeInsets.fromLTRB(0, 4, 0, 4),
+      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: .45),
+      child: Padding(
+        padding: const EdgeInsets.all(7),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Correções C0/G1',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 2),
+            const Text(
+              'Selecione uma junção próxima para examinar alternativas. O preview é transitório e não altera o Sketch.',
+              style: TextStyle(fontSize: 9.5),
+            ),
+            const SizedBox(height: 4),
+            for (final join in joins)
+              ListTile(
+                key: ValueKey(
+                  'sketch-continuity-join-${join.first.entityId}-${join.first.name}-${join.second.entityId}-${join.second.name}',
+                ),
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                contentPadding: EdgeInsets.zero,
+                selected:
+                    selectedJoin != null &&
+                    selectedJoin.first.entityId == join.first.entityId &&
+                    selectedJoin.second.entityId == join.second.entityId &&
+                    selectedJoin.first.name == join.first.name &&
+                    selectedJoin.second.name == join.second.name,
+                title: Text(
+                  _joinLabel(join),
+                  style: const TextStyle(fontSize: 9.5),
+                ),
+                subtitle: Text(
+                  'gap ${join.gapMillimeters.toStringAsFixed(3)} mm · ${_continuityLabel(join.continuity)}'
+                  '${join.tangentAngleDegrees == null ? '' : ' · Δ ${join.tangentAngleDegrees!.toStringAsFixed(2)}°'}',
+                  style: const TextStyle(fontSize: 9),
+                ),
+                onTap: () => controller.selectSketchContinuityJoin(join),
+              ),
+            OutlinedButton.icon(
+              key: const ValueKey('sketch-continuity-use-cad-selection'),
+              onPressed: controller.selectedSketchEntityIds.length == 2
+                  ? controller.selectSketchContinuityJoinFromSketchSelection
+                  : null,
+              icon: const Icon(Icons.ads_click, size: 14),
+              label: const Text('Usar 2 curvas selecionadas'),
+            ),
+            if (selectedJoin != null) ...[
+              const Divider(height: 8),
+              Text(
+                'Junção: ${_joinLabel(selectedJoin)} · C0 medido: ${selectedJoin.measuredC0 ? 'sim' : 'não'} · G1 medido: ${selectedJoin.measuredG1 ? 'sim' : 'não'}',
+                style: const TextStyle(fontSize: 9.5),
+              ),
+              if (selectedJoin.declaredCoincident ||
+                  selectedJoin.declaredTangent)
+                Text(
+                  'Constraints declaradas: ${[if (selectedJoin.declaredCoincident) 'coincident', if (selectedJoin.declaredTangent) 'tangent'].join(', ')} (continuidade medida separadamente)',
+                  style: const TextStyle(fontSize: 9),
+                ),
+              const SizedBox(height: 4),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.tonalIcon(
+                      key: const ValueKey('sketch-continuity-plan'),
+                      onPressed: controller.canPreviewSketchContinuityRepair
+                          ? controller.previewSketchContinuityRepair
+                          : null,
+                      icon: const Icon(Icons.preview_outlined, size: 15),
+                      label: const Text('Planejar preview'),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  TextButton(
+                    onPressed: controller.clearSketchContinuityJoinSelection,
+                    child: const Text('Limpar'),
+                  ),
+                ],
+              ),
+            ],
+            if (preview != null) ...[
+              const Divider(height: 8),
+              Text(
+                preview!.status == SketchContinuityRepairStatus.impossible
+                    ? 'Plano impossível'
+                    : preview!.status == SketchContinuityRepairStatus.valid
+                    ? 'Junção já coincidente'
+                    : 'Plano requer confirmação futura',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color:
+                      preview!.status == SketchContinuityRepairStatus.impossible
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.primary,
+                ),
+              ),
+              Text(
+                'Gap atual ${preview!.currentGapMillimeters.toStringAsFixed(3)} mm · limite reparável ${preview!.repairGapToleranceMillimeters.toStringAsFixed(3)} mm',
+                style: const TextStyle(fontSize: 9),
+              ),
+              if (preview!.protectedEntityIds.isNotEmpty)
+                Text(
+                  'Protegidas: ${preview!.protectedEntityIds.join(', ')}',
+                  style: const TextStyle(fontSize: 9),
+                ),
+              for (var index = 0; index < preview!.alternatives.length; index++)
+                ListTile(
+                  key: ValueKey('sketch-continuity-alternative-$index'),
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  contentPadding: EdgeInsets.zero,
+                  selected: identical(
+                    selectedAlternative,
+                    preview!.alternatives[index],
+                  ),
+                  title: Text(
+                    _alternativeLabel(preview!.alternatives[index]),
+                    style: const TextStyle(fontSize: 9.5),
+                  ),
+                  subtitle: Text(
+                    '${preview!.alternatives[index].status.name} · desloc. máx ${preview!.alternatives[index].maxDisplacementMillimeters.toStringAsFixed(3)} mm · C0 ${preview!.alternatives[index].c0ResidualMillimeters.toStringAsFixed(6)} mm${preview!.alternatives[index].g1ResidualRadians == null ? '' : ' · G1 ${preview!.alternatives[index].g1ResidualRadians!.toStringAsFixed(6)} rad'}',
+                    style: const TextStyle(fontSize: 8.5),
+                  ),
+                  onTap: () =>
+                      controller.selectSketchContinuityRepairAlternative(index),
+                ),
+              for (final diagnostic in preview!.diagnostics)
+                Text(
+                  diagnostic,
+                  style: TextStyle(
+                    fontSize: 8.5,
+                    color:
+                        preview!.status ==
+                            SketchContinuityRepairStatus.impossible
+                        ? theme.colorScheme.error
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              if (selectedAlternative != null)
+                for (final diagnostic in selectedAlternative.diagnostics)
+                  Text(diagnostic, style: const TextStyle(fontSize: 8.5)),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: controller.cancelSketchContinuityRepairPreview,
+                    child: const Text('Cancelar'),
+                  ),
+                  const SizedBox(width: 5),
+                  OutlinedButton.icon(
+                    key: const ValueKey('sketch-continuity-repair-confirm'),
+                    onPressed: null,
+                    icon: const Icon(Icons.check, size: 14),
+                    label: const Text('Confirmar (futuro)'),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _SketchReconstructionJointPreviewPanel extends StatelessWidget {
   const _SketchReconstructionJointPreviewPanel({
     required this.controller,
@@ -11764,13 +12005,16 @@ class _SketchReconstructionJointPreviewPanel extends StatelessWidget {
                   key: const ValueKey(
                     'sketch-reconstruction-joint-preview-confirm',
                   ),
-                  onPressed: controller.canConfirmSketchReconstructionJointAcceptance
+                  onPressed:
+                      controller.canConfirmSketchReconstructionJointAcceptance
                       ? () async {
                           final token =
                               controller.sketchReconstructionJointPreviewToken;
                           if (token == null) return;
                           await controller
-                              .confirmSketchReconstructionJointAcceptance(token);
+                              .confirmSketchReconstructionJointAcceptance(
+                                token,
+                              );
                         }
                       : null,
                   icon: const Icon(Icons.check, size: 14),
