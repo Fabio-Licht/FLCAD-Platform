@@ -119,6 +119,16 @@ const String sketchReconstructionHighlightId =
 const String sketchReconstructionHoverHighlightId =
     'sketch-reconstruction-hover-highlight';
 
+/// Runtime-only overlays used by the joint-acceptance preview.  They are
+/// deliberately separate from the source highlight so cancelling the
+/// preview cannot change the persistent Assistant selection.
+const String sketchReconstructionJointPreviewOverlayKey =
+    'sketch.reconstruction.jointPreview.overlayIds';
+const String sketchReconstructionJointPreviewPrefix =
+    'sketch-reconstruction-joint-preview-';
+const String sketchReconstructionJointConnectionsPreviewId =
+    'sketch-reconstruction-joint-connections-preview';
+
 /// Runtime-only visual overlay for the immutable Section that originated the
 /// active Sketch.  The durable Section remains the source of truth; this
 /// presentation has no document entity and therefore cannot enter Sketch
@@ -321,6 +331,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.reconstruction.selected', null);
       runtime.write('sketch.reconstruction.selectedMany', null);
       _clearArcRadiusEditPreview();
+      _invalidateSketchReconstructionJointPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
       runtime.hideTransient(sketchReconstructionHoverHighlightId);
     } on Object {
@@ -718,6 +729,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Map<String, String> _sketchReconstructionSuggestionFingerprints = const {};
   SketchReconstructionSelectionAnalysis?
   _sketchReconstructionSelectionAnalysis;
+  SketchReconstructionJointAcceptancePlan?
+  _sketchReconstructionJointPreview;
+  List<String> _sketchReconstructionJointPreviewSelectionKeys = const [];
+  String? _sketchReconstructionJointPreviewSketchId;
+  Set<String> _sketchReconstructionJointPreviewEntityIds = const {};
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
@@ -727,6 +743,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchReconstructionSelectionAnalysis?
   get sketchReconstructionSelectionAnalysis =>
       _sketchReconstructionSelectionAnalysis;
+
+  /// The current joint-acceptance preview, if it still describes the active
+  /// Sketch and the same source geometry.  This is a presentation-only
+  /// session: no entity or history entry is created by it.
+  SketchReconstructionJointAcceptancePlan?
+  get sketchReconstructionJointPreview {
+    final preview = _sketchReconstructionJointPreview;
+    if (preview == null) return null;
+    if (!_isSketchReconstructionJointPreviewCurrent(preview)) {
+      _invalidateSketchReconstructionJointPreview();
+      return null;
+    }
+    return preview;
+  }
+
+  bool get canPreviewSketchReconstructionJointAcceptance =>
+      activeSketch != null && selectedSketchReconstructionSuggestions.length >= 2;
 
   /// Classifies a suggestion for the Sketch Assistant presentation without
   /// changing its geometric hypothesis.  The reconstruction model currently
@@ -829,6 +862,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void analyzeSketchReconstruction() {
     sketchReconstructionMessage = null;
+    _invalidateSketchReconstructionJointPreview();
     final previousSelection = selectedSketchReconstructionSuggestions;
     final previousFingerprints = _sketchReconstructionSuggestionFingerprints;
     _clearSketchReconstructionHighlight(clearEntitySelection: previousSelection.isNotEmpty);
@@ -2450,6 +2484,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void clearSketchReconstructionSuggestions() {
     final highlighted = selectedSketchReconstructionSuggestion;
+    _invalidateSketchReconstructionJointPreview();
     _sketchReconstructionSuggestions = const [];
     _sketchReconstructionSuggestionFingerprints = const {};
     sketchReconstructionMessage = null;
@@ -2829,6 +2864,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// Starts capturing the next viewport pick into [target] ('start' or 'end').
   void beginSketchTangencyPick(String target) {
     if (target != 'start' && target != 'end') return;
+    _invalidateSketchReconstructionJointPreview();
     sketchCircularFitMessage = null;
     runtime.write('sketch.tangency.pickTarget', target);
     notifyListeners();
@@ -2889,6 +2925,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void beginSketchCircularSelection() {
+    _invalidateSketchReconstructionJointPreview();
     sketchCircularFitMessage = null;
     runtime.write('sketch.circularFit.confirmed', false);
     runtime.write('sketch.circularSelectionMode', true);
@@ -5864,6 +5901,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void beginLineCommand({SketchToolType tool = SketchToolType.line}) {
     if (stage != SketchSurfaceStage.sketchActive) return;
+    _invalidateSketchReconstructionJointPreview();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     if (circleCommandActive) finishCircleCommand();
     if (arcCommandActive) finishArcCommand();
@@ -5921,6 +5959,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchCircleMode mode = SketchCircleMode.centerRadius,
   ]) {
     if (stage != SketchSurfaceStage.sketchActive || !mode.implemented) return;
+    _invalidateSketchReconstructionJointPreview();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     finishLineCommand();
     if (arcCommandActive) finishArcCommand();
@@ -5941,6 +5980,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void beginArcCommand([SketchArcMode mode = SketchArcMode.center]) {
     if (stage != SketchSurfaceStage.sketchActive || !mode.implemented) return;
+    _invalidateSketchReconstructionJointPreview();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     finishLineCommand();
     if (circleCommandActive) finishCircleCommand();
@@ -5963,6 +6003,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void beginRectangleCommand() {
     if (stage != SketchSurfaceStage.sketchActive) return;
+    _invalidateSketchReconstructionJointPreview();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     finishLineCommand();
     if (circleCommandActive) finishCircleCommand();
@@ -5990,6 +6031,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   void beginSplineCommand() {
     if (stage != SketchSurfaceStage.sketchActive) return;
+    _invalidateSketchReconstructionJointPreview();
     cancelSketchCommand();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     activeTool = SketchToolType.spline;
@@ -6059,6 +6101,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void cancelSketchCommand() {
+    _invalidateSketchReconstructionJointPreview();
     _clearArcRadiusEditPreview();
     _sketchCoordinateMagnet.clear();
     previewPoints = const [];
@@ -6087,6 +6130,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void enterSketchSelectionMode() {
+    _invalidateSketchReconstructionJointPreview();
     cancelSketchCommand();
     if (sketchEditingCommandActive) finishSketchEditingTool();
     activeTool = SketchToolType.point;
@@ -7854,6 +7898,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     Iterable<SketchReconstructionSuggestion> suggestions, {
     bool notify = true,
   }) {
+    _invalidateSketchReconstructionJointPreview();
     final unique = <String, SketchReconstructionSuggestion>{};
     for (final suggestion in suggestions) {
       unique[_reconstructionSuggestionKey(suggestion)] = suggestion;
@@ -8017,10 +8062,282 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _publishSketchReconstructionHighlight(notify: true);
   }
 
+  /// Builds a read-only joint-acceptance plan and publishes only transient
+  /// preview geometry.  The planner is deliberately run before any command
+  /// path and the preview has no document or history representation.
+  void previewSketchReconstructionAcceptance() {
+    final selected = selectedSketchReconstructionSuggestions;
+    if (!canPreviewSketchReconstructionJointAcceptance) {
+      sketchReconstructionMessage =
+          'Selecione ao menos duas sugestoes elegiveis para o preview conjunto.';
+      notifyListeners();
+      return;
+    }
+    final entities = _jointAcceptanceEntities(selected);
+    final plan = const SketchReconstructionAcceptancePlanner().plan(
+      selected,
+      entities,
+    );
+    _sketchReconstructionJointPreview = plan;
+    _sketchReconstructionJointPreviewSelectionKeys = [
+      for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
+    ];
+    _sketchReconstructionJointPreviewSketchId = activeSketch?.id;
+    _sketchReconstructionJointPreviewEntityIds = entities.keys.toSet();
+    _publishSketchReconstructionJointPreview(plan);
+    sketchReconstructionMessage = plan.canApply
+        ? 'Preview conjunto pronto; nada sera aplicado nesta etapa.'
+        : 'Preview bloqueado: ${plan.blockers.join(' ')}';
+    notifyListeners();
+  }
+
+  /// Removes only the transient joint preview.  The ordered selection and
+  /// individual acceptance path remain untouched.
+  void cancelSketchReconstructionJointPreview() {
+    _invalidateSketchReconstructionJointPreview();
+    sketchReconstructionMessage = 'Preview conjunto cancelado.';
+    notifyListeners();
+  }
+
+  Map<String, SketchEntity> _jointAcceptanceEntities(
+    Iterable<SketchReconstructionSuggestion> suggestions,
+  ) {
+    final ids = <String>{
+      for (final suggestion in suggestions) ...suggestion.entityIds,
+      for (final suggestion in suggestions) ...suggestion.usedEntityIds,
+      for (final suggestion in suggestions) ...suggestion.coveredEntityIds,
+    };
+    final api = sketchApi;
+    if (api == null) return const <String, SketchEntity>{};
+    final result = <String, SketchEntity>{};
+    for (final id in ids) {
+      final entity = api.entity(id);
+      if (entity != null) result[id] = entity;
+    }
+    return result;
+  }
+
+  bool _isSketchReconstructionJointPreviewCurrent(
+    SketchReconstructionJointAcceptancePlan preview,
+  ) {
+    if (_sketchReconstructionJointPreviewSketchId != activeSketch?.id) {
+      return false;
+    }
+    final selected = selectedSketchReconstructionSuggestions;
+    final keys = [
+      for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
+    ];
+    if (keys.length != _sketchReconstructionJointPreviewSelectionKeys.length ||
+        !keys.asMap().entries.every(
+          (entry) =>
+              entry.value == _sketchReconstructionJointPreviewSelectionKeys[
+                entry.key
+              ],
+        )) {
+      return false;
+    }
+    final entities = _jointAcceptanceEntities(selected);
+    if (!entities.keys.toSet().containsAll(_sketchReconstructionJointPreviewEntityIds)) {
+      return false;
+    }
+    // Fingerprints are checked directly rather than rebuilding the geometric
+    // plan on every widget rebuild (hover can rebuild the panel frequently).
+    // The plan itself is still recomputed when the operator explicitly starts
+    // a new preview.
+    for (final entry in preview.sourceFingerprints.entries) {
+      final entity = entities[entry.key];
+      if (entity == null ||
+          _jointPreviewEntityFingerprint(entity) != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  String _jointPreviewEntityFingerprint(SketchEntity entity) {
+    try {
+      return jsonEncode([
+        entity.id,
+        entity.type.name,
+        entity.version,
+        entity.visible,
+        entity.construction,
+        entity.reference,
+        entity.metadata['reconstructionHidden'] == true,
+        entity.parameters,
+      ]);
+    } on Object {
+      return '${entity.id}:${entity.type.name}:${entity.version}';
+    }
+  }
+
+  void _invalidateSketchReconstructionJointPreview() {
+    final overlayIds = runtime.read<Object?>(
+      sketchReconstructionJointPreviewOverlayKey,
+    );
+    if (overlayIds is Iterable) {
+      for (final id in overlayIds.whereType<String>()) {
+        runtime.hideTransient(id);
+      }
+    }
+    runtime.hideTransient(sketchReconstructionJointConnectionsPreviewId);
+    runtime.write(sketchReconstructionJointPreviewOverlayKey, const <String>[]);
+    _sketchReconstructionJointPreview = null;
+    _sketchReconstructionJointPreviewSelectionKeys = const [];
+    _sketchReconstructionJointPreviewSketchId = null;
+    _sketchReconstructionJointPreviewEntityIds = const {};
+  }
+
+  void _publishSketchReconstructionJointPreview(
+    SketchReconstructionJointAcceptancePlan plan,
+  ) {
+    _invalidateSketchReconstructionJointPreviewOverlaysOnly();
+    final overlayIds = <String>[];
+    for (var index = 0; index < plan.suggestions.length; index++) {
+      final item = plan.suggestions[index];
+      final segments = _jointPreviewSegments(item);
+      if (segments.isEmpty) continue;
+      final id = '$sketchReconstructionJointPreviewPrefix$index';
+      runtime.showTransient(
+        CadSceneEntity(
+          id: id,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': segments,
+            'displayColor': 'assistantSuggestion',
+            'strokeWidth': 2.8,
+            'dashed': false,
+            'jointAcceptancePreview': true,
+            'nonSelectable': true,
+            'selectionOrder': index + 1,
+            'entityIds': item.sourceEntityIds,
+          },
+        ),
+      );
+      overlayIds.add(id);
+    }
+    final byKey = <String, SketchReconstructionJointSuggestionPlan>{
+      for (final item in plan.suggestions)
+        _reconstructionSuggestionKey(item.suggestion): item,
+    };
+    final connectionSegments = <List<dynamic>>[];
+    var hasGap = false;
+    for (final connection in plan.analysis.connections) {
+      final from = byKey[connection.fromKey];
+      final to = byKey[connection.toKey];
+      if (from == null || to == null) continue;
+      final fromPoint = _jointPreviewEndpoint(from, connection.fromEndpoint);
+      final toPoint = _jointPreviewEndpoint(to, connection.toEndpoint);
+      if (fromPoint == null || toPoint == null) continue;
+      connectionSegments.add([fromPoint.toJson(), toPoint.toJson()]);
+      hasGap = hasGap || !connection.isConnected;
+    }
+    if (connectionSegments.isNotEmpty) {
+      runtime.showTransient(
+        CadSceneEntity(
+          id: sketchReconstructionJointConnectionsPreviewId,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': connectionSegments,
+            'displayColor': hasGap ? 'conflictRed' : 'referenceCurveHighlight',
+            'strokeWidth': 1.4,
+            'dashed': true,
+            'jointAcceptanceConnections': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+    }
+    runtime.write(sketchReconstructionJointPreviewOverlayKey, overlayIds);
+  }
+
+  void _invalidateSketchReconstructionJointPreviewOverlaysOnly() {
+    final previous = runtime.read<Object?>(
+      sketchReconstructionJointPreviewOverlayKey,
+    );
+    if (previous is Iterable) {
+      for (final id in previous.whereType<String>()) {
+        runtime.hideTransient(id);
+      }
+    }
+    runtime.hideTransient(sketchReconstructionJointConnectionsPreviewId);
+  }
+
+  List<List<dynamic>> _jointPreviewSegments(
+    SketchReconstructionJointSuggestionPlan item,
+  ) {
+    final geometry = item.proposedGeometry;
+    final coordinates = activeSketch?.coordinates;
+    if (coordinates == null) return const [];
+    SketchVector global(SketchVector point) => coordinates.localToGlobal(point);
+    final sourceContainsSpline = item.sourceTypes.contains(SketchEntityType.spline);
+    if (sourceContainsSpline) {
+      final sourceSegments = <List<dynamic>>[];
+      for (final id in item.sourceEntityIds) {
+        final entity = sketchApi?.entity(id);
+        if (entity == null) continue;
+        sourceSegments.addAll(
+          _segmentsFromGeometry(
+            _sketchScene.adapt(entity, coordinates: coordinates).geometry,
+          ),
+        );
+      }
+      if (sourceSegments.isNotEmpty) return sourceSegments;
+    }
+    if (geometry.kind == SketchReconstructionKind.line) {
+      return [[global(geometry.startPoint).toJson(), global(geometry.endPoint).toJson()]];
+    }
+    final radius = geometry.radius;
+    if ((geometry.kind == SketchReconstructionKind.arc ||
+            geometry.kind == SketchReconstructionKind.circle) &&
+        geometry.center != null &&
+        radius != null &&
+        radius.isFinite &&
+        radius > 0) {
+      final start = geometry.startAngle ?? 0;
+      final end = geometry.endAngle ?? (start + math.pi * 2);
+      final count = geometry.closed ? 65 : 33;
+      final points = [
+        for (var index = 0; index < count; index++)
+          global(
+            SketchVector(
+              geometry.center!.x + radius * math.cos(start + (end - start) * index / (count - 1)),
+              geometry.center!.y + radius * math.sin(start + (end - start) * index / (count - 1)),
+              geometry.center!.z,
+            ),
+          ).toJson(),
+      ];
+      return [for (var index = 0; index + 1 < points.length; index++) [points[index], points[index + 1]]];
+    }
+    final segments = <List<dynamic>>[];
+    for (final id in item.sourceEntityIds) {
+      final entity = sketchApi?.entity(id);
+      if (entity == null) continue;
+      final visual = _sketchScene.adapt(entity, coordinates: coordinates);
+      segments.addAll(_segmentsFromGeometry(visual.geometry));
+    }
+    if (segments.isNotEmpty) return segments;
+    return [[global(geometry.startPoint).toJson(), global(geometry.endPoint).toJson()]];
+  }
+
+  SketchVector? _jointPreviewEndpoint(
+    SketchReconstructionJointSuggestionPlan item,
+    String endpoint,
+  ) {
+    final local = endpoint == 'end'
+        ? item.proposedGeometry.endPoint
+        : item.proposedGeometry.startPoint;
+    final coordinates = activeSketch?.coordinates;
+    return coordinates?.localToGlobal(local);
+  }
+
   void _clearSketchReconstructionHighlight({
     bool clearEntitySelection = false,
     bool notify = false,
   }) {
+    _invalidateSketchReconstructionJointPreview();
     final highlightedIds = <String>{
       for (final item in selectedSketchReconstructionSuggestions)
         ...item.entityIds,
@@ -8326,6 +8643,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void beginSketchPointReferenceCapture(String mode) {
+    _invalidateSketchReconstructionJointPreview();
     if (!const {
       'coincident',
       'midpoint',

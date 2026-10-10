@@ -9783,6 +9783,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
   Widget build(BuildContext context) {
     final hud = controller.lineHud;
     final dragHud = controller.sketchDragHud;
+    final jointAcceptancePreview =
+        controller.sketchReconstructionJointPreview;
     final health = controller.sketchHealth;
     final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
     final blockingIssues = health.blockingIssues.toList(growable: false);
@@ -10526,6 +10528,15 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   style: const TextStyle(fontSize: 10),
                 ),
               ),
+              OutlinedButton.icon(
+                key: const ValueKey('sketch-reconstruction-accept-selected'),
+                onPressed: controller.canPreviewSketchReconstructionJointAcceptance &&
+                        jointAcceptancePreview == null
+                    ? controller.previewSketchReconstructionAcceptance
+                    : null,
+                icon: const Icon(Icons.preview_outlined, size: 16),
+                label: const Text('Aceitar selecionadas'),
+              ),
               _SketchReconstructionSuggestionGroups(
                 controller: controller,
                 onFocusSuggestion: onFocusSuggestion,
@@ -10539,6 +10550,11 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     'Seleção: ${analysis.summary}${analysis.diagnostics.isEmpty ? '' : ' · ${analysis.diagnostics.join(' · ')}'}',
                     style: const TextStyle(fontSize: 9),
                   ),
+                ),
+              if (jointAcceptancePreview case final preview?)
+                _SketchReconstructionJointPreviewPanel(
+                  controller: controller,
+                  preview: preview,
                 ),
               TextButton(
                 onPressed: controller.clearSketchReconstructionSuggestions,
@@ -11653,6 +11669,101 @@ class _SketchReconstructionSuggestionTile extends StatelessWidget {
                     );
                   },
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SketchReconstructionJointPreviewPanel extends StatelessWidget {
+  const _SketchReconstructionJointPreviewPanel({
+    required this.controller,
+    required this.preview,
+  });
+
+  final OperationalReverseEngineeringController controller;
+  final SketchReconstructionJointAcceptancePlan preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final analysis = preview.analysis;
+    return Card(
+      key: const ValueKey('sketch-reconstruction-joint-preview'),
+      margin: const EdgeInsets.fromLTRB(0, 4, 0, 4),
+      color: theme.colorScheme.secondaryContainer.withValues(alpha: .45),
+      child: Padding(
+        padding: const EdgeInsets.all(7),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Preview de aceitacao conjunta',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: theme.colorScheme.onSecondaryContainer,
+              ),
+            ),
+            const SizedBox(height: 3),
+            const Text(
+              'Somente diagnostico visual; nenhuma entidade sera criada nesta etapa.',
+              style: TextStyle(fontSize: 9.5),
+            ),
+            Text(
+              '${analysis.summary} Â· ${preview.suggestions.length} geometrias propostas',
+              style: const TextStyle(fontSize: 9.5),
+            ),
+            if (analysis.gapsMillimeters.isNotEmpty)
+              Text(
+                'Gaps: ${analysis.gapsMillimeters.map((gap) => '${gap.toStringAsFixed(3)} mm').join(', ')}',
+                style: const TextStyle(fontSize: 9.5),
+              ),
+            const SizedBox(height: 3),
+            for (var index = 0; index < preview.suggestions.length; index++)
+              Text(
+                '${index + 1}. ${preview.suggestions[index].suggestion.label} Â· '
+                '${preview.suggestions[index].reversed ? 'invertida' : 'orientacao original'}',
+                style: const TextStyle(fontSize: 9.5),
+              ),
+            if (preview.warnings.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              for (final warning in preview.warnings)
+                Text(
+                  'Aviso: $warning',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    color: theme.colorScheme.tertiary,
+                  ),
+                ),
+            ],
+            if (preview.blockers.isNotEmpty) ...[
+              const SizedBox(height: 3),
+              for (final blocker in preview.blockers)
+                Text(
+                  'Bloqueador: $blocker',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+            ],
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                TextButton(
+                  onPressed: controller.cancelSketchReconstructionJointPreview,
+                  child: const Text('Cancelar'),
+                ),
+                const SizedBox(width: 6),
+                OutlinedButton.icon(
+                  onPressed: null,
+                  icon: const Icon(Icons.lock_outline, size: 14),
+                  label: const Text('Confirmar (em breve)'),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

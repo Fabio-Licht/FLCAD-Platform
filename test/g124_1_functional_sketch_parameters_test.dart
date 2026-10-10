@@ -4639,6 +4639,110 @@ void main() {
       );
     },
   );
+
+  test(
+    'joint acceptance preview is transient, cancellable and does not mutate the Sketch',
+    () async {
+      final harness = await _g124Harness('g124-joint-acceptance-preview');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final first = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final second = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final third = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 0),
+        const SketchVector(30, 0),
+      );
+      final suggestions = [
+        for (final entity in [first, second, third])
+          SketchReconstructionSuggestion(
+            kind: SketchReconstructionKind.line,
+            entityIds: [entity.id],
+            confidence: 1,
+          ),
+      ];
+      for (final suggestion in suggestions) {
+        harness.controller.selectSketchReconstructionSuggestion(
+          suggestion,
+          additive: true,
+        );
+      }
+      final historyBefore = harness.controller.commands.manager.history.length;
+      final documentBefore = harness.cad.runtime.document!.entities.keys.toSet();
+
+      harness.controller.previewSketchReconstructionAcceptance();
+
+      final preview = harness.controller.sketchReconstructionJointPreview;
+      expect(preview, isNotNull);
+      expect(preview!.canApply, isTrue);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchReconstructionJointPreviewPrefix}0',
+        ),
+        isNotNull,
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          sketchReconstructionJointConnectionsPreviewId,
+        ),
+        isNotNull,
+      );
+      expect(harness.controller.commands.manager.history.length, historyBefore);
+      expect(
+        harness.cad.runtime.document!.entities.keys.toSet(),
+        documentBefore,
+      );
+      expect(first.visible, isTrue);
+      expect(second.visible, isTrue);
+      expect(third.visible, isTrue);
+
+      // Any selection change invalidates the preview before it can become
+      // stale, while leaving the source entities untouched.
+      harness.controller.selectSketchReconstructionSuggestion(
+        suggestions[1],
+        additive: true,
+      );
+      expect(harness.controller.sketchReconstructionJointPreview, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchReconstructionJointPreviewPrefix}0',
+        ),
+        isNull,
+      );
+      harness.controller.selectSketchReconstructionSuggestion(
+        suggestions[1],
+        additive: true,
+      );
+
+      harness.controller.previewSketchReconstructionAcceptance();
+      expect(harness.controller.sketchReconstructionJointPreview, isNotNull);
+      harness.controller.cancelSketchReconstructionJointPreview();
+      expect(harness.controller.sketchReconstructionJointPreview, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchReconstructionJointPreviewPrefix}0',
+        ),
+        isNull,
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          sketchReconstructionJointConnectionsPreviewId,
+        ),
+        isNull,
+      );
+      expect(
+        harness.controller.selectedSketchReconstructionSuggestions,
+        [suggestions[0], suggestions[2], suggestions[1]],
+      );
+    },
+  );
 }
 
 Future<
