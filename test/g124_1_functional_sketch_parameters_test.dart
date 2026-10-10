@@ -5132,6 +5132,295 @@ void main() {
       );
     },
   );
+
+  test(
+    'C0 repair applies one exact line-line transaction and supports undo redo',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-apply');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(1.05, 0),
+        const SketchVector(2, 0),
+      );
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({first.id, second.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final token = harness.controller.sketchContinuityRepairPreviewToken!;
+      final commandHistory = harness.controller.commands.manager.history.length;
+      final engineHistory = api.engine.history.entries.length;
+
+      final affected = await harness.controller
+          .confirmSketchContinuityRepairPreview(token: token);
+
+      expect(affected, hasLength(1));
+      expect({first.id, second.id}, contains(affected.single));
+      final appliedFirstEnd =
+          (api.entity(first.id) as SketchLine).parameters['end'];
+      final appliedSecondStart =
+          (api.entity(second.id) as SketchLine).parameters['start'];
+      expect(appliedFirstEnd, appliedSecondStart);
+      expect((appliedFirstEnd as List).first, closeTo(1, .051));
+      expect(harness.controller.sketchContinuityRepairPreview, isNull);
+      expect(harness.controller.sketchContinuityRepairPreviewToken, isNull);
+      expect(
+        harness.controller.commands.manager.history.length,
+        commandHistory + 1,
+      );
+      expect(api.engine.history.entries.length, engineHistory + 1);
+
+      await harness.controller.undo();
+      expect((api.entity(first.id) as SketchLine).parameters['end'], const [
+        1.0,
+        0.0,
+        0.0,
+      ]);
+      expect((api.entity(second.id) as SketchLine).parameters['start'], const [
+        1.05,
+        0.0,
+        0.0,
+      ]);
+      await harness.controller.redo();
+      expect(
+        (api.entity(first.id) as SketchLine).parameters['end'],
+        appliedFirstEnd,
+      );
+      expect(
+        (api.entity(second.id) as SketchLine).parameters['start'],
+        appliedSecondStart,
+      );
+      await expectLater(
+        harness.controller.confirmSketchContinuityRepairPreview(token: token),
+        throwsStateError,
+      );
+    },
+  );
+
+  test(
+    'C0 repair rejects an obsolete token without mutating the Sketch',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-token');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(1.05, 0),
+        const SketchVector(2, 0),
+      );
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({first.id, second.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final token = harness.controller.sketchContinuityRepairPreviewToken!;
+      final beforeFirst = first.toJson();
+      final beforeSecond = second.toJson();
+      final commandHistory = harness.controller.commands.manager.history.length;
+      final canUndo = harness.controller.commands.manager.canUndo;
+
+      await expectLater(
+        harness.controller.confirmSketchContinuityRepairPreview(
+          token: '$token-stale',
+        ),
+        throwsStateError,
+      );
+      expect(first.toJson(), beforeFirst);
+      expect(second.toJson(), beforeSecond);
+      expect(
+        harness.controller.commands.manager.history.length,
+        commandHistory,
+      );
+      expect(harness.controller.commands.manager.canUndo, canUndo);
+      expect(harness.controller.sketchContinuityRepairPreview, isNotNull);
+    },
+  );
+
+  test(
+    'C0 repair applies a two-entity alternative as one undoable transaction',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-both');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final second = api.builders.line.build(
+        const SketchVector(1.05, 0),
+        const SketchVector(2, 0),
+      );
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({first.id, second.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final preview = harness.controller.sketchContinuityRepairPreview!;
+      final bothIndex = preview.alternatives.indexWhere(
+        (alternative) => alternative.updates.length == 2,
+      );
+      expect(bothIndex, greaterThanOrEqualTo(0));
+      harness.controller.selectSketchContinuityRepairAlternative(bothIndex);
+      final token = harness.controller.sketchContinuityRepairPreviewToken!;
+      final beforeFirst = first.toJson()['parameters'];
+      final beforeSecond = second.toJson()['parameters'];
+      final historyBefore = api.engine.history.entries.length;
+
+      final affected = await harness.controller
+          .confirmSketchContinuityRepairPreview(token: token);
+
+      expect(affected, containsAll(<String>[first.id, second.id]));
+      expect(api.engine.history.entries.length, historyBefore + 1);
+      final afterFirst = first.toJson()['parameters'];
+      final afterSecond = second.toJson()['parameters'];
+      expect(
+        (api.entity(first.id) as SketchLine).parameters['end'],
+        (api.entity(second.id) as SketchLine).parameters['start'],
+      );
+
+      await harness.controller.undo();
+      expect(first.toJson()['parameters'], beforeFirst);
+      expect(second.toJson()['parameters'], beforeSecond);
+      await harness.controller.redo();
+      expect(first.toJson()['parameters'], afterFirst);
+      expect(second.toJson()['parameters'], afterSecond);
+    },
+  );
+
+  test(
+    'C0 repair applies a supported line-arc alternative without changing arc radius',
+    () async {
+      final harness = await _g124Harness('g124-continuity-repair-arc');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final line = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final arc = api.builders.arc.build(
+        const SketchVector(1.05, 1),
+        1,
+        -math.pi / 2,
+        0,
+      );
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({line.id, arc.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final token = harness.controller.sketchContinuityRepairPreviewToken!;
+      final originalCenter =
+          (api.entity(arc.id) as SketchArc).parameters['center'];
+      final originalRadius =
+          (api.entity(arc.id) as SketchArc).parameters['radius'];
+
+      await harness.controller.confirmSketchContinuityRepairPreview(
+        token: token,
+      );
+
+      final repairedArc = api.entity(arc.id) as SketchArc;
+      expect(repairedArc.parameters['center'], originalCenter);
+      expect(repairedArc.parameters['radius'], originalRadius);
+      final repairedJoin = harness.controller.sketchContinuityAnalysis.joins
+          .where(
+            (join) => {
+              join.first.entityId,
+              join.second.entityId,
+            }.containsAll({line.id, arc.id}),
+          )
+          .firstOrNull;
+      expect(repairedJoin, isNotNull);
+      expect(
+        repairedJoin!.gapMillimeters,
+        lessThanOrEqualTo(
+          const SketchHealthAnalyzer().connectionTolerance + 1e-9,
+        ),
+      );
+    },
+  );
+
+  test('C0 repair persists the confirmed geometry across Save/Open', () async {
+    final harness = await _g124Harness('g124-continuity-repair-save');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final api = harness.controller.sketchApi!;
+    final first = api.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(1, 0),
+    );
+    final second = api.builders.line.build(
+      const SketchVector(1.05, 0),
+      const SketchVector(2, 0),
+    );
+    final sketchId = harness.controller.activeSketch!.id;
+    harness.controller.selectedSketchEntityIds
+      ..clear()
+      ..addAll({first.id, second.id});
+    harness.controller.selectSketchContinuityJoinFromSketchSelection();
+    harness.controller.previewSketchContinuityRepair();
+    await harness.controller.confirmSketchContinuityRepairPreview(
+      token: harness.controller.sketchContinuityRepairPreviewToken!,
+    );
+    await harness.controller.undo();
+    await harness.controller.redo();
+    await harness.controller.persist();
+
+    final reopenedKernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final reopenedCad = DesktopCadController(
+      kernels: reopenedKernels,
+      projects: ProjectManager.instance,
+    );
+    final reopenedCommands = DesktopCommandCoordinator(
+      cad: reopenedCad,
+      projects: ProjectManager.instance,
+    );
+    final reopened = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: reopenedCommands,
+      runtime: reopenedCad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: harness.projects),
+        ),
+      ),
+    );
+    addTearDown(reopened.dispose);
+    addTearDown(reopenedCad.dispose);
+    await reopenedCad.runtime.open(
+      'g124-continuity-repair-save',
+      harness.directory,
+    );
+    await reopened.configureProject(
+      projectId: 'g124-continuity-repair-save',
+      projectDirectory: harness.directory,
+    );
+    await reopened.reopenSketchForEditing(sketchId);
+    final restoredFirst = reopened.sketchApi!.entity(first.id) as SketchLine;
+    final restoredSecond = reopened.sketchApi!.entity(second.id) as SketchLine;
+    expect(restoredFirst.parameters['end'], restoredSecond.parameters['start']);
+    expect(reopened.sketchContinuityRepairPreview, isNull);
+    expect(reopened.sketchContinuityRepairPreviewToken, isNull);
+    expect(reopenedCad.runtime.scene.find(first.id), isNotNull);
+    expect(reopenedCad.runtime.scene.find(second.id), isNotNull);
+  });
 }
 
 Future<
