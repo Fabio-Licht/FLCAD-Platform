@@ -4743,6 +4743,261 @@ void main() {
       );
     },
   );
+
+  test(
+    'joint acceptance applies a validated mixed plan atomically and supports undo redo',
+    () async {
+      final harness = await _g124Harness('g124-joint-acceptance-apply');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final line = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final arc = harness.controller.sketchApi!.builders.arc.build(
+        const SketchVector(15, 0),
+        5,
+        math.pi,
+        math.pi * 2,
+      );
+      final spline = harness.controller.sketchApi!.builders.spline.build([
+        const SketchVector(20, 0),
+        const SketchVector(25, 2),
+        const SketchVector(30, 0),
+      ]);
+      final suggestions = [
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [line.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.arc,
+          entityIds: [arc.id],
+          confidence: 1,
+          center: const SketchVector(15, 0),
+          radius: 5,
+          startAngle: math.pi,
+          endAngle: math.pi * 2,
+        ),
+        SketchReconstructionSuggestion(
+          // Spline sources are represented by the existing line recognition
+          // kind, but the immutable plan carries their samples and promotes
+          // them back to a SketchSpline.
+          kind: SketchReconstructionKind.line,
+          entityIds: [spline.id],
+          confidence: 1,
+        ),
+      ];
+      for (final suggestion in suggestions) {
+        harness.controller.selectSketchReconstructionSuggestion(
+          suggestion,
+          additive: true,
+        );
+      }
+      harness.controller.previewSketchReconstructionAcceptance();
+      final token = harness.controller.sketchReconstructionJointPreviewToken;
+      expect(token, isNotNull);
+      final historyBefore = harness.controller.commands.manager.history.length;
+
+      final created = await harness.controller
+          .confirmSketchReconstructionJointAcceptance(token!);
+      expect(created, hasLength(3));
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyBefore + 1,
+      );
+      expect(harness.controller.sketchReconstructionJointPreviewToken, isNull);
+      final createdEntities = created!
+          .map((id) => harness.controller.sketchApi!.entity(id))
+          .toList();
+      expect(createdEntities.whereType<SketchLine>(), hasLength(1));
+      expect(createdEntities.whereType<SketchArc>(), hasLength(1));
+      expect(createdEntities.whereType<SketchSpline>(), hasLength(1));
+      expect(line.visible, isFalse);
+      expect(arc.visible, isFalse);
+      expect(spline.visible, isFalse);
+      expect(harness.controller.selectedSketchEntityIds, created.toSet());
+      expect(
+        harness.controller.selectedSketchReconstructionSuggestions,
+        isEmpty,
+      );
+
+      final reused = await harness.controller
+          .confirmSketchReconstructionJointAcceptance(token);
+      expect(reused, isNull);
+      expect(harness.controller.sketchReconstructionMessage, contains('expirou'));
+
+      await harness.controller.undo();
+      for (final id in created) {
+        expect(harness.controller.sketchApi!.entity(id), isNull);
+      }
+      expect(harness.controller.sketchApi!.entity(line.id)!.visible, isTrue);
+      expect(harness.controller.sketchApi!.entity(arc.id)!.visible, isTrue);
+      expect(harness.controller.sketchApi!.entity(spline.id)!.visible, isTrue);
+
+      await harness.controller.redo();
+      final redoneEntities = created
+          .map((id) => harness.controller.sketchApi!.entity(id))
+          .toList();
+      expect(redoneEntities.whereType<SketchLine>(), hasLength(1));
+      expect(redoneEntities.whereType<SketchArc>(), hasLength(1));
+      expect(redoneEntities.whereType<SketchSpline>(), hasLength(1));
+      expect(harness.controller.sketchApi!.entity(line.id)!.visible, isFalse);
+      expect(harness.controller.sketchApi!.entity(arc.id)!.visible, isFalse);
+      expect(harness.controller.sketchApi!.entity(spline.id)!.visible, isFalse);
+      expect(
+        harness.controller.selectedSketchReconstructionSuggestions,
+        isEmpty,
+      );
+
+      // The confirmed geometry and source visibility are persisted as
+      // ordinary Sketch entity state; the transient plan/token must not be.
+      await harness.controller.persist();
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open(
+        'g124-joint-acceptance-apply',
+        harness.directory,
+      );
+      await reopened.configureProject(
+        projectId: 'g124-joint-acceptance-apply',
+        projectDirectory: harness.directory,
+      );
+      await reopened.reopenSketchForEditing(
+        harness.controller.activeSketch!.id,
+      );
+      for (final id in created) {
+        final restored = reopened.sketchApi!.entity(id);
+        expect(restored, isNotNull);
+        expect(restored!.visible, isTrue);
+        expect(restored.metadata['reconstructionJoint'], isTrue);
+      }
+      for (final id in [line.id, arc.id, spline.id]) {
+        expect(reopened.sketchApi!.entity(id)!.visible, isFalse);
+      }
+      expect(reopened.sketchReconstructionJointPreviewToken, isNull);
+    },
+  );
+
+  test(
+    'joint acceptance rejects an obsolete plan without creating or hiding sources',
+    () async {
+      final harness = await _g124Harness('g124-joint-acceptance-stale');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final first = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final second = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final suggestions = [
+        for (final entity in [first, second])
+          SketchReconstructionSuggestion(
+            kind: SketchReconstructionKind.line,
+            entityIds: [entity.id],
+            confidence: 1,
+          ),
+      ];
+      for (final suggestion in suggestions) {
+        harness.controller.selectSketchReconstructionSuggestion(
+          suggestion,
+          additive: true,
+        );
+      }
+      harness.controller.previewSketchReconstructionAcceptance();
+      final token = harness.controller.sketchReconstructionJointPreviewToken!;
+      first.parameters['start'] = const SketchVector(0, 1).toJson();
+      first.version++;
+
+      final created = await harness.controller
+          .confirmSketchReconstructionJointAcceptance(token);
+      expect(created, isNull);
+      expect(first.visible, isTrue);
+      expect(second.visible, isTrue);
+      expect(
+        harness.controller.sketchApi!.sketches
+            .expand((sketch) => sketch.entityIds)
+            .where((id) => id != first.id && id != second.id),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'joint acceptance rolls back a failure after an earlier proposal was prepared',
+    () async {
+      final harness = await _g124Harness('g124-joint-acceptance-rollback');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final first = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final second = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final suggestions = [
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [first.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.parallel,
+          entityIds: [second.id],
+          confidence: 1,
+        ),
+      ];
+      for (final suggestion in suggestions) {
+        harness.controller.selectSketchReconstructionSuggestion(
+          suggestion,
+          additive: true,
+        );
+      }
+      harness.controller.previewSketchReconstructionAcceptance();
+      final token = harness.controller.sketchReconstructionJointPreviewToken!;
+      final beforeIds = harness.controller.activeSketch!.entityIds.toSet();
+      final created = await harness.controller
+          .confirmSketchReconstructionJointAcceptance(token);
+
+      expect(created, isNull);
+      expect(harness.controller.activeSketch!.entityIds.toSet(), beforeIds);
+      expect(first.visible, isTrue);
+      expect(second.visible, isTrue);
+      expect(harness.controller.sketchReconstructionJointPreviewToken, isNull);
+    },
+  );
 }
 
 Future<

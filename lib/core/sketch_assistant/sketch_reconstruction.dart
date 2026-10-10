@@ -403,6 +403,7 @@ class SketchReconstructionProposedGeometry {
     required this.startPoint,
     required this.endPoint,
     required this.closed,
+    this.points = const <SketchVector>[],
     this.center,
     this.radius,
     this.startAngle,
@@ -413,6 +414,9 @@ class SketchReconstructionProposedGeometry {
   final SketchVector startPoint;
   final SketchVector endPoint;
   final bool closed;
+  /// Immutable samples for a spline proposal.  A line/arc proposal leaves
+  /// this empty; no fitting is performed while building the joint plan.
+  final List<SketchVector> points;
   final SketchVector? center;
   final double? radius;
   final double? startAngle;
@@ -622,13 +626,23 @@ class SketchReconstructionAcceptancePlanner {
           suggestion: _freezeSuggestion(suggestion),
           proposedGeometry: SketchReconstructionProposedGeometry(
             kind: suggestion.kind,
-            startPoint: geometry.start,
-            endPoint: geometry.end,
+            startPoint: item.reversed ? geometry.end : geometry.start,
+            endPoint: item.reversed ? geometry.start : geometry.end,
             closed: geometry.closed,
+            points: _jointSplineProposalPoints(
+              suggestion,
+              entities,
+              engine,
+              reversed: item.reversed,
+            ),
             center: suggestion.center,
             radius: suggestion.radius,
-            startAngle: suggestion.startAngle,
-            endAngle: suggestion.endAngle,
+            startAngle: item.reversed
+                ? suggestion.endAngle
+                : suggestion.startAngle,
+            endAngle: item.reversed
+                ? suggestion.startAngle
+                : suggestion.endAngle,
           ),
           sourceEntityIds: requiredIds,
           coveredEntityIds: coveredIds,
@@ -658,6 +672,32 @@ class SketchReconstructionAcceptancePlanner {
 
   static List<String> _unique(Iterable<String> values) =>
       values.toSet().toList(growable: false);
+
+  static List<SketchVector> _jointSplineProposalPoints(
+    SketchReconstructionSuggestion suggestion,
+    Map<String, SketchEntity> entities,
+    SketchReconstructionEngine engine,
+    {required bool reversed}
+  ) {
+    final ids = suggestion.usedEntityIds.isEmpty
+        ? suggestion.entityIds
+        : suggestion.usedEntityIds;
+    if (!ids.any((id) => entities[id] is SketchSpline)) {
+      return const <SketchVector>[];
+    }
+    final points = <SketchVector>[];
+    for (final id in ids) {
+      final entity = entities[id];
+      if (entity is! SketchSpline) continue;
+      for (final point in engine._entitySamples(entity)) {
+        if (points.isEmpty ||
+            (point - points.last).dot(point - points.last) > 1e-24) {
+          points.add(point);
+        }
+      }
+    }
+    return List.unmodifiable(reversed ? points.reversed : points);
+  }
 
   static String _jointClassificationLabel(
     SketchReconstructionSelectionClassification classification,

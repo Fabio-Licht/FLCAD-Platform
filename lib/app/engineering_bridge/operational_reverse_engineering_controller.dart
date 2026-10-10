@@ -731,6 +731,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   _sketchReconstructionSelectionAnalysis;
   SketchReconstructionJointAcceptancePlan?
   _sketchReconstructionJointPreview;
+  String? _sketchReconstructionJointPreviewToken;
+  String? _sketchReconstructionJointPreviewConstraintFingerprint;
   List<String> _sketchReconstructionJointPreviewSelectionKeys = const [];
   String? _sketchReconstructionJointPreviewSketchId;
   Set<String> _sketchReconstructionJointPreviewEntityIds = const {};
@@ -757,6 +759,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     return preview;
   }
+
+  /// Token consumed by the internal confirmation API.  It is never persisted
+  /// and is invalidated with the transient preview session.
+  String? get sketchReconstructionJointPreviewToken =>
+      _sketchReconstructionJointPreviewToken;
 
   bool get canPreviewSketchReconstructionJointAcceptance =>
       activeSketch != null && selectedSketchReconstructionSuggestions.length >= 2;
@@ -8079,6 +8086,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       entities,
     );
     _sketchReconstructionJointPreview = plan;
+    _sketchReconstructionJointPreviewToken =
+        'joint-${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(plan)}';
+    _sketchReconstructionJointPreviewConstraintFingerprint =
+        _jointConstraintFingerprint();
     _sketchReconstructionJointPreviewSelectionKeys = [
       for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
     ];
@@ -8097,6 +8108,293 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _invalidateSketchReconstructionJointPreview();
     sketchReconstructionMessage = 'Preview conjunto cancelado.';
     notifyListeners();
+  }
+
+  /// Internal confirmation entry point for the next UI phase.  It is kept
+  /// separate from the disabled panel button so callers must present the
+  /// exact, still-valid preview token before any mutation is possible.
+  Future<List<String>?> confirmSketchReconstructionJointAcceptance(
+    String token,
+  ) async {
+    final parameters = <String, Object?>{'token': token};
+    await _run('reverse.sketch.acceptReconstructionJoint', parameters);
+    if (error != null) {
+      sketchReconstructionMessage = error;
+      notifyListeners();
+      return null;
+    }
+    final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
+    return createdIds == null ? null : List.unmodifiable(createdIds);
+  }
+
+  Future<List<String>> _applySketchReconstructionJointAcceptance(
+    String token,
+    Map<String, Object?> parameters,
+  ) async {
+    if (_sketchReconstructionJointPreviewToken != token) {
+      _invalidateSketchReconstructionJointPreview();
+      throw StateError('O preview conjunto expirou ou ja foi utilizado.');
+    }
+    final plan = sketchReconstructionJointPreview;
+    if (plan == null) {
+      throw StateError('O preview conjunto nao esta mais valido.');
+    }
+    if (!plan.canApply) {
+      _invalidateSketchReconstructionJointPreview();
+      throw StateError(
+        'Aplicacao conjunta bloqueada: ${plan.blockers.join(' ')}',
+      );
+    }
+    final api = sketchApi;
+    final sketch = activeSketch;
+    if (api == null || sketch == null) {
+      _invalidateSketchReconstructionJointPreview();
+      throw StateError('O Sketch ativo nao esta disponivel.');
+    }
+    if (_sketchReconstructionJointPreviewConstraintFingerprint !=
+        _jointConstraintFingerprint()) {
+      _invalidateSketchReconstructionJointPreview();
+      throw StateError('As constraints foram alteradas desde o preview.');
+    }
+
+    final requiredIds = <String>{};
+    final hiddenIds = plan.hiddenEntityIds.toSet();
+    final existing = <String, SketchEntity>{};
+    for (final id in plan.sourceFingerprints.keys) {
+      final entity = api.entity(id);
+      if (entity == null) {
+        _invalidateSketchReconstructionJointPreview();
+        throw StateError('A fonte $id foi removida desde o preview.');
+      }
+      if (_jointPreviewEntityFingerprint(entity) !=
+          plan.sourceFingerprints[id]) {
+        _invalidateSketchReconstructionJointPreview();
+        throw StateError('A geometria da fonte $id mudou desde o preview.');
+      }
+      existing[id] = entity;
+    }
+    for (final item in plan.suggestions) {
+      if (item.sourceEntityIds.isEmpty) {
+        _invalidateSketchReconstructionJointPreview();
+        throw StateError('Uma sugestao do preview nao possui fontes.');
+      }
+      for (final id in item.sourceEntityIds) {
+        requiredIds.add(id);
+        final entity = existing[id];
+        if (entity == null ||
+            !entity.visible ||
+            entity.construction ||
+            entity.reference ||
+            entity.metadata['reconstructionHidden'] == true) {
+          _invalidateSketchReconstructionJointPreview();
+          throw StateError('A fonte obrigatoria $id nao esta elegivel.');
+        }
+      }
+      for (final id in item.coveredEntityIds) {
+        if (!existing.containsKey(id)) {
+          _invalidateSketchReconstructionJointPreview();
+          throw StateError('O fragmento coberto $id foi removido desde o preview.');
+        }
+      }
+      final geometry = item.proposedGeometry;
+      if (!_jointProposedGeometryIsFinite(geometry)) {
+        _invalidateSketchReconstructionJointPreview();
+        throw StateError('A geometria proposta contem valores invalidos.');
+      }
+    }
+    final sourceOwners = <String, String>{};
+    for (final item in plan.suggestions) {
+      for (final id in item.sourceEntityIds) {
+        final previous = sourceOwners[id];
+        if (previous != null) {
+          _invalidateSketchReconstructionJointPreview();
+          throw StateError('A fonte $id esta compartilhada por sugestoes.');
+        }
+        sourceOwners[id] = _reconstructionSuggestionKey(item.suggestion);
+      }
+    }
+    final constraintConflicts = _jointConstraintConflicts(hiddenIds);
+    if (constraintConflicts.isNotEmpty) {
+      _invalidateSketchReconstructionJointPreview();
+      throw StateError(
+        'Aplicacao conjunta bloqueada por constraints: ${constraintConflicts.join(', ')}.',
+      );
+    }
+
+    final createdIds = <String>[];
+    var transactionCommitted = false;
+    try {
+      api.engine.transaction('sketch.reconstruction.acceptJoint', () {
+        for (final item in plan.suggestions) {
+          final geometry = item.proposedGeometry;
+          final createsSpline =
+              geometry.points.length >= 2 &&
+              item.sourceTypes.isNotEmpty &&
+              item.sourceTypes.every((type) => type == SketchEntityType.spline);
+          final created = createsSpline
+              ? api.builders.spline.build(geometry.points)
+              : switch (geometry.kind) {
+                  SketchReconstructionKind.line => api.builders.line.build(
+                    geometry.startPoint,
+                    geometry.endPoint,
+                  ),
+                  SketchReconstructionKind.arc => api.builders.arc.build(
+                    geometry.center!,
+                    geometry.radius!,
+                    geometry.startAngle!,
+                    geometry.endAngle!,
+                  ),
+                  SketchReconstructionKind.circle => api.builders.circle.build(
+                    geometry.center!,
+                    geometry.radius!,
+                  ),
+                  _ => throw StateError(
+                    'Tipo ${geometry.kind.name} nao suportado na aplicacao conjunta.',
+                  ),
+                };
+          createdIds.add(created.id);
+          api.engine.modify(created.id, SketchHistoryAction.modify, (value) {
+            value.metadata['reconstructionKind'] = createsSpline
+                ? 'spline'
+                : geometry.kind.name;
+            value.metadata['reconstructionJoint'] = true;
+            value.metadata['reconstructionSourceIds'] = item.sourceEntityIds;
+            value.metadata.remove('reconstructionHidden');
+            if (geometry.kind == SketchReconstructionKind.line) {
+              if (item.suggestion.rmsError case final rms?) {
+                value.metadata['reconstructionRmsError'] = rms;
+              }
+              if (item.suggestion.maxError case final max?) {
+                value.metadata['reconstructionMaxError'] = max;
+              }
+            }
+          });
+        }
+        for (final id in hiddenIds) {
+          api.engine.modify(id, SketchHistoryAction.modify, (value) {
+            value.metadata['reconstructionKind'] = 'joint';
+            value.metadata['reconstructionHidden'] = true;
+            value.visible = false;
+          });
+        }
+      });
+      transactionCommitted = true;
+      parameters['createdIds'] = List<String>.from(createdIds);
+      parameters['hiddenIds'] = List<String>.from(hiddenIds);
+      parameters['suggestionKeys'] = [
+        for (final item in plan.suggestions)
+          _reconstructionSuggestionKey(item.suggestion),
+      ];
+      await _presentJointSketchReconstruction(
+        createdIds: createdIds,
+        hiddenIds: hiddenIds.toList(growable: false),
+        applied: true,
+      );
+      _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
+          .where(
+            (suggestion) => !plan.suggestions.any(
+              (item) => _sameSketchReconstructionSuggestion(
+                item.suggestion,
+                suggestion,
+              ),
+            ),
+          )
+          .toList(growable: false);
+      // The CAD selection now belongs to the created geometry.  Clear only
+      // the Assistant's transient suggestion selection so the next preview
+      // cannot accidentally reuse the just-consumed sources.
+      _setSketchReconstructionSelection(const [], notify: false);
+      _invalidateSketchReconstructionJointPreview();
+      return List.unmodifiable(createdIds);
+    } catch (_) {
+      if (transactionCommitted) {
+        try {
+          api.engine.undo();
+          await _presentJointSketchReconstruction(
+            createdIds: createdIds,
+            hiddenIds: hiddenIds.toList(growable: false),
+            applied: false,
+          );
+        } on Object {
+          // The engine transaction already rolls back its own partial state;
+          // presentation repair is best effort because the original error is
+          // still reported to the operator.
+        }
+      }
+      _invalidateSketchReconstructionJointPreview();
+      rethrow;
+    }
+  }
+
+  bool _jointProposedGeometryIsFinite(
+    SketchReconstructionProposedGeometry geometry,
+  ) {
+    bool finite(SketchVector point) =>
+        point.x.isFinite && point.y.isFinite && point.z.isFinite;
+    if (!finite(geometry.startPoint) || !finite(geometry.endPoint)) return false;
+    if (geometry.center != null && !finite(geometry.center!)) return false;
+    if (geometry.radius != null &&
+        (!geometry.radius!.isFinite || geometry.radius! <= 0)) {
+      return false;
+    }
+    if (geometry.startAngle != null && !geometry.startAngle!.isFinite) {
+      return false;
+    }
+    if (geometry.endAngle != null && !geometry.endAngle!.isFinite) return false;
+    if (!geometry.points.every(finite)) return false;
+    switch (geometry.kind) {
+      case SketchReconstructionKind.arc:
+        return geometry.center != null &&
+            geometry.radius != null &&
+            geometry.startAngle != null &&
+            geometry.endAngle != null;
+      case SketchReconstructionKind.circle:
+        return geometry.center != null && geometry.radius != null;
+      case SketchReconstructionKind.line:
+        return true;
+      case SketchReconstructionKind.parallel:
+      case SketchReconstructionKind.perpendicular:
+        return false;
+    }
+  }
+
+  List<String> _jointConstraintConflicts(Set<String> ids) {
+    String owner(String reference) =>
+        reference.replaceFirst(RegExp(r':(start|end|point)$'), '');
+    final conflicts = <String>{};
+    for (final constraint in constraints) {
+      if (constraint.references.any((reference) => ids.contains(owner(reference)))) {
+        conflicts.add('${constraint.type.name} (${constraint.id})');
+      }
+    }
+    for (final dimension in dimensions) {
+      final references = <String>[
+        ...dimension.references,
+        if (dimension.anchorReference != null) dimension.anchorReference!,
+      ];
+      if (references.any((reference) => ids.contains(owner(reference)))) {
+        conflicts.add('${dimension.type.name} (${dimension.id})');
+      }
+    }
+    return conflicts.toList()..sort();
+  }
+
+  Future<void> _presentJointSketchReconstruction({
+    required List<String> createdIds,
+    required List<String> hiddenIds,
+    required bool applied,
+  }) async {
+    await _synchronizeSketchScene();
+    for (final id in hiddenIds) {
+      if (runtime.document?.entities[id] == null) continue;
+      await runtime.setEntityVisibility(id, !applied);
+    }
+    selectedSketchEntityIds
+      ..clear()
+      ..addAll(applied ? createdIds : hiddenIds);
+    final selection = {..._selectionWithDimensions()};
+    runtime.select(selection);
+    runtime.scene.select(selection);
   }
 
   Map<String, SketchEntity> _jointAcceptanceEntities(
@@ -8123,6 +8421,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (_sketchReconstructionJointPreviewSketchId != activeSketch?.id) {
       return false;
     }
+    if (_sketchReconstructionJointPreviewConstraintFingerprint !=
+        _jointConstraintFingerprint()) {
+      return false;
+    }
     final selected = selectedSketchReconstructionSuggestions;
     final keys = [
       for (final suggestion in selected) _reconstructionSuggestionKey(suggestion),
@@ -8135,6 +8437,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               ],
         )) {
       return false;
+    }
+    final selectedByKey = <String, SketchReconstructionSuggestion>{
+      for (final suggestion in selected)
+        _reconstructionSuggestionKey(suggestion): suggestion,
+    };
+    for (final item in preview.suggestions) {
+      final current = selectedByKey[_reconstructionSuggestionKey(item.suggestion)];
+      if (current == null ||
+          _jointSuggestionSnapshotFingerprint(current) !=
+              _jointSuggestionSnapshotFingerprint(item.suggestion)) {
+        return false;
+      }
     }
     final entities = _jointAcceptanceEntities(selected);
     if (!entities.keys.toSet().containsAll(_sketchReconstructionJointPreviewEntityIds)) {
@@ -8171,6 +8485,46 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
+  String _jointConstraintFingerprint() {
+    try {
+      return jsonEncode([
+        for (final constraint in constraints)
+          constraint.toJson(),
+        for (final dimension in dimensions)
+          dimension.toJson(),
+      ]);
+    } on Object {
+      return constraints
+          .map((constraint) => '${constraint.id}:${constraint.version}:${constraint.signature}')
+          .join('|');
+    }
+  }
+
+  String _jointSuggestionSnapshotFingerprint(
+    SketchReconstructionSuggestion suggestion,
+  ) {
+    return jsonEncode([
+      suggestion.kind.name,
+      suggestion.entityIds,
+      suggestion.usedEntityIds,
+      suggestion.coveredEntityIds,
+      suggestion.confidence,
+      suggestion.center?.toJson(),
+      suggestion.radius,
+      suggestion.startAngle,
+      suggestion.endAngle,
+      suggestion.startPoint?.toJson(),
+      suggestion.endPoint?.toJson(),
+      suggestion.circularFitQuality?.name,
+      suggestion.warnings,
+      suggestion.maxGapMillimeters,
+      suggestion.tangencyStartDegrees,
+      suggestion.tangencyEndDegrees,
+      suggestion.rmsError,
+      suggestion.maxError,
+    ]);
+  }
+
   void _invalidateSketchReconstructionJointPreview() {
     final overlayIds = runtime.read<Object?>(
       sketchReconstructionJointPreviewOverlayKey,
@@ -8183,6 +8537,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.hideTransient(sketchReconstructionJointConnectionsPreviewId);
     runtime.write(sketchReconstructionJointPreviewOverlayKey, const <String>[]);
     _sketchReconstructionJointPreview = null;
+    _sketchReconstructionJointPreviewToken = null;
+    _sketchReconstructionJointPreviewConstraintFingerprint = null;
     _sketchReconstructionJointPreviewSelectionKeys = const [];
     _sketchReconstructionJointPreviewSketchId = null;
     _sketchReconstructionJointPreviewEntityIds = const {};
@@ -8272,6 +8628,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final coordinates = activeSketch?.coordinates;
     if (coordinates == null) return const [];
     SketchVector global(SketchVector point) => coordinates.localToGlobal(point);
+    if (geometry.points.length >= 2) {
+      final points = geometry.points.map(global).map((point) => point.toJson()).toList();
+      return [
+        for (var index = 0; index + 1 < points.length; index++)
+          [points[index], points[index + 1]],
+      ];
+    }
     final sourceContainsSpline = item.sourceTypes.contains(SketchEntityType.spline);
     if (sourceContainsSpline) {
       final sourceSegments = <List<dynamic>>[];
@@ -14438,6 +14801,67 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               .toList(growable: false);
         }
         return createdId ?? parameters['constraintId'] ?? 'reconstruction';
+      },
+    );
+
+    register(
+      id: 'reverse.sketch.acceptReconstructionJoint',
+      execute: (parameters) async {
+        final token = parameters['token'] as String?;
+        if (token == null) {
+          throw StateError('O token do preview conjunto nao foi informado.');
+        }
+        final created = await _applySketchReconstructionJointAcceptance(
+          token,
+          parameters,
+        );
+        return created.join(',');
+      },
+      undo: (parameters) async {
+        final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
+        final hiddenIds = (parameters['hiddenIds'] as List?)?.cast<String>();
+        if (createdIds == null || hiddenIds == null) {
+          throw StateError('O historico da aceitacao conjunta esta incompleto.');
+        }
+        if (sketchApi?.engine.undo() != true) {
+          throw StateError('Nao ha aceitacao conjunta para desfazer.');
+        }
+        await _presentJointSketchReconstruction(
+          createdIds: createdIds,
+          hiddenIds: hiddenIds,
+          applied: false,
+        );
+        analyzeSketchReconstruction();
+        return 'joint reconstruction undone';
+      },
+      redo: (parameters) async {
+        final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
+        final hiddenIds = (parameters['hiddenIds'] as List?)?.cast<String>();
+        if (createdIds == null || hiddenIds == null) {
+          throw StateError('O historico da aceitacao conjunta esta incompleto.');
+        }
+        if (sketchApi?.engine.redo() != true) {
+          throw StateError('Nao ha aceitacao conjunta para refazer.');
+        }
+        await _presentJointSketchReconstruction(
+          createdIds: createdIds,
+          hiddenIds: hiddenIds,
+          applied: true,
+        );
+        final suggestionKeys = (parameters['suggestionKeys'] as List?)
+            ?.whereType<String>()
+            .toSet();
+        if (suggestionKeys != null && suggestionKeys.isNotEmpty) {
+          _sketchReconstructionSuggestions = _sketchReconstructionSuggestions
+              .where(
+                (item) =>
+                    !suggestionKeys.contains(
+                      _reconstructionSuggestionKey(item),
+                    ),
+              )
+              .toList(growable: false);
+        }
+        return createdIds.join(',');
       },
     );
 
