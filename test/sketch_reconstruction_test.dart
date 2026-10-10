@@ -167,6 +167,326 @@ void main() {
     });
   });
 
+  group('joint reconstruction acceptance planner', () {
+    SketchReconstructionSuggestion suggestion(
+      SketchReconstructionKind kind,
+      String id, {
+      List<String> used = const <String>[],
+      List<String> covered = const <String>[],
+    }) => SketchReconstructionSuggestion(
+      kind: kind,
+      entityIds: [id],
+      usedEntityIds: used,
+      coveredEntityIds: covered,
+      confidence: 1,
+    );
+
+    test('builds one immutable open-chain plan for line, arc and spline', () {
+      final line = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+        id: 'line',
+      );
+      final arc = SketchArc(
+        const SketchVector(10, 5),
+        5,
+        -math.pi / 2,
+        0,
+        id: 'arc',
+      );
+      final spline = SketchSpline(const [
+        SketchVector(15, 5),
+        SketchVector(20, 5),
+      ], id: 'spline');
+      final entities = <String, SketchEntity>{
+        line.id: line,
+        arc.id: arc,
+        spline.id: spline,
+      };
+      final selected = [
+        suggestion(SketchReconstructionKind.line, spline.id),
+        suggestion(SketchReconstructionKind.arc, arc.id),
+        suggestion(SketchReconstructionKind.line, line.id),
+      ];
+      final before = entities.map(
+        (id, entity) => MapEntry(id, entity.toJson()),
+      );
+      final plan = const SketchReconstructionAcceptancePlanner().plan(
+        selected,
+        entities,
+      );
+
+      expect(plan.canApply, isTrue, reason: plan.blockers.join(' | '));
+      expect(
+        plan.analysis.classification,
+        SketchReconstructionSelectionClassification.openChain,
+      );
+      expect(plan.suggestions, hasLength(3));
+      expect(plan.affectedEntityIds, ['arc', 'line', 'spline']);
+      expect(plan.hiddenEntityIds, ['arc', 'line', 'spline']);
+      expect(plan.suggestions.map((item) => item.suggestion.entityIds.single), [
+        'line',
+        'arc',
+        'spline',
+      ]);
+      expect(plan.suggestions.first.proposedGeometry.startPoint.x, 0);
+      expect(plan.suggestions.last.proposedGeometry.endPoint.x, 20);
+      expect(
+        entities.map((id, entity) => MapEntry(id, entity.toJson())),
+        before,
+      );
+      expect(
+        () => plan.suggestions.add(plan.suggestions.first),
+        throwsUnsupportedError,
+      );
+      expect(() => plan.hiddenEntityIds.add('other'), throwsUnsupportedError);
+    });
+
+    test('rejects duplicate, shared, crossing and large-gap sources', () {
+      final first = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+        id: 'first',
+      );
+      final second = SketchLine(
+        const SketchVector(3, 0),
+        const SketchVector(4, 0),
+        id: 'second',
+      );
+      final duplicate = [
+        suggestion(SketchReconstructionKind.line, first.id),
+        suggestion(SketchReconstructionKind.line, first.id),
+      ];
+      final duplicatePlan = const SketchReconstructionAcceptancePlanner().plan(
+        duplicate,
+        {first.id: first},
+      );
+      expect(duplicatePlan.canApply, isFalse);
+      expect(duplicatePlan.blockers.join(' '), contains('duplicadas'));
+
+      final sharedPlan = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, first.id, used: [first.id]),
+        ],
+        {first.id: first},
+      );
+      expect(sharedPlan.canApply, isFalse);
+      expect(sharedPlan.blockers.join(' '), contains('sobrepostas'));
+
+      final coveredConflict = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(
+            SketchReconstructionKind.line,
+            first.id,
+            covered: [second.id],
+          ),
+          suggestion(SketchReconstructionKind.line, second.id),
+        ],
+        {first.id: first, second.id: second},
+      );
+      expect(coveredConflict.canApply, isFalse);
+      expect(coveredConflict.blockers.join(' '), contains('cobertas'));
+
+      final gapPlan = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, second.id),
+        ],
+        {first.id: first, second.id: second},
+      );
+      expect(gapPlan.canApply, isFalse);
+      expect(gapPlan.blockers.join(' '), contains('gaps'));
+
+      final crossing = SketchLine(
+        const SketchVector(.5, -1),
+        const SketchVector(.5, 1),
+        id: 'crossing',
+      );
+      final crossingPlan = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, crossing.id),
+        ],
+        {first.id: first, crossing.id: crossing},
+      );
+      expect(crossingPlan.canApply, isFalse);
+      expect(crossingPlan.blockers.join(' '), contains('cruzamentos'));
+    });
+
+    test('plans a closed loop without depending on click order', () {
+      final entities = <String, SketchEntity>{
+        'a': SketchLine(
+          const SketchVector(0, 0),
+          const SketchVector(10, 0),
+          id: 'a',
+        ),
+        'b': SketchLine(
+          const SketchVector(10, 0),
+          const SketchVector(10, 10),
+          id: 'b',
+        ),
+        'c': SketchLine(
+          const SketchVector(10, 10),
+          const SketchVector(0, 10),
+          id: 'c',
+        ),
+        'd': SketchLine(
+          const SketchVector(0, 10),
+          const SketchVector(0, 0),
+          id: 'd',
+        ),
+      };
+      final plan = const SketchReconstructionAcceptancePlanner().plan([
+        suggestion(SketchReconstructionKind.line, 'c'),
+        suggestion(SketchReconstructionKind.line, 'a'),
+        suggestion(SketchReconstructionKind.line, 'd'),
+        suggestion(SketchReconstructionKind.line, 'b'),
+      ], entities);
+      expect(plan.canApply, isTrue, reason: plan.blockers.join(' | '));
+      expect(
+        plan.analysis.classification,
+        SketchReconstructionSelectionClassification.closedLoop,
+      );
+      expect(plan.suggestions, hasLength(4));
+    });
+
+    test('plans a closed loop containing an arc', () {
+      final entities = <String, SketchEntity>{
+        'arc': SketchArc(
+          const SketchVector(5, 0),
+          5,
+          math.pi,
+          0,
+          id: 'arc',
+        ),
+        'right': SketchLine(
+          const SketchVector(10, 0),
+          const SketchVector(10, 10),
+          id: 'right',
+        ),
+        'top': SketchLine(
+          const SketchVector(10, 10),
+          const SketchVector(0, 10),
+          id: 'top',
+        ),
+        'left': SketchLine(
+          const SketchVector(0, 10),
+          const SketchVector(0, 0),
+          id: 'left',
+        ),
+      };
+      final plan = const SketchReconstructionAcceptancePlanner().plan([
+        suggestion(SketchReconstructionKind.line, 'top'),
+        suggestion(SketchReconstructionKind.arc, 'arc'),
+        suggestion(SketchReconstructionKind.line, 'left'),
+        suggestion(SketchReconstructionKind.line, 'right'),
+      ], entities);
+      expect(plan.canApply, isTrue, reason: plan.blockers.join(' | '));
+      expect(
+        plan.analysis.classification,
+        SketchReconstructionSelectionClassification.closedLoop,
+      );
+      expect(plan.suggestions.any((item) =>
+          item.proposedGeometry.kind == SketchReconstructionKind.arc), isTrue);
+    });
+
+    test('reports a small gap as a warning but never authorizes it', () {
+      final first = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+        id: 'first',
+      );
+      final second = SketchLine(
+        const SketchVector(1.1, 0),
+        const SketchVector(2.1, 0),
+        id: 'second',
+      );
+      final plan = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(SketchReconstructionKind.line, first.id),
+          suggestion(SketchReconstructionKind.line, second.id),
+        ],
+        {first.id: first, second.id: second},
+      );
+      expect(plan.canApply, isFalse);
+      expect(plan.warnings.join(' '), contains('Gaps dentro'));
+      expect(plan.blockers.join(' '), contains('incompatível'));
+    });
+
+    test('rejects stale or ineligible sources without mutating them', () {
+      final line = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+        id: 'line',
+      );
+      final selected = [suggestion(SketchReconstructionKind.line, line.id)];
+      final planner = const SketchReconstructionAcceptancePlanner();
+      final current = planner.plan(selected, {line.id: line});
+      final stale = planner.plan(
+        selected,
+        {line.id: line},
+        expectedSuggestionFingerprints: {
+          sketchReconstructionSuggestionKey(selected.single): 'old',
+        },
+      );
+      expect(current.canApply, isTrue);
+      expect(stale.canApply, isFalse);
+      expect(stale.blockers.join(' '), contains('obsoleta'));
+
+      final removed = planner.plan(selected, const {});
+      expect(removed.canApply, isFalse);
+      expect(removed.blockers.join(' '), contains('ausente'));
+
+      final fingerprint = planner
+          .plan(selected, {line.id: line})
+          .suggestionFingerprints;
+      line.parameters['end'] = const [11.0, 0.0, 0.0];
+      final altered = planner.plan(
+        selected,
+        {line.id: line},
+        expectedSuggestionFingerprints: fingerprint,
+      );
+      expect(altered.canApply, isFalse);
+      expect(altered.blockers.join(' '), contains('obsoleta'));
+
+      final snapshot = line.toJson();
+      line.visible = false;
+      final hidden = planner.plan(selected, {line.id: line});
+      expect(hidden.canApply, isFalse);
+      expect(hidden.blockers.join(' '), contains('elegível'));
+      expect(line.toJson(), isNot(snapshot));
+      expect(line.parameters['start'], [0.0, 0.0, 0.0]);
+    });
+
+    test('keeps an already hidden covered fragment as a warning', () {
+      final source = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+        id: 'source',
+      );
+      final covered = SketchLine(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+        id: 'covered',
+      )..visible = false;
+      covered.metadata['reconstructionHidden'] = true;
+      final plan = const SketchReconstructionAcceptancePlanner().plan(
+        [
+          suggestion(
+            SketchReconstructionKind.line,
+            source.id,
+            covered: ['covered'],
+          ),
+        ],
+        {source.id: source, covered.id: covered},
+      );
+      expect(plan.canApply, isTrue);
+      expect(plan.hiddenEntityIds, ['covered', 'source']);
+      expect(plan.warnings.join(' '), contains('Fragmento coberto'));
+    });
+  });
+
   group('line and spline region fit', () {
     test('uses 2, 5 and 10 unordered fragments with large gaps', () {
       final engine = const SketchReconstructionEngine();

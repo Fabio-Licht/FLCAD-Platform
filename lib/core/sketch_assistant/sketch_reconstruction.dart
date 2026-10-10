@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math' as math;
 
 import '../sketch_engine/entities/sketch_entities.dart';
@@ -386,6 +387,368 @@ class SketchReconstructionSelectionAnalysis {
         '${connections.length} conexões · gap máx. $gap mm';
   }
 }
+
+/// Stable key shared by the Assistant selection model and the joint
+/// acceptance planner.  It intentionally depends on source identity and
+/// recognition kind, never on click order or list position.
+String sketchReconstructionSuggestionKey(
+  SketchReconstructionSuggestion suggestion,
+) => _selectionSuggestionKey(suggestion);
+
+/// Immutable geometry proposed by a joint acceptance plan.  This is a
+/// description only: constructing it never creates or edits a SketchEntity.
+class SketchReconstructionProposedGeometry {
+  const SketchReconstructionProposedGeometry({
+    required this.kind,
+    required this.startPoint,
+    required this.endPoint,
+    required this.closed,
+    this.center,
+    this.radius,
+    this.startAngle,
+    this.endAngle,
+  });
+
+  final SketchReconstructionKind kind;
+  final SketchVector startPoint;
+  final SketchVector endPoint;
+  final bool closed;
+  final SketchVector? center;
+  final double? radius;
+  final double? startAngle;
+  final double? endAngle;
+}
+
+/// One suggestion as it would participate in a future atomic promotion.
+/// Source IDs and fingerprints are copied into the plan so a later executor
+/// can validate that it is still applying the same recognition result.
+class SketchReconstructionJointSuggestionPlan {
+  SketchReconstructionJointSuggestionPlan({
+    required this.suggestion,
+    required this.proposedGeometry,
+    required List<String> sourceEntityIds,
+    required List<String> coveredEntityIds,
+    required List<SketchEntityType> sourceTypes,
+    required this.reversed,
+    required this.fingerprint,
+  }) : sourceEntityIds = List.unmodifiable(sourceEntityIds),
+       coveredEntityIds = List.unmodifiable(coveredEntityIds),
+       sourceTypes = List.unmodifiable(sourceTypes);
+
+  final SketchReconstructionSuggestion suggestion;
+  final SketchReconstructionProposedGeometry proposedGeometry;
+  final List<String> sourceEntityIds;
+  final List<String> coveredEntityIds;
+  final List<SketchEntityType> sourceTypes;
+  final bool reversed;
+  final String fingerprint;
+}
+
+/// Pure, immutable plan for accepting several Assistant suggestions in one
+/// future transaction.  The plan is deliberately not connected to a
+/// document, command runner, Sketch Engine mutation, overlay or history.
+class SketchReconstructionJointAcceptancePlan {
+  const SketchReconstructionJointAcceptancePlan({
+    required this.analysis,
+    required this.suggestions,
+    required this.affectedEntityIds,
+    required this.hiddenEntityIds,
+    required this.sourceFingerprints,
+    required this.suggestionFingerprints,
+    required this.blockers,
+    required this.warnings,
+  });
+
+  final SketchReconstructionSelectionAnalysis analysis;
+  final List<SketchReconstructionJointSuggestionPlan> suggestions;
+  final List<String> affectedEntityIds;
+  final List<String> hiddenEntityIds;
+  final Map<String, String> sourceFingerprints;
+  final Map<String, String> suggestionFingerprints;
+  final List<String> blockers;
+  final List<String> warnings;
+
+  bool get canApply => blockers.isEmpty;
+}
+
+/// Builds a joint acceptance plan without mutating any input object.  It is
+/// intentionally separate from individual acceptance: no suggestion is
+/// applied sequentially as a substitute for global validation.
+class SketchReconstructionAcceptancePlanner {
+  const SketchReconstructionAcceptancePlanner();
+
+  SketchReconstructionJointAcceptancePlan plan(
+    Iterable<SketchReconstructionSuggestion> selected,
+    Map<String, SketchEntity> entities, {
+    Map<String, String> expectedSuggestionFingerprints = const {},
+    SketchCircularFitTolerance tolerance = const SketchCircularFitTolerance(),
+  }) {
+    final source = selected.toList(growable: false);
+    final engine = const SketchReconstructionEngine();
+    final analysis = engine.analyzeSelectedSuggestions(
+      source,
+      entities,
+      tolerance: tolerance,
+    );
+    final blockers = <String>[];
+    final warnings = <String>[];
+    final sourceFingerprints = <String, String>{};
+    final suggestionFingerprints = <String, String>{};
+    final plans = <SketchReconstructionJointSuggestionPlan>[];
+    final affected = <String>{};
+    final hidden = <String>{};
+
+    if (source.isEmpty) blockers.add('Nenhuma sugestão foi selecionada.');
+    if (!analysis.isValid) {
+      blockers.add(
+        'A seleção conjunta é ${_jointClassificationLabel(analysis.classification)}.',
+      );
+    }
+    if (analysis.duplicateKeys.isNotEmpty) {
+      blockers.add('Há sugestões duplicadas na seleção.');
+    }
+    if (analysis.overlapKeys.isNotEmpty) {
+      blockers.add('Há fontes compartilhadas ou sobrepostas entre sugestões.');
+    }
+    if (analysis.branchKeys.isNotEmpty) {
+      blockers.add('A seleção contém ramificações ambíguas.');
+    }
+    if (analysis.crossingKeys.isNotEmpty) {
+      blockers.add('A seleção contém cruzamentos internos.');
+    }
+    if (analysis.missingEntityIds.isNotEmpty) {
+      blockers.add(
+        'Há entidades de origem ausentes: ${analysis.missingEntityIds.join(', ')}.',
+      );
+    }
+    if (analysis.gapsMillimeters.isNotEmpty) {
+      final maxGap = analysis.maximumGapMillimeters;
+      if (maxGap > tolerance.maxGapMillimeters) {
+        blockers.add(
+          'Há gaps acima da tolerância (${maxGap.toStringAsFixed(3)} mm).',
+        );
+      } else {
+        warnings.add(
+          'Gaps dentro da tolerância: ${maxGap.toStringAsFixed(3)} mm.',
+        );
+      }
+    }
+
+    // The topology analyzer intentionally treats covered fragments as
+    // presentation-only.  For a joint transaction they still matter: one
+    // proposal must not hide or replace a fragment that another proposal
+    // claims as a source.  Keep this check separate so a hidden covered
+    // fragment belonging to only one suggestion remains a valid warning.
+    for (var first = 0; first < source.length; first++) {
+      final firstIds = {
+        ...source[first].entityIds,
+        ...source[first].usedEntityIds,
+        ...source[first].coveredEntityIds,
+      };
+      for (var second = first + 1; second < source.length; second++) {
+        final shared = firstIds.intersection({
+          ...source[second].entityIds,
+          ...source[second].usedEntityIds,
+          ...source[second].coveredEntityIds,
+        });
+        if (shared.isNotEmpty) {
+          blockers.add(
+            'Fontes compartilhadas ou cobertas em conflito: ${shared.toList()..sort()}.',
+          );
+        }
+      }
+    }
+
+    final seenRequired = <String>{};
+    for (final item in analysis.items) {
+      final suggestion = item.suggestion;
+      final key = _selectionSuggestionKey(suggestion);
+      final requiredIds = <String>{
+        ...suggestion.entityIds,
+        ...suggestion.usedEntityIds,
+      }.toList()..sort();
+      final coveredIds = suggestion.coveredEntityIds.toSet().toList()..sort();
+      final allIds = {...requiredIds, ...coveredIds}.toList()..sort();
+      final currentFingerprint = _jointSuggestionFingerprint(
+        suggestion,
+        entities,
+      );
+      suggestionFingerprints[key] = currentFingerprint;
+      final expected = expectedSuggestionFingerprints[key];
+      if (expected != null && expected != currentFingerprint) {
+        blockers.add('Sugestão obsoleta: $key.');
+      }
+      for (final id in allIds) {
+        final entity = entities[id];
+        if (entity == null) {
+          blockers.add('Entidade ausente na sugestão $key: $id.');
+          continue;
+        }
+        sourceFingerprints[id] = _jointEntityFingerprint(entity);
+        affected.add(id);
+        if (requiredIds.contains(id)) {
+          if (!seenRequired.add(id)) {
+            blockers.add(
+              'A entidade fonte $id é usada por mais de uma sugestão.',
+            );
+          }
+          if (!entity.visible ||
+              entity.construction ||
+              entity.reference ||
+              entity.metadata['reconstructionHidden'] == true) {
+            blockers.add(
+              'A fonte obrigatória $id não está elegível ou visível.',
+            );
+          }
+        } else if (entity.metadata['reconstructionHidden'] == true ||
+            !entity.visible) {
+          warnings.add(
+            'Fragmento coberto $id já está oculto; não será reocultado.',
+          );
+        }
+        hidden.add(id);
+      }
+      final geometry = engine._selectionSuggestionGeometry(
+        suggestion,
+        entities,
+        tolerance.endpointCoincidenceMillimeters,
+      );
+      if (geometry == null) {
+        blockers.add('Geometria inválida ou degenerada na sugestão $key.');
+        continue;
+      }
+      plans.add(
+        SketchReconstructionJointSuggestionPlan(
+          suggestion: _freezeSuggestion(suggestion),
+          proposedGeometry: SketchReconstructionProposedGeometry(
+            kind: suggestion.kind,
+            startPoint: geometry.start,
+            endPoint: geometry.end,
+            closed: geometry.closed,
+            center: suggestion.center,
+            radius: suggestion.radius,
+            startAngle: suggestion.startAngle,
+            endAngle: suggestion.endAngle,
+          ),
+          sourceEntityIds: requiredIds,
+          coveredEntityIds: coveredIds,
+          sourceTypes: [
+            for (final id in requiredIds)
+              if (entities[id] case final entity?) entity.type,
+          ],
+          reversed: item.reversed,
+          fingerprint: currentFingerprint,
+        ),
+      );
+    }
+    if (plans.length != source.length) {
+      blockers.add('Uma ou mais sugestões não possuem geometria utilizável.');
+    }
+    return SketchReconstructionJointAcceptancePlan(
+      analysis: _freezeSelectionAnalysis(analysis),
+      suggestions: List.unmodifiable(plans),
+      affectedEntityIds: List.unmodifiable(affected.toList()..sort()),
+      hiddenEntityIds: List.unmodifiable(hidden.toList()..sort()),
+      sourceFingerprints: Map.unmodifiable(sourceFingerprints),
+      suggestionFingerprints: Map.unmodifiable(suggestionFingerprints),
+      blockers: List.unmodifiable(_unique(blockers)),
+      warnings: List.unmodifiable(_unique(warnings)),
+    );
+  }
+
+  static List<String> _unique(Iterable<String> values) =>
+      values.toSet().toList(growable: false);
+
+  static String _jointClassificationLabel(
+    SketchReconstructionSelectionClassification classification,
+  ) => switch (classification) {
+    SketchReconstructionSelectionClassification.openChain =>
+      'uma cadeia aberta',
+    SketchReconstructionSelectionClassification.closedLoop => 'um loop fechado',
+    SketchReconstructionSelectionClassification.ambiguous => 'ambígua',
+    SketchReconstructionSelectionClassification.incompatible => 'incompatível',
+  };
+}
+
+String _jointEntityFingerprint(SketchEntity entity) {
+  try {
+    return jsonEncode([
+      entity.id,
+      entity.type.name,
+      entity.version,
+      entity.visible,
+      entity.construction,
+      entity.reference,
+      entity.metadata['reconstructionHidden'] == true,
+      entity.parameters,
+    ]);
+  } on Object {
+    return '${entity.id}:${entity.type.name}:${entity.version}';
+  }
+}
+
+String _jointSuggestionFingerprint(
+  SketchReconstructionSuggestion suggestion,
+  Map<String, SketchEntity> entities,
+) {
+  final ids = {
+    ...suggestion.entityIds,
+    ...suggestion.usedEntityIds,
+    ...suggestion.coveredEntityIds,
+  }.toList()..sort();
+  return jsonEncode([
+    suggestion.kind.name,
+    for (final id in ids)
+      [
+        id,
+        entities[id] == null ? null : _jointEntityFingerprint(entities[id]!),
+      ],
+  ]);
+}
+
+SketchReconstructionSuggestion _freezeSuggestion(
+  SketchReconstructionSuggestion suggestion,
+) => SketchReconstructionSuggestion(
+  kind: suggestion.kind,
+  entityIds: List.unmodifiable(suggestion.entityIds),
+  confidence: suggestion.confidence,
+  center: suggestion.center,
+  radius: suggestion.radius,
+  startAngle: suggestion.startAngle,
+  endAngle: suggestion.endAngle,
+  startPoint: suggestion.startPoint,
+  endPoint: suggestion.endPoint,
+  circularFitQuality: suggestion.circularFitQuality,
+  warnings: List.unmodifiable(suggestion.warnings),
+  maxGapMillimeters: suggestion.maxGapMillimeters,
+  tangencyStartDegrees: suggestion.tangencyStartDegrees,
+  tangencyEndDegrees: suggestion.tangencyEndDegrees,
+  usedEntityIds: List.unmodifiable(suggestion.usedEntityIds),
+  coveredEntityIds: List.unmodifiable(suggestion.coveredEntityIds),
+  rmsError: suggestion.rmsError,
+  maxError: suggestion.maxError,
+);
+
+SketchReconstructionSelectionAnalysis _freezeSelectionAnalysis(
+  SketchReconstructionSelectionAnalysis analysis,
+) => SketchReconstructionSelectionAnalysis(
+  classification: analysis.classification,
+  items: [
+    for (final item in analysis.items)
+      SketchReconstructionSelectionItem(
+        suggestion: _freezeSuggestion(item.suggestion),
+        reversed: item.reversed,
+      ),
+  ],
+  connections: List.unmodifiable(analysis.connections),
+  gapsMillimeters: List.unmodifiable(analysis.gapsMillimeters),
+  overlapKeys: List.unmodifiable(analysis.overlapKeys),
+  duplicateKeys: List.unmodifiable(analysis.duplicateKeys),
+  branchKeys: List.unmodifiable(analysis.branchKeys),
+  crossingKeys: List.unmodifiable(analysis.crossingKeys),
+  missingEntityIds: List.unmodifiable(analysis.missingEntityIds),
+  diagnostics: List.unmodifiable(analysis.diagnostics),
+);
 
 class _SelectionEdge {
   const _SelectionEdge(this.start, this.end);
