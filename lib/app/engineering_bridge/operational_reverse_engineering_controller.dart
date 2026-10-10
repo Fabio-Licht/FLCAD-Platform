@@ -733,6 +733,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   _sketchReconstructionJointPreview;
   String? _sketchReconstructionJointPreviewToken;
   String? _sketchReconstructionJointPreviewConstraintFingerprint;
+  bool _jointAcceptanceConfirming = false;
   List<String> _sketchReconstructionJointPreviewSelectionKeys = const [];
   String? _sketchReconstructionJointPreviewSketchId;
   Set<String> _sketchReconstructionJointPreviewEntityIds = const {};
@@ -764,6 +765,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// and is invalidated with the transient preview session.
   String? get sketchReconstructionJointPreviewToken =>
       _sketchReconstructionJointPreviewToken;
+
+  /// The UI may enable confirmation only while this exact preview session is
+  /// still valid.  The final token/fingerprint checks remain in the command
+  /// executor immediately before the document transaction.
+  bool get canConfirmSketchReconstructionJointAcceptance {
+    if (_jointAcceptanceConfirming || busy) return false;
+    final preview = sketchReconstructionJointPreview;
+    return _sketchReconstructionJointPreviewToken != null &&
+        preview != null &&
+        preview.suggestions.length >= 2 &&
+        preview.canApply;
+  }
 
   bool get canPreviewSketchReconstructionJointAcceptance =>
       activeSketch != null && selectedSketchReconstructionSuggestions.length >= 2;
@@ -8116,15 +8129,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<List<String>?> confirmSketchReconstructionJointAcceptance(
     String token,
   ) async {
-    final parameters = <String, Object?>{'token': token};
-    await _run('reverse.sketch.acceptReconstructionJoint', parameters);
-    if (error != null) {
-      sketchReconstructionMessage = error;
+    if (_jointAcceptanceConfirming) {
+      sketchReconstructionMessage =
+          'A confirmacao conjunta ja esta em andamento.';
       notifyListeners();
       return null;
     }
-    final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
-    return createdIds == null ? null : List.unmodifiable(createdIds);
+    _jointAcceptanceConfirming = true;
+    final parameters = <String, Object?>{'token': token};
+    try {
+      await _run('reverse.sketch.acceptReconstructionJoint', parameters);
+      if (error != null) {
+        sketchReconstructionMessage = error;
+        notifyListeners();
+        return null;
+      }
+      final createdIds = (parameters['createdIds'] as List?)?.cast<String>();
+      if (createdIds == null || createdIds.isEmpty) return null;
+      final typeNames = [
+        for (final id in createdIds)
+          if (sketchApi?.entity(id) case final entity?) entity.type.name,
+      ];
+      sketchReconstructionMessage =
+          'Aceitacao conjunta concluida: ${createdIds.length} entidade(s) '
+          '(${typeNames.join(', ')}) criada(s) e selecionada(s).';
+      notifyListeners();
+      return List.unmodifiable(createdIds);
+    } finally {
+      _jointAcceptanceConfirming = false;
+      notifyListeners();
+    }
   }
 
   Future<List<String>> _applySketchReconstructionJointAcceptance(

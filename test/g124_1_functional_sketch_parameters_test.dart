@@ -4683,6 +4683,10 @@ void main() {
       expect(preview, isNotNull);
       expect(preview!.canApply, isTrue);
       expect(
+        harness.controller.canConfirmSketchReconstructionJointAcceptance,
+        isTrue,
+      );
+      expect(
         harness.cad.runtime.scene.find(
           '${sketchReconstructionJointPreviewPrefix}0',
         ),
@@ -4710,6 +4714,10 @@ void main() {
         additive: true,
       );
       expect(harness.controller.sketchReconstructionJointPreview, isNull);
+      expect(
+        harness.controller.canConfirmSketchReconstructionJointAcceptance,
+        isFalse,
+      );
       expect(
         harness.cad.runtime.scene.find(
           '${sketchReconstructionJointPreviewPrefix}0',
@@ -4741,6 +4749,41 @@ void main() {
         harness.controller.selectedSketchReconstructionSuggestions,
         [suggestions[0], suggestions[2], suggestions[1]],
       );
+      expect(
+        harness.controller.canConfirmSketchReconstructionJointAcceptance,
+        isFalse,
+      );
+
+      harness.controller.clearSketchReconstructionSelection();
+      final conflicting = [
+        suggestions.first,
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.arc,
+          entityIds: [first.id],
+          confidence: 1,
+          center: const SketchVector(5, 5),
+          radius: 5,
+          startAngle: -math.pi / 2,
+          endAngle: math.pi / 2,
+        ),
+      ];
+      for (final suggestion in conflicting) {
+        harness.controller.selectSketchReconstructionSuggestion(
+          suggestion,
+          additive: true,
+        );
+      }
+      harness.controller.previewSketchReconstructionAcceptance();
+      expect(harness.controller.sketchReconstructionJointPreview, isNotNull);
+      expect(
+        harness.controller.sketchReconstructionJointPreview!.blockers,
+        isNotEmpty,
+      );
+      expect(
+        harness.controller.canConfirmSketchReconstructionJointAcceptance,
+        isFalse,
+      );
+      harness.controller.cancelSketchReconstructionJointPreview();
     },
   );
 
@@ -4802,14 +4845,23 @@ void main() {
       expect(token, isNotNull);
       final historyBefore = harness.controller.commands.manager.history.length;
 
-      final created = await harness.controller
+      final firstConfirmation = harness.controller
           .confirmSketchReconstructionJointAcceptance(token!);
+      final duplicateConfirmation = harness.controller
+          .confirmSketchReconstructionJointAcceptance(token);
+      final created = await firstConfirmation;
+      expect(await duplicateConfirmation, isNull);
       expect(created, hasLength(3));
       expect(
         harness.controller.commands.manager.history.length,
         historyBefore + 1,
       );
       expect(harness.controller.sketchReconstructionJointPreviewToken, isNull);
+      expect(
+        harness.controller.canConfirmSketchReconstructionJointAcceptance,
+        isFalse,
+      );
+      expect(harness.controller.sketchReconstructionMessage, contains('conclu'));
       final createdEntities = created!
           .map((id) => harness.controller.sketchApi!.entity(id))
           .toList();

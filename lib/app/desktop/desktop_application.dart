@@ -11706,9 +11706,11 @@ class _SketchReconstructionJointPreviewPanel extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 3),
-            const Text(
-              'Somente diagnostico visual; nenhuma entidade sera criada nesta etapa.',
-              style: TextStyle(fontSize: 9.5),
+            Text(
+              preview.canApply
+                  ? 'Preview validado; confirmar aplica a transacao atomica apresentada.'
+                  : 'Preview bloqueado; confirme somente apos resolver os bloqueadores.',
+              style: const TextStyle(fontSize: 9.5),
             ),
             Text(
               '${analysis.summary} Â· ${preview.suggestions.length} geometrias propostas',
@@ -11752,14 +11754,27 @@ class _SketchReconstructionJointPreviewPanel extends StatelessWidget {
             Row(
               children: [
                 TextButton(
-                  onPressed: controller.cancelSketchReconstructionJointPreview,
+                  onPressed: controller.busy
+                      ? null
+                      : controller.cancelSketchReconstructionJointPreview,
                   child: const Text('Cancelar'),
                 ),
                 const SizedBox(width: 6),
                 OutlinedButton.icon(
-                  onPressed: null,
-                  icon: const Icon(Icons.lock_outline, size: 14),
-                  label: const Text('Confirmar (em breve)'),
+                  key: const ValueKey(
+                    'sketch-reconstruction-joint-preview-confirm',
+                  ),
+                  onPressed: controller.canConfirmSketchReconstructionJointAcceptance
+                      ? () async {
+                          final token =
+                              controller.sketchReconstructionJointPreviewToken;
+                          if (token == null) return;
+                          await controller
+                              .confirmSketchReconstructionJointAcceptance(token);
+                        }
+                      : null,
+                  icon: const Icon(Icons.check, size: 14),
+                  label: const Text('Confirmar'),
                 ),
               ],
             ),
