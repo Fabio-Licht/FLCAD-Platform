@@ -316,12 +316,31 @@ class _ProfessionalCadViewportWidgetState
     );
     final next = hit?.entityId;
     widget.onPickCaptureHover?.call(hit);
-    widget.onSketchSuggestionHover?.call(hit);
+    widget.onSketchSuggestionHover?.call(
+      _suggestionHoverPick(hit, position),
+    );
     widget.onSketchSuggestionHoverPosition?.call(position);
     widget.onManagedFaceHover?.call(hit);
     if (next != hoveredEntityId && mounted) {
       setState(() => hoveredEntityId = next);
     }
+  }
+
+  CadViewportPick? _suggestionHoverPick(
+    CadViewportPick? hit,
+    Offset position,
+  ) {
+    if (hit != null &&
+        !cadSceneEntityIsPickOnly(widget.scene.find(hit.entityId))) {
+      return hit;
+    }
+    return picking.pick(
+      position: position,
+      camera: widget.camera,
+      scene: widget.scene,
+      eligibleEntityIds: widget.pickCaptureCandidateIds,
+      includePickOnlyProfiles: false,
+    );
   }
 
   void _fitVisibleScene([CadStandardView? standardView]) {

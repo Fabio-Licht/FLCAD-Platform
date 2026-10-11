@@ -4,6 +4,7 @@ import 'managed_placement_editor.dart';
 import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -66,6 +67,7 @@ import 'desktop_asset_manager.dart';
 import 'desktop_cad_controller.dart';
 import 'desktop_settings.dart';
 import 'desktop_theme.dart';
+import 'development_calota_autoload.dart';
 import 'contextual_reference_actions.dart';
 import 'contextual_reference_preview_session.dart';
 import 'explorer_tree_projection.dart';
@@ -73,17 +75,6 @@ import 'inspector_value_formatter.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'reference_tree_taxonomy.dart';
-
-// Development-only startup validation. Commercial builds leave both defines
-// at their defaults and therefore retain the normal project/import startup.
-const bool _devAutoLoadCalota = bool.fromEnvironment(
-  'FLCAD_DEV_AUTOLOAD_CALOTA',
-  defaultValue: false,
-);
-const String _devCalotaPath = String.fromEnvironment(
-  'FLCAD_DEV_STL_PATH',
-  defaultValue: '',
-);
 
 class FLCADDesktopApplication extends StatefulWidget {
   const FLCADDesktopApplication({
@@ -520,16 +511,28 @@ class _DesktopShellState extends State<DesktopShell> {
   int destination = 0;
   late final DesktopCadController cad;
   late final DesktopCommandCoordinator commands;
-  bool _devCalotaAutoloadConsumed = false;
+  late final DevelopmentCalotaAutoloadPolicy _autoloadPolicy;
+  final DevelopmentCalotaAutoload _autoload = DevelopmentCalotaAutoload();
+  final Completer<void> _workspaceViewportReady = Completer<void>();
   bool _devCalotaUsePathForNextImport = false;
   @override
   void initState() {
     super.initState();
     EngineeringBootstrap.instance.initialize();
+    // Development Release: both --dart-define=FLCAD_DEV_AUTOLOAD_CALOTA=true
+    // and --dart-define=FLCAD_DEV_STL_PATH=... Commercial: defaults, no autoload.
+    // Platform.environment fallback is kDebugMode only and never FLUTTER_TEST.
+    _autoloadPolicy = DevelopmentCalotaAutoloadPolicy.resolve(
+      debugMode: kDebugMode && !const bool.fromEnvironment('FLUTTER_TEST'),
+      debugEnvironment: kDebugMode && !const bool.fromEnvironment('FLUTTER_TEST')
+          ? Platform.environment
+          : const <String, String>{},
+    );
+    if (_autoloadPolicy.enabled) destination = 1;
     cad = DesktopCadController(
       kernels: EngineeringBootstrap.instance.services.get<KernelManager>(),
       projects: ProjectManager.instance,
-      managedStlFilePicker: _devAutoLoadCalota
+      managedStlFilePicker: _autoloadPolicy.enabled
           ? _developmentStlFilePicker
           : null,
     );
@@ -550,7 +553,8 @@ class _DesktopShellState extends State<DesktopShell> {
   Future<String?> _developmentStlFilePicker(List<String> extensions) async {
     if (_devCalotaUsePathForNextImport) {
       _devCalotaUsePathForNextImport = false;
-      return _devCalotaPath.trim().isEmpty ? null : _devCalotaPath.trim();
+      final locator = _autoloadPolicy.path.trim();
+      return locator.isEmpty ? null : locator;
     }
     final selected = await FilePicker.pickFile(
       type: FileType.custom,
@@ -560,47 +564,57 @@ class _DesktopShellState extends State<DesktopShell> {
     return selected?.path;
   }
 
+  void _logDevAutoload(String event, Map<String, Object?> fields) {
+    if (!(kDebugMode || _autoloadPolicy.enabled)) return;
+    debugPrint('[dev-autoload] $event $fields');
+  }
+
   Future<void> _autoloadDevelopmentCalota() async {
-    if (!_devAutoLoadCalota || _devCalotaAutoloadConsumed) return;
-    _devCalotaAutoloadConsumed = true;
-    final locator = _devCalotaPath.trim();
-    if (locator.isEmpty) {
-      cad.setStatus(
-        'Autoload CALOTA desabilitado: defina FLCAD_DEV_STL_PATH para o Release de desenvolvimento.',
-      );
-      return;
-    }
-    final source = File(locator);
-    if (!await source.exists()) {
-      cad.setStatus(
-        'Aviso: CALOTA de desenvolvimento não encontrada em $locator. A inicialização continua normalmente.',
-      );
-      return;
-    }
-    try {
-      final project = ProjectManager.instance.current;
-      if (project == null) {
-        await commands.createProject(
-          'CALOTA — validação de desenvolvimento',
-          'FLCAD',
-        );
-      } else {
-        if (cad.runtime.document?.projectId != project.id) {
-          await cad.restoreProjectGeometry(project.id);
+    await _autoload.run(
+      policy: _autoloadPolicy,
+      waitUntilReady: () => _workspaceViewportReady.future,
+      fileExists: (path) => File(path).exists(),
+      ensureProject: () async {
+        final project = ProjectManager.instance.current;
+        if (project == null) {
+          await commands.createProject(
+            'CALOTA — validação de desenvolvimento',
+            'FLCAD',
+          );
+        } else {
+          if (cad.runtime.document?.projectId != project.id) {
+            await cad.restoreProjectGeometry(project.id);
+          }
+          await commands.refreshContext();
         }
-        await commands.refreshContext();
-      }
-      if (_documentContainsDevelopmentCalota(locator)) {
-        cad.setStatus('CALOTA de desenvolvimento já está carregada.');
-        return;
-      }
-      _devCalotaUsePathForNextImport = true;
-      await commands.dispatch('import.stl');
-    } catch (error) {
-      cad.setStatus(
-        'Aviso: não foi possível carregar a CALOTA de desenvolvimento ($error). A inicialização continua normalmente.',
-      );
-    }
+      },
+      alreadyContainsCalota: (path) async =>
+          _documentContainsDevelopmentCalota(path),
+      hasExistingGeometry: () async => _documentHasExistingUserGeometry(),
+      importStl: (path) async {
+        _devCalotaUsePathForNextImport = true;
+        await commands.dispatch('import.stl');
+        final publication = cad.runtime.managedImportPublication;
+        final meshPublished =
+            publication != null &&
+            cad.runtime.scene.entities.any(
+              (entity) =>
+                  entity.visible && entity.kind == CadSceneEntityKind.mesh,
+            );
+        return DevelopmentCalotaImportOutcome(
+          entityId: cad.runtime.selection.isEmpty
+              ? null
+              : cad.runtime.selection.first,
+          meshPublished: meshPublished,
+        );
+      },
+      fitViewAfterMeshPublished: () async {
+        // OfficialEngineeringWorkspace schedules Fit after publication and
+        // the first valid viewport frame. Do not Fit before the mesh exists.
+      },
+      reportStatus: cad.setStatus,
+      log: _logDevAutoload,
+    );
   }
 
   bool _documentContainsDevelopmentCalota(String locator) {
@@ -617,6 +631,31 @@ class _DesktopShellState extends State<DesktopShell> {
       return samePath(entity.data['sourcePath']) ||
           samePath(entity.data['registeredPath']);
     });
+  }
+
+  bool _documentHasExistingUserGeometry() {
+    final document = cad.runtime.document;
+    if (document != null &&
+        document.entities.values.any((entity) {
+          switch (entity.kind) {
+            case CadDocumentEntityKind.import:
+            case CadDocumentEntityKind.solid:
+            case CadDocumentEntityKind.surface:
+            case CadDocumentEntityKind.sketch:
+            case CadDocumentEntityKind.curve:
+            case CadDocumentEntityKind.face:
+            case CadDocumentEntityKind.shell:
+            case CadDocumentEntityKind.boundary:
+              return true;
+            default:
+              return false;
+          }
+        })) {
+      return true;
+    }
+    return cad.runtime.scene.entities.any(
+      (entity) => entity.visible && entity.kind == CadSceneEntityKind.mesh,
+    );
   }
 
   @override
@@ -650,7 +689,15 @@ class _DesktopShellState extends State<DesktopShell> {
         controller: widget.controller,
         commands: commands,
       ),
-      OfficialEngineeringWorkspace(cad: cad, commands: commands),
+      OfficialEngineeringWorkspace(
+        cad: cad,
+        commands: commands,
+        onViewportReady: () {
+          if (!_workspaceViewportReady.isCompleted) {
+            _workspaceViewportReady.complete();
+          }
+        },
+      ),
       DesktopSettingsScreen(
         controller: widget.controller,
         colmapLabBuilder: widget.colmapLabBuilder,
@@ -1161,9 +1208,11 @@ class OfficialEngineeringWorkspace extends StatefulWidget {
     super.key,
     required this.cad,
     required this.commands,
+    this.onViewportReady,
   });
   final DesktopCadController cad;
   final DesktopCommandCoordinator commands;
+  final VoidCallback? onViewportReady;
   @override
   State<OfficialEngineeringWorkspace> createState() =>
       _OfficialEngineeringWorkspaceState();
@@ -5605,8 +5654,10 @@ class _OfficialEngineeringWorkspaceState
                             children: [
                               Positioned.fill(
                                 child: IntegratedCadViewportWidget(
-                                  onViewportReady: () =>
-                                      _pendingManagedImportFit?.call(),
+                                  onViewportReady: () {
+                                    widget.onViewportReady?.call();
+                                    _pendingManagedImportFit?.call();
+                                  },
                                   onPickCapture:
                                       _captureContextualReferencePick,
                                   pickCaptureCandidateIds:
@@ -11456,6 +11507,10 @@ class _SketchHealthOverflowLabel extends StatelessWidget {
     ),
   );
 }
+
+String sketchReconstructionSuggestionUiKey(
+  SketchReconstructionSuggestion suggestion,
+) => _sketchSuggestionUiKey(suggestion);
 
 String _sketchSuggestionUiKey(SketchReconstructionSuggestion suggestion) {
   String ids(Iterable<String> values) => (values.toSet().toList()..sort()).join(',');

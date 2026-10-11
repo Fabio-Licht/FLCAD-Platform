@@ -762,6 +762,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchReconstructionSuggestion? _reconstructionSuggestionBeingAccepted;
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
+
+  @visibleForTesting
+  void debugReplaceSketchReconstructionSuggestions(
+    List<SketchReconstructionSuggestion> value,
+  ) {
+    _sketchReconstructionSuggestions = List.unmodifiable(value);
+  }
   SketchReconstructionSelectionAnalysis?
   get sketchReconstructionSelectionAnalysis =>
       _sketchReconstructionSelectionAnalysis;
@@ -8160,6 +8167,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       clearHoveredSketchReconstructionSuggestion();
       return false;
     }
+    if (cadSceneEntityIsPickOnly(runtime.scene.find(entityId))) {
+      _logReconstructionHoverMiss(
+        hitEntityId: entityId,
+        reason: 'pickOnlyProfile',
+      );
+      clearHoveredSketchReconstructionSuggestion();
+      return false;
+    }
     final api = sketchApi;
     final visibleSourceIds = api == null
         ? const <String>{}
@@ -8187,6 +8202,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         })
         .toList(growable: false);
     if (matches.isEmpty) {
+      _logReconstructionHoverMiss(
+        hitEntityId: entityId,
+        reason: 'noEligibleSuggestion',
+        visibleSourceIds: visibleSourceIds,
+      );
       clearHoveredSketchReconstructionSuggestion();
       return false;
     }
@@ -8406,6 +8426,44 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
     }
     return extrema;
+  }
+
+  String? _lastReconstructionHoverMissKey;
+
+  void _logReconstructionHoverMiss({
+    required String? hitEntityId,
+    required String reason,
+    Set<String> visibleSourceIds = const {},
+  }) {
+    if (!kDebugMode || hitEntityId == null) return;
+    SketchReconstructionSuggestion? candidate;
+    var reject = reason;
+    for (final suggestion in _sketchReconstructionSuggestions) {
+      final sourceIds = <String>{
+        ...suggestion.entityIds,
+        ...suggestion.usedEntityIds,
+      };
+      final allIds = {...sourceIds, ...suggestion.coveredEntityIds};
+      if (!allIds.contains(hitEntityId)) continue;
+      candidate = suggestion;
+      if (sourceIds.isNotEmpty && !sourceIds.any(visibleSourceIds.contains)) {
+        reject = 'usedHidden';
+      }
+      break;
+    }
+    // Empty-space / random-mesh hover is not a diagnostic miss. Log only
+    // when a suggestion candidate failed, or pick-only stole the hit.
+    if (candidate == null && reason != 'pickOnlyProfile') return;
+    final key = '$hitEntityId|$reject';
+    if (_lastReconstructionHoverMissKey == key) return;
+    _lastReconstructionHoverMissKey = key;
+    debugPrint(
+      '[recon-hover-miss] hit=$hitEntityId reason=$reject '
+      'candidate=${candidate == null ? '-' : _reconstructionSuggestionKey(candidate)} '
+      'used=${candidate?.usedEntityIds.join(',')} '
+      'covered=${candidate?.coveredEntityIds.join(',')} '
+      'visible=${visibleSourceIds.length}',
+    );
   }
 
   void clearHoveredSketchReconstructionSuggestion() {

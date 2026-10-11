@@ -45,6 +45,11 @@ class _IntView extends ListBase<int> {
 
 enum CadViewportSubentityKind { face, edge, vertex }
 
+bool cadSceneEntityIsPickOnly(CadSceneEntity? entity) =>
+    entity != null &&
+    (entity.geometry['pickOnly'] == true ||
+        entity.geometry['pickOnlyClosedProfile'] == true);
+
 class ManagedCadFaceHighlight {
   const ManagedCadFaceHighlight({
     required this.entityId,
@@ -188,6 +193,7 @@ class ViewportPickingController {
     required CadCameraController camera,
     required CadSceneGraph scene,
     Set<String>? eligibleEntityIds,
+    bool includePickOnlyProfiles = true,
   }) {
     CadViewportPick? nearest;
     for (final entity in scene.entities.where(
@@ -269,6 +275,7 @@ class ViewportPickingController {
           camera,
           scene,
           eligibleEntityIds: eligibleEntityIds,
+          includePickOnlyProfiles: includePickOnlyProfiles,
         ) ??
         nearest;
   }
@@ -278,10 +285,13 @@ class ViewportPickingController {
     CadCameraController camera,
     CadSceneGraph scene, {
     Set<String>? eligibleEntityIds,
+    bool includePickOnlyProfiles = true,
   }) {
     CadViewportPick? best;
     var bestPriority = 1 << 30;
     var bestDistance = double.infinity;
+    CadSceneEntity? pickOnlyProfile;
+    Vector3? pickOnlyWorld;
     final worldScale = cadReferencePresentationScale(scene, camera);
 
     Vector3? vector(Object? value) {
@@ -349,6 +359,8 @@ class ViewportPickingController {
           item.visible &&
           (eligibleEntityIds == null || eligibleEntityIds.contains(item.id)),
     )) {
+      final pickOnly = cadSceneEntityIsPickOnly(entity);
+      if (pickOnly && !includePickOnlyProfiles) continue;
       final priority = switch (entity.kind) {
         CadSceneEntityKind.sketch || CadSceneEntityKind.curve => 0,
         CadSceneEntityKind.plane => 1,
@@ -360,7 +372,8 @@ class ViewportPickingController {
       if (priority == 10) continue;
 
       final rawSegments = entity.geometry['segments'];
-      if (rawSegments is List) {
+      if (rawSegments is List && rawSegments.isNotEmpty) {
+        if (pickOnly) continue;
         for (final raw in rawSegments.whereType<List>()) {
           if (raw.length < 2) continue;
           final a = vector(raw[0]), b = vector(raw[1]);
@@ -383,13 +396,21 @@ class ViewportPickingController {
       final rawPoints = entity.geometry['points'];
       if (rawPoints is List) {
         final points = rawPoints.map(vector).whereType<Vector3>().toList();
-        if (entity.geometry['pickOnlyClosedProfile'] == true &&
-            points.length >= 3) {
-          final polygon = Path()
-            ..addPolygon(points.map(project).toList(), true);
-          if (polygon.contains(position)) {
-            consider(entity, -2, 0, points.first);
+        if (pickOnly) {
+          if (includePickOnlyProfiles &&
+              entity.geometry['pickOnlyClosedProfile'] == true &&
+              points.length >= 3) {
+            final polygon = Path()
+              ..addPolygon(points.map(project).toList(), true);
+            if (polygon.contains(position)) {
+              // Apply after painted geometry so children (0 / -1) win. Still
+              // displaces world planes (1) so Extrude keeps the closed
+              // profile in empty interior.
+              pickOnlyProfile = entity;
+              pickOnlyWorld = points.first;
+            }
           }
+          continue;
         }
         if (entity.kind == CadSceneEntityKind.sketch &&
             entity.geometry['showEndpoints'] == true &&
@@ -505,6 +526,13 @@ class ViewportPickingController {
           origin,
         );
       }
+    }
+    // Painted sketch/curve/endpoints already won (priority <= 0). Otherwise
+    // the closed profile replaces a world plane so Extrude still hits.
+    if (pickOnlyProfile != null &&
+        pickOnlyWorld != null &&
+        (best == null || bestPriority > 0)) {
+      consider(pickOnlyProfile, 0, 0, pickOnlyWorld);
     }
     return best;
   }

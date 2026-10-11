@@ -413,6 +413,7 @@ class _IntegratedCadViewportWidgetState
         position: current,
         camera: widget.camera,
         scene: widget.scene,
+        includePickOnlyProfiles: false,
       );
       final result = await native.pick(current.dx, current.dy);
       final source = result == null ? null : widget.scene.find(result.entityId);
