@@ -157,6 +157,12 @@ void main() {
       expect(publication.bounds.maxX, 1);
       expect(publication.bounds.maxY, 1);
       expect(publication.bounds.maxZ, 0);
+      expect(runtime.scene.find(entity.id)?.visible, isTrue);
+      expect(
+        runtime.document!.entities[entity.id]!.data['sceneVisible'] as bool? ??
+            true,
+        isTrue,
+      );
 
       await runtime.undoDocument();
       expect(runtime.managedImportPublication!.id, publication.id);

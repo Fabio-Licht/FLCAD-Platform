@@ -102,6 +102,14 @@ import 'selection/geometry_selection_manager.dart';
 import '../runtime/cad_runtime.dart';
 import '../runtime/world_coordinate_system.dart';
 
+// Opt-in diagnostics for a development Release. The normal hover path stays
+// silent in Release; defining this flag emits at most one line per
+// entity/reason pair, so a large pointer sweep cannot flood the log.
+const bool _devReconstructionHoverDiagnostics = bool.fromEnvironment(
+  'FLCAD_DEV_RECONSTRUCTION_HOVER_DIAGNOSTICS',
+  defaultValue: false,
+);
+
 /// Distance below which two Sketch samples are treated as the same point.
 ///
 /// The profile resolver and the native Wire builder must share this value:
@@ -763,12 +771,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   List<SketchReconstructionSuggestion> get sketchReconstructionSuggestions =>
       List.unmodifiable(_sketchReconstructionSuggestions);
 
+  /// Scene IDs that may legitimately resolve to an active reconstruction
+  /// suggestion during viewport hover.  The viewport uses this as a narrow
+  /// candidate set so a raw Section/reference curve or imported mesh cannot
+  /// win the hit before the painted Sketch source.
+  Set<String> get sketchReconstructionSuggestionPickCandidateIds {
+    final api = sketchApi;
+    final ids = <String>{};
+    for (final suggestion in _sketchReconstructionSuggestions) {
+      final sourceIds = <String>{
+        ...suggestion.entityIds,
+        ...suggestion.usedEntityIds,
+      };
+      if (sourceIds.isNotEmpty &&
+          !(sourceIds.any((id) => api?.entity(id)?.visible == true))) {
+        continue;
+      }
+      ids
+        ..addAll(sourceIds)
+        ..addAll(suggestion.coveredEntityIds);
+    }
+    return ids;
+  }
+
   @visibleForTesting
   void debugReplaceSketchReconstructionSuggestions(
     List<SketchReconstructionSuggestion> value,
   ) {
     _sketchReconstructionSuggestions = List.unmodifiable(value);
   }
+
   SketchReconstructionSelectionAnalysis?
   get sketchReconstructionSelectionAnalysis =>
       _sketchReconstructionSelectionAnalysis;
@@ -8435,7 +8467,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     required String reason,
     Set<String> visibleSourceIds = const {},
   }) {
-    if (!kDebugMode || hitEntityId == null) return;
+    if (!(kDebugMode || _devReconstructionHoverDiagnostics) ||
+        hitEntityId == null) {
+      return;
+    }
     SketchReconstructionSuggestion? candidate;
     var reject = reason;
     for (final suggestion in _sketchReconstructionSuggestions) {

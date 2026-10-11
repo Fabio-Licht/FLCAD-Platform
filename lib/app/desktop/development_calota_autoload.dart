@@ -114,10 +114,12 @@ class DevelopmentCalotaImportOutcome {
   const DevelopmentCalotaImportOutcome({
     this.entityId,
     this.meshPublished = false,
+    this.visible = false,
   });
 
   final String? entityId;
   final bool meshPublished;
+  final bool visible;
 }
 
 @immutable
@@ -238,6 +240,7 @@ class DevelopmentCalotaAutoload {
       emit('result', {
         'entityId': outcome.entityId,
         'meshPublished': outcome.meshPublished,
+        'visible': outcome.visible,
       });
       var fitted = false;
       if (outcome.meshPublished) {

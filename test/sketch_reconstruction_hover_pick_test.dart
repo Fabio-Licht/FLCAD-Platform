@@ -194,6 +194,54 @@ void main() {
   );
 
   test(
+    'suggestion hover candidate filter wins over an overlapping Section reference',
+    () {
+      final camera = CadCameraController(
+        eye: const Vector3(0, 0, 10),
+        target: Vector3.zero,
+        up: const Vector3(0, 1, 0),
+      )..resize(800, 600);
+      final scene = CadSceneGraph()
+        ..upsert(
+          const CadSceneEntity(
+            id: 'section-reference',
+            kind: CadSceneEntityKind.curve,
+            geometry: {
+              'points': [
+                [-4, 0, 0],
+                [4, 0, 0],
+              ],
+              'displayColor': 'sectionReferenceLilac',
+            },
+          ),
+        )
+        ..upsert(
+          const CadSceneEntity(
+            id: 'suggestion-source',
+            kind: CadSceneEntityKind.sketch,
+            geometry: {
+              'points': [
+                [-4, 0, 0],
+                [4, 0, 0],
+              ],
+              'displayColor': 'reconstructedLine',
+            },
+          ),
+        );
+      addTearDown(scene.dispose);
+      addTearDown(camera.dispose);
+      final hit = ViewportPickingController().pick(
+        position: _project(camera, const [0, 0, 0]),
+        camera: camera,
+        scene: scene,
+        eligibleEntityIds: const {'suggestion-source'},
+        includePickOnlyProfiles: false,
+      );
+      expect(hit?.entityId, 'suggestion-source');
+    },
+  );
+
+  test(
     'every active suggestion in a multi-region fixture is hoverable',
     () async {
       final directory = await Directory.systemTemp.createTemp('hover-regions_');

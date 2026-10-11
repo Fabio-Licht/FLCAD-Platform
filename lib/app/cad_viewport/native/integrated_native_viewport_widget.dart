@@ -47,6 +47,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.onSketchHover,
     this.onSketchSuggestionHover,
     this.onSketchSuggestionHoverPosition,
+    this.sketchSuggestionPickCandidateIds,
     this.onSketchEntityDragStart,
     this.onSketchEntityDragUpdate,
     this.onSketchEntityDragEnd,
@@ -77,6 +78,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchHover;
   final ValueChanged<CadViewportPick?>? onSketchSuggestionHover;
   final ValueChanged<Offset?>? onSketchSuggestionHoverPosition;
+  final Set<String>? sketchSuggestionPickCandidateIds;
   final void Function(CadViewportPick pick, Offset position)?
   onSketchEntityDragStart;
   final ValueChanged<Offset>? onSketchEntityDragUpdate;
@@ -413,6 +415,7 @@ class _IntegratedCadViewportWidgetState
         position: current,
         camera: widget.camera,
         scene: widget.scene,
+        eligibleEntityIds: widget.sketchSuggestionPickCandidateIds,
         includePickOnlyProfiles: false,
       );
       final result = await native.pick(current.dx, current.dy);
@@ -902,6 +905,8 @@ class _IntegratedCadViewportWidgetState
                       onSketchSuggestionHoverPosition: useNative
                           ? null
                           : widget.onSketchSuggestionHoverPosition,
+                      sketchSuggestionPickCandidateIds:
+                          widget.sketchSuggestionPickCandidateIds,
                       captureHoveredEntityId: _captureHover?.entityId,
                       onManagedFacePick: useNative ? null : _pickCanvas,
                       onEmptyNormalTap: () {

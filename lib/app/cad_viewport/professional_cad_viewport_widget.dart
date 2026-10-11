@@ -48,6 +48,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.onSketchHover,
     this.onSketchSuggestionHover,
     this.onSketchSuggestionHoverPosition,
+    this.sketchSuggestionPickCandidateIds,
     this.onSketchEntityDragStart,
     this.onSketchEntityDragUpdate,
     this.onSketchEntityDragEnd,
@@ -87,6 +88,11 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final ValueChanged<Offset>? onSketchHover;
   final ValueChanged<CadViewportPick?>? onSketchSuggestionHover;
   final ValueChanged<Offset?>? onSketchSuggestionHoverPosition;
+
+  /// When present, suggestion hover is resolved only against these active
+  /// source entities.  This prevents the Section/reference overlay or a mesh
+  /// under the sketch from stealing the transient suggestion hover.
+  final Set<String>? sketchSuggestionPickCandidateIds;
   final void Function(CadViewportPick pick, Offset position)?
   onSketchEntityDragStart;
   final ValueChanged<Offset>? onSketchEntityDragUpdate;
@@ -330,6 +336,17 @@ class _ProfessionalCadViewportWidgetState
     CadViewportPick? hit,
     Offset position,
   ) {
+    final candidates = widget.sketchSuggestionPickCandidateIds;
+    if (candidates != null && candidates.isNotEmpty) {
+      final suggestionHit = picking.pick(
+        position: position,
+        camera: widget.camera,
+        scene: widget.scene,
+        eligibleEntityIds: candidates,
+        includePickOnlyProfiles: false,
+      );
+      if (suggestionHit != null) return suggestionHit;
+    }
     if (hit != null &&
         !cadSceneEntityIsPickOnly(widget.scene.find(hit.entityId))) {
       return hit;

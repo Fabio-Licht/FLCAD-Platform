@@ -594,18 +594,41 @@ class _DesktopShellState extends State<DesktopShell> {
       importStl: (path) async {
         _devCalotaUsePathForNextImport = true;
         await commands.dispatch('import.stl');
+        // Managed import normally starts visible.  Reassert it for the
+        // development-only autoload because a restored collection/session may
+        // carry an old sceneVisible=false value; do not change commercial
+        // imports or create a second import.
+        String? importedId;
+        for (final id in cad.runtime.selection) {
+          final entity = cad.runtime.scene.find(id);
+          if (entity?.kind == CadSceneEntityKind.mesh) {
+            importedId = id;
+            break;
+          }
+        }
+        final importedDocument = importedId == null
+            ? null
+            : cad.runtime.document?.entities[importedId];
+        final importedScene = importedId == null
+            ? null
+            : cad.runtime.scene.find(importedId);
+        if (importedId != null &&
+            (importedScene?.visible != true ||
+                (importedDocument?.data['sceneVisible'] as bool? ?? true) !=
+                    true)) {
+          await cad.runtime.setEntityVisibility(importedId, true);
+        }
         final publication = cad.runtime.managedImportPublication;
+        final visible = importedId != null &&
+            cad.runtime.scene.find(importedId)?.visible == true;
         final meshPublished =
             publication != null &&
-            cad.runtime.scene.entities.any(
-              (entity) =>
-                  entity.visible && entity.kind == CadSceneEntityKind.mesh,
-            );
+            visible &&
+            cad.runtime.scene.find(importedId)?.kind == CadSceneEntityKind.mesh;
         return DevelopmentCalotaImportOutcome(
-          entityId: cad.runtime.selection.isEmpty
-              ? null
-              : cad.runtime.selection.first,
+          entityId: importedId,
           meshPublished: meshPublished,
+          visible: visible,
         );
       },
       fitViewAfterMeshPublished: () async {
@@ -3014,6 +3037,15 @@ class _OfficialEngineeringWorkspaceState
       );
       return true;
     }());
+    // The managed publication can arrive after the first valid viewport frame
+    // (the development autoload intentionally waits for that frame).  In that
+    // case no later layout callback is guaranteed, so deliver the pending Fit
+    // on the next frame instead of leaving it stranded indefinitely.
+    if (camera.viewportWidth > 1 && camera.viewportHeight > 1) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) apply();
+      });
+    }
   }
 
   void _scheduleProjectOpenFit({
@@ -5718,6 +5750,11 @@ class _OfficialEngineeringWorkspaceState
                                                 null;
                                           }
                                         }
+                                      : null,
+                                  sketchSuggestionPickCandidateIds:
+                                      module == 'Sketch'
+                                      ? operational
+                                            .sketchReconstructionSuggestionPickCandidateIds
                                       : null,
                                   scene: scene,
                                   camera: camera,

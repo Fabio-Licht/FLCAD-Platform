@@ -113,6 +113,7 @@ void main() {
           return const DevelopmentCalotaImportOutcome(
             entityId: 'stl-calota',
             meshPublished: true,
+            visible: true,
           );
         },
         fitViewAfterMeshPublished: () async {
@@ -137,6 +138,15 @@ void main() {
       expect(ensureCalls, 1);
       expect(fitCalls, 1);
       expect(events, containsAllInOrder(['start', 'command', 'scene.publish', 'fit-view']));
+      expect(report.fitted, isTrue);
+      expect(
+        events.where(
+          (event) => event.contains('section') || event.contains('sketch'),
+        ),
+        isEmpty,
+        reason:
+            'CALOTA autoload must not create Section or Sketch automatically',
+      );
 
       final second = await runner.run(
         policy: const DevelopmentCalotaAutoloadPolicy(
