@@ -200,11 +200,27 @@ class _ProfessionalCadViewportWidgetState
 
   void _handleTap(TapUpDetails event) {
     if (_hasSketchGesture) {
-      final hit = picking.pick(
-        position: event.localPosition,
-        camera: widget.camera,
-        scene: widget.scene,
-      );
+      // Suggestion hover already resolves against the active source set. Use
+      // that same filtered picker for clicks so an overlapping Section or
+      // reference curve cannot steal the Assistant selection. Fall back to
+      // normal Sketch picking for ordinary CAD gestures outside suggestions.
+      final suggestionHit =
+          widget.onSketchEntityPick != null &&
+              widget.sketchSuggestionPickCandidateIds != null
+          ? picking.pickSuggestionHover(
+              position: event.localPosition,
+              camera: widget.camera,
+              scene: widget.scene,
+              suggestionCandidateIds:
+                  widget.sketchSuggestionPickCandidateIds,
+            )
+          : null;
+      final hit = suggestionHit ??
+          picking.pick(
+            position: event.localPosition,
+            camera: widget.camera,
+            scene: widget.scene,
+          );
       if (hit != null &&
           widget.scene.find(hit.entityId)?.kind == CadSceneEntityKind.sketch &&
           widget.onSketchEntityPick != null) {

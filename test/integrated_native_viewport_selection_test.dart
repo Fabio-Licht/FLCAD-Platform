@@ -982,6 +982,110 @@ void main() {
     },
   );
 
+  for (final backendLabel in ['Native GPU', 'Flutter Canvas']) {
+    testWidgets(
+      'viewport Ctrl-click accumulates and toggles reconstruction suggestions on $backendLabel',
+      (tester) async {
+        final f = _Fixture();
+        final picked = <String>[];
+        final selected = <String>{};
+        final hovered = <String>[];
+        f.scene
+          ..upsert(
+            const CadSceneEntity(
+              id: 'section-reference',
+              kind: CadSceneEntityKind.curve,
+              geometry: {
+                'segments': [
+                  [
+                    [-2.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                  ],
+                ],
+              },
+            ),
+          )
+          ..upsert(
+            const CadSceneEntity(
+              id: 'suggestion-a',
+              kind: CadSceneEntityKind.sketch,
+              geometry: {
+                'segments': [
+                  [
+                    [-2.0, 0.0, 0.0],
+                    [-1.0, 0.0, 0.0],
+                  ],
+                ],
+              },
+            ),
+          )
+          ..upsert(
+            const CadSceneEntity(
+              id: 'suggestion-b',
+              kind: CadSceneEntityKind.sketch,
+              geometry: {
+                'segments': [
+                  [
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                  ],
+                ],
+              },
+            ),
+          );
+        await f.mount(
+          tester,
+          sketchEntity: (pick) {
+            picked.add(pick.entityId);
+            if (HardwareKeyboard.instance.isControlPressed) {
+              if (!selected.add(pick.entityId)) selected.remove(pick.entityId);
+            } else {
+              selected
+                ..clear()
+                ..add(pick.entityId);
+            }
+          },
+          onSketchSuggestionHover: (pick) {
+            if (pick != null) hovered.add(pick.entityId);
+          },
+          sketchSuggestionPickCandidateIds: const {
+            'suggestion-a',
+            'suggestion-b',
+          },
+        );
+        expect(f.camera.viewportWidth, greaterThan(1));
+        expect(f.camera.viewportHeight, greaterThan(1));
+        if (backendLabel == 'Flutter Canvas') {
+          await tester.tap(find.text('Flutter Canvas'));
+          await tester.pump(const Duration(milliseconds: 100));
+        } else {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+
+        final pointer = TestPointer(23, PointerDeviceKind.mouse);
+        await tester.sendEventToBinding(pointer.hover(const Offset(300, 400)));
+        await tester.pump();
+        await tester.tapAt(const Offset(300, 400));
+        await tester.pump();
+        if (backendLabel == 'Native GPU') expect(hovered, isNotEmpty);
+        expect(selected, {'suggestion-a'});
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.tapAt(const Offset(900, 400));
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(picked, ['suggestion-a', 'suggestion-b']);
+        expect(selected, {'suggestion-a', 'suggestion-b'});
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.tapAt(const Offset(300, 400));
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pump();
+        expect(picked, ['suggestion-a', 'suggestion-b', 'suggestion-a']);
+        expect(selected, {'suggestion-b'});
+      },
+    );
+  }
+
   testWidgets(
     'native suggestion hover publishes overlay hit before a slow GPU pick',
     (tester) async {
