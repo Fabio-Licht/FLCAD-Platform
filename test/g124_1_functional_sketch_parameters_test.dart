@@ -5304,6 +5304,164 @@ void main() {
   );
 
   test(
+    'G1 confirmation rolls back when a new external connection would break',
+    () async {
+      final harness = await _g124Harness('g124-g1-external-rollback');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final line = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final arc = api.builders.arc.build(
+        const SketchVector(1.05, 1),
+        1,
+        -math.pi / 2,
+        0,
+      );
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({line.id, arc.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final preview = harness.controller.sketchG1ContinuityRepairPreview!;
+      final lineAlternativeIndex = preview.alternatives.indexWhere(
+        (alternative) =>
+            alternative.isViable &&
+            alternative.updates.any((update) => update.entityId == line.id),
+      );
+      expect(lineAlternativeIndex, greaterThanOrEqualTo(0));
+      harness.controller.selectSketchG1ContinuityRepairAlternative(
+        lineAlternativeIndex,
+      );
+      expect(
+        harness.controller.selectedSketchG1RepairAlternative!.updates
+            .any((update) => update.entityId == arc.id),
+        isTrue,
+      );
+      final beforeLine = Map<String, dynamic>.from(line.parameters);
+      final beforeArc = Map<String, dynamic>.from(arc.parameters);
+      final external = api.builders.line.build(
+        const SketchVector(1, 0),
+        const SketchVector(1, -1),
+      );
+      expect(
+        harness.controller.sketchContinuityAnalysis.joins.any(
+          (join) => {
+            join.first.entityId,
+            join.second.entityId,
+          }.containsAll({external.id, line.id}) && join.measuredC0,
+        ),
+        isTrue,
+      );
+      final historyBefore = api.engine.history.entries.length;
+      final commandHistory = harness.controller.commands.manager.history.length;
+      await expectLater(
+        harness.controller.confirmSketchG1ContinuityRepairPreview(
+          token: harness.controller.sketchG1ContinuityRepairPreviewToken!,
+        ),
+        throwsStateError,
+      );
+      expect(api.entity(line.id)!.toJson()['parameters'], beforeLine);
+      expect(api.entity(arc.id)!.toJson()['parameters'], beforeArc);
+      expect(api.entity(external.id), isNotNull);
+      expect(api.engine.history.entries.length, historyBefore);
+      expect(harness.controller.commands.manager.history.length, commandHistory);
+      expect(harness.controller.sketchG1ContinuityRepairPreview, isNull);
+    },
+  );
+
+  test(
+    'G1 line-arc confirmation applies one transaction and supports undo redo',
+    () async {
+      final harness = await _g124Harness('g124-g1-line-arc-apply');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final line = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final arc = api.builders.arc.build(
+        const SketchVector(1.05, 1),
+        1,
+        -math.pi / 2,
+        0,
+      );
+      final beforeLine = Map<String, dynamic>.from(line.parameters);
+      final beforeArc = Map<String, dynamic>.from(arc.parameters);
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({line.id, arc.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+      final preview = harness.controller.sketchG1ContinuityRepairPreview!;
+      final token = harness.controller.sketchG1ContinuityRepairPreviewToken!;
+      final commandHistory = harness.controller.commands.manager.history.length;
+      final historyBefore = api.engine.history.entries.length;
+      await expectLater(
+        harness.controller.confirmSketchG1ContinuityRepairPreview(
+          token: '$token-stale',
+        ),
+        throwsStateError,
+      );
+      expect(api.entity(line.id)!.toJson()['parameters'], beforeLine);
+      expect(api.entity(arc.id)!.toJson()['parameters'], beforeArc);
+      expect(harness.controller.sketchG1ContinuityRepairPreview, isNotNull);
+      final affected = await harness.controller
+        .confirmSketchG1ContinuityRepairPreview(token: token);
+
+      expect(affected, isNotEmpty);
+      expect(
+        harness.controller.commands.manager.history.length,
+        commandHistory + 1,
+      );
+      expect(api.engine.history.entries.length, historyBefore + 1);
+      expect(harness.controller.sketchG1ContinuityRepairPreview, isNull);
+      final repairedJoin = harness.controller.sketchContinuityAnalysis.joins
+          .where(
+            (join) => {
+              join.first.entityId,
+              join.second.entityId,
+            }.containsAll({line.id, arc.id}),
+          )
+          .firstOrNull;
+      expect(repairedJoin, isNotNull);
+      expect(repairedJoin!.measuredC0, isTrue);
+      expect(repairedJoin.measuredG1, isTrue);
+      expect(
+        repairedJoin.gapMillimeters,
+        lessThanOrEqualTo(preview.connectionToleranceMillimeters + 1e-9),
+      );
+      expect(
+        repairedJoin.tangentAngleRadians,
+        lessThanOrEqualTo(preview.tangencyToleranceRadians + 1e-9),
+      );
+
+      await harness.controller.undo();
+      expect(api.entity(line.id)!.toJson()['parameters'], beforeLine);
+      expect(api.entity(arc.id)!.toJson()['parameters'], beforeArc);
+      await harness.controller.redo();
+      final redoneJoin = harness.controller.sketchContinuityAnalysis.joins
+          .where(
+            (join) => {
+              join.first.entityId,
+              join.second.entityId,
+            }.containsAll({line.id, arc.id}),
+          )
+          .firstOrNull;
+      expect(redoneJoin?.measuredG1, isTrue);
+      await expectLater(
+        harness.controller.confirmSketchG1ContinuityRepairPreview(token: token),
+        throwsStateError,
+      );
+    },
+  );
+
+  test(
     'G1 arc-arc preview supports both contact-preserving alternatives',
     () async {
       final harness = await _g124Harness('g124-g1-arc-arc-preview');
@@ -5354,6 +5512,117 @@ void main() {
     },
   );
 
+  test('G1 arc-arc confirmation preserves both arc identities', () async {
+    final harness = await _g124Harness('g124-g1-arc-arc-apply');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final api = harness.controller.sketchApi!;
+    final first = api.builders.arc.build(
+      const SketchVector(0, 0),
+      2,
+      0,
+      math.pi / 2,
+    );
+    final second = api.builders.arc.build(
+      SketchVector(-math.sqrt(2), 2 + math.sqrt(2)),
+      2,
+      -math.pi / 4,
+      math.pi / 4,
+    );
+    final firstId = first.id;
+    final secondId = second.id;
+    harness.controller.selectedSketchEntityIds
+      ..clear()
+      ..addAll({firstId, secondId});
+    harness.controller.selectSketchContinuityJoinFromSketchSelection();
+    harness.controller.previewSketchContinuityRepair();
+    expect(harness.controller.canConfirmSketchG1ContinuityRepair, isTrue);
+    final token = harness.controller.sketchG1ContinuityRepairPreviewToken!;
+    final affected = await harness.controller
+        .confirmSketchG1ContinuityRepairPreview(token: token);
+    expect(affected, anyOf(contains(firstId), contains(secondId)));
+    expect(api.entity(firstId), isNotNull);
+    expect(api.entity(secondId), isNotNull);
+    final join = harness.controller.sketchContinuityAnalysis.joins
+        .where(
+          (candidate) => {
+            candidate.first.entityId,
+            candidate.second.entityId,
+          }.containsAll({firstId, secondId}),
+        )
+        .firstOrNull;
+    expect(join?.measuredG1, isTrue);
+  });
+
+  test('G1 line-arc confirmation persists through Save/Open', () async {
+    final harness = await _g124Harness('g124-g1-line-arc-save');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final api = harness.controller.sketchApi!;
+    final line = api.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(1, 0),
+    );
+    final arc = api.builders.arc.build(
+      const SketchVector(1.05, 1),
+      1,
+      -math.pi / 2,
+      0,
+    );
+    final sketchId = harness.controller.activeSketch!.id;
+    harness.controller.selectedSketchEntityIds
+      ..clear()
+      ..addAll({line.id, arc.id});
+    harness.controller.selectSketchContinuityJoinFromSketchSelection();
+    harness.controller.previewSketchContinuityRepair();
+    await harness.controller.confirmSketchG1ContinuityRepairPreview(
+      token: harness.controller.sketchG1ContinuityRepairPreviewToken!,
+    );
+    await harness.controller.persist();
+
+    final reopenedKernels = KernelManager()
+      ..register(_HealthySurfaceKernel(), makeDefault: true);
+    final reopenedCad = DesktopCadController(
+      kernels: reopenedKernels,
+      projects: ProjectManager.instance,
+    );
+    final reopenedCommands = DesktopCommandCoordinator(
+      cad: reopenedCad,
+      projects: ProjectManager.instance,
+    );
+    final reopened = OperationalReverseEngineeringController(
+      recognition: ProfessionalRecognitionApi(),
+      commands: reopenedCommands,
+      runtime: reopenedCad.runtime,
+      referenceApi: ReferenceApi(
+        engine: ReferenceEngine(
+          repository: ReferenceRepository(projects: harness.projects),
+        ),
+      ),
+    );
+    addTearDown(reopened.dispose);
+    addTearDown(reopenedCad.dispose);
+    await reopenedCad.runtime.open('g124-g1-line-arc-save', harness.directory);
+    await reopened.configureProject(
+      projectId: 'g124-g1-line-arc-save',
+      projectDirectory: harness.directory,
+    );
+    await reopened.reopenSketchForEditing(sketchId);
+    final restoredJoin = reopened.sketchContinuityAnalysis.joins
+        .where(
+          (join) => {
+            join.first.entityId,
+            join.second.entityId,
+          }.containsAll({line.id, arc.id}),
+        )
+        .firstOrNull;
+    expect(restoredJoin?.measuredC0, isTrue);
+    expect(restoredJoin?.measuredG1, isTrue);
+    expect(reopened.sketchG1ContinuityRepairPreview, isNull);
+  });
+
   test('G1 spline repair is blocked with an explicit diagnostic', () async {
     final harness = await _g124Harness('g124-g1-spline-blocked');
     addTearDown(() => harness.directory.delete(recursive: true));
@@ -5378,6 +5647,13 @@ void main() {
     expect(preview, isNotNull);
     expect(preview!.alternatives, isEmpty);
     expect(preview.status, SketchContinuityRepairStatus.impossible);
+    expect(harness.controller.canConfirmSketchG1ContinuityRepair, isFalse);
+    await expectLater(
+      harness.controller.confirmSketchG1ContinuityRepairPreview(
+        token: harness.controller.sketchG1ContinuityRepairPreviewToken!,
+      ),
+      throwsStateError,
+    );
     expect(preview.diagnostics.join(' '), contains('Spline'));
     expect(
       harness.cad.runtime.scene.find(

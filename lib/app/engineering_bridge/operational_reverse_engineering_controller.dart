@@ -778,6 +778,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   SketchG1RepairPlan? _sketchG1ContinuityRepairPreview;
   SketchG1RepairAlternative? _selectedSketchG1RepairAlternative;
   String? _sketchG1ContinuityRepairPreviewToken;
+  bool _sketchG1ContinuityRepairApplying = false;
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
@@ -994,6 +995,24 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return _sketchG1ContinuityRepairPreviewToken;
   }
 
+  /// Internal Apply gate for the read-only G1 preview.  The UI intentionally
+  /// keeps its G1 confirmation button disabled until the dedicated UX step,
+  /// but tests and the command layer use the same token-validated gate.
+  bool get canConfirmSketchG1ContinuityRepair {
+    final preview = sketchG1ContinuityRepairPreview;
+    final alternative = selectedSketchG1RepairAlternative;
+    final token = _sketchG1ContinuityRepairPreviewToken;
+    return !_sketchG1ContinuityRepairApplying &&
+        !busy &&
+        preview != null &&
+        preview.status != SketchContinuityRepairStatus.impossible &&
+        alternative != null &&
+        alternative.isViable &&
+        alternative.updates.isNotEmpty &&
+        token != null &&
+        token.isNotEmpty;
+  }
+
   String? get sketchContinuityRepairPreviewToken {
     sketchContinuityRepairPreview;
     return _sketchContinuityRepairPreviewToken;
@@ -1065,6 +1084,52 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       rethrow;
     } finally {
       _sketchContinuityRepairApplying = false;
+      busy = false;
+      notifyListeners();
+    }
+  }
+
+  /// Applies exactly the selected G1 alternative from the active preview.
+  /// This API is deliberately not connected to the G1 button yet; the
+  /// preview token remains the sole authority for a future confirmation UI.
+  Future<List<String>> confirmSketchG1ContinuityRepairPreview({
+    required String token,
+  }) async {
+    if (_sketchG1ContinuityRepairApplying || busy) {
+      throw StateError('Uma correção G1 já está sendo aplicada.');
+    }
+    final preview = sketchG1ContinuityRepairPreview;
+    final alternative = selectedSketchG1RepairAlternative;
+    if (preview == null || alternative == null) {
+      throw StateError('Não há uma alternativa G1 selecionada para aplicar.');
+    }
+    if (token.isEmpty || token != _sketchG1ContinuityRepairPreviewToken) {
+      throw StateError('O token do preview G1 é inválido ou expirou.');
+    }
+    final alternativeIndex = preview.alternatives.indexOf(alternative);
+    if (alternativeIndex < 0 || !alternative.isViable) {
+      throw StateError('A alternativa G1 selecionada não é aplicável.');
+    }
+    _sketchG1ContinuityRepairApplying = true;
+    busy = true;
+    error = null;
+    notifyListeners();
+    try {
+      await commands.dispatch(
+        'reverse.sketch.g1ContinuityRepair.apply',
+        <String, Object?>{'token': token, 'alternativeIndex': alternativeIndex},
+      );
+      final affectedIds =
+          alternative.updates.map((item) => item.entityId).toSet().toList()
+            ..sort();
+      return affectedIds;
+    } catch (value) {
+      final diagnostic = value.toString().replaceFirst('Bad state: ', '');
+      error = diagnostic;
+      sketchReconstructionMessage = diagnostic;
+      rethrow;
+    } finally {
+      _sketchG1ContinuityRepairApplying = false;
       busy = false;
       notifyListeners();
     }
@@ -9009,6 +9074,173 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return delta.dot(delta) <= tolerance * tolerance;
   }
 
+  Map<String, double> _g1ParametersForEntity(SketchEntity entity) {
+    double finite(String name, double value) {
+      if (!value.isFinite) throw StateError('Parâmetro G1 inválido: $name.');
+      return value;
+    }
+
+    if (entity is SketchLine) {
+      final start = SketchVector.fromJson(entity.parameters['start']);
+      final end = SketchVector.fromJson(entity.parameters['end']);
+      if (_continuitySamePoint(start, end, tolerance: 1e-12)) {
+        throw StateError('A proposta G1 degeneraria a linha ${entity.id}.');
+      }
+      return {
+        'startX': finite('startX', start.x),
+        'startY': finite('startY', start.y),
+        'endX': finite('endX', end.x),
+        'endY': finite('endY', end.y),
+      };
+    }
+    if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final start = (entity.parameters['startAngle'] as num).toDouble();
+      final end = (entity.parameters['endAngle'] as num).toDouble();
+      final sweep = end - start;
+      if (!radius.isFinite || radius <= 0 || !sweep.isFinite || sweep.abs() <= 1e-9 || sweep.abs() > 2 * math.pi + 1e-6) {
+        throw StateError('A proposta G1 degeneraria o arco ${entity.id}.');
+      }
+      return {
+        'centerX': finite('centerX', center.x),
+        'centerY': finite('centerY', center.y),
+        'radius': finite('radius', radius),
+        'startAngleDegrees': finite('startAngleDegrees', start * 180 / math.pi),
+        'endAngleDegrees': finite('endAngleDegrees', end * 180 / math.pi),
+      };
+    }
+    throw StateError(
+      'A aplicação G1 não suporta ${entity.type.name} (${entity.id}).',
+    );
+  }
+
+  ({SketchG1RepairPlan plan, SketchG1RepairAlternative alternative})
+  _validateSketchG1ContinuityRepairApplication(
+    Map<String, Object?> parameters,
+  ) {
+    final token = parameters['token'];
+    if (token is! String ||
+        token.isEmpty ||
+        token != _sketchG1ContinuityRepairPreviewToken) {
+      throw StateError('O token do preview G1 é inválido ou expirou.');
+    }
+    final plan = sketchG1ContinuityRepairPreview;
+    if (plan == null) {
+      throw StateError('O preview G1 ficou obsoleto; gere um novo preview.');
+    }
+    final sketch = activeSketch;
+    final api = sketchApi;
+    if (sketch == null ||
+        api == null ||
+        _sketchContinuityRepairPreviewSketchId != sketch.id) {
+      throw StateError('O Sketch do preview G1 não está mais ativo.');
+    }
+    final index = parameters['alternativeIndex'];
+    if (index is! int || index < 0 || index >= plan.alternatives.length) {
+      throw StateError('A alternativa do preview G1 é inválida.');
+    }
+    final alternative = plan.alternatives[index];
+    if (!identical(_selectedSketchG1RepairAlternative, alternative)) {
+      throw StateError(
+        'A alternativa selecionada mudou desde a abertura do preview G1.',
+      );
+    }
+    if (plan.status == SketchContinuityRepairStatus.impossible ||
+        !alternative.isViable ||
+        alternative.updates.isEmpty) {
+      throw StateError(
+        'A alternativa do preview G1 está bloqueada e não pode ser aplicada.',
+      );
+    }
+    final selectedJoin = _selectedSketchContinuityJoin;
+    final currentJoin = selectedJoin == null
+        ? null
+        : _continuityJoinForEndpoints(
+            selectedJoin.first.entityId,
+            selectedJoin.first.name,
+            selectedJoin.second.entityId,
+            selectedJoin.second.name,
+          );
+    if (currentJoin == null) {
+      throw StateError('A junção do preview G1 ficou obsoleta.');
+    }
+    if (_sketchContinuityRepairPreviewConstraintFingerprint !=
+        _jointConstraintFingerprint()) {
+      throw StateError('As constraints mudaram desde o preview G1.');
+    }
+    final currentSelection = selectedSketchEntityIds.toSet();
+    if (currentSelection.length !=
+            _sketchContinuityRepairPreviewSelectionIds.length ||
+        !currentSelection.containsAll(_sketchContinuityRepairPreviewSelectionIds)) {
+      throw StateError(
+        'A seleção CAD mudou desde o preview G1; gere um novo preview.',
+      );
+    }
+    final updateIds = <String>{};
+    for (final update in alternative.updates) {
+      if (!updateIds.add(update.entityId)) {
+        throw StateError('A alternativa G1 contém atualizações duplicadas.');
+      }
+      final entity = api.entity(update.entityId);
+      if (entity == null ||
+          entity is SketchSpline ||
+          (entity is! SketchLine && entity is! SketchArc) ||
+          entity.locked ||
+          entity.type != update.entityType) {
+        throw StateError(
+          'A alternativa G1 tenta alterar uma entidade ausente, protegida ou não suportada: ${update.entityId}.',
+        );
+      }
+      if (_sketchContinuityEntityFingerprint(entity) !=
+          jsonEncode(update.beforeJson)) {
+        throw StateError(
+          'A geometria de ${update.entityId} mudou desde o preview G1.',
+        );
+      }
+      final proposed = update.proposedEntity;
+      if (proposed.id != entity.id || proposed.type != entity.type) {
+        throw StateError('A proposta G1 perdeu a identidade de ${update.entityId}.');
+      }
+      if (entity is SketchLine && proposed is SketchLine) {
+        final oldStart = SketchVector.fromJson(entity.parameters['start']);
+        final oldEnd = SketchVector.fromJson(entity.parameters['end']);
+        final newStart = SketchVector.fromJson(proposed.parameters['start']);
+        final newEnd = SketchVector.fromJson(proposed.parameters['end']);
+        if ((oldStart.z - newStart.z).abs() > 1e-9 ||
+            (oldEnd.z - newEnd.z).abs() > 1e-9) {
+          throw StateError('A proposta G1 sairia do plano da linha ${entity.id}.');
+        }
+      }
+      if (entity is SketchArc && proposed is SketchArc) {
+        final oldRadius = (entity.parameters['radius'] as num).toDouble();
+        final newRadius = (proposed.parameters['radius'] as num).toDouble();
+        final oldStart = (entity.parameters['startAngle'] as num).toDouble();
+        final oldEnd = (entity.parameters['endAngle'] as num).toDouble();
+        final newStart = (proposed.parameters['startAngle'] as num).toDouble();
+        final newEnd = (proposed.parameters['endAngle'] as num).toDouble();
+        final oldSweep = oldEnd - oldStart;
+        final newSweep = newEnd - newStart;
+        final oldCenter = SketchVector.fromJson(entity.parameters['center']);
+        final newCenter = SketchVector.fromJson(proposed.parameters['center']);
+        if ((oldRadius - newRadius).abs() > 1e-9 ||
+            (oldSweep - newSweep).abs() > 1e-9 ||
+            oldSweep.sign != newSweep.sign ||
+            (oldCenter.z - newCenter.z).abs() > 1e-9) {
+          throw StateError(
+            'A proposta G1 alteraria raio, sweep ou plano do arco ${entity.id}.',
+          );
+        }
+      }
+      _g1ParametersForEntity(proposed);
+    }
+    if (updateIds.length != alternative.affectedEntityIds.toSet().length ||
+        !updateIds.containsAll(alternative.affectedEntityIds)) {
+      throw StateError('A alternativa G1 possui entidades afetadas inconsistentes.');
+    }
+    return (plan: plan, alternative: alternative);
+  }
+
   ({
     SketchContinuityRepairPlan plan,
     SketchContinuityRepairAlternative alternative,
@@ -9270,6 +9502,79 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         } on Object {
           // The Sketch engine already owns the transaction rollback. Best
           // effort persistence repair must not hide the original diagnostic.
+        }
+      }
+      _invalidateSketchContinuityRepairPreview();
+      rethrow;
+    }
+  }
+
+  Future<List<String>> _applySketchG1ContinuityRepair(
+    Map<String, Object?> parameters,
+  ) async {
+    final validated = _validateSketchG1ContinuityRepairApplication(parameters);
+    final api = sketchApi!;
+    final alternative = validated.alternative;
+    final beforeConnections = _currentSketchConnections(robustEntityIds: true);
+    final updateById = <String, SketchG1GeometryUpdate>{
+      for (final update in alternative.updates) update.entityId: update,
+    };
+    final affectedIds = updateById.keys.toList()..sort();
+    var transactionCommitted = false;
+    try {
+      api.engine.transaction('sketch.g1ContinuityRepair', () {
+        for (final id in affectedIds) {
+          final update = updateById[id]!;
+          final proposed = update.proposedEntity;
+          final entity = api.entity(id);
+          if (entity == null || entity.type != proposed.type) {
+            throw StateError('Entidade G1 ausente ou incompatível: $id.');
+          }
+          api.updateParameters(id, _g1ParametersForEntity(proposed));
+        }
+        _assertSketchConnectionsPreserved(beforeConnections);
+        final selectedJoin = _selectedSketchContinuityJoin;
+        final after = selectedJoin == null
+            ? null
+            : _continuityJoinForEndpoints(
+                selectedJoin.first.entityId,
+                selectedJoin.first.name,
+                selectedJoin.second.entityId,
+                selectedJoin.second.name,
+              );
+        if (after == null ||
+            after.gapMillimeters > validated.plan.connectionToleranceMillimeters ||
+            !after.measuredG1 ||
+            after.tangentAngleRadians == null ||
+            after.tangentAngleRadians! > validated.plan.tangencyToleranceRadians) {
+          throw StateError(
+            'A correção G1 não atingiu as tolerâncias C0/G1 do planner.',
+          );
+        }
+      });
+      transactionCommitted = true;
+      parameters['affectedEntityIds'] = List<String>.from(affectedIds);
+      await api.persist();
+      await _synchronizeSketchScene();
+      selectedSketchEntityIds
+        ..clear()
+        ..addAll(affectedIds);
+      runtime.select(affectedIds.toSet());
+      _invalidateSketchContinuityRepairPreview();
+      _selectedSketchContinuityJoin = null;
+      sketchReconstructionMessage =
+          'Correção G1 aplicada: ${affectedIds.length} entidade(s) atualizada(s).';
+      notifyListeners();
+      return List.unmodifiable(affectedIds);
+    } catch (_) {
+      if (transactionCommitted) {
+        try {
+          api.engine.undo();
+          await api.persist();
+          await _synchronizeSketchScene();
+        } on Object {
+          // Preserve the original diagnostic; transaction rollback is owned
+          // by the Sketch engine and persistence repair is best effort.
         }
       }
       _invalidateSketchContinuityRepairPreview();
@@ -10939,7 +11244,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           item.enabled &&
           !item.suppressed &&
           item.references.any(
-            (reference) => reference.split(':').first == entity.id,
+            (reference) => _sketchEntityIdFromReference(reference) == entity.id,
           ),
     )) {
       double? required;
@@ -10953,7 +11258,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         case SketchConstraintType.parallel:
         case SketchConstraintType.perpendicular:
           final otherId = constraint.references
-              .map((reference) => reference.split(':').first)
+              .map(_sketchEntityIdFromReference)
               .firstWhere((id) => id != entity.id, orElse: () => '');
           final other = sketchApi?.entity(otherId);
           if (other is SketchLine) {
@@ -10977,7 +11282,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
-  List<(String, String)> _currentSketchConnections() {
+  List<(String, String)> _currentSketchConnections({
+    bool robustEntityIds = true,
+  }) {
     final endpoints = <(String, SketchVector)>[];
     for (final entity in sketchEntities) {
       if (!entity.visible) continue;
@@ -11009,8 +11316,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final result = <(String, String)>[];
     for (var i = 0; i < endpoints.length; i++) {
       for (var j = i + 1; j < endpoints.length; j++) {
-        if (endpoints[i].$1.split(':').first ==
-            endpoints[j].$1.split(':').first) {
+        final firstEntityId = _sketchEntityIdFromReference(
+          endpoints[i].$1,
+          robust: robustEntityIds,
+        );
+        final secondEntityId = _sketchEntityIdFromReference(
+          endpoints[j].$1,
+          robust: robustEntityIds,
+        );
+        if (firstEntityId == secondEntityId) {
           continue;
         }
         final delta = endpoints[i].$2 - endpoints[j].$2;
@@ -11023,9 +11337,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   SketchVector? _sketchEndpoint(String reference) {
-    final parts = reference.split(':');
-    final entity = sketchApi?.entity(parts.first);
-    final end = parts.last;
+    final separator = reference.lastIndexOf(':');
+    if (separator <= 0 || separator == reference.length - 1) return null;
+    final entity = sketchApi?.entity(reference.substring(0, separator));
+    final end = reference.substring(separator + 1);
     if (entity is SketchLine) {
       return SketchVector.fromJson(entity.parameters[end]);
     }
@@ -11039,6 +11354,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       );
     }
     return null;
+  }
+
+  String _sketchEntityIdFromReference(
+    String reference, {
+    bool robust = true,
+  }) {
+    final separator = robust
+        ? reference.lastIndexOf(':')
+        : reference.indexOf(':');
+    if (separator <= 0) return reference;
+    return reference.substring(0, separator);
   }
 
   void _assertSketchConnectionsPreserved(List<(String, String)> before) {
@@ -16802,7 +17128,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             : _arcParametersFromPlan(radiusPlan);
         _validateConstrainedParameterEdit(entity, resolvedValues);
         parameters['entityVersionBefore'] = entity.version;
-        final connections = _currentSketchConnections();
+        final connections = _currentSketchConnections(robustEntityIds: false);
         sketchApi!.engine.transaction('safe-parametric-edit', () {
           sketchApi!.updateParameters(id, resolvedValues);
           for (final entry
@@ -16867,6 +17193,40 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             .cast<String>();
         runtime.select(ids.toSet());
         return 'correção C0 refeita';
+      },
+    );
+
+    register(
+      id: 'reverse.sketch.g1ContinuityRepair.apply',
+      execute: (parameters) async {
+        try {
+          return await _applySketchG1ContinuityRepair(parameters);
+        } catch (_) {
+          _invalidateSketchContinuityRepairPreview();
+          rethrow;
+        }
+      },
+      undo: (parameters) async {
+        final api = sketchApi;
+        if (api?.engine.undo() != true) {
+          throw StateError('Não há correção G1 disponível para desfazer.');
+        }
+        await _synchronizeSketchScene();
+        final ids = (parameters['affectedEntityIds'] as List? ?? const [])
+            .cast<String>();
+        runtime.select(ids.toSet());
+        return 'correção G1 desfeita';
+      },
+      redo: (parameters) async {
+        final api = sketchApi;
+        if (api?.engine.redo() != true) {
+          throw StateError('Não há correção G1 disponível para refazer.');
+        }
+        await _synchronizeSketchScene();
+        final ids = (parameters['affectedEntityIds'] as List? ?? const [])
+            .cast<String>();
+        runtime.select(ids.toSet());
+        return 'correção G1 refeita';
       },
     );
 
