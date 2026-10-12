@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flcad_mobile/app/desktop/development_calota_autoload.dart';
+import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -43,6 +44,61 @@ void main() {
       expect(policy.source, DevelopmentCalotaAutoloadSource.debugEnvironment);
     },
   );
+
+  test('isolated CALOTA session is opt-in and disabled by default', () {
+    final isolated = DevelopmentCalotaAutoloadPolicy.resolve(
+      debugMode: true,
+      debugEnvironment: const {
+        'FLCAD_DEV_AUTOLOAD_CALOTA': 'true',
+        'FLCAD_DEV_STL_PATH': r'C:\dev\calota.stl',
+        'FLCAD_DEV_CALOTA_ISOLATED_SESSION': 'true',
+      },
+    );
+    expect(isolated.enabled, isTrue);
+    expect(isolated.isolatedSession, isTrue);
+
+    final normal = DevelopmentCalotaAutoloadPolicy.resolve(
+      debugMode: true,
+      debugEnvironment: const {
+        'FLCAD_DEV_AUTOLOAD_CALOTA': 'true',
+        'FLCAD_DEV_STL_PATH': r'C:\dev\calota.stl',
+      },
+    );
+    expect(normal.isolatedSession, isFalse);
+    expect(
+      DevelopmentCalotaAutoloadPolicy.resolve(debugMode: false).isolatedSession,
+      isFalse,
+    );
+  });
+
+  test('isolated session guard detects unsaved CAD document changes', () {
+    final persisted = CadDocument.empty('project');
+    final restored = CadDocument.fromJson(persisted.toJson());
+    expect(
+      developmentCalotaDocumentMatchesPersisted(
+        current: restored,
+        persisted: persisted,
+      ),
+      isTrue,
+    );
+    final changed = persisted.mutate(
+      command: 'test.import',
+      upsert: const [
+        CadDocumentEntity(
+          id: 'mesh',
+          kind: CadDocumentEntityKind.import,
+          data: {'format': 'stl'},
+        ),
+      ],
+    );
+    expect(
+      developmentCalotaDocumentMatchesPersisted(
+        current: changed,
+        persisted: persisted,
+      ),
+      isFalse,
+    );
+  });
 
   test(
     'legacy autoload after commands.initialize fired before document/viewport ready',

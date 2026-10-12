@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flcad_mobile/app/cad_viewport/camera/cad_camera_controller.dart';
 import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
+import 'package:flcad_mobile/app/cad_viewport/rendering/sketch_scene_adapter.dart';
 import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/desktop/desktop_application.dart';
@@ -238,6 +239,131 @@ void main() {
         includePickOnlyProfiles: false,
       );
       expect(hit?.entityId, 'suggestion-source');
+    },
+  );
+
+  test(
+    'line arc and spline suggestions all have reachable hover geometry',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('hover-types_');
+      addTearDown(() => directory.delete(recursive: true));
+      final kernels = KernelManager()
+        ..register(_HoverKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      addTearDown(cad.dispose);
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await cad.runtime.open('hover-types', directory);
+      await controller.configureProject(
+        projectId: 'hover-types',
+        projectDirectory: directory,
+      );
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
+      final api = controller.sketchApi!;
+      final line = api.builders.line.build(
+        const SketchVector(-20, 12),
+        const SketchVector(-10, 12),
+      );
+      final arc = api.builders.arc.build(
+        const SketchVector(0, 0),
+        8,
+        0,
+        1.5707963267948966,
+      );
+      final spline = api.builders.spline.build([
+        const SketchVector(10, -12),
+        const SketchVector(15, -8),
+        const SketchVector(20, -12),
+      ]);
+      final suggestions = [
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.line,
+          entityIds: [line.id],
+          usedEntityIds: [line.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          kind: SketchReconstructionKind.arc,
+          entityIds: [arc.id],
+          usedEntityIds: [arc.id],
+          confidence: 1,
+        ),
+        SketchReconstructionSuggestion(
+          // Spline hypotheses are represented as line-kind candidates by the
+          // reconstruction engine and classified as Splines from source type.
+          kind: SketchReconstructionKind.line,
+          entityIds: [spline.id],
+          usedEntityIds: [spline.id],
+          confidence: 1,
+        ),
+      ];
+      controller.debugReplaceSketchReconstructionSuggestions(suggestions);
+
+      final camera = CadCameraController(
+        eye: const Vector3(0, 0, 40),
+        target: Vector3.zero,
+        up: const Vector3(0, 1, 0),
+      )..resize(900, 700);
+      final scene = cad.runtime.scene;
+      final adapter = const SketchSceneAdapter();
+      for (final entity in [line, arc, spline]) {
+        final visual = adapter.adapt(
+          entity,
+          coordinates: controller.activeSketch!.coordinates,
+        );
+        scene.upsert(visual);
+      }
+      addTearDown(camera.dispose);
+
+      final candidates =
+          controller.sketchReconstructionSuggestionPickCandidateIds;
+      expect(candidates, containsAll([line.id, arc.id, spline.id]));
+      final hoverPoints = <String, List<num>>{
+        line.id: [-15, 12, 0],
+        arc.id: [5.656854249, 5.656854249, 0],
+        spline.id: [15, -8, 0],
+      };
+      final picking = ViewportPickingController();
+      for (final suggestion in suggestions) {
+        final id = suggestion.entityIds.single;
+        final hit = picking.pick(
+          position: _project(camera, hoverPoints[id]!),
+          camera: camera,
+          scene: scene,
+          eligibleEntityIds: candidates,
+          includePickOnlyProfiles: false,
+        );
+        expect(hit?.entityId, id, reason: 'Rendered $id must be pickable');
+        expect(
+          controller.hoverSketchReconstructionSuggestionForEntity(id),
+          isTrue,
+          reason: 'Rendered $id must resolve to its active suggestion',
+        );
+        expect(
+          controller.isSketchReconstructionSuggestionHovered(suggestion),
+          isTrue,
+        );
+      }
     },
   );
 

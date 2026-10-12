@@ -1,4 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
+
+import '../../core/cad_document/cad_document.dart';
 
 /// Compile-time dart-defines. These are NOT `Platform.environment` reads.
 ///
@@ -11,10 +15,24 @@ const bool kFlcadDevAutoloadCalota = bool.fromEnvironment(
   'FLCAD_DEV_AUTOLOAD_CALOTA',
   defaultValue: false,
 );
+const bool kFlcadDevIsolatedCalotaSession = bool.fromEnvironment(
+  'FLCAD_DEV_CALOTA_ISOLATED_SESSION',
+  defaultValue: false,
+);
 const String kFlcadDevStlPath = String.fromEnvironment(
   'FLCAD_DEV_STL_PATH',
   defaultValue: '',
 );
+
+/// Compares the in-memory document with the durable snapshot before an
+/// isolated development session replaces the active runtime document.
+/// Keeping this check here makes the data-loss guard deterministic and
+/// independently testable; it never writes either snapshot.
+bool developmentCalotaDocumentMatchesPersisted({
+  required CadDocument current,
+  required CadDocument persisted,
+}) =>
+    jsonEncode(current.toJson()) == jsonEncode(persisted.toJson());
 
 /// How the isolate obtained the autoload switch and path.
 enum DevelopmentCalotaAutoloadSource {
@@ -34,13 +52,17 @@ class DevelopmentCalotaAutoloadPolicy {
     required this.enabled,
     required this.path,
     required this.source,
+    this.isolatedSession = false,
   });
 
   final bool enabled;
   final String path;
   final DevelopmentCalotaAutoloadSource source;
+  final bool isolatedSession;
 
   static const bool compileTimeEnabled = kFlcadDevAutoloadCalota;
+  static const bool compileTimeIsolatedSession =
+      kFlcadDevIsolatedCalotaSession;
   static const String compileTimePath = kFlcadDevStlPath;
 
   /// Resolves what this isolate actually reads.
@@ -59,6 +81,7 @@ class DevelopmentCalotaAutoloadPolicy {
         enabled: true,
         path: compileTimePath.trim(),
         source: DevelopmentCalotaAutoloadSource.compileTime,
+        isolatedSession: compileTimeIsolatedSession,
       );
     }
     if (debug) {
@@ -67,11 +90,15 @@ class DevelopmentCalotaAutoloadPolicy {
           env['FLCAD_DEV_AUTOLOAD_CALOTA'] == 'true' ||
           env['FLCAD_DEV_AUTOLOAD_CALOTA'] == '1';
       final path = (env['FLCAD_DEV_STL_PATH'] ?? '').trim();
+      final isolated =
+          env['FLCAD_DEV_CALOTA_ISOLATED_SESSION'] == 'true' ||
+          env['FLCAD_DEV_CALOTA_ISOLATED_SESSION'] == '1';
       if (enabled) {
         return DevelopmentCalotaAutoloadPolicy(
           enabled: true,
           path: path,
           source: DevelopmentCalotaAutoloadSource.debugEnvironment,
+          isolatedSession: isolated,
         );
       }
     }
@@ -168,6 +195,7 @@ class DevelopmentCalotaAutoload {
       'enabled': policy.enabled,
       'source': policy.source.name,
       'path': policy.path,
+      'isolatedSession': policy.isolatedSession,
       'compileTimeEnabled': DevelopmentCalotaAutoloadPolicy.compileTimeEnabled,
       'compileTimePath': DevelopmentCalotaAutoloadPolicy.compileTimePath,
     });

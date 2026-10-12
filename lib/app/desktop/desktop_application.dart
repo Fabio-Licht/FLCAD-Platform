@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../core/cad_kernel/manager/kernel_manager.dart';
 import '../../core/cad_document/cad_document.dart';
+import '../../core/cad_document/cad_document_repository.dart';
 import '../../core/cad_document/managed_cad_identity.dart';
 import '../../core/cad_document/managed_cad_reference.dart';
 import '../../core/cad_document/plane_axis_intersection_point.dart';
@@ -515,6 +516,8 @@ class _DesktopShellState extends State<DesktopShell> {
   final DevelopmentCalotaAutoload _autoload = DevelopmentCalotaAutoload();
   final Completer<void> _workspaceViewportReady = Completer<void>();
   bool _devCalotaUsePathForNextImport = false;
+  bool _devCalotaIsolationBlocked = false;
+  String? _devCalotaIsolationBlockMessage;
   @override
   void initState() {
     super.initState();
@@ -570,12 +573,41 @@ class _DesktopShellState extends State<DesktopShell> {
   }
 
   Future<void> _autoloadDevelopmentCalota() async {
+    _devCalotaIsolationBlocked = false;
+    _devCalotaIsolationBlockMessage = null;
     await _autoload.run(
       policy: _autoloadPolicy,
       waitUntilReady: () => _workspaceViewportReady.future,
       fileExists: (path) => File(path).exists(),
       ensureProject: () async {
         final project = ProjectManager.instance.current;
+        if (_autoloadPolicy.isolatedSession) {
+          if (project != null && await _hasUnsavedCadChanges(project)) {
+            const message =
+                'Sessão isolada da CALOTA bloqueada: o projeto atual possui alterações não salvas. Salve ou feche o projeto antes de iniciar a sessão de desenvolvimento.';
+            _devCalotaIsolationBlocked = true;
+            _devCalotaIsolationBlockMessage = message;
+            cad.setStatus(message);
+            _logDevAutoload('isolated-project-blocked', {
+              'projectId': project.id,
+              'reason': 'unsaved-document',
+            });
+            return;
+          }
+          // Development-only isolation creates a new project instead of
+          // clearing or restoring the operator's current project. The prior
+          // project remains in ProjectManager and can be reopened normally.
+          final previousProjectId = project?.id;
+          await commands.createProject(
+            'CALOTA - sessao isolada de desenvolvimento',
+            'FLCAD',
+          );
+          _logDevAutoload('isolated-project', {
+            'previousProjectId': previousProjectId,
+            'projectId': ProjectManager.instance.current?.id,
+          });
+          return;
+        }
         if (project == null) {
           await commands.createProject(
             'CALOTA — validação de desenvolvimento',
@@ -638,6 +670,34 @@ class _DesktopShellState extends State<DesktopShell> {
       reportStatus: cad.setStatus,
       log: _logDevAutoload,
     );
+    if (_devCalotaIsolationBlocked &&
+        _devCalotaIsolationBlockMessage != null) {
+      cad.setStatus(_devCalotaIsolationBlockMessage!);
+    }
+  }
+
+  Future<bool> _hasUnsavedCadChanges(Project project) async {
+    final current = cad.runtime.document;
+    if (current == null || current.projectId != project.id) return false;
+    try {
+      final directory = await cad.projectRepository.directoryFor(project.id);
+      final persisted = await const CadDocumentRepository().load(
+        project.id,
+        directory,
+      );
+      return !developmentCalotaDocumentMatchesPersisted(
+        current: current,
+        persisted: persisted,
+      );
+    } catch (error) {
+      _logDevAutoload('isolated-project-guard-error', {
+        'projectId': project.id,
+        'error': '$error',
+      });
+      // An unreadable persistence boundary cannot be treated as clean: do not
+      // risk replacing the operator's in-memory document.
+      return true;
+    }
   }
 
   bool _documentContainsDevelopmentCalota(String locator) {
