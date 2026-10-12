@@ -3476,6 +3476,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (sketch == null) throw StateError('Unknown Sketch: $id');
     _reconcileSketchEntityMembership(sketch);
     activeSketch = sketch;
+    // Entity IDs belong to one Sketch. Switching roots must not keep a
+    // previous selection that Ctrl-click could later treat as still valid.
+    selectedSketchEntityIds.clear();
     runtime.select({id});
     notifyListeners();
   }
@@ -5389,6 +5392,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }) async {
     if (configuredProjectId == projectId) return;
     cancelSketchPointReferenceCapture(notify: false);
+    selectedSketchEntityIds.clear();
+    selectedConstraintIds.clear();
     configuredProjectId = projectId;
     final sketch = const SketchEngineFactory().create(projectDirectory);
     final constraints = const ConstraintFactory().create(
@@ -15788,6 +15793,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> undo() async {
     await commands.undo();
     await _synchronizeSketchScene();
+    _reconcileSketchEntitySelection();
     // Rebuild the recognition queue from the restored Sketch state. This
     // makes an undone accepted suggestion available again instead of losing
     // it from the Assistant list.
@@ -15815,7 +15821,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> redo() async {
     await commands.redo();
     await _synchronizeSketchScene();
+    _reconcileSketchEntitySelection();
     notifyListeners();
+  }
+
+  /// Undo/Redo restores the Sketch engine independently of the transient CAD
+  /// selection set.  Drop IDs for entities that no longer belong to the active
+  /// Sketch so a later Ctrl-click cannot accumulate orphaned selections.
+  void _reconcileSketchEntitySelection() {
+    final sketch = activeSketch;
+    final api = sketchApi;
+    if (sketch == null || api == null) {
+      if (selectedSketchEntityIds.isEmpty) return;
+      selectedSketchEntityIds.clear();
+      runtime.select(_selectionWithDimensions());
+      return;
+    }
+    final document = runtime.document;
+    final validIds = sketch.entityIds.where((id) {
+      if (api.entity(id) == null) return false;
+      return document == null || document.entities.containsKey(id);
+    }).toSet();
+    final before = selectedSketchEntityIds.toSet();
+    selectedSketchEntityIds.removeWhere((id) => !validIds.contains(id));
+    if (before.length != selectedSketchEntityIds.length) {
+      runtime.select(_selectionWithDimensions());
+    }
   }
 
   Future<void> persist() async {

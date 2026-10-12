@@ -4765,6 +4765,105 @@ void main() {
   );
 
   test(
+    'Undo of accepted reconstruction clears the removed entity from CAD selection',
+    () async {
+      final harness = await _g124Harness('g124-selection-after-undo');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final first = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final second = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(20, 0),
+      );
+      final historyBeforeSelect =
+          harness.controller.commands.manager.history.length;
+      harness.controller.selectSketchEntity(first.id);
+      harness.controller.selectSketchEntity(second.id, additive: true);
+      expect(harness.controller.selectedSketchEntityIds, {
+        first.id,
+        second.id,
+      });
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyBeforeSelect,
+      );
+
+      final beforeIds = harness.controller.activeSketch!.entityIds.toSet();
+      await harness.controller.commands.dispatch(
+        'reverse.sketch.draw',
+        {
+          'tool': 'line',
+          'points': [
+            const SketchVector(30, 0).toJson(),
+            const SketchVector(32, 2).toJson(),
+          ],
+        },
+      );
+      final createdId = harness.controller.activeSketch!.entityIds
+          .firstWhere((id) => !beforeIds.contains(id));
+      final historyAfterDraw =
+          harness.controller.commands.manager.history.length;
+      harness.controller.selectSketchEntity(createdId);
+      expect(harness.controller.selectedSketchEntityIds, {createdId});
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyAfterDraw,
+      );
+
+      await harness.controller.undo();
+      expect(harness.controller.sketchApi!.entity(createdId), isNull);
+      expect(
+        harness.controller.selectedSketchEntityIds.contains(createdId),
+        isFalse,
+      );
+      final historyAfterUndo =
+          harness.controller.commands.manager.history.length;
+      harness.controller.selectSketchEntity(first.id, additive: true);
+      expect(harness.controller.selectedSketchEntityIds, {first.id});
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyAfterUndo,
+      );
+
+      await harness.controller.redo();
+      expect(harness.controller.sketchApi!.entity(createdId), isNotNull);
+      expect(
+        harness.controller.selectedSketchEntityIds.contains(createdId),
+        isFalse,
+      );
+      expect(harness.controller.selectedSketchEntityIds, {first.id});
+      final historyAfterRedo =
+          harness.controller.commands.manager.history.length;
+      harness.controller.selectSketchEntity(createdId, additive: true);
+      expect(harness.controller.selectedSketchEntityIds, {
+        first.id,
+        createdId,
+      });
+      expect(
+        harness.controller.commands.manager.history.length,
+        historyAfterRedo,
+      );
+
+      final firstSketchId = harness.controller.activeSketch!.id;
+      final other = harness.controller.sketchApi!.createSketch('other-sketch');
+      harness.controller.selectSketch(other.id);
+      expect(harness.controller.selectedSketchEntityIds, isEmpty);
+      harness.controller.selectSketch(firstSketchId);
+      expect(harness.controller.selectedSketchEntityIds, isEmpty);
+
+      harness.controller.selectSketchEntity(first.id);
+      expect(harness.controller.selectedSketchEntityIds, {first.id});
+      harness.controller.detachProject();
+      expect(harness.controller.selectedSketchEntityIds, isEmpty);
+    },
+  );
+
+  test(
     'joint acceptance applies a validated mixed plan atomically and supports undo redo',
     () async {
       final harness = await _g124Harness('g124-joint-acceptance-apply');
