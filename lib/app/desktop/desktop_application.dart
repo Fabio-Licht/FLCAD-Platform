@@ -28,6 +28,7 @@ import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
 import '../../core/sketch_assistant/sketch_reconstruction.dart';
 import '../../core/sketch_assistant/sketch_continuity_repair_planner.dart';
+import '../../core/sketch_assistant/sketch_g1_continuity_repair_planner.dart';
 import '../../core/recognition_engine/recognition_result.dart';
 import '../../core/reverse_engineering_studio/reverse_engineering_studio.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
@@ -10039,6 +10040,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
         controller.sketchContinuityRepairAttentionJoins;
     final continuityRepairAllJoins = controller.sketchContinuityRepairAllJoins;
     final continuityRepairPreview = controller.sketchContinuityRepairPreview;
+    final g1ContinuityRepairPreview =
+        controller.sketchG1ContinuityRepairPreview;
     final health = controller.sketchHealth;
     final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
     final blockingIssues = health.blockingIssues.toList(growable: false);
@@ -10785,6 +10788,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     joins: continuityRepairJoins,
                     allJoins: continuityRepairAllJoins,
                     preview: continuityRepairPreview,
+                    g1Preview: g1ContinuityRepairPreview,
                   ),
                 ),
               ),
@@ -11969,12 +11973,14 @@ class _SketchContinuityRepairPanel extends StatefulWidget {
     required this.joins,
     required this.allJoins,
     required this.preview,
+    required this.g1Preview,
   });
 
   final OperationalReverseEngineeringController controller;
   final List<SketchContinuityJoinDiagnostic> joins;
   final List<SketchContinuityJoinDiagnostic> allJoins;
   final SketchContinuityRepairPlan? preview;
+  final SketchG1RepairPlan? g1Preview;
 
   @override
   State<_SketchContinuityRepairPanel> createState() =>
@@ -11987,6 +11993,7 @@ class _SketchContinuityRepairPanelState
 
   OperationalReverseEngineeringController get controller => widget.controller;
   SketchContinuityRepairPlan? get preview => widget.preview;
+  SketchG1RepairPlan? get g1Preview => widget.g1Preview;
 
   String _continuityLabel(SketchContinuityLevel level) => switch (level) {
     SketchContinuityLevel.g1 => 'G1 tangente',
@@ -12022,6 +12029,18 @@ class _SketchContinuityRepairPanelState
           'Preservar endpoint protegido',
       };
 
+  String _g1AlternativeLabel(SketchG1RepairAlternative alternative) =>
+      switch (alternative.kind) {
+        SketchG1RepairAlternativeKind.lineArcPreserveLineContact =>
+          'Linha–Arco: preservar contato da linha',
+        SketchG1RepairAlternativeKind.lineArcPreserveArcContact =>
+          'Linha–Arco: preservar contato do arco',
+        SketchG1RepairAlternativeKind.arcArcPreserveFirstContact =>
+          'Arco–Arco: preservar primeiro contato',
+        SketchG1RepairAlternativeKind.arcArcPreserveSecondContact =>
+          'Arco–Arco: preservar segundo contato',
+      };
+
   Future<void> _confirmSelectedAlternative() async {
     final token = controller.sketchContinuityRepairPreviewToken;
     if (token == null || !controller.canConfirmSketchContinuityRepair) return;
@@ -12038,6 +12057,7 @@ class _SketchContinuityRepairPanelState
     final selectedJoin = controller.selectedSketchContinuityJoin;
     final selectedAlternative =
         controller.selectedSketchContinuityRepairAlternative;
+    final selectedG1Alternative = controller.selectedSketchG1RepairAlternative;
     final displayedJoins = _showAll ? widget.allJoins : widget.joins;
     final healthyCount = widget.allJoins.length - widget.joins.length;
     final gapCount = widget.joins
@@ -12237,6 +12257,70 @@ class _SketchContinuityRepairPanelState
                     label: const Text('Confirmar'),
                   ),
                 ],
+              ),
+            ],
+            if (g1Preview != null) ...[
+              const Divider(height: 8),
+              Text(
+                'Preview G1 tangencial',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color:
+                      g1Preview!.status ==
+                          SketchContinuityRepairStatus.impossible
+                      ? theme.colorScheme.error
+                      : theme.colorScheme.primary,
+                ),
+              ),
+              Text(
+                'C0: ${g1Preview!.currentGapMillimeters.toStringAsFixed(6)} mm · '
+                'G1: ${g1Preview!.currentG1ResidualRadians == null ? 'indisponível' : '${g1Preview!.currentG1ResidualRadians!.toStringAsFixed(6)} rad'} · '
+                'limite angular ${g1Preview!.tangencyToleranceRadians.toStringAsFixed(6)} rad',
+                style: const TextStyle(fontSize: 8.5),
+              ),
+              for (
+                var index = 0;
+                index < g1Preview!.alternatives.length;
+                index++
+              )
+                if (g1Preview!.alternatives[index].isViable)
+                  ListTile(
+                    key: ValueKey('sketch-g1-continuity-alternative-$index'),
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    contentPadding: EdgeInsets.zero,
+                    selected: identical(
+                      selectedG1Alternative,
+                      g1Preview!.alternatives[index],
+                    ),
+                    title: Text(
+                      _g1AlternativeLabel(g1Preview!.alternatives[index]),
+                      style: const TextStyle(fontSize: 9.5),
+                    ),
+                    subtitle: Text(
+                      'C0 ${g1Preview!.alternatives[index].afterGapMillimeters.toStringAsFixed(6)} mm · '
+                      'G1 ${g1Preview!.alternatives[index].afterG1ResidualRadians?.toStringAsFixed(6) ?? 'indisponível'} rad · '
+                      'desloc. máx ${g1Preview!.alternatives[index].maxDisplacementMillimeters.toStringAsFixed(3)} mm',
+                      style: const TextStyle(fontSize: 8.5),
+                    ),
+                    onTap: () => controller
+                        .selectSketchG1ContinuityRepairAlternative(index),
+                  ),
+              if (g1Preview!.alternatives.every((item) => !item.isViable))
+                Text(
+                  g1Preview!.diagnostics.join(' '),
+                  style: TextStyle(
+                    fontSize: 8.5,
+                    color: theme.colorScheme.error,
+                  ),
+                ),
+              if (selectedG1Alternative != null)
+                for (final diagnostic in selectedG1Alternative.diagnostics)
+                  Text(diagnostic, style: const TextStyle(fontSize: 8.5)),
+              const Text(
+                'Somente leitura: Confirmar G1 ainda não está habilitado.',
+                style: TextStyle(fontSize: 8.5),
               ),
             ],
           ],

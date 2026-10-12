@@ -60,6 +60,7 @@ import '../../core/sketch_editor/snapping/sketch_coordinate_magnet.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
 import '../../core/sketch_assistant/sketch_reconstruction.dart';
 import '../../core/sketch_assistant/sketch_continuity_repair_planner.dart';
+import '../../core/sketch_assistant/sketch_g1_continuity_repair_planner.dart';
 import '../../core/sketch_engine/api/sketch_engine_api.dart';
 import '../../core/sketch_engine/entities/sketch_entities.dart'
     hide ReferenceGeometry;
@@ -148,6 +149,16 @@ const String sketchContinuityRepairPreviewEndpointsId =
     'sketch-continuity-repair-preview-endpoints';
 const String sketchContinuityRepairPreviewConnectionsId =
     'sketch-continuity-repair-preview-connections';
+
+/// Separate runtime-only overlays for the pure G1 planner.  Keeping them
+/// distinct from the C0 session lets the existing C0 preview remain intact
+/// while a tangency alternative is inspected.
+const String sketchG1ContinuityRepairPreviewOverlayKey =
+    'sketch.continuityRepair.g1Preview.overlayIds';
+const String sketchG1ContinuityRepairPreviewPrefix =
+    'sketch-g1-continuity-repair-preview-';
+const String sketchG1ContinuityRepairPreviewEndpointsId =
+    'sketch-g1-continuity-repair-preview-endpoints';
 
 /// Runtime-only visual overlay for the immutable Section that originated the
 /// active Sketch.  The durable Section remains the source of truth; this
@@ -764,6 +775,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       const {};
   Set<String> _sketchContinuityRepairPreviewSelectionIds = const {};
   bool _sketchContinuityRepairApplying = false;
+  SketchG1RepairPlan? _sketchG1ContinuityRepairPreview;
+  SketchG1RepairAlternative? _selectedSketchG1RepairAlternative;
+  String? _sketchG1ContinuityRepairPreviewToken;
   final List<SketchReconstructionSuggestion>
   _acceptedSketchReconstructionSuggestions = <SketchReconstructionSuggestion>[];
   int _operationalCommandDepth = 0;
@@ -955,6 +969,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return preview.alternatives.contains(selected) ? selected : null;
   }
 
+  /// The current G1-only plan is a sibling of the existing C0 preview
+  /// session.  It is read-only and is invalidated by the same Sketch,
+  /// selection, constraint and entity fingerprint changes.
+  SketchG1RepairPlan? get sketchG1ContinuityRepairPreview {
+    final preview = _sketchG1ContinuityRepairPreview;
+    if (preview == null) return null;
+    if (!_isSketchG1ContinuityRepairPreviewCurrent()) {
+      _invalidateSketchG1ContinuityRepairPreview();
+      return null;
+    }
+    return preview;
+  }
+
+  SketchG1RepairAlternative? get selectedSketchG1RepairAlternative {
+    final preview = sketchG1ContinuityRepairPreview;
+    final selected = _selectedSketchG1RepairAlternative;
+    if (preview == null || selected == null) return null;
+    return preview.alternatives.contains(selected) ? selected : null;
+  }
+
+  String? get sketchG1ContinuityRepairPreviewToken {
+    sketchG1ContinuityRepairPreview;
+    return _sketchG1ContinuityRepairPreviewToken;
+  }
+
   String? get sketchContinuityRepairPreviewToken {
     sketchContinuityRepairPreview;
     return _sketchContinuityRepairPreviewToken;
@@ -1095,6 +1134,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       entities: entities,
       constraints: constraints,
     );
+    final g1Plan = const SketchG1ContinuityRepairPlanner().plan(
+      selected,
+      entities: entities,
+      constraints: constraints,
+    );
     _invalidateSketchContinuityRepairPreview();
     _sketchContinuityRepairPreview = plan;
     _sketchContinuityRepairPreviewToken =
@@ -1115,7 +1159,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               alternative.status != SketchContinuityRepairStatus.impossible,
         )
         .firstOrNull;
+    _sketchG1ContinuityRepairPreview = g1Plan;
+    _sketchG1ContinuityRepairPreviewToken =
+        'g1-continuity-${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(g1Plan)}';
+    _selectedSketchG1RepairAlternative = g1Plan.alternatives
+        .where((alternative) => alternative.isViable)
+        .firstOrNull;
     _publishSketchContinuityRepairPreview(plan);
+    _publishSketchG1ContinuityRepairPreview(g1Plan);
     sketchReconstructionMessage =
         plan.status == SketchContinuityRepairStatus.impossible
         ? 'Correção C0 bloqueada: ${plan.diagnostics.join(' ')}'
@@ -1131,6 +1182,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final alternative = preview.alternatives[index];
     _selectedSketchContinuityRepairAlternative = alternative;
     _publishSketchContinuityRepairPreview(preview);
+    notifyListeners();
+  }
+
+  void selectSketchG1ContinuityRepairAlternative(int index) {
+    final preview = sketchG1ContinuityRepairPreview;
+    if (preview == null || index < 0 || index >= preview.alternatives.length) {
+      return;
+    }
+    final alternative = preview.alternatives[index];
+    if (!alternative.isViable) return;
+    _selectedSketchG1RepairAlternative = alternative;
+    _publishSketchG1ContinuityRepairPreview(preview);
     notifyListeners();
   }
 
@@ -9496,8 +9559,170 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write(sketchContinuityRepairPreviewOverlayKey, overlayIds);
   }
 
+  bool _isSketchG1ContinuityRepairPreviewCurrent() {
+    if (_sketchContinuityRepairPreviewSketchId != activeSketch?.id ||
+        _sketchContinuityRepairPreviewConstraintFingerprint !=
+            _jointConstraintFingerprint()) {
+      return false;
+    }
+    final currentSelection = selectedSketchEntityIds.toSet();
+    if (currentSelection.length !=
+            _sketchContinuityRepairPreviewSelectionIds.length ||
+        !currentSelection.containsAll(
+          _sketchContinuityRepairPreviewSelectionIds,
+        )) {
+      return false;
+    }
+    final selected = _selectedSketchContinuityJoin;
+    if (selected == null || _currentSketchContinuityJoin(selected) == null) {
+      return false;
+    }
+    for (final entry
+        in _sketchContinuityRepairPreviewEntityFingerprints.entries) {
+      final entity = sketchApi?.entity(entry.key);
+      if (entity == null ||
+          _sketchContinuityEntityFingerprint(entity) != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void _publishSketchG1ContinuityRepairPreview(SketchG1RepairPlan plan) {
+    _invalidateSketchG1ContinuityRepairPreviewOverlaysOnly();
+    final entities = _sketchContinuityRepairEntities();
+    final selectedIds = {plan.firstEntityId, plan.secondEntityId};
+    final originalSegments = <List<dynamic>>[];
+    for (final id in selectedIds) {
+      final entity = entities[id];
+      if (entity != null) {
+        originalSegments.addAll(_continuityGlobalSegments(entity));
+      }
+    }
+    final overlayIds = <String>[];
+    if (originalSegments.isNotEmpty) {
+      final id = '${sketchG1ContinuityRepairPreviewPrefix}original';
+      runtime.showTransient(
+        CadSceneEntity(
+          id: id,
+          kind: CadSceneEntityKind.preview,
+          transparent: true,
+          geometry: {
+            'segments': originalSegments,
+            'displayColor': 'referenceCurveHighlight',
+            'strokeWidth': 1.0,
+            'dashed': true,
+            'g1ContinuityRepairPreview': true,
+            'nonSelectable': true,
+          },
+        ),
+      );
+      overlayIds.add(id);
+    }
+    final alternative = selectedSketchG1RepairAlternative;
+    if (alternative != null && alternative.isViable) {
+      final proposedById = <String, SketchEntity>{
+        for (final entry in entities.entries) entry.key: entry.value,
+      };
+      for (final update in alternative.updates) {
+        proposedById[update.entityId] = update.proposedEntity;
+      }
+      final proposedSegments = <List<dynamic>>[];
+      for (final id in selectedIds) {
+        final entity = proposedById[id];
+        if (entity != null) {
+          proposedSegments.addAll(_continuityGlobalSegments(entity));
+        }
+      }
+      if (proposedSegments.isNotEmpty) {
+        final id = '${sketchG1ContinuityRepairPreviewPrefix}proposed';
+        runtime.showTransient(
+          CadSceneEntity(
+            id: id,
+            kind: CadSceneEntityKind.preview,
+            transparent: true,
+            geometry: {
+              'segments': proposedSegments,
+              'displayColor': 'assistantSuggestion',
+              'strokeWidth': 2.8,
+              'g1ContinuityRepairPreview': true,
+              'nonSelectable': true,
+            },
+          ),
+        );
+        overlayIds.add(id);
+      }
+      final coordinates = activeSketch?.coordinates;
+      if (coordinates != null) {
+        final markers = <List<dynamic>>[];
+        final join = selectedSketchContinuityJoin;
+        for (final update in alternative.updates) {
+          final entity = proposedById[update.entityId];
+          final endpoint = join?.first.entityId == update.entityId
+              ? join?.first.name
+              : join?.second.entityId == update.entityId
+              ? join?.second.name
+              : null;
+          final markerPoint = endpoint == null
+              ? null
+              : _continuityEndpoint(entity, endpoint);
+          if (markerPoint == null) continue;
+          final global = coordinates.localToGlobal(markerPoint);
+          const size = .25;
+          markers.add([
+            SketchVector(global.x - size, global.y, global.z).toJson(),
+            SketchVector(global.x + size, global.y, global.z).toJson(),
+          ]);
+          markers.add([
+            SketchVector(global.x, global.y - size, global.z).toJson(),
+            SketchVector(global.x, global.y + size, global.z).toJson(),
+          ]);
+        }
+        if (markers.isNotEmpty) {
+          runtime.showTransient(
+            CadSceneEntity(
+              id: sketchG1ContinuityRepairPreviewEndpointsId,
+              kind: CadSceneEntityKind.preview,
+              transparent: true,
+              geometry: {
+                'segments': markers,
+                'displayColor': 'arcRadiusAffected',
+                'strokeWidth': 1.8,
+                'g1ContinuityRepairEndpoints': true,
+                'nonSelectable': true,
+              },
+            ),
+          );
+          overlayIds.add(sketchG1ContinuityRepairPreviewEndpointsId);
+        }
+      }
+    }
+    runtime.write(sketchG1ContinuityRepairPreviewOverlayKey, overlayIds);
+  }
+
+  void _invalidateSketchG1ContinuityRepairPreview() {
+    _invalidateSketchG1ContinuityRepairPreviewOverlaysOnly();
+    _sketchG1ContinuityRepairPreview = null;
+    _selectedSketchG1RepairAlternative = null;
+    _sketchG1ContinuityRepairPreviewToken = null;
+  }
+
+  void _invalidateSketchG1ContinuityRepairPreviewOverlaysOnly() {
+    final raw = runtime.read<Object?>(
+      sketchG1ContinuityRepairPreviewOverlayKey,
+    );
+    if (raw is Iterable) {
+      for (final id in raw.whereType<String>()) {
+        runtime.hideTransient(id);
+      }
+    }
+    runtime.hideTransient(sketchG1ContinuityRepairPreviewEndpointsId);
+    runtime.write(sketchG1ContinuityRepairPreviewOverlayKey, const <String>[]);
+  }
+
   void _invalidateSketchContinuityRepairPreview() {
     _invalidateSketchContinuityRepairPreviewOverlaysOnly();
+    _invalidateSketchG1ContinuityRepairPreview();
     _sketchContinuityRepairPreview = null;
     _selectedSketchContinuityRepairAlternative = null;
     _sketchContinuityRepairPreviewToken = null;

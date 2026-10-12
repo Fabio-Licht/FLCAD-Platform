@@ -5094,6 +5094,175 @@ void main() {
   );
 
   test(
+    'G1 line-arc preview shows both metrics and transient proposed geometry',
+    () async {
+      final harness = await _g124Harness('g124-g1-line-arc-preview');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final line = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(1, 0),
+      );
+      final arc = api.builders.arc.build(
+        const SketchVector(1.05, 1),
+        1,
+        -math.pi / 2,
+        0,
+      );
+      final before = [line.toJson(), arc.toJson()];
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({line.id, arc.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+
+      final preview = harness.controller.sketchG1ContinuityRepairPreview;
+      expect(preview, isNotNull);
+      expect(
+        preview!.alternatives.where((alternative) => alternative.isViable),
+        isNotEmpty,
+      );
+      expect(preview.currentGapMillimeters, closeTo(.05, 1e-9));
+      expect(preview.currentG1ResidualRadians, isNotNull);
+      expect(
+        harness.controller.sketchG1ContinuityRepairPreviewToken,
+        isNotNull,
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchG1ContinuityRepairPreviewPrefix}original',
+        ),
+        isNotNull,
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNotNull,
+      );
+      expect([line.toJson(), arc.toJson()], before);
+      expect(harness.controller.canConfirmSketchContinuityRepair, isTrue);
+
+      final viableIndex = preview.alternatives.indexWhere(
+        (alternative) => alternative.isViable,
+      );
+      harness.controller.selectSketchG1ContinuityRepairAlternative(viableIndex);
+      expect(harness.controller.selectedSketchG1RepairAlternative, isNotNull);
+      expect([line.toJson(), arc.toJson()], before);
+      await harness.controller.updateSketchEntityParameters(line.id, {
+        'length': 1.1,
+      });
+      expect(harness.controller.sketchG1ContinuityRepairPreview, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNull,
+      );
+      harness.controller.cancelSketchContinuityRepairPreview();
+      expect(harness.controller.sketchG1ContinuityRepairPreviewToken, isNull);
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNull,
+      );
+      expect(
+        SketchVector.fromJson(line.parameters['end']).x,
+        closeTo(1.1, 1e-9),
+      );
+      expect(arc.toJson(), before[1]);
+    },
+  );
+
+  test(
+    'G1 arc-arc preview supports both contact-preserving alternatives',
+    () async {
+      final harness = await _g124Harness('g124-g1-arc-arc-preview');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final api = harness.controller.sketchApi!;
+      final first = api.builders.arc.build(
+        const SketchVector(0, 0),
+        2,
+        0,
+        math.pi / 2,
+      );
+      final second = api.builders.arc.build(
+        SketchVector(-math.sqrt(2), 2 + math.sqrt(2)),
+        2,
+        -math.pi / 4,
+        math.pi / 4,
+      );
+      final before = [first.toJson(), second.toJson()];
+      harness.controller.selectedSketchEntityIds
+        ..clear()
+        ..addAll({first.id, second.id});
+      harness.controller.selectSketchContinuityJoinFromSketchSelection();
+      harness.controller.previewSketchContinuityRepair();
+
+      final preview = harness.controller.sketchG1ContinuityRepairPreview;
+      expect(preview, isNotNull);
+      final viable = preview!.alternatives
+          .where((alternative) => alternative.isViable)
+          .toList();
+      expect(viable.length, greaterThanOrEqualTo(2));
+      expect(
+        viable.map((alternative) => alternative.kind).toSet(),
+        hasLength(2),
+      );
+      expect(
+        harness.cad.runtime.scene.find(
+          '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+        ),
+        isNotNull,
+      );
+      expect([first.toJson(), second.toJson()], before);
+      expect(harness.controller.canConfirmSketchContinuityRepair, isFalse);
+      harness.controller.cancelSketchContinuityRepairPreview();
+      expect([first.toJson(), second.toJson()], before);
+      expect(harness.controller.sketchG1ContinuityRepairPreview, isNull);
+    },
+  );
+
+  test('G1 spline repair is blocked with an explicit diagnostic', () async {
+    final harness = await _g124Harness('g124-g1-spline-blocked');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final api = harness.controller.sketchApi!;
+    final line = api.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(1, 0),
+    );
+    final spline = api.builders.spline.build([
+      const SketchVector(1, 0),
+      const SketchVector(2, .2),
+    ]);
+    harness.controller.selectedSketchEntityIds
+      ..clear()
+      ..addAll({line.id, spline.id});
+    harness.controller.selectSketchContinuityJoinFromSketchSelection();
+    harness.controller.previewSketchContinuityRepair();
+
+    final preview = harness.controller.sketchG1ContinuityRepairPreview;
+    expect(preview, isNotNull);
+    expect(preview!.alternatives, isEmpty);
+    expect(preview.status, SketchContinuityRepairStatus.impossible);
+    expect(preview.diagnostics.join(' '), contains('Spline'));
+    expect(
+      harness.cad.runtime.scene.find(
+        '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+      ),
+      isNull,
+    );
+    harness.controller.cancelSketchContinuityRepairPreview();
+  });
+
+  test(
     'C0 panel data hides healthy joins and keeps friendly entity labels',
     () async {
       final harness = await _g124Harness('g124-continuity-panel-filter');
