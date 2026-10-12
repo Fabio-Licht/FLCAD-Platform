@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:ui' show RootIsolateToken;
 import 'package:ffi/ffi.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:path/path.dart' as p;
 import '../io/kernel_io_models.dart';
 import '../models/kernel_models.dart';
 import 'open_cascade_bridge.dart';
@@ -599,13 +601,35 @@ class OpenCascadeFFI
       : Platform.isMacOS
       ? 'libflcad_opencascade.dylib'
       : 'libflcad_opencascade.so';
+
+  /// Resolves the bundled native library without relying on the process PATH.
+  /// Flutter's Windows release runner does not always include its executable
+  /// directory in the DLL search path, while the OCCT dependencies are
+  /// intentionally shipped beside the runner.
+  @visibleForTesting
+  static String resolveLibraryPath({
+    String? explicitPath,
+    @visibleForTesting String? executablePath,
+  }) {
+    if (explicitPath != null) {
+      return explicitPath;
+    }
+    final name = defaultLibraryName();
+    if (!Platform.isWindows) return name;
+    final adjacent = p.join(
+      File(executablePath ?? Platform.resolvedExecutable).parent.path,
+      name,
+    );
+    return File(adjacent).existsSync() ? adjacent : name;
+  }
+
   static OpenCascadeFFI load({String? path}) {
     if (RootIsolateToken.instance == null) {
       throw StateError(
         'OpenCascade must be hosted by the root isolate coordinator',
       );
     }
-    final resolved = path ?? defaultLibraryName();
+    final resolved = resolveLibraryPath(explicitPath: path);
     try {
       return OpenCascadeFFI._(DynamicLibrary.open(resolved));
     } catch (error) {

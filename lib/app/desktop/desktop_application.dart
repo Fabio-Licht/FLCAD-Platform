@@ -539,6 +539,12 @@ class _DesktopShellState extends State<DesktopShell> {
       managedStlFilePicker: _autoloadPolicy.enabled
           ? _developmentStlFilePicker
           : null,
+      managedStlErrorReporter: _autoloadPolicy.enabled
+          ? (error, stack) => _logDevAutoload('import.error', {
+              'error': '$error',
+              'stack': '$stack',
+            })
+          : null,
     );
     commands = DesktopCommandCoordinator(
       cad: cad,

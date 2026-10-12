@@ -35,10 +35,12 @@ class DesktopCadController extends ChangeNotifier {
     ManagedStepImporter? managedStepImporter,
     ManagedStepFilePicker? managedStlFilePicker,
     ManagedStepImporter? managedStlImporter,
+    void Function(Object error, StackTrace stack)? managedStlErrorReporter,
   }) : projectRepository = projectRepository ?? ProjectRepository(),
        importExportRepository =
            importExportRepository ?? const ImportExportRepository(),
-       _managedStepFilePicker = managedStepFilePicker ?? _pickManagedStepFile {
+       _managedStepFilePicker = managedStepFilePicker ?? _pickManagedStepFile,
+       _managedStlErrorReporter = managedStlErrorReporter {
     runtime = CadRuntime(kernels: kernels);
     _managedStepProjectOpener =
         managedStepProjectOpener ?? _openManagedStepProject;
@@ -55,6 +57,7 @@ class DesktopCadController extends ChangeNotifier {
   late final ManagedStepImporter _managedStepImporter;
   late final ManagedStepFilePicker _managedStlFilePicker;
   late final ManagedStepImporter _managedStlImporter;
+  final void Function(Object error, StackTrace stack)? _managedStlErrorReporter;
   CadAssetCancellation? _managedStlCancellation;
   bool _stlControllerDisposed = false;
   late final CadRuntime runtime;
@@ -295,7 +298,8 @@ class DesktopCadController extends ChangeNotifier {
       runtime.select({entity.id});
       progress = 1;
       message = 'STL importado e registrado no projeto.';
-    } catch (error) {
+    } catch (error, stack) {
+      _managedStlErrorReporter?.call(error, stack);
       message = runtime.recoveryRequired
           ? 'A importação STL foi confirmada e requer recuperação antes de continuar.'
           : cancellation.isCancelled || error is CadAssetCancelled
