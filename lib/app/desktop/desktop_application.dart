@@ -12047,6 +12047,27 @@ class _SketchContinuityRepairPanelState
           'Arco–Arco: preservar segundo contato',
       };
 
+  String _g1Metric(double? value, {String unit = 'mm'}) =>
+      value == null ? 'indisponível' : '${value.toStringAsFixed(6)} $unit';
+
+  Widget _g1MetricRow(String label, String before, String after) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 1),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(flex: 3, child: Text(label, style: const TextStyle(fontSize: 8.5))),
+        Expanded(
+          flex: 2,
+          child: Text(before, key: ValueKey('sketch-g1-metric-before-$label'), style: const TextStyle(fontSize: 8.5)),
+        ),
+        Expanded(
+          flex: 2,
+          child: Text(after, key: ValueKey('sketch-g1-metric-after-$label'), style: const TextStyle(fontSize: 8.5)),
+        ),
+      ],
+    ),
+  );
+
   Future<void> _confirmSelectedAlternative() async {
     final token = controller.sketchContinuityRepairPreviewToken;
     if (token == null || !controller.canConfirmSketchContinuityRepair) return;
@@ -12280,10 +12301,96 @@ class _SketchContinuityRepairPanelState
                 ),
               ),
               Text(
+                'Junção: ${controller.sketchContinuityEntityDisplayLabel(g1Preview!.firstEntityId)} ↔ '
+                '${controller.sketchContinuityEntityDisplayLabel(g1Preview!.secondEntityId)}',
+                key: const ValueKey('sketch-g1-continuity-join-label'),
+                style: const TextStyle(fontSize: 9.5, fontWeight: FontWeight.w700),
+              ),
+              Text(
+                '${g1Preview!.alternatives.length} alternativa(s) calculada(s) · '
+                'limite C0 ${g1Preview!.connectionToleranceMillimeters.toStringAsFixed(6)} mm · '
+                'limite G1 ${g1Preview!.tangencyToleranceRadians.toStringAsFixed(6)} rad',
+                style: const TextStyle(fontSize: 8.5),
+              ),
+              Text(
                 'C0: ${g1Preview!.currentGapMillimeters.toStringAsFixed(6)} mm · '
                 'G1: ${g1Preview!.currentG1ResidualRadians == null ? 'indisponível' : '${g1Preview!.currentG1ResidualRadians!.toStringAsFixed(6)} rad'} · '
                 'limite angular ${g1Preview!.tangencyToleranceRadians.toStringAsFixed(6)} rad',
                 style: const TextStyle(fontSize: 8.5),
+              ),
+              if (selectedG1Alternative != null) ...[
+                Text(
+                  'Alternativa selecionada: ${_g1AlternativeLabel(selectedG1Alternative)}',
+                  key: const ValueKey('sketch-g1-selected-alternative'),
+                  style: const TextStyle(fontSize: 8.5),
+                ),
+                Text(
+                  'Métricas do planner (somente diagnóstico visual)',
+                  key: const ValueKey('sketch-g1-metrics-title'),
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w700,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                Container(
+                  key: const ValueKey('sketch-g1-metrics'),
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Column(
+                    children: [
+                      const Row(
+                        children: [
+                          Expanded(flex: 3, child: SizedBox()),
+                          Expanded(flex: 2, child: Text('Antes', style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700))),
+                          Expanded(flex: 2, child: Text('Proposta', style: TextStyle(fontSize: 8, fontWeight: FontWeight.w700))),
+                        ],
+                      ),
+                      _g1MetricRow(
+                        'Gap C0',
+                        _g1Metric(selectedG1Alternative.beforeGapMillimeters),
+                        _g1Metric(selectedG1Alternative.afterGapMillimeters),
+                      ),
+                      _g1MetricRow(
+                        'Resíduo G1',
+                        _g1Metric(selectedG1Alternative.beforeG1ResidualRadians, unit: 'rad'),
+                        _g1Metric(selectedG1Alternative.afterG1ResidualRadians, unit: 'rad'),
+                      ),
+                      _g1MetricRow(
+                        'Deslocamento máx.',
+                        '—',
+                        _g1Metric(selectedG1Alternative.maxDisplacementMillimeters),
+                      ),
+                    ],
+                  ),
+                ),
+                Text(
+                  g1Preview!.protectedEntityIds.isEmpty
+                      ? 'Elementos protegidos: nenhum informado pelo planner.'
+                      : 'Elementos protegidos: ${g1Preview!.protectedEntityIds.map(controller.sketchContinuityEntityDisplayLabel).join(', ')}',
+                  key: const ValueKey('sketch-g1-protected-elements'),
+                  style: const TextStyle(fontSize: 8.5),
+                ),
+              ],
+              Text(
+                'Valores calculados pelo planner; não são constraint paramétrica.',
+                style: TextStyle(fontSize: 8, color: theme.colorScheme.onSurfaceVariant),
+              ),
+              if (g1Preview!.diagnostics.isNotEmpty)
+                Container(
+                  key: const ValueKey('sketch-g1-diagnostics'),
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      const Text('Bloqueios e avisos', style: TextStyle(fontSize: 8.5, fontWeight: FontWeight.w700)),
+                      for (final diagnostic in g1Preview!.diagnostics)
+                        Text(diagnostic, style: TextStyle(fontSize: 8.5, color: theme.colorScheme.error)),
+                    ],
+                  ),
+                ),
+              Text(
+                'Alternativas válidas',
+                style: TextStyle(fontSize: 9, fontWeight: FontWeight.w700, color: theme.colorScheme.onSurfaceVariant),
               ),
               for (
                 var index = 0;
@@ -12324,6 +12431,12 @@ class _SketchContinuityRepairPanelState
               if (selectedG1Alternative != null)
                 for (final diagnostic in selectedG1Alternative.diagnostics)
                   Text(diagnostic, style: const TextStyle(fontSize: 8.5)),
+              OutlinedButton.icon(
+                key: const ValueKey('sketch-g1-continuity-repair-confirm'),
+                onPressed: null,
+                icon: const Icon(Icons.lock_outline, size: 13),
+                label: const Text('Confirmar G1'),
+              ),
               const Text(
                 'Somente leitura: Confirmar G1 ainda não está habilitado.',
                 style: TextStyle(fontSize: 8.5),

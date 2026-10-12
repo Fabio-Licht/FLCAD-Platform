@@ -5225,6 +5225,16 @@ void main() {
       );
       expect(preview.currentGapMillimeters, closeTo(.05, 1e-9));
       expect(preview.currentG1ResidualRadians, isNotNull);
+      final viableAlternatives = preview.alternatives
+          .where((alternative) => alternative.isViable)
+          .toList();
+      final firstAlternative = viableAlternatives.first;
+      expect(firstAlternative.beforeGapMillimeters, closeTo(.05, 1e-9));
+      expect(firstAlternative.afterGapMillimeters, lessThan(1e-8));
+      expect(firstAlternative.beforeG1ResidualRadians, isNotNull);
+      expect(firstAlternative.afterG1ResidualRadians, isNotNull);
+      expect(firstAlternative.maxDisplacementMillimeters, isNonNegative);
+      expect(firstAlternative.affectedEntityIds, isNotEmpty);
       expect(
         harness.controller.sketchG1ContinuityRepairPreviewToken,
         isNotNull,
@@ -5249,6 +5259,23 @@ void main() {
       );
       harness.controller.selectSketchG1ContinuityRepairAlternative(viableIndex);
       expect(harness.controller.selectedSketchG1RepairAlternative, isNotNull);
+      if (viableAlternatives.length > 1) {
+        final secondIndex = preview.alternatives.indexWhere(
+          (alternative) => alternative.isViable && alternative != firstAlternative,
+        );
+        expect(secondIndex, greaterThanOrEqualTo(0));
+        harness.controller.selectSketchG1ContinuityRepairAlternative(secondIndex);
+        expect(
+          harness.controller.selectedSketchG1RepairAlternative,
+          isNot(same(firstAlternative)),
+        );
+        expect(
+          harness.cad.runtime.scene.find(
+            '${sketchG1ContinuityRepairPreviewPrefix}proposed',
+          ),
+          isNotNull,
+        );
+      }
       expect([line.toJson(), arc.toJson()], before);
       await harness.controller.updateSketchEntityParameters(line.id, {
         'length': 1.1,
