@@ -335,30 +335,14 @@ class _ProfessionalCadViewportWidgetState
   CadViewportPick? _suggestionHoverPick(
     CadViewportPick? hit,
     Offset position,
-  ) {
-    final candidates = widget.sketchSuggestionPickCandidateIds;
-    if (candidates != null && candidates.isNotEmpty) {
-      final suggestionHit = picking.pick(
-        position: position,
-        camera: widget.camera,
-        scene: widget.scene,
-        eligibleEntityIds: candidates,
-        includePickOnlyProfiles: false,
-      );
-      if (suggestionHit != null) return suggestionHit;
-    }
-    if (hit != null &&
-        !cadSceneEntityIsPickOnly(widget.scene.find(hit.entityId))) {
-      return hit;
-    }
-    return picking.pick(
-      position: position,
-      camera: widget.camera,
-      scene: widget.scene,
-      eligibleEntityIds: widget.pickCaptureCandidateIds,
-      includePickOnlyProfiles: false,
-    );
-  }
+  ) => picking.pickSuggestionHover(
+    position: position,
+    camera: widget.camera,
+    scene: widget.scene,
+    suggestionCandidateIds: widget.sketchSuggestionPickCandidateIds,
+    fallbackEligibleEntityIds: widget.pickCaptureCandidateIds,
+    generalHit: hit,
+  );
 
   void _fitVisibleScene([CadStandardView? standardView]) {
     var minX = double.infinity, minY = double.infinity, minZ = double.infinity;

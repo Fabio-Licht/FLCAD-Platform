@@ -2836,6 +2836,16 @@ class _OfficialEngineeringWorkspaceState
       openToolWindows.clear();
       return;
     }
+    final sessionChanged =
+        fittedDocumentId != runtimeDocument.projectId ||
+        fittedDocumentSession != widget.cad.runtime.sessionIdentity;
+    // project.new / runtime.open clears CadRuntime._state (sketchApi, stage,
+    // hovered) without going through detachProject.  Drop the surviving
+    // suggestion list so hover cannot look at stale IDs while the new
+    // session rebinds. configureProject below reconnects the same controller.
+    if (sessionChanged && fittedDocumentSession != null) {
+      operational.detachProject();
+    }
     unawaited(
       widget.commands.repository
           .directoryFor(runtimeDocument.projectId)
@@ -2846,8 +2856,7 @@ class _OfficialEngineeringWorkspaceState
             ),
           ),
     );
-    if (fittedDocumentId != runtimeDocument.projectId ||
-        fittedDocumentSession != widget.cad.runtime.sessionIdentity) {
+    if (sessionChanged) {
       contextualReferencePreview.cancel();
       intersectionSelection.clear();
       alignmentCoordinateSystemSelection.clear();
@@ -11765,20 +11774,26 @@ class _SketchReconstructionSuggestionGroupsState
 
   @override
   Widget build(BuildContext context) {
-    final suggestions = widget.controller.sketchReconstructionSuggestions;
-    return MouseRegion(
-      onEnter: (_) {
-        _pointerInsideList = true;
-        _cancelHoverScroll();
-        _stopAutomaticScrollAnimation();
+    return ListenableBuilder(
+      listenable: widget.controller,
+      builder: (context, _) {
+        final suggestions = widget.controller.sketchReconstructionSuggestions;
+        return MouseRegion(
+          onEnter: (_) {
+            _pointerInsideList = true;
+            _cancelHoverScroll();
+            _stopAutomaticScrollAnimation();
+          },
+          onExit: (_) => _pointerInsideList = false,
+          child: Column(
+            children: [
+              for (final category
+                  in SketchReconstructionSuggestionCategory.values)
+                _buildGroup(category, suggestions),
+            ],
+          ),
+        );
       },
-      onExit: (_) => _pointerInsideList = false,
-      child: Column(
-        children: [
-          for (final category in SketchReconstructionSuggestionCategory.values)
-            _buildGroup(category, suggestions),
-        ],
-      ),
     );
   }
 

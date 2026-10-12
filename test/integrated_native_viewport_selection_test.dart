@@ -238,6 +238,7 @@ class _Fixture {
     ValueChanged<CadViewportPick?>? onPickCaptureHover,
     ValueChanged<CadViewportPick?>? onSketchSuggestionHover,
     ValueChanged<Offset?>? onSketchSuggestionHoverPosition,
+    Set<String>? sketchSuggestionPickCandidateIds,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     await tester.pumpWidget(
@@ -257,6 +258,7 @@ class _Fixture {
           onPickCaptureHover: onPickCaptureHover,
           onSketchSuggestionHover: onSketchSuggestionHover,
           onSketchSuggestionHoverPosition: onSketchSuggestionHoverPosition,
+          sketchSuggestionPickCandidateIds: sketchSuggestionPickCandidateIds,
           onSketchTap: sketchTap,
           onSketchEntityPick: sketchEntity,
           onSketchSupportPick: sketchSupport,
@@ -918,6 +920,192 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
     expect(positions.last, const Offset(1100, 700));
   });
+
+  testWidgets(
+    'native empty suggestion filter must not pick mesh, Section, or sketch',
+    (tester) async {
+      final f = _Fixture();
+      f.scene
+        ..upsert(
+          const CadSceneEntity(
+            id: 'imported-mesh',
+            kind: CadSceneEntityKind.mesh,
+            geometry: {
+              'nodes': [-4.0, -4.0, 0.0, 4.0, -4.0, 0.0, 0.0, 4.0, 0.0],
+              'triangles': [0, 1, 2],
+            },
+          ),
+        )
+        ..upsert(
+          const CadSceneEntity(
+            id: 'section-reference',
+            kind: CadSceneEntityKind.curve,
+            geometry: {
+              'points': [
+                [-4.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+              ],
+              'displayColor': 'sectionReferenceLilac',
+            },
+          ),
+        )
+        ..upsert(
+          const CadSceneEntity(
+            id: 'suggestion-source',
+            kind: CadSceneEntityKind.sketch,
+            geometry: {
+              'segments': [
+                [
+                  [-1.0, 0.0, 0.0],
+                  [1.0, 0.0, 0.0],
+                ],
+              ],
+            },
+          ),
+        );
+      final hovered = <CadViewportPick?>[];
+      final mouse = TestPointer(73, PointerDeviceKind.mouse);
+      await f.mount(
+        tester,
+        onSketchSuggestionHover: hovered.add,
+        sketchSuggestionPickCandidateIds: const <String>{},
+      );
+      await tester.sendEventToBinding(mouse.hover(const Offset(600, 400)));
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(hovered, isNotEmpty);
+      expect(
+        hovered.last?.entityId,
+        isNull,
+        reason:
+            'Empty Assistant filter must miss mesh/Section/unrelated overlay',
+      );
+    },
+  );
+
+  testWidgets(
+    'native suggestion hover publishes overlay hit before a slow GPU pick',
+    (tester) async {
+      final f = _Fixture();
+      f.scene.upsert(
+        const CadSceneEntity(
+          id: 'suggestion-source',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'segments': [
+              [
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+              ],
+            ],
+          },
+        ),
+      );
+      final gate = Completer<void>();
+      f.bridge.answer = (_) async {
+        await gate.future;
+        return null;
+      };
+      final hovered = <CadViewportPick?>[];
+      final mouse = TestPointer(74, PointerDeviceKind.mouse);
+      await f.mount(
+        tester,
+        onSketchSuggestionHover: hovered.add,
+        sketchSuggestionPickCandidateIds: const {'suggestion-source'},
+      );
+      await tester.sendEventToBinding(mouse.hover(const Offset(600, 400)));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(
+        hovered.where((hit) => hit?.entityId == 'suggestion-source'),
+        isNotEmpty,
+        reason: 'Overlay hover must not wait for native.pick',
+      );
+      gate.complete();
+      await tester.pump(const Duration(milliseconds: 50));
+    },
+  );
+
+  testWidgets(
+    'stale native GPU pick cannot replace the latest overlay hover',
+    (tester) async {
+      final f = _Fixture();
+      f.scene.upsert(
+        const CadSceneEntity(
+          id: 'suggestion-source',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'segments': [
+              [
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+              ],
+            ],
+          },
+        ),
+      );
+      final gate = Completer<void>();
+      f.bridge.answer = (_) async {
+        await gate.future;
+        return null;
+      };
+      final hovered = <CadViewportPick?>[];
+      final mouse = TestPointer(76, PointerDeviceKind.mouse);
+      await f.mount(
+        tester,
+        onSketchSuggestionHover: hovered.add,
+        sketchSuggestionPickCandidateIds: const {'suggestion-source'},
+      );
+      await tester.sendEventToBinding(mouse.hover(const Offset(600, 400)));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(hovered.last?.entityId, 'suggestion-source');
+      await tester.sendEventToBinding(mouse.hover(const Offset(1100, 700)));
+      await tester.pump(const Duration(milliseconds: 20));
+      expect(
+        hovered.last,
+        isNull,
+        reason: 'Overlay must follow the latest pointer before the first GPU pick returns',
+      );
+      gate.complete();
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(
+        hovered.last,
+        isNull,
+        reason: 'A late GPU result must not resurrect the previous overlay hit',
+      );
+    },
+  );
+
+  testWidgets(
+    'canvas suggestion hover with candidates still hits the painted source',
+    (tester) async {
+      final f = _Fixture();
+      f.scene.upsert(
+        const CadSceneEntity(
+          id: 'suggestion-source',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'segments': [
+              [
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+              ],
+            ],
+          },
+        ),
+      );
+      final hovered = <CadViewportPick?>[];
+      final mouse = TestPointer(75, PointerDeviceKind.mouse);
+      await f.mount(
+        tester,
+        onSketchSuggestionHover: hovered.add,
+        sketchSuggestionPickCandidateIds: const {'suggestion-source'},
+      );
+      await tester.tap(find.text('Flutter Canvas'));
+      await tester.pumpAndSettle();
+      await tester.sendEventToBinding(mouse.hover(const Offset(600, 400)));
+      await tester.pump(const Duration(milliseconds: 50));
+      expect(hovered.last?.entityId, 'suggestion-source');
+    },
+  );
 
   for (final mode in ['entity', 'support', 'tap', 'double', 'drag']) {
     testWidgets('Sketch $mode retains priority over native selection', (

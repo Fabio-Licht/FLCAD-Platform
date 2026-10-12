@@ -776,15 +776,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// candidate set so a raw Section/reference curve or imported mesh cannot
   /// win the hit before the painted Sketch source.
   Set<String> get sketchReconstructionSuggestionPickCandidateIds {
-    final api = sketchApi;
     final ids = <String>{};
     for (final suggestion in _sketchReconstructionSuggestions) {
       final sourceIds = <String>{
         ...suggestion.entityIds,
         ...suggestion.usedEntityIds,
       };
-      if (sourceIds.isNotEmpty &&
-          !(sourceIds.any((id) => api?.entity(id)?.visible == true))) {
+      if (sourceIds.isNotEmpty && !sourceIds.any(_reconstructionSourceIsHoverable)) {
         continue;
       }
       ids
@@ -792,6 +790,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ..addAll(suggestion.coveredEntityIds);
     }
     return ids;
+  }
+
+  bool _reconstructionSourceIsHoverable(String id) {
+    if (sketchApi?.entity(id)?.visible == true) return true;
+    final visual = runtime.scene.find(id);
+    return visual != null &&
+        visual.visible &&
+        !cadSceneEntityIsPickOnly(visual);
   }
 
   @visibleForTesting
@@ -8207,13 +8213,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       clearHoveredSketchReconstructionSuggestion();
       return false;
     }
-    final api = sketchApi;
-    final visibleSourceIds = api == null
-        ? const <String>{}
-        : {
-            for (final id in activeSketch?.entityIds ?? const <String>[])
-              if (api.entity(id)?.visible == true) id,
-          };
     final matches = _sketchReconstructionSuggestions
         .where((suggestion) {
           final sourceIds = <String>{
@@ -8222,9 +8221,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           };
           // A promoted suggestion can leave covered fragments in its old
           // metadata.  They must not make hidden geometry hoverable after the
-          // suggestion itself has been removed or invalidated.
+          // suggestion itself has been removed or invalidated. Scene
+          // visibility is consulted too: project.new/_state.clear can leave
+          // sketchApi briefly unbound while the published overlay is still
+          // the operator-visible source.
           if (sourceIds.isNotEmpty &&
-              !sourceIds.any(visibleSourceIds.contains)) {
+              !sourceIds.any(_reconstructionSourceIsHoverable)) {
             return false;
           }
           return {
@@ -8237,7 +8239,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _logReconstructionHoverMiss(
         hitEntityId: entityId,
         reason: 'noEligibleSuggestion',
-        visibleSourceIds: visibleSourceIds,
+        visibleSourceIds: {
+          for (final suggestion in _sketchReconstructionSuggestions)
+            ...{
+              ...suggestion.entityIds,
+              ...suggestion.usedEntityIds,
+            }.where(_reconstructionSourceIsHoverable),
+        },
       );
       clearHoveredSketchReconstructionSuggestion();
       return false;
@@ -9933,11 +9941,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final segments = <List<dynamic>>[];
     for (final id in suggestion.entityIds) {
       final entity = sketchApi?.entity(id);
-      if (entity == null || !entity.visible) continue;
       final visual = runtime.scene.find(id);
-      if (visual != null && !visual.visible) continue;
-      var copied = _segmentsFromGeometry(visual?.geometry);
-      if (copied.isEmpty) {
+      final entityVisible = entity != null && entity.visible;
+      final visualUsable =
+          visual != null &&
+          visual.visible &&
+          !cadSceneEntityIsPickOnly(visual);
+      if (!entityVisible && !visualUsable) continue;
+      var copied = visualUsable
+          ? _segmentsFromGeometry(visual.geometry)
+          : const <List<dynamic>>[];
+      if (copied.isEmpty && entity != null && entity.visible) {
         copied = _segmentsFromGeometry(
           _sketchScene.adapt(entity, coordinates: sketch?.coordinates).geometry,
         );

@@ -400,65 +400,68 @@ class _IntegratedCadViewportWidgetState
       }
       return;
     }
+    // Sketch/reference curves are Flutter overlays even when the CAD body
+    // is rendered by the native backend. Publish overlay hover from the
+    // latest pointer before any GPU await, including while a pick is already
+    // in flight, so a slow/hung query cannot freeze Assistant hover.
+    widget.onSketchSuggestionHover?.call(
+      _overlayPicking.pickSuggestionHover(
+        position: position,
+        camera: widget.camera,
+        scene: widget.scene,
+        suggestionCandidateIds: widget.sketchSuggestionPickCandidateIds,
+      ),
+    );
     _pendingHover = position;
     if (_hoverRequestActive || !_nativeActive || _nativeNavigating) return;
     final generation = _backendGeneration;
     _hoverRequestActive = true;
-    while (_pendingHover != null && _nativeActive) {
-      final current = _pendingHover!;
-      _pendingHover = null;
-      // Sketch/reference curves are Flutter overlays even when the CAD body
-      // is rendered by the native backend. Resolve the latest pointer
-      // position through the deterministic screen-space picker, without
-      // making overlays part of CAD selection or capture candidates.
-      final sketchOverlayHover = _overlayPicking.pick(
-        position: current,
-        camera: widget.camera,
-        scene: widget.scene,
-        eligibleEntityIds: widget.sketchSuggestionPickCandidateIds,
-        includePickOnlyProfiles: false,
-      );
-      final result = await native.pick(current.dx, current.dy);
-      final source = result == null ? null : widget.scene.find(result.entityId);
-      final managedFace = result?.kind == NativePickKind.face && source != null
-          ? managedCadFaceHighlight(source, result!.subId)
-          : null;
-      final resolved = !widget.enableInspectionHover || managedFace != null
-          ? null
-          : result == null
-          ? null
-          : await operationalResolver.resolve(result, widget.scene);
-      if (!mounted ||
-          !_nativeActive ||
-          generation != _backendGeneration ||
-          _pendingHover != null ||
-          _nativeNavigating) {
-        continue;
+    try {
+      while (_pendingHover != null && _nativeActive) {
+        final current = _pendingHover!;
+        _pendingHover = null;
+        final result = await native.pick(current.dx, current.dy);
+        final source = result == null ? null : widget.scene.find(result.entityId);
+        final managedFace = result?.kind == NativePickKind.face && source != null
+            ? managedCadFaceHighlight(source, result!.subId)
+            : null;
+        final resolved = !widget.enableInspectionHover || managedFace != null
+            ? null
+            : result == null
+            ? null
+            : await operationalResolver.resolve(result, widget.scene);
+        if (!mounted ||
+            !_nativeActive ||
+            generation != _backendGeneration ||
+            _pendingHover != null ||
+            _nativeNavigating) {
+          continue;
+        }
+        if (managedFace != null) {
+          await native.setManagedCadFaceHover(
+            entityId: managedFace.entityId,
+            presentationSubId: managedFace.presentationSubId,
+          );
+        } else if (resolved == null) {
+          await native.clearHover();
+        } else {
+          await native.setOperationalHover(
+            operationalEntityId: resolved.entity.id,
+            entityId: resolved.entity.ownerId,
+            triangleIndices: resolved.triangleIndices,
+          );
+        }
+        if (mounted) {
+          setState(() {
+            _nativeHover = result;
+            _operationalHover = resolved;
+            _managedFaceHover = managedFace;
+          });
+        }
       }
-      if (managedFace != null) {
-        await native.setManagedCadFaceHover(
-          entityId: managedFace.entityId,
-          presentationSubId: managedFace.presentationSubId,
-        );
-      } else if (resolved == null) {
-        await native.clearHover();
-      } else {
-        await native.setOperationalHover(
-          operationalEntityId: resolved.entity.id,
-          entityId: resolved.entity.ownerId,
-          triangleIndices: resolved.triangleIndices,
-        );
-      }
-      if (mounted) {
-        setState(() {
-          _nativeHover = result;
-          _operationalHover = resolved;
-          _managedFaceHover = managedFace;
-        });
-      }
-      widget.onSketchSuggestionHover?.call(sketchOverlayHover);
+    } finally {
+      _hoverRequestActive = false;
     }
-    _hoverRequestActive = false;
   }
 
   MouseCursor get _nativeCursor {
@@ -742,6 +745,7 @@ class _IntegratedCadViewportWidgetState
     _nativeHover = null;
     _operationalHover = null;
     _managedFaceHover = null;
+    _hoverRequestActive = false;
     _nativeNavigating = false;
     setState(() {
       if (recovery) _requestedBackend = ViewportBackend.flutterCanvas;

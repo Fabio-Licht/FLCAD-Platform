@@ -535,6 +535,344 @@ void main() {
       expect(controller.selectedSketchReconstructionSuggestions, hasLength(2));
     },
   );
+
+  test(
+    'empty suggestion filter must not pick mesh, Section, or unrelated geometry',
+    () {
+      final camera = CadCameraController(
+        eye: const Vector3(0, 0, 10),
+        target: Vector3.zero,
+        up: const Vector3(0, 1, 0),
+      )..resize(800, 600);
+      final scene = CadSceneGraph()
+        ..upsert(
+          const CadSceneEntity(
+            id: 'imported-mesh',
+            kind: CadSceneEntityKind.mesh,
+            geometry: {
+              'nodes': [-4.0, -4.0, 0.0, 4.0, -4.0, 0.0, 0.0, 4.0, 0.0],
+              'triangles': [0, 1, 2],
+            },
+          ),
+        )
+        ..upsert(
+          const CadSceneEntity(
+            id: 'section-reference',
+            kind: CadSceneEntityKind.curve,
+            geometry: {
+              'points': [
+                [-4.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+              ],
+              'displayColor': 'sectionReferenceLilac',
+            },
+          ),
+        )
+        ..upsert(
+          const CadSceneEntity(
+            id: 'painted-line',
+            kind: CadSceneEntityKind.sketch,
+            geometry: {
+              'points': [
+                [-2.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+              ],
+            },
+          ),
+        );
+      addTearDown(scene.dispose);
+      addTearDown(camera.dispose);
+      final picking = ViewportPickingController();
+      final position = _project(camera, const [0, 0, 0]);
+      expect(
+        picking
+            .pick(
+              position: position,
+              camera: camera,
+              scene: scene,
+              eligibleEntityIds: const <String>{},
+              includePickOnlyProfiles: false,
+            )
+            ?.entityId,
+        isNull,
+        reason: 'An empty eligible set is a closed capture filter',
+      );
+      expect(
+        picking
+            .pickSuggestionHover(
+              position: position,
+              camera: camera,
+              scene: scene,
+              suggestionCandidateIds: const <String>{},
+              generalHit: picking.pick(
+                position: position,
+                camera: camera,
+                scene: scene,
+              ),
+            )
+            ?.entityId,
+        isNull,
+        reason:
+            'Empty Assistant filter must miss instead of highlighting mesh/Section',
+      );
+      expect(
+        picking
+            .pickSuggestionHover(
+              position: position,
+              camera: camera,
+              scene: scene,
+              suggestionCandidateIds: const {'painted-line'},
+            )
+            ?.entityId,
+        'painted-line',
+      );
+      expect(
+        picking
+            .pickSuggestionHover(
+              position: position,
+              camera: camera,
+              scene: scene,
+            )
+            ?.entityId,
+        isNot(anyOf('imported-mesh', isNull)),
+        reason: 'Null filter keeps unrestricted overlay pick of painted geometry',
+      );
+    },
+  );
+
+  test(
+    'list hover still publishes geometry when the scene node is hidden',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('hover-hidden_');
+      addTearDown(() => directory.delete(recursive: true));
+      final kernels = KernelManager()..register(_HoverKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      addTearDown(cad.dispose);
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: directory),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(controller.dispose);
+      await cad.runtime.open('hover-hidden', directory);
+      await controller.configureProject(
+        projectId: 'hover-hidden',
+        projectDirectory: directory,
+      );
+      controller.selectWorldSketchPlane(SketchPlaneType.xy);
+      await controller.openSketch();
+      final line = controller.sketchApi!.builders.line.build(
+        const SketchVector(-8, 0),
+        const SketchVector(8, 0),
+      );
+      final suggestion = SketchReconstructionSuggestion(
+        kind: SketchReconstructionKind.line,
+        entityIds: [line.id],
+        usedEntityIds: [line.id],
+        confidence: 1,
+      );
+      controller.debugReplaceSketchReconstructionSuggestions([suggestion]);
+      cad.runtime.scene.upsert(
+        CadSceneEntity(
+          id: line.id,
+          kind: CadSceneEntityKind.sketch,
+          visible: false,
+          geometry: {
+            'points': [
+              [-8.0, 0.0, 0.0],
+              [8.0, 0.0, 0.0],
+            ],
+          },
+        ),
+      );
+
+      controller.highlightSketchReconstructionSuggestion(suggestion);
+      final overlay = cad.runtime.scene.find(sketchReconstructionHighlightId);
+      expect(overlay, isNotNull);
+      expect(overlay!.geometry['reconstructionHighlight'], 'hover');
+      expect(overlay.geometry['segments'], isNotEmpty);
+      expect(controller.isSketchReconstructionSuggestionHovered(suggestion), isTrue);
+    },
+  );
+
+  test(
+    'both hover directions survive project.new then Section/Sketch regenerate',
+    () async {
+      final firstDir = await Directory.systemTemp.createTemp('hover-proj-a_');
+      final secondDir = await Directory.systemTemp.createTemp('hover-proj-b_');
+      addTearDown(() => firstDir.delete(recursive: true));
+      addTearDown(() => secondDir.delete(recursive: true));
+      final kernels = KernelManager()..register(_HoverKernel(), makeDefault: true);
+      final cad = DesktopCadController(
+        kernels: kernels,
+        projects: ProjectManager.instance,
+      );
+      addTearDown(cad.dispose);
+      final commands = DesktopCommandCoordinator(
+        cad: cad,
+        projects: ProjectManager.instance,
+      );
+      final projects = ProjectRepository(
+        storage: LocalStorageService(rootDirectory: firstDir),
+      );
+      final controller = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: commands,
+        runtime: cad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: projects),
+          ),
+        ),
+      );
+      addTearDown(controller.dispose);
+
+      Future<List<SketchReconstructionSuggestion>> seedSketch() async {
+        controller.selectWorldSketchPlane(SketchPlaneType.xy);
+        await controller.openSketch();
+        final api = controller.sketchApi!;
+        final line = api.builders.line.build(
+          const SketchVector(-20, 12),
+          const SketchVector(-10, 12),
+        );
+        final arc = api.builders.arc.build(
+          const SketchVector(0, 0),
+          8,
+          0,
+          1.5707963267948966,
+        );
+        final spline = api.builders.spline.build([
+          const SketchVector(10, -12),
+          const SketchVector(15, -8),
+          const SketchVector(20, -12),
+        ]);
+        final adapter = const SketchSceneAdapter();
+        for (final entity in [line, arc, spline]) {
+          cad.runtime.scene.upsert(
+            adapter.adapt(entity, coordinates: controller.activeSketch!.coordinates),
+          );
+        }
+        final suggestions = [
+          SketchReconstructionSuggestion(
+            kind: SketchReconstructionKind.line,
+            entityIds: [line.id],
+            usedEntityIds: [line.id],
+            confidence: 1,
+          ),
+          SketchReconstructionSuggestion(
+            kind: SketchReconstructionKind.arc,
+            entityIds: [arc.id],
+            usedEntityIds: [arc.id],
+            confidence: 1,
+          ),
+          SketchReconstructionSuggestion(
+            kind: SketchReconstructionKind.line,
+            entityIds: [spline.id],
+            usedEntityIds: [spline.id],
+            confidence: 1,
+          ),
+        ];
+        controller.debugReplaceSketchReconstructionSuggestions(suggestions);
+        return suggestions;
+      }
+
+      await cad.runtime.open('hover-proj-a', firstDir);
+      await controller.configureProject(
+        projectId: 'hover-proj-a',
+        projectDirectory: firstDir,
+      );
+      var suggestions = await seedSketch();
+      expect(controller.stage, SketchSurfaceStage.sketchActive);
+      for (final suggestion in suggestions) {
+        expect(
+          controller.hoverSketchReconstructionSuggestionForEntity(
+            suggestion.entityIds.single,
+          ),
+          isTrue,
+        );
+        controller.highlightSketchReconstructionSuggestion(suggestion);
+        expect(
+          cad.runtime.scene.find(sketchReconstructionHighlightId),
+          isNotNull,
+        );
+      }
+
+      await cad.runtime.open('hover-proj-b', secondDir);
+      expect(
+        controller.stage == SketchSurfaceStage.sketchActive,
+        isFalse,
+        reason: 'Session boundary must not leave sketchActive stuck true',
+      );
+      expect(
+        controller.hoverSketchReconstructionSuggestionForEntity(
+          suggestions.first.entityIds.single,
+        ),
+        isFalse,
+        reason: 'Viewport→list must not resolve stale IDs after project.new',
+      );
+
+      await controller.configureProject(
+        projectId: 'hover-proj-b',
+        projectDirectory: secondDir,
+      );
+      suggestions = await seedSketch();
+      final camera = CadCameraController(
+        eye: const Vector3(0, 0, 40),
+        target: Vector3.zero,
+        up: const Vector3(0, 1, 0),
+      )..resize(900, 700);
+      addTearDown(camera.dispose);
+      final picking = ViewportPickingController();
+      final hoverPoints = <String, List<num>>{
+        suggestions[0].entityIds.single: [-15, 12, 0],
+        suggestions[1].entityIds.single: [5.656854249, 5.656854249, 0],
+        suggestions[2].entityIds.single: [15, -8, 0],
+      };
+      expect(
+        controller.sketchReconstructionSuggestionPickCandidateIds,
+        containsAll(hoverPoints.keys),
+      );
+      for (final suggestion in suggestions) {
+        final id = suggestion.entityIds.single;
+        expect(cad.runtime.scene.find(id), isNotNull);
+        final hit = picking.pickSuggestionHover(
+          position: _project(camera, hoverPoints[id]!),
+          camera: camera,
+          scene: cad.runtime.scene,
+          suggestionCandidateIds:
+              controller.sketchReconstructionSuggestionPickCandidateIds,
+        );
+        expect(hit?.entityId, id);
+        expect(
+          controller.hoverSketchReconstructionSuggestionForEntity(id),
+          isTrue,
+        );
+        controller.highlightSketchReconstructionSuggestion(suggestion);
+        final overlay = cad.runtime.scene.find(sketchReconstructionHighlightId);
+        expect(overlay, isNotNull);
+        expect(overlay!.geometry['segments'], isNotEmpty);
+        expect(
+          controller.isSketchReconstructionSuggestionHovered(suggestion),
+          isTrue,
+        );
+      }
+    },
+  );
 }
 
 class _HoverKernel implements GeometryKernelAPI, SurfaceOperationKernelAPI {

@@ -574,4 +574,42 @@ class ViewportPickingController {
       inverseViewProjection: columnMajor,
     );
   }
+
+  /// Resolves reconstruction-suggestion hover for Canvas and native GPU.
+  ///
+  /// Three candidate-filter cases:
+  /// - `null`: feature unused. Unrestricted overlay pick of painted
+  ///   geometry (not pick-only), via [generalHit] / [fallbackEligibleEntityIds].
+  /// - empty `{}`: do not steal hits and do not fall through to mesh,
+  ///   Section, or unrelated bodies. Hover misses (clear overlay).
+  /// - non-empty: pick only those IDs (`includePickOnlyProfiles: false`).
+  CadViewportPick? pickSuggestionHover({
+    required Offset position,
+    required CadCameraController camera,
+    required CadSceneGraph scene,
+    Set<String>? suggestionCandidateIds,
+    Set<String>? fallbackEligibleEntityIds,
+    CadViewportPick? generalHit,
+  }) {
+    if (suggestionCandidateIds != null) {
+      return pick(
+        position: position,
+        camera: camera,
+        scene: scene,
+        eligibleEntityIds: suggestionCandidateIds,
+        includePickOnlyProfiles: false,
+      );
+    }
+    if (generalHit != null &&
+        !cadSceneEntityIsPickOnly(scene.find(generalHit.entityId))) {
+      return generalHit;
+    }
+    return pick(
+      position: position,
+      camera: camera,
+      scene: scene,
+      eligibleEntityIds: fallbackEligibleEntityIds,
+      includePickOnlyProfiles: false,
+    );
+  }
 }
