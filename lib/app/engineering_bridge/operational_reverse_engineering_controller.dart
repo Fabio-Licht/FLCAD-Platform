@@ -18289,6 +18289,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ...allSketchEntities.map((item) => item.id),
       ...allSketches.map((item) => item.id),
     };
+    // The Sketch Engine can be temporarily incomplete while a project is
+    // being rehydrated (for example, when entering one Sketch races the
+    // asynchronous project configuration). A persisted Sketch root with its
+    // embedded definition is still authoritative document state; do not
+    // interpret its absence from the partially loaded engine as deletion.
+    final persistedSketchRootIds = document.entities.values
+        .where(
+          (item) =>
+              item.kind == CadDocumentEntityKind.sketch &&
+              item.data['sketch'] is Map &&
+              item.data['deleted'] != true,
+        )
+        .map((item) => item.id)
+        .toSet();
     final constraintIds = {
       ...constraints.map((item) => item.id),
       ...dimensions.map((item) => item.id),
@@ -18296,7 +18310,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final stale = document.entities.values
         .where((item) => item.kind == CadDocumentEntityKind.sketch)
         .map((item) => item.id)
-        .where((id) => !currentIds.contains(id));
+        .where(
+          (id) =>
+              !currentIds.contains(id) &&
+              !persistedSketchRootIds.contains(id),
+        );
     final staleConstraints = document.entities.values
         .where((item) => item.kind == CadDocumentEntityKind.constraint)
         .map((item) => item.id)

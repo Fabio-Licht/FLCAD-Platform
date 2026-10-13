@@ -245,6 +245,172 @@ void main() {
   );
 
   test(
+    'reopening any Sketch preserves all document roots and Explorer inputs',
+    () async {
+      final harness = await _p0Harness('p0-three-sketch-roots', openSketch: true);
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final ids = <String>[];
+      for (var index = 0; index < 3; index++) {
+        if (index > 0) {
+          harness.controller.selectWorldSketchPlane(
+            index == 1 ? SketchPlaneType.yz : SketchPlaneType.zx,
+          );
+          await harness.controller.openSketch(forceNew: true);
+        }
+        final sketch = harness.controller.activeSketch!;
+        ids.add(sketch.id);
+        harness.controller.sketchApi!.builders.line.build(
+          SketchVector(index.toDouble(), 0),
+          SketchVector(index.toDouble() + 1, 0),
+        );
+      }
+
+      Future<Set<String>> documentRoots() async => harness.cad.runtime.document!
+          .entities.values
+          .where(
+            (entity) =>
+                entity.kind == CadDocumentEntityKind.sketch &&
+                entity.data['sketch'] is Map,
+          )
+          .map((entity) => entity.id)
+          .toSet();
+
+      expect(await documentRoots(), ids.toSet());
+      for (final id in ids) {
+        await harness.controller.reopenSketchForEditing(id);
+        expect(harness.controller.activeSketch!.id, id);
+        expect(await documentRoots(), ids.toSet());
+        expect(
+          harness.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+          ids.toSet(),
+        );
+      }
+    },
+  );
+
+  test(
+    'incomplete engine synchronization never removes persisted Sketch roots',
+    () async {
+      final harness = await _p0Harness(
+        'p0-incomplete-sketch-sync',
+        openSketch: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final ids = <String>[];
+      for (var index = 0; index < 3; index++) {
+        if (index > 0) {
+          harness.controller.selectWorldSketchPlane(
+            index == 1 ? SketchPlaneType.yz : SketchPlaneType.zx,
+          );
+          await harness.controller.openSketch(forceNew: true);
+        }
+        final sketch = harness.controller.activeSketch!;
+        ids.add(sketch.id);
+        harness.controller.sketchApi!.builders.line.build(
+          SketchVector(index.toDouble(), 0),
+          SketchVector(index.toDouble() + 1, 0),
+        );
+      }
+      await harness.controller.persist();
+      final document = harness.cad.runtime.document!;
+      expect(
+        document.entities.values
+            .where(
+              (entity) =>
+                  entity.kind == CadDocumentEntityKind.sketch &&
+                  entity.data['sketch'] is Map,
+            )
+            .map((entity) => entity.id)
+            .toSet(),
+        ids.toSet(),
+      );
+
+      // Simulate the transient state produced when configureProject has only
+      // restored the active root while the other roots are still loading.
+      final engine = harness.controller.sketchApi!.engine;
+      for (final id in ids.skip(1)) {
+        final removed = engine.sketches.remove(id);
+        for (final entityId in removed?.entityIds ?? const <String>[]) {
+          engine.entities.remove(entityId);
+        }
+      }
+      engine.activeSketchId = ids.first;
+
+      await harness.controller.reopenSketchForEditing(ids.first);
+      final remainingRoots = harness.cad.runtime.document!.entities.values
+          .where(
+            (entity) =>
+                entity.kind == CadDocumentEntityKind.sketch &&
+                entity.data['sketch'] is Map,
+          )
+          .map((entity) => entity.id)
+          .toSet();
+      expect(remainingRoots, ids.toSet());
+      expect(
+        harness.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+        contains(ids.first),
+      );
+
+    },
+  );
+
+  test(
+    'explicitly deleted Sketch roots are not resurrected by synchronization',
+    () async {
+      final harness = await _p0Harness(
+        'p0-explicit-sketch-delete',
+        openSketch: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final ids = <String>[];
+      for (var index = 0; index < 3; index++) {
+        if (index > 0) {
+          harness.controller.selectWorldSketchPlane(
+            index == 1 ? SketchPlaneType.yz : SketchPlaneType.zx,
+          );
+          await harness.controller.openSketch(forceNew: true);
+        }
+        final sketch = harness.controller.activeSketch!;
+        ids.add(sketch.id);
+        harness.controller.sketchApi!.builders.line.build(
+          SketchVector(index.toDouble(), 0),
+          SketchVector(index.toDouble() + 1, 0),
+        );
+      }
+      final deletedId = ids.last;
+      harness.controller.sketchApi!.engine.deleteSketch(deletedId);
+      await harness.cad.runtime.mutate(
+        command: 'test.delete-sketch-root',
+        remove: [deletedId],
+      );
+      await harness.controller.reopenSketchForEditing(ids.first);
+
+      final roots = harness.cad.runtime.document!.entities.values
+          .where(
+            (entity) =>
+                entity.kind == CadDocumentEntityKind.sketch &&
+                entity.data['sketch'] is Map,
+          )
+          .map((entity) => entity.id)
+          .toSet();
+      expect(roots, {ids[0], ids[1]});
+      expect(
+        harness.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+        {ids[0], ids[1]},
+      );
+    },
+  );
+
+  test(
     'Create Section immediately after Plane YZ keeps YZ support metadata',
     () async {
       final harness = await _p0Harness(
