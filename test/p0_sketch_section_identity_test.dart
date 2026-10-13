@@ -217,6 +217,84 @@ void main() {
   );
 
   test(
+    'editing immediately after Open waits for late Sketch Engine configuration',
+    () async {
+      final harness = await _p0Harness(
+        'p0-late-sketch-configuration',
+        openSketch: false,
+        mesh: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final created = await _createThreeSketchesIncludingSection(harness);
+      await harness.controller.saveProject();
+
+      // Simulate the desktop listener's directory lookup gap: runtime.open
+      // has published the document, but configureProject has not started yet.
+      final reopened = await _reopen(
+        harness,
+        'p0-late-sketch-configuration',
+        configure: false,
+      );
+      addTearDown(reopened.controller.dispose);
+      addTearDown(reopened.cad.dispose);
+      expect(reopened.controller.sketchApi, isNull);
+
+      for (final id in created.ids) {
+        await reopened.controller.reopenSketchForEditing(id);
+        expect(reopened.controller.error, isNull);
+        expect(reopened.controller.activeSketch?.id, id);
+        expect(reopened.controller.sketchApi?.engine.activeSketchId, id);
+        await reopened.controller.finishSketch();
+      }
+      expect(reopened.controller.sketchApi?.sketches, hasLength(3));
+    },
+  );
+
+  test(
+    'concurrent Sketch edits share the single project configuration Future',
+    () async {
+      final harness = await _p0Harness(
+        'p0-concurrent-sketch-configuration',
+        openSketch: false,
+        mesh: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final created = await _createThreeSketchesIncludingSection(harness);
+      await harness.controller.saveProject();
+      final reopened = await _reopen(
+        harness,
+        'p0-concurrent-sketch-configuration',
+        configure: false,
+      );
+      addTearDown(reopened.controller.dispose);
+      addTearDown(reopened.cad.dispose);
+
+      // Simulate the desktop listener scheduling configureProject immediately
+      // after Open while two edit commands arrive in the same event turn.
+      final configure = reopened.controller.configureProject(
+        projectId: 'p0-concurrent-sketch-configuration',
+        projectDirectory: harness.directory,
+      );
+      final first = reopened.controller.reopenSketchForEditing(created.ids[0]);
+      final second = reopened.controller.reopenSketchForEditing(created.ids[1]);
+      await Future.wait([configure, first, second]);
+
+      expect(reopened.controller.error, isNull);
+      expect(reopened.controller.sketchApi?.sketches, hasLength(3));
+      expect(
+        {reopened.controller.activeSketch?.id},
+        contains(created.ids[1]),
+      );
+    },
+  );
+
+  test(
     'controller, document and engine share the sketch: prefix identity',
     () async {
       final harness = await _p0Harness('p0-sketch-prefix', openSketch: true);
@@ -1228,7 +1306,11 @@ Future<
     OperationalReverseEngineeringController controller,
   })
 >
-_reopen(_P0Harness harness, String projectId) async {
+_reopen(
+  _P0Harness harness,
+  String projectId, {
+  bool configure = true,
+}) async {
   final projects = harness.projects;
   final projectManager = ProjectManager(repository: projects);
   final project = await projects.findById(projectId);
@@ -1253,10 +1335,12 @@ _reopen(_P0Harness harness, String projectId) async {
     ),
   );
   await cad.runtime.open(projectId, harness.directory);
-  await controller.configureProject(
-    projectId: projectId,
-    projectDirectory: harness.directory,
-  );
+  if (configure) {
+    await controller.configureProject(
+      projectId: projectId,
+      projectDirectory: harness.directory,
+    );
+  }
   await commands.refreshContext();
   return (cad: cad, controller: controller);
 }

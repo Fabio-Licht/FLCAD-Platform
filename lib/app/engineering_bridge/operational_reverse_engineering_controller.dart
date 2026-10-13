@@ -428,17 +428,85 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   int _configurationEpoch = 0;
   String? _configurationReadyProjectId;
   Future<void>? _configurationInFlight;
+  Future<void>? _configurationBootstrapInFlight;
+  String? _configurationBootstrapProjectId;
+  Future<void> _sketchEditTail = Future<void>.value();
 
   Future<void> _awaitProjectConfiguration() async {
-    final pending = _configurationInFlight;
-    if (pending != null) await pending;
     final projectId = runtime.document?.projectId;
-    if (projectId != null &&
-        (_configurationReadyProjectId != projectId ||
-            configuredProjectId != projectId)) {
-      throw StateError(
-        'Sketch Engine configuration is not complete for project $projectId.',
-      );
+    if (projectId == null) return;
+
+    bool ready() =>
+        _configurationReadyProjectId == projectId &&
+        configuredProjectId == projectId;
+
+    if (ready()) return;
+
+    final bootstrap = _configurationBootstrapInFlight;
+    if (bootstrap != null) {
+      if (_configurationBootstrapProjectId == projectId) {
+        await bootstrap;
+        if (ready()) return;
+      } else {
+        await bootstrap.catchError((_) {});
+      }
+    }
+
+    // The desktop listener resolves the project directory asynchronously
+    // before it calls configureProject().  A user can double-click a Sketch
+    // after runtime.open has published the document but before that Future is
+    // registered.  Start the canonical configuration here so the command
+    // waits for the same operation instead of reporting a false incomplete
+    // state.
+    final pending = _configurationInFlight;
+    if (pending != null) {
+      try {
+        await pending;
+      } catch (_) {
+        // A stale configuration from a previous project must not mask the
+        // current project's configuration.  A failure for the current
+        // project is rethrown with its original stack by the Future itself.
+        if (configuredProjectId == projectId) rethrow;
+      }
+      if (ready()) return;
+    }
+
+    final bootstrapCompleter = Completer<void>();
+    _configurationBootstrapProjectId = projectId;
+    _configurationBootstrapInFlight = bootstrapCompleter.future;
+    try {
+      final currentProjectId = runtime.document?.projectId;
+      if (currentProjectId != projectId) {
+        throw StateError(
+          'The active project changed while configuring Sketch Engine.',
+        );
+      }
+      final directory = await commands.repository.directoryFor(projectId);
+      if (runtime.document?.projectId != projectId) {
+        throw StateError(
+          'The active project changed while locating Sketch Engine data.',
+        );
+      }
+      if (!ready()) {
+        await _configureProjectCanonical(
+          projectId: projectId,
+          projectDirectory: directory,
+        );
+      }
+      if (!ready()) {
+        throw StateError(
+          'Sketch Engine configuration is not complete for project $projectId.',
+        );
+      }
+      bootstrapCompleter.complete();
+    } catch (error, stackTrace) {
+      bootstrapCompleter.completeError(error, stackTrace);
+      rethrow;
+    } finally {
+      if (identical(_configurationBootstrapInFlight, bootstrapCompleter.future)) {
+        _configurationBootstrapInFlight = null;
+        _configurationBootstrapProjectId = null;
+      }
     }
   }
 
@@ -3656,7 +3724,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
-  Future<void> reopenSketchForEditing(String id) async {
+  Future<void> reopenSketchForEditing(String id) {
+    final requestedProjectId = runtime.document?.projectId;
+    final previous = _sketchEditTail;
+    final operation = () async {
+      await previous.catchError((_) {});
+      if (runtime.document?.projectId != requestedProjectId) {
+        throw StateError(
+          'The active project changed before Sketch editing started.',
+        );
+      }
+      await _reopenSketchForEditing(id);
+    }();
+    _sketchEditTail = operation.catchError((_) {});
+    return operation;
+  }
+
+  Future<void> _reopenSketchForEditing(String id) async {
     await _awaitProjectConfiguration();
     final api = sketchApi ?? (throw StateError('SketchEngine is unavailable.'));
     selectSketch(id);
@@ -5555,6 +5639,24 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     required String projectId,
     required Directory projectDirectory,
   }) async {
+    final bootstrap = _configurationBootstrapInFlight;
+    if (bootstrap != null && _configurationBootstrapProjectId == projectId) {
+      await bootstrap;
+      return;
+    }
+    if (bootstrap != null) {
+      await bootstrap.catchError((_) {});
+    }
+    await _configureProjectCanonical(
+      projectId: projectId,
+      projectDirectory: projectDirectory,
+    );
+  }
+
+  Future<void> _configureProjectCanonical({
+    required String projectId,
+    required Directory projectDirectory,
+  }) async {
     if (_configurationReadyProjectId == projectId &&
         configuredProjectId == projectId) {
       _installBeforeSaveHook();
@@ -5580,6 +5682,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _configurationInFlight = operation;
     try {
       await operation;
+    } catch (error, stackTrace) {
+      if (_configurationEpoch == epoch) {
+        _configurationReadyProjectId = null;
+        runtime.write(
+          'sketch.configuration.diagnostic',
+          'project=$projectId error=$error',
+        );
+        debugPrint(
+          '[sketch-config] project=$projectId failed: $error\n$stackTrace',
+        );
+      }
+      rethrow;
     } finally {
       if (_configurationEpoch == epoch &&
           identical(_configurationInFlight, operation)) {
@@ -5734,6 +5848,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await refreshReconstructionManager(persist: false);
     if (_configurationIsCurrent(projectId, epoch)) {
       _configurationReadyProjectId = projectId;
+      runtime.write('sketch.configuration.diagnostic', null);
     }
     notifyListeners();
   }
