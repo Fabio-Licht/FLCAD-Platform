@@ -12078,6 +12078,18 @@ class _SketchContinuityRepairPanelState
     }
   }
 
+  Future<void> _confirmSelectedG1Alternative() async {
+    final token = controller.sketchG1ContinuityRepairPreviewToken;
+    if (token == null || !controller.canConfirmSketchG1ContinuityRepair) {
+      return;
+    }
+    try {
+      await controller.confirmSketchG1ContinuityRepairPreview(token: token);
+    } catch (_) {
+      // The controller publishes the diagnostic and releases its busy guard.
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -12433,12 +12445,14 @@ class _SketchContinuityRepairPanelState
                   Text(diagnostic, style: const TextStyle(fontSize: 8.5)),
               OutlinedButton.icon(
                 key: const ValueKey('sketch-g1-continuity-repair-confirm'),
-                onPressed: null,
-                icon: const Icon(Icons.lock_outline, size: 13),
+                onPressed: controller.canConfirmSketchG1ContinuityRepair
+                    ? _confirmSelectedG1Alternative
+                    : null,
+                icon: const Icon(Icons.check, size: 13),
                 label: const Text('Confirmar G1'),
               ),
               const Text(
-                'Somente leitura: Confirmar G1 ainda não está habilitado.',
+                'Disponível somente para uma alternativa G1 válida do preview atual.',
                 style: TextStyle(fontSize: 8.5),
               ),
             ],

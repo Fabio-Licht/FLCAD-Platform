@@ -1090,8 +1090,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   /// Applies exactly the selected G1 alternative from the active preview.
-  /// This API is deliberately not connected to the G1 button yet; the
-  /// preview token remains the sole authority for a future confirmation UI.
+  /// The preview token remains the sole authority for this confirmation UI.
   Future<List<String>> confirmSketchG1ContinuityRepairPreview({
     required String token,
   }) async {
@@ -9554,13 +9553,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       });
       transactionCommitted = true;
       parameters['affectedEntityIds'] = List<String>.from(affectedIds);
+      // Invalidate the preview before publishing the changed Sketch scene.
+      // The scene publication notifies the workspace synchronously; keeping
+      // the old fingerprint alive until after that notification would make
+      // the preview getter invalidate itself while the panel is building.
+      _invalidateSketchContinuityRepairPreview();
       await api.persist();
       await _synchronizeSketchScene();
       selectedSketchEntityIds
         ..clear()
         ..addAll(affectedIds);
       runtime.select(affectedIds.toSet());
-      _invalidateSketchContinuityRepairPreview();
       _selectedSketchContinuityJoin = null;
       sketchReconstructionMessage =
           'Correção G1 aplicada: ${affectedIds.length} entidade(s) atualizada(s).';
