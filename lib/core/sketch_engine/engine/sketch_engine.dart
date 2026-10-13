@@ -63,6 +63,55 @@ class SketchEngine {
     activeSketchId = id;
   }
 
+  /// Rehydrates a Sketch root that is still present in the CAD document but
+  /// has no canonical file in the Sketch repository. This is deliberately a
+  /// non-historic restore: it repairs the engine/document identity boundary
+  /// without creating an edit, changing the document, or adding Undo state.
+  void restoreSketch(
+    Sketch sketch, {
+    Iterable<SketchEntity> entities = const <SketchEntity>[],
+  }) {
+    if (sketches.containsKey(sketch.id)) return;
+    final restoredEntities = entities.toList(growable: false);
+    final duplicate =
+        restoredEntities.map((entity) => entity.id).toSet().length !=
+        restoredEntities.length;
+    if (duplicate) {
+      throw StateError('Sketch ${sketch.id} contains duplicate entity IDs.');
+    }
+    for (final entity in restoredEntities) {
+      final existing = this.entities[entity.id];
+      if (existing != null) {
+        throw StateError(
+          'Sketch entity ID ${entity.id} belongs to another restored Sketch.',
+        );
+      }
+    }
+    sketches[sketch.id] = sketch;
+    graphs.sketch.addNode(sketch.id);
+    for (final entity in restoredEntities) {
+      if (!sketch.entityIds.contains(entity.id)) {
+        sketch.entityIds.add(entity.id);
+      }
+      entity.graphNode = entity.graphNode.isEmpty
+          ? entity.id
+          : entity.graphNode;
+      this.entities[entity.id] = entity;
+      graphs.entities.addNode(entity.id);
+      graphs.dependencies.addNode(entity.id);
+      if (entity.reference) graphs.references.addNode(entity.id);
+      if (entity.construction) graphs.construction.addNode(entity.id);
+    }
+    analytics.sketches = sketches.length;
+    analytics.entities = this.entities.length;
+    analytics.referenceEntities = this.entities.values
+        .where((entity) => entity.reference)
+        .length;
+    analytics.constructionEntities = this.entities.values
+        .where((entity) => entity.construction)
+        .length;
+  }
+
   void closeSketch() => activeSketchId = null;
   Sketch get activeSketch =>
       sketches[activeSketchId] ?? (throw StateError('No active sketch'));

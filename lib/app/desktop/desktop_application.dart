@@ -459,11 +459,13 @@ class DesktopHistoryShortcuts extends StatefulWidget {
     super.key,
     required this.onUndo,
     required this.onRedo,
+    this.onSave,
     required this.child,
   });
 
   final Future<void> Function() onUndo;
   final Future<void> Function() onRedo;
+  final Future<void> Function()? onSave;
   final Widget child;
 
   @override
@@ -504,6 +506,10 @@ class _DesktopHistoryShortcutsState extends State<DesktopHistoryShortcuts> {
       SingleActivator(LogicalKeyboardKey.keyY, control: true): () {
         if (!_textEditorHasFocus()) _invoke('redo', widget.onRedo);
       },
+      if (widget.onSave != null)
+        SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
+          if (!_textEditorHasFocus()) _invoke('save', widget.onSave!);
+        },
     },
     child: Focus(autofocus: true, child: widget.child),
   );
@@ -923,6 +929,7 @@ class _DesktopShellState extends State<DesktopShell> {
             child: DesktopHistoryShortcuts(
               onUndo: commands.undo,
               onRedo: commands.redo,
+              onSave: () => commands.dispatch('project.save'),
               child: screens[destination],
             ),
           ),

@@ -106,15 +106,12 @@ class ProjectRepository implements Repository<Project, String> {
   Future<void> save(Project project) async {
     final directory = await ensureStructure(project.id);
     final file = File(path.join(directory.path, 'job.json'));
-    final temporary = File('${file.path}.tmp');
-    await temporary.writeAsString(
+    await _atomicText(
+      file,
       const JsonEncoder.withIndent(
         ' ',
       ).convert(ProjectSerializer.toJson(project)),
-      flush: true,
     );
-    if (await file.exists()) await file.delete();
-    await temporary.rename(file.path);
     await _saveManifest(directory, project);
   }
 
@@ -132,10 +129,44 @@ class ProjectRepository implements Repository<Project, String> {
       createdAt: existing?.createdAt ?? project.createdAt,
       updatedAt: now,
     );
-    await file.writeAsString(
+    await _atomicText(
+      file,
       const JsonEncoder.withIndent(' ').convert(manifest.toJson()),
-      flush: true,
     );
+  }
+
+  Future<void> _atomicText(File target, String value) async {
+    final suffix = DateTime.now().microsecondsSinceEpoch;
+    final temporary = File('${target.path}.tmp-$suffix');
+    final backup = File('${target.path}.bak-$suffix');
+    var installed = false;
+    try {
+      await temporary.writeAsString(value, flush: true);
+      if (await target.exists()) await target.rename(backup.path);
+      await temporary.rename(target.path);
+      installed = true;
+      if (await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // Best-effort cleanup only.
+        }
+      }
+    } catch (_) {
+      if (!installed && !await target.exists() && await backup.exists()) {
+        await backup.rename(target.path);
+      }
+      rethrow;
+    } finally {
+      if (await temporary.exists()) await temporary.delete();
+      if (installed && await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // Best-effort cleanup only.
+        }
+      }
+    }
   }
 
   @override

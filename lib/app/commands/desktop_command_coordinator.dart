@@ -34,6 +34,49 @@ class DesktopCommandCoordinator {
   late final CommandManager manager;
   late final CommandDispatcher dispatcher;
   late final EngineeringCommandRouter router;
+  Future<void> _saveTail = Future<void>.value();
+
+  /// Canonical project save entry point. Menu, Ctrl+S and workspace callers
+  /// share this tail so Sketch/document writes cannot interleave.
+  Future<void> saveProject({String? expectedProjectId}) {
+    final operation = _saveTail.then<void>(
+      (_) => _performSave(expectedProjectId: expectedProjectId),
+      onError: (_, _) => _performSave(expectedProjectId: expectedProjectId),
+    );
+    _saveTail = operation.then<void>((_) {}, onError: (_, _) {});
+    return operation;
+  }
+
+  Future<void> _performSave({String? expectedProjectId}) async {
+    final project = projects.current;
+    if (project == null) throw StateError('No project is open.');
+    _assertSaveContext(project, expectedProjectId: expectedProjectId);
+    final persist = cad.runtime.read<Future<void> Function()>(
+      'project.beforeSave',
+    );
+    if (persist != null) await persist();
+    _assertSaveContext(project, expectedProjectId: expectedProjectId);
+    await cad.runtime.save(recordLifecycle: true);
+    _assertSaveContext(project, expectedProjectId: expectedProjectId);
+    await repository.save(project);
+    _assertSaveContext(project, expectedProjectId: expectedProjectId);
+  }
+
+  void _assertSaveContext(
+    Project project, {
+    String? expectedProjectId,
+  }) {
+    if (expectedProjectId != null && project.id != expectedProjectId) {
+      throw StateError('The project changed while Save was waiting.');
+    }
+    if (projects.current?.id != project.id) {
+      throw StateError('The active project changed during Save.');
+    }
+    final documentProjectId = cad.runtime.document?.projectId;
+    if (documentProjectId != null && documentProjectId != project.id) {
+      throw StateError('The CAD document changed during Save.');
+    }
+  }
 
   Future<void> initialize() async {
     await projects.initialize();
@@ -141,9 +184,8 @@ class DesktopCommandCoordinator {
       id: 'project.save',
       module: 'Project',
       validator: CommandValidation.projectRequired,
-      execute: (_, _) async {
-        await cad.runtime.save(recordLifecycle: true);
-        await repository.save(projects.current!);
+      execute: (context, _) async {
+        await saveProject(expectedProjectId: context.projectId);
         return 'Project saved';
       },
       undo: (_, _) async => 'Save is already durable; project state unchanged',

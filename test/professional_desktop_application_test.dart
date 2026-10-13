@@ -312,6 +312,7 @@ void main() {
     ) async {
       var undoCalls = 0;
       var redoCalls = 0;
+      var saveCalls = 0;
       final text = TextEditingController(text: 'editable');
       addTearDown(text.dispose);
       await tester.pumpWidget(
@@ -319,6 +320,7 @@ void main() {
           home: DesktopHistoryShortcuts(
             onUndo: () async => undoCalls++,
             onRedo: () async => redoCalls++,
+            onSave: () async => saveCalls++,
             child: Scaffold(body: TextField(controller: text)),
           ),
         ),
@@ -332,6 +334,10 @@ void main() {
       await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
       expect(undoCalls, 1);
       expect(redoCalls, 1);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlRight);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyS);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlRight);
+      expect(saveCalls, 1);
 
       await tester.tap(find.byType(TextField));
       await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);

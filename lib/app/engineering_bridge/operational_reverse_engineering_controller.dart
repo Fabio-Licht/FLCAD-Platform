@@ -351,7 +351,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SmartRegionsApi? smartRegionsApi,
   }) : recognition = RecognitionBridge(recognition),
        _referenceApi = referenceApi ?? ReferenceApi(),
-       _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi();
+       _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi() {
+    // All desktop Save entry points (menu, Ctrl+S and the Sketch panel) go
+    // through DesktopCommandCoordinator.  Register the editor/constraint
+    // persistence as its pre-save phase so it is serialized with the CAD and
+    // project writes instead of being performed as a second, racing save.
+    _beforeSaveCallback = persist;
+    runtime.write<Future<void> Function()>(
+      'project.beforeSave',
+      _beforeSaveCallback,
+    );
+  }
 
   @override
   void dispose() {
@@ -364,6 +374,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _invalidateSketchReconstructionJointPreview();
       runtime.hideTransient(sketchReconstructionHighlightId);
       runtime.hideTransient(sketchReconstructionHoverHighlightId);
+      if (runtime.read<Future<void> Function()>('project.beforeSave') ==
+          _beforeSaveCallback) {
+        runtime.write('project.beforeSave', null);
+      }
     } on Object {
       // Widget tests dispose CadRuntime before the controller.
     }
@@ -371,6 +385,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   final RecognitionBridge recognition;
+  late final Future<void> Function() _beforeSaveCallback;
+
+  void _installBeforeSaveHook() {
+    runtime.write<Future<void> Function()>(
+      'project.beforeSave',
+      _beforeSaveCallback,
+    );
+  }
   final DesktopCommandCoordinator commands;
   final CadRuntime runtime;
   GeometrySelectionManager get geometrySelection => runtime.geometrySelection;
@@ -3537,7 +3559,36 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     var sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
     final persisted = runtime.document?.entities[id]?.data['sketch'];
     if (sketch == null && persisted is Map) {
-      sketch = Sketch.fromJson(Map<String, dynamic>.from(persisted));
+      final restored = Sketch.fromJson(Map<String, dynamic>.from(persisted));
+      final restoredEntities = <SketchEntity>[];
+      final document = runtime.document;
+      if (document != null) {
+        for (final entityId in restored.entityIds) {
+          final documentEntity = document.entities[entityId];
+          final raw = documentEntity?.data['sketchEntity'];
+          if (raw is Map) {
+            restoredEntities.add(
+              SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
+            );
+          }
+        }
+        for (final documentEntity in document.entities.values) {
+          if (documentEntity.data['parentSketchId'] != restored.id) continue;
+          final raw = documentEntity.data['sketchEntity'];
+          if (raw is! Map ||
+              restoredEntities.any(
+                (entity) => entity.id == documentEntity.id,
+              )) {
+            continue;
+          }
+          restoredEntities.add(
+            SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
+          );
+        }
+      }
+      sketchApi?.restoreSketch(restored, entities: restoredEntities);
+      sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
+      sketch ??= restored;
     }
     if (sketch == null) throw StateError('Unknown Sketch: $id');
     _reconcileSketchEntityMembership(sketch);
@@ -3779,6 +3830,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ),
       _ => throw StateError('Only XY, YZ and ZX are supported.'),
     };
+    // The plane buttons create a visible reference curve, but they also act
+    // as the operator's explicit plane choice for the following Create
+    // Section command. Keep the runtime support state in lockstep with the
+    // reference that is about to be published.
+    selectSketchSupport(definition.$1);
     await sections.create(
       planeId: definition.$1,
       origin: definition.$2,
@@ -5470,11 +5526,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     required String projectId,
     required Directory projectDirectory,
   }) async {
-    if (configuredProjectId == projectId) return;
+    if (configuredProjectId == projectId) {
+      _installBeforeSaveHook();
+      return;
+    }
     cancelSketchPointReferenceCapture(notify: false);
     selectedSketchEntityIds.clear();
     selectedConstraintIds.clear();
     configuredProjectId = projectId;
+    _installBeforeSaveHook();
     final sketch = const SketchEngineFactory().create(projectDirectory);
     sketch.engine.projectId = projectId;
     final constraints = const ConstraintFactory().create(
@@ -16226,7 +16286,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> saveProject() async {
-    await persist();
     await commands.dispatch('project.save');
   }
 

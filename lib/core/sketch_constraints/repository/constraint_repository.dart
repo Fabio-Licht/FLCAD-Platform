@@ -35,6 +35,36 @@ class ConstraintRepository {
     await initialize();
     final constraintList = constraints.toList(growable: false);
     final dimensionList = dimensions.toList(growable: false);
+    for (final c in constraintList) {
+      await _writeJsonAtomically(
+        File(
+          '${_dir(paths[0]).path}${Platform.pathSeparator}${_safe(c.id)}.json',
+        ),
+        c.toJson(),
+      );
+    }
+    for (final d in dimensionList) {
+      await _writeJsonAtomically(
+        File(
+          '${_dir(paths[4]).path}${Platform.pathSeparator}${_safe(d.id)}.json',
+        ),
+        d.toJson(),
+      );
+    }
+    await _writeJsonAtomically(
+      File('${_dir(paths[1]).path}${Platform.pathSeparator}graph.json'),
+      graphs.toJson(),
+    );
+    await _writeJsonAtomically(
+      File('${_dir(paths[2]).path}${Platform.pathSeparator}history.json'),
+      history.entries.map((e) => e.toJson()).toList(),
+    );
+    await _writeJsonAtomically(
+      File('${_dir(paths[3]).path}${Platform.pathSeparator}analytics.json'),
+      analytics.toJson(),
+    );
+    // Remove obsolete records only after every replacement file was written.
+    // A failed write therefore leaves the previous set recoverable.
     await _removeStaleJson(
       _dir(paths[0]),
       constraintList.map((value) => value.id),
@@ -43,27 +73,40 @@ class ConstraintRepository {
       _dir(paths[4]),
       dimensionList.map((value) => value.id),
     );
-    for (final c in constraintList) {
-      await File(
-        '${_dir(paths[0]).path}${Platform.pathSeparator}${_safe(c.id)}.json',
-      ).writeAsString(jsonEncode(c.toJson()));
+  }
+
+  Future<void> _writeJsonAtomically(File target, Object value) async {
+    final suffix = DateTime.now().microsecondsSinceEpoch;
+    final temporary = File('${target.path}.tmp-$suffix');
+    final backup = File('${target.path}.bak-$suffix');
+    var installed = false;
+    try {
+      await temporary.writeAsString(jsonEncode(value), flush: true);
+      if (await target.exists()) await target.rename(backup.path);
+      await temporary.rename(target.path);
+      installed = true;
+      if (await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // Best-effort cleanup only.
+        }
+      }
+    } catch (_) {
+      if (!installed && !await target.exists() && await backup.exists()) {
+        await backup.rename(target.path);
+      }
+      rethrow;
+    } finally {
+      if (await temporary.exists()) await temporary.delete();
+      if (installed && await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // Best-effort cleanup only.
+        }
+      }
     }
-    for (final d in dimensionList) {
-      await File(
-        '${_dir(paths[4]).path}${Platform.pathSeparator}${_safe(d.id)}.json',
-      ).writeAsString(jsonEncode(d.toJson()));
-    }
-    await File(
-      '${_dir(paths[1]).path}${Platform.pathSeparator}graph.json',
-    ).writeAsString(jsonEncode(graphs.toJson()));
-    await File(
-      '${_dir(paths[2]).path}${Platform.pathSeparator}history.json',
-    ).writeAsString(
-      jsonEncode(history.entries.map((e) => e.toJson()).toList()),
-    );
-    await File(
-      '${_dir(paths[3]).path}${Platform.pathSeparator}analytics.json',
-    ).writeAsString(jsonEncode(analytics.toJson()));
   }
 
   Future<void> _removeStaleJson(

@@ -5015,6 +5015,153 @@ void main() {
     },
   );
 
+  test(
+    'document Sketch roots are rehydrated when the engine loses the root',
+    () async {
+      final harness = await _g124Harness('g124-orphan-sketch-root');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final sketch = harness.controller.activeSketch!;
+      final line = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, 0),
+      );
+      await harness.controller.reopenSketchForEditing(sketch.id);
+      await harness.controller.persist();
+      expect(
+        harness
+            .cad
+            .runtime
+            .document!
+            .entities[sketch.id]
+            ?.data['geometricEntities'],
+        contains(line.id),
+      );
+
+      // Simulate the observed document/engine split without touching a real
+      // project: the CAD projection still contains the root and child, while
+      // the in-memory Sketch Engine has lost both canonical objects.
+      harness.controller.sketchApi!.engine.sketches.remove(sketch.id);
+      harness.controller.sketchApi!.engine.entities.remove(line.id);
+      harness.controller.sketchApi!.engine.activeSketchId = null;
+
+      await harness.controller.reopenSketchForEditing(sketch.id);
+      expect(harness.controller.activeSketch!.id, sketch.id);
+      expect(harness.controller.sketchApi!.engine.activeSketchId, sketch.id);
+      expect(harness.controller.sketchApi!.entity(line.id), isA<SketchLine>());
+      expect(harness.controller.stage, SketchSurfaceStage.sketchActive);
+    },
+  );
+
+  test(
+    'Plane YZ is transferred to Create Section instead of the previous plane',
+    () async {
+      final harness = await _g124Harness('g124-section-plane-transfer');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      const mesh = KernelMeshHandle(
+        persistentId: 'plane-transfer-mesh',
+        kernelId: 'test',
+        fingerprint: 'plane-transfer',
+        vertexCount: 4,
+        triangleCount: 4,
+        bounds: KernelBounds(-1, -1, -1, 1, 1, 1),
+        hasNormals: false,
+        metadata: {},
+      );
+      await harness.cad.runtime.registerImport(
+        const ImportedCadDocument(
+          id: 'Mesh001',
+          projectId: 'g124-section-plane-transfer',
+          sourcePath: 'mesh.stl',
+          format: CadImportFormat.stl,
+          registeredPath: 'CAD/Imports/mesh.stl',
+          validation: [],
+          mesh: mesh,
+        ),
+        geometry: const KernelMeshGeometry(
+          nodes: [-1, -1, -1, 1, -1, 1, 0, 1, -1, 0, 0, 1],
+          triangles: [0, 1, 2, 0, 3, 1, 1, 3, 2, 2, 3, 0],
+        ),
+      );
+
+      await harness.controller.createWorldReferenceCurve(SketchPlaneType.yz);
+      expect(harness.controller.activeSketchPlaneId, endsWith('yz-plane'));
+      expect(harness.controller.activeSketchPlane!.normal.x, closeTo(1, 1e-12));
+      await harness.controller.createSection();
+      final sections = harness.controller.sections.sections;
+      expect(sections, hasLength(2));
+      final created = sections.last.data['section'] as Map;
+      expect(created['planeId'], endsWith('yz-plane'));
+      expect(created['normal'], [1.0, 0.0, 0.0]);
+    },
+  );
+
+  test(
+    'dense Section display decimation never joins unrelated segments',
+    () async {
+      final harness = await _g124Harness('g124-dense-section-display');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      const count = 1001;
+      final nodes = <double>[];
+      final triangles = <int>[];
+      for (var index = 0; index < count; index++) {
+        final x = index * .01;
+        final base = nodes.length ~/ 3;
+        nodes.addAll([x, 0, -1, x + .004, 0, 1, x, .004, -1]);
+        triangles.addAll([base, base + 1, base + 2]);
+      }
+      const mesh = KernelMeshHandle(
+        persistentId: 'dense-section-mesh',
+        kernelId: 'test',
+        fingerprint: 'dense-section',
+        vertexCount: count * 3,
+        triangleCount: count,
+        bounds: KernelBounds(0, 0, -1, 10.1, .004, 1),
+        hasNormals: false,
+        metadata: {},
+      );
+      await harness.cad.runtime.registerImport(
+        const ImportedCadDocument(
+          id: 'Mesh001',
+          projectId: 'g124-dense-section-display',
+          sourcePath: 'dense.stl',
+          format: CadImportFormat.stl,
+          registeredPath: 'CAD/Imports/dense.stl',
+          validation: [],
+          mesh: mesh,
+        ),
+        geometry: KernelMeshGeometry(nodes: nodes, triangles: triangles),
+      );
+      final section = await harness.controller.sections.create(
+        planeId:
+            '${WorldCoordinateSystem.prefix('g124-dense-section-display')}xy-plane',
+        origin: Vector3.zero,
+        normal: const Vector3(0, 0, 1),
+      );
+      final raw = (section.data['section'] as Map)['segments'] as List;
+      final display =
+          (section.data['sceneGeometry'] as Map)['segments'] as List;
+      expect(raw.length, greaterThan(1000));
+      final source = raw.map(jsonEncode).toSet();
+      expect(
+        display.every((segment) => source.contains(jsonEncode(segment))),
+        isTrue,
+      );
+      final conversionTimer = Stopwatch()..start();
+      await harness.controller.createSketchFromSelectedSection();
+      conversionTimer.stop();
+      expect(harness.controller.activeSketch, isNotNull);
+      expect(harness.controller.sketchEntities, isNotEmpty);
+      expect(conversionTimer.elapsed, lessThan(const Duration(seconds: 10)));
+    },
+  );
+
   test('legacy Sketch projects use a deterministic active-root fallback', () async {
     final directory = await Directory.systemTemp.createTemp(
       'g124-legacy-active-sketch-',

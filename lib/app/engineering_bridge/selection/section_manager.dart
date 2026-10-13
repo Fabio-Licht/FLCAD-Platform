@@ -335,9 +335,14 @@ class SectionManager {
     if (segments.length <= _maxDisplaySegments) return segments;
     final stride = (segments.length / _maxDisplaySegments).ceil();
     final output = <List<List<double>>>[];
+    // Decimate by retaining complete source segments. Joining the first point
+    // of one segment to the last point of a later segment invents diagonals
+    // between disconnected STL intersections and can visibly cross loops.
     for (var start = 0; start < segments.length; start += stride) {
-      final end = math.min(start + stride - 1, segments.length - 1);
-      output.add([segments[start].first, segments[end].last]);
+      output.add(segments[start]);
+    }
+    if (output.isNotEmpty && !identical(output.last, segments.last)) {
+      output.add(segments.last);
     }
     return output;
   }

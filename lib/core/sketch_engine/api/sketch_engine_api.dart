@@ -17,6 +17,10 @@ class SketchEngineApi {
   }) => engine.createSketch(name, plane: plane, coordinates: coordinates);
   void deleteSketch(String id) => engine.deleteSketch(id);
   void openSketch(String id) => engine.openSketch(id);
+  void restoreSketch(
+    Sketch sketch, {
+    Iterable<SketchEntity> entities = const <SketchEntity>[],
+  }) => engine.restoreSketch(sketch, entities: entities);
   void closeSketch() => engine.closeSketch();
   void deleteEntity(String id) => engine.deleteEntity(id);
 

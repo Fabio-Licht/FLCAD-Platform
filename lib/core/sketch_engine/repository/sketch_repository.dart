@@ -30,9 +30,12 @@ class SketchRepository {
 
   Future<void> saveSketch(Sketch sketch) async {
     await initialize();
-    await File(
-      '${_directory(paths[0]).path}${Platform.pathSeparator}${_safeName(sketch.id)}.json',
-    ).writeAsString(jsonEncode(sketch.toJson()));
+    await _writeJsonAtomically(
+      File(
+        '${_directory(paths[0]).path}${Platform.pathSeparator}${_safeName(sketch.id)}.json',
+      ),
+      sketch.toJson(),
+    );
   }
 
   Future<void> saveEntity(String sketchId, SketchEntity entity) async {
@@ -41,9 +44,10 @@ class SketchRepository {
       '${_directory(paths[1]).path}${Platform.pathSeparator}${_safeName(sketchId)}',
     );
     await dir.create(recursive: true);
-    await File(
-      '${dir.path}${Platform.pathSeparator}${_safeName(entity.id)}.json',
-    ).writeAsString(jsonEncode(entity.toJson()));
+    await _writeJsonAtomically(
+      File('${dir.path}${Platform.pathSeparator}${_safeName(entity.id)}.json'),
+      entity.toJson(),
+    );
   }
 
   Future<List<Sketch>> loadSketches() async {
@@ -94,29 +98,29 @@ class SketchRepository {
     String? projectId,
   }) async {
     await initialize();
-    await File(
-      '${_directory(paths[2]).path}${Platform.pathSeparator}history.json',
-    ).writeAsString(
-      jsonEncode(history.entries.map((e) => e.toJson()).toList()),
+    await _writeJsonAtomically(
+      File('${_directory(paths[2]).path}${Platform.pathSeparator}history.json'),
+      history.entries.map((e) => e.toJson()).toList(),
     );
-    await File(
-      '${_directory(paths[3]).path}${Platform.pathSeparator}graph.json',
-    ).writeAsString(jsonEncode(graphs.toJson()));
-    await File(
-      '${_directory(paths[4]).path}${Platform.pathSeparator}analytics.json',
-    ).writeAsString(jsonEncode(analytics.toJson()));
+    await _writeJsonAtomically(
+      File('${_directory(paths[3]).path}${Platform.pathSeparator}graph.json'),
+      graphs.toJson(),
+    );
+    await _writeJsonAtomically(
+      File(
+        '${_directory(paths[4]).path}${Platform.pathSeparator}analytics.json',
+      ),
+      analytics.toJson(),
+    );
     final activeFile = File(
       '${_directory(paths[2]).path}${Platform.pathSeparator}$_activeSketchFile',
     );
-    await _writeJsonAtomically(
-      activeFile,
-      {
-        'schema': 'flcad.sketch-active',
-        'version': 1,
-        'projectId': projectId,
-        'activeSketchId': activeSketchId,
-      },
-    );
+    await _writeJsonAtomically(activeFile, {
+      'schema': 'flcad.sketch-active',
+      'version': 1,
+      'projectId': projectId,
+      'activeSketchId': activeSketchId,
+    });
   }
 
   /// Reads the project-level active Sketch identity. Missing or malformed
@@ -159,16 +163,40 @@ class SketchRepository {
   }
 
   Future<void> _writeJsonAtomically(File target, Object value) async {
-    final temporary = File(
-      '${target.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
-    );
+    final suffix = DateTime.now().microsecondsSinceEpoch;
+    final temporary = File('${target.path}.tmp-$suffix');
+    final backup = File('${target.path}.bak-$suffix');
+    var installed = false;
     try {
       await temporary.writeAsString(jsonEncode(value), flush: true);
-      if (await target.exists()) await target.delete();
+      if (await target.exists()) await target.rename(backup.path);
       await temporary.rename(target.path);
+      installed = true;
+      if (await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // A stale backup is recoverable and must not turn a successful save
+          // into a false failure.
+        }
+      }
+    } catch (_) {
+      if (!installed &&
+          !await target.exists() &&
+          await backup.exists()) {
+        await backup.rename(target.path);
+      }
+      rethrow;
     } finally {
       if (await temporary.exists()) {
         await temporary.delete();
+      }
+      if (installed && await backup.exists()) {
+        try {
+          await backup.delete();
+        } on Object {
+          // Best-effort cleanup only.
+        }
       }
     }
   }
