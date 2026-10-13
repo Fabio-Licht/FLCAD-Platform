@@ -123,6 +123,8 @@ class SketchEngineApi {
   SketchEntity? entity(String id) => engine.entities[id];
   Future<void> load() => engine.load();
   Future<void> persist() => engine.persist();
+  String? get activeSketchRestoreDiagnostic =>
+      engine.activeSketchRestoreDiagnostic;
 
   static void _updateProfessionalParameters(
     SketchEntity entity,

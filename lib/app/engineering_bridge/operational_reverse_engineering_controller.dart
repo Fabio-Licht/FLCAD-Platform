@@ -402,6 +402,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String? get configuredProjectId => runtime.read('project.configuredId');
   set configuredProjectId(String? value) =>
       runtime.write('project.configuredId', value);
+  String? get sketchOpenDiagnostic =>
+      runtime.read<String>('sketch.open.diagnostic');
   SketchEngineApi? get sketchApi => runtime.read('sketch.api');
   set sketchApi(SketchEngineApi? value) => runtime.write('sketch.api', value);
   SketchEditorApi? get editorApi => runtime.read('sketch.editorApi');
@@ -3539,6 +3541,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     if (sketch == null) throw StateError('Unknown Sketch: $id');
     _reconcileSketchEntityMembership(sketch);
+    // Keep the engine identity in sync with the controller selection so the
+    // chosen root is the one persisted by SketchEngine.persist().
+    if (sketchApi?.sketches.any((item) => item.id == id) == true) {
+      sketchApi!.openSketch(id);
+    }
     activeSketch = sketch;
     // Entity IDs belong to one Sketch. Switching roots must not keep a
     // previous selection that Ctrl-click could later treat as still valid.
@@ -5053,6 +5060,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return 'Sketch${index.toString().padLeft(3, '0')}';
   }
 
+  Sketch? _stableSketch(Iterable<Sketch> candidates) {
+    final ordered = candidates.toList()
+      ..sort((a, b) {
+        final timestamp = a.timestamp.compareTo(b.timestamp);
+        return timestamp != 0 ? timestamp : a.id.compareTo(b.id);
+      });
+    return ordered.firstOrNull;
+  }
+
   /// Sketch already persisted for [supportId], if any. Re-entering the Sketch
   /// module for the same support must reopen this root instead of persisting a
   /// second one.
@@ -5064,7 +5080,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sketch.plane.parameters['referenceId'] == supportId;
     final active = activeSketch;
     if (active != null && matches(active)) return active;
-    return api.sketches.where(matches).firstOrNull;
+    return _stableSketch(api.sketches.where(matches));
   }
 
   /// Sketch already derived from [sectionId], if any. Rebuilding a Section must
@@ -5076,7 +5092,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         sketch.metadata['sourceSectionId'] == sectionId;
     final active = activeSketch;
     if (active != null && matches(active)) return active;
-    return api.sketches.where(matches).firstOrNull;
+    return _stableSketch(api.sketches.where(matches));
   }
 
   bool get _commandsRegistered =>
@@ -5460,6 +5476,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     selectedConstraintIds.clear();
     configuredProjectId = projectId;
     final sketch = const SketchEngineFactory().create(projectDirectory);
+    sketch.engine.projectId = projectId;
     final constraints = const ConstraintFactory().create(
       projectDirectory: projectDirectory,
       sketch: sketch,
@@ -5523,9 +5540,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               item.geometry is PlaneGeometry,
         )
         .lastOrNull;
+    activeSketch = null;
+    runtime.write('sketch.open.diagnostic', null);
     if (sketch.sketches.isNotEmpty) {
-      activeSketch = sketch.sketches.last;
+      // SketchEngine restores a persisted identity, or selects its stable
+      // timestamp/ID fallback for legacy projects. Never use filesystem/list
+      // order here: Directory.list() order is not a project contract.
+      final restoredId = sketch.engine.activeSketchId;
+      final restored = sketch.sketches
+          .where((item) => item.id == restoredId)
+          .firstOrNull;
+      final selected =
+          restored ??
+          (!sketch.engine.activeSketchIdentityPersisted
+              ? _stableSketch(sketch.sketches)
+              : null);
+      if (selected != null && sketch.engine.activeSketchId != selected.id) {
+        sketch.openSketch(selected.id);
+      }
+      activeSketch = selected;
+      runtime.write(
+        'sketch.open.diagnostic',
+        sketch.activeSketchRestoreDiagnostic,
+      );
       await _synchronizeSketchScene();
+    } else {
+      runtime.write('sketch.open.diagnostic', null);
     }
     if (activeSurface != null) {
       stage = SketchSurfaceStage.surfaceGenerated;
@@ -5570,6 +5610,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     configuredProjectId = null;
     activeReference = null;
     activeSketch = null;
+    runtime.write('sketch.open.diagnostic', null);
     activeSurface = null;
     surfacePlan = null;
     runtime.hideTransient('surface-preview');

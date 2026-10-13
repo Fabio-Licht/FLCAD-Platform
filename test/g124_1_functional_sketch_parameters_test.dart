@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -26,7 +27,9 @@ import 'package:flcad_mobile/core/reference_engine/repository/reference_reposito
 import 'package:flcad_mobile/core/sketch_assistant/sketch_reconstruction.dart';
 import 'package:flcad_mobile/core/sketch_assistant/sketch_continuity_repair_planner.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
+import 'package:flcad_mobile/core/sketch_engine/engine/sketch_engine.dart';
 import 'package:flcad_mobile/core/sketch_engine/history/sketch_history.dart';
+import 'package:flcad_mobile/core/sketch_engine/repository/sketch_repository.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
@@ -4862,6 +4865,268 @@ void main() {
       expect(harness.controller.selectedSketchEntityIds, isEmpty);
     },
   );
+
+  test(
+    'Save/Open preserves independent manual and Section-derived Sketch roots',
+    () async {
+      final harness = await _g124Harness('g124-multiple-sketch-rehydration');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      final manual = controller.activeSketch!;
+      final manualLine = api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      api.builders.arc.build(
+        const SketchVector(10, 2),
+        2,
+        -math.pi / 2,
+        math.pi / 2,
+      );
+
+      CadDocumentEntity section(String id, double offset) => CadDocumentEntity(
+        id: id,
+        kind: CadDocumentEntityKind.section,
+        data: {
+          'name': id,
+          'sceneKind': 'curve',
+          'sceneVisible': true,
+          'sceneGeometry': {
+            'segments': [
+              [
+                [offset, 0, 0],
+                [offset + 5, 0, 0],
+              ],
+              [
+                [offset + 5, 0, 0],
+                [offset + 5, 5, 0],
+              ],
+            ],
+          },
+          'section': {
+            'origin': [offset, 0, 0],
+            'normal': [0, 0, 1],
+            'planeId': 'xy-plane',
+            'segments': [
+              [
+                [offset, 0, 0],
+                [offset + 5, 0, 0],
+              ],
+              [
+                [offset + 5, 0, 0],
+                [offset + 5, 5, 0],
+              ],
+            ],
+          },
+        },
+      );
+      await harness.cad.runtime.mutate(
+        command: 'test.sections',
+        upsert: [section('SectionA', 20), section('SectionB', 40)],
+      );
+
+      harness.cad.runtime.select({'SectionA'});
+      await controller.createSketchFromSelectedSection();
+      final derivedA = controller.activeSketch!;
+      harness.cad.runtime.select({'SectionB'});
+      await controller.createSketchFromSelectedSection();
+      final derivedB = controller.activeSketch!;
+      expect({manual.id, derivedA.id, derivedB.id}, hasLength(3));
+      expect(api.sketches, hasLength(3));
+      final idsBefore = api.sketches.map((sketch) => sketch.id).toSet();
+      final membershipsBefore = {
+        for (final sketch in api.sketches)
+          sketch.id: List<String>.of(sketch.entityIds),
+      };
+      // Persist an active identity that is not the last-created Sketch. This
+      // is the regression case for the old `sketches.last` restoration.
+      controller.selectSketch(manual.id);
+      await controller.persist();
+      final activeMetadata = jsonDecode(
+        await File(
+          '${harness.directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+          'SketchHistory${Platform.pathSeparator}active-sketch.json',
+        ).readAsString(),
+      ) as Map<String, dynamic>;
+      expect(activeMetadata['schema'], 'flcad.sketch-active');
+      expect(activeMetadata['version'], 1);
+      expect(activeMetadata['projectId'], 'g124-multiple-sketch-rehydration');
+      expect(activeMetadata['activeSketchId'], manual.id);
+
+      final reopenedKernels = KernelManager()
+        ..register(_HealthySurfaceKernel(), makeDefault: true);
+      final reopenedCad = DesktopCadController(
+        kernels: reopenedKernels,
+        projects: ProjectManager.instance,
+      );
+      final reopenedCommands = DesktopCommandCoordinator(
+        cad: reopenedCad,
+        projects: ProjectManager.instance,
+      );
+      final reopened = OperationalReverseEngineeringController(
+        recognition: ProfessionalRecognitionApi(),
+        commands: reopenedCommands,
+        runtime: reopenedCad.runtime,
+        referenceApi: ReferenceApi(
+          engine: ReferenceEngine(
+            repository: ReferenceRepository(projects: harness.projects),
+          ),
+        ),
+      );
+      addTearDown(reopened.dispose);
+      addTearDown(reopenedCad.dispose);
+      await reopenedCad.runtime.open(
+        'g124-multiple-sketch-rehydration',
+        harness.directory,
+      );
+      await reopened.configureProject(
+        projectId: 'g124-multiple-sketch-rehydration',
+        projectDirectory: harness.directory,
+      );
+      expect(reopened.sketchApi!.sketches, hasLength(3));
+      expect(reopened.sketchApi!.sketches.map((s) => s.id).toSet(), idsBefore);
+      expect(reopened.activeSketch!.id, manual.id);
+      expect(reopened.sketchApi!.engine.activeSketchId, manual.id);
+      expect(reopened.sketchOpenDiagnostic, contains('identidade persistida'));
+      for (final sketch in reopened.sketchApi!.sketches) {
+        final documentRoot = reopenedCad.runtime.document!.entities[sketch.id];
+        expect(documentRoot?.kind, CadDocumentEntityKind.sketch);
+        expect(documentRoot?.data['sketch'], isA<Map>());
+        expect(
+          documentRoot?.data['geometricEntities'],
+          membershipsBefore[sketch.id],
+        );
+        expect(sketch.entityIds, membershipsBefore[sketch.id]);
+        await reopened.reopenSketchForEditing(sketch.id);
+        expect(reopened.stage, SketchSurfaceStage.sketchActive);
+        expect(reopened.sketchApi!.engine.activeSketchId, sketch.id);
+        // Entering the editor must target the same root, not merely its
+        // previously published scene projection.
+        expect(reopened.activeSketch!.id, sketch.id);
+      }
+      await reopened.reopenSketchForEditing(manual.id);
+      final restoredManualLine = reopened.sketchApi!.entity(manualLine.id);
+      expect(restoredManualLine, isNotNull);
+      expect(reopened.sketchEntities, isNotEmpty);
+    },
+  );
+
+  test('legacy Sketch projects use a deterministic active-root fallback', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'g124-legacy-active-sketch-',
+    );
+    addTearDown(() => directory.delete(recursive: true));
+    final repository = SketchRepository(directory);
+    final engine = SketchEngine(repository: repository);
+    engine.projectId = 'legacy-project';
+    final first = engine.createSketch('first');
+    engine.createSketch('second');
+    await engine.persist();
+    await File(
+      '${directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+      'SketchHistory${Platform.pathSeparator}active-sketch.json',
+    ).delete();
+
+    final restored = SketchEngine(repository: repository)
+      ..projectId = 'legacy-project';
+    await restored.load();
+    final expected = [first, ...engine.sketches.values.where((s) => s != first)]
+      ..sort((a, b) {
+        final timestamp = a.timestamp.compareTo(b.timestamp);
+        return timestamp != 0 ? timestamp : a.id.compareTo(b.id);
+      });
+    expect(restored.activeSketchId, expected.first.id);
+    expect(restored.activeSketchRestoreDiagnostic, contains('legado'));
+
+    engine.closeSketch();
+    await engine.persist();
+    final restoredWithoutActive = SketchEngine(repository: repository)
+      ..projectId = 'legacy-project';
+    await restoredWithoutActive.load();
+    expect(restoredWithoutActive.activeSketchId, isNull);
+    expect(
+      restoredWithoutActive.activeSketchRestoreDiagnostic,
+      contains('sem Sketch ativo'),
+    );
+
+    await File(
+      '${directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+      'SketchHistory${Platform.pathSeparator}active-sketch.json',
+    ).writeAsString(
+      '{"schema":"flcad.sketch-active","version":1,'
+      '"activeSketchId":"sketch:missing"}',
+    );
+    final restoredWithMissingId = SketchEngine(repository: repository)
+      ..projectId = 'legacy-project';
+    await restoredWithMissingId.load();
+    expect(restoredWithMissingId.activeSketchId, expected.first.id);
+    await File(
+      '${directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+      'SketchHistory${Platform.pathSeparator}active-sketch.json',
+    ).writeAsString(
+      '{"schema":"flcad.sketch-active","version":1,'
+      '"projectId":"other-project",'
+      '"activeSketchId":"${expected.first.id}"}',
+    );
+    final restoredWithOtherProject = SketchEngine(repository: repository)
+      ..projectId = 'legacy-project';
+    await restoredWithOtherProject.load();
+    expect(restoredWithOtherProject.activeSketchId, expected.first.id);
+    expect(
+      restoredWithOtherProject.activeSketchRestoreDiagnostic,
+      contains('inv'),
+    );
+
+    await File(
+      '${directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+      'SketchHistory${Platform.pathSeparator}active-sketch.json',
+    ).writeAsString(
+      '{"schema":"flcad.sketch-active","version":99,'
+      '"activeSketchId":"${expected.first.id}"}',
+    );
+    final restoredWithUnknownVersion = SketchEngine(repository: repository)
+      ..projectId = 'legacy-project';
+    await restoredWithUnknownVersion.load();
+    expect(restoredWithUnknownVersion.activeSketchId, expected.first.id);
+    expect(
+      restoredWithUnknownVersion.activeSketchRestoreDiagnostic,
+      contains('inv'),
+    );
+
+    final failureDirectory = await Directory.systemTemp.createTemp(
+      'g124-active-sketch-write-failure-',
+    );
+    addTearDown(() => failureDirectory.delete(recursive: true));
+    final failureRepository = SketchRepository(failureDirectory);
+    final failureEngine = SketchEngine(repository: failureRepository);
+    failureEngine.createSketch('survives metadata failure');
+    await failureEngine.persist();
+    final failureMetadata = File(
+      '${failureDirectory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+      'SketchHistory${Platform.pathSeparator}active-sketch.json',
+    );
+    await failureMetadata.delete();
+    await Directory(failureMetadata.path).create();
+    await expectLater(
+      failureEngine.persist(),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(
+      (await Directory(
+        '${failureDirectory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+        'Sketch',
+      ).list().toList()),
+      isNotEmpty,
+    );
+    expect(
+      restoredWithMissingId.activeSketchRestoreDiagnostic,
+      contains('indisponível'),
+    );
+  });
 
   test(
     'joint acceptance applies a validated mixed plan atomically and supports undo redo',

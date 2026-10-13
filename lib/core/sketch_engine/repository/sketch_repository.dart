@@ -10,6 +10,7 @@ import '../models/sketch_models.dart';
 class SketchRepository {
   SketchRepository(this.projectDirectory);
   final Directory projectDirectory;
+  static const _activeSketchFile = 'active-sketch.json';
   static const paths = [
     'CAD/Sketch',
     'CAD/SketchEntities',
@@ -89,6 +90,8 @@ class SketchRepository {
     required SketchGraphSet graphs,
     required SketchHistory history,
     required SketchAnalytics analytics,
+    String? activeSketchId,
+    String? projectId,
   }) async {
     await initialize();
     await File(
@@ -102,7 +105,91 @@ class SketchRepository {
     await File(
       '${_directory(paths[4]).path}${Platform.pathSeparator}analytics.json',
     ).writeAsString(jsonEncode(analytics.toJson()));
+    final activeFile = File(
+      '${_directory(paths[2]).path}${Platform.pathSeparator}$_activeSketchFile',
+    );
+    await _writeJsonAtomically(
+      activeFile,
+      {
+        'schema': 'flcad.sketch-active',
+        'version': 1,
+        'projectId': projectId,
+        'activeSketchId': activeSketchId,
+      },
+    );
   }
+
+  /// Reads the project-level active Sketch identity. Missing or malformed
+  /// metadata is treated as a legacy project and resolved deterministically by
+  /// [SketchEngine], rather than by filesystem enumeration order.
+  Future<String?> loadActiveSketchId() async {
+    final metadata = await loadActiveSketchMetadata();
+    return metadata.valid ? metadata.id : null;
+  }
+
+  Future<SketchActiveMetadata> loadActiveSketchMetadata({
+    String? expectedProjectId,
+  }) async {
+    final file = File(
+      '${_directory(paths[2]).path}${Platform.pathSeparator}$_activeSketchFile',
+    );
+    if (!await file.exists()) return const SketchActiveMetadata.missing();
+    try {
+      final value = jsonDecode(await file.readAsString());
+      if (value is! Map ||
+          value['schema'] != 'flcad.sketch-active' ||
+          value['version'] != 1) {
+        return const SketchActiveMetadata.invalid();
+      }
+      final storedProjectId = value['projectId'];
+      if (storedProjectId != null &&
+          (storedProjectId is! String ||
+              (expectedProjectId != null &&
+                  storedProjectId != expectedProjectId))) {
+        return const SketchActiveMetadata.invalid();
+      }
+      final id = value['activeSketchId'];
+      if (id != null && (id is! String || id.isEmpty)) {
+        return const SketchActiveMetadata.invalid();
+      }
+      return SketchActiveMetadata.valid(id as String?);
+    } on Object {
+      return const SketchActiveMetadata.invalid();
+    }
+  }
+
+  Future<void> _writeJsonAtomically(File target, Object value) async {
+    final temporary = File(
+      '${target.path}.tmp-${DateTime.now().microsecondsSinceEpoch}',
+    );
+    try {
+      await temporary.writeAsString(jsonEncode(value), flush: true);
+      if (await target.exists()) await target.delete();
+      await temporary.rename(target.path);
+    } finally {
+      if (await temporary.exists()) {
+        await temporary.delete();
+      }
+    }
+  }
+}
+
+class SketchActiveMetadata {
+  const SketchActiveMetadata._({
+    required this.present,
+    required this.valid,
+    this.id,
+  });
+  const SketchActiveMetadata.missing()
+    : this._(present: false, valid: false);
+  const SketchActiveMetadata.invalid()
+    : this._(present: true, valid: false);
+  const SketchActiveMetadata.valid(String? id)
+    : this._(present: true, valid: true, id: id);
+
+  final bool present;
+  final bool valid;
+  final String? id;
 }
 
 class SketchRepositoryFactory {

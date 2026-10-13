@@ -10049,6 +10049,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
     final g1ContinuityRepairPreview =
         controller.sketchG1ContinuityRepairPreview;
     final health = controller.sketchHealth;
+    final sketchOpenDiagnostic = controller.sketchOpenDiagnostic;
     final friendlyNames = _friendlySketchEntityNames(controller.sketchEntities);
     final blockingIssues = health.blockingIssues.toList(growable: false);
     final warningIssues = health.warningIssues.toList(growable: false);
@@ -10081,6 +10082,16 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
             color: Theme.of(context).colorScheme.onSurfaceVariant,
           ),
         ),
+        if (sketchOpenDiagnostic != null) ...[
+          const SizedBox(height: 3),
+          Text(
+            sketchOpenDiagnostic,
+            style: TextStyle(
+              fontSize: 10,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
         const Divider(height: 20),
         ExpansionTile(
           initiallyExpanded: true,

@@ -32,6 +32,9 @@ class SketchEngine {
   final List<_Snapshot> _redo = [];
   int _transactionDepth = 0;
   String? activeSketchId;
+  String? projectId;
+  String? activeSketchRestoreDiagnostic;
+  bool activeSketchIdentityPersisted = false;
 
   Sketch createSketch(
     String name, {
@@ -195,6 +198,8 @@ class SketchEngine {
       graphs: graphs,
       history: history,
       analytics: analytics,
+      activeSketchId: activeSketchId,
+      projectId: projectId,
     );
   }
 
@@ -218,6 +223,45 @@ class SketchEngine {
     }
     analytics.sketches = sketches.length;
     analytics.entities = entities.length;
+    await _restoreActiveSketchIdentity();
+  }
+
+  Future<void> _restoreActiveSketchIdentity() async {
+    final ordered = sketches.values.toList()
+      ..sort((a, b) {
+        final timestamp = a.timestamp.compareTo(b.timestamp);
+        return timestamp != 0 ? timestamp : a.id.compareTo(b.id);
+      });
+    if (ordered.isEmpty) {
+      activeSketchId = null;
+      activeSketchIdentityPersisted = false;
+      activeSketchRestoreDiagnostic = null;
+      return;
+    }
+    final metadata = await repository.loadActiveSketchMetadata(
+      expectedProjectId: projectId,
+    );
+    activeSketchIdentityPersisted = metadata.present && metadata.valid;
+    final persisted = metadata.id;
+    if (metadata.valid && persisted == null) {
+      activeSketchId = null;
+      activeSketchRestoreDiagnostic =
+          'Projeto com identidade persistida sem Sketch ativo.';
+      return;
+    }
+    if (metadata.valid && persisted != null && sketches.containsKey(persisted)) {
+      activeSketchId = persisted;
+      activeSketchRestoreDiagnostic =
+          'Sketch ativo restaurado pela identidade persistida: $persisted.';
+      return;
+    }
+    final fallback = ordered.first;
+    activeSketchId = fallback.id;
+    activeSketchRestoreDiagnostic = !metadata.present
+        ? 'Projeto legado sem Sketch ativo persistido; usando fallback '
+              'determinístico (${fallback.id}).'
+        : 'Sketch ativo persistido inválido ou indisponível ($persisted); usando fallback '
+              'determinístico (${fallback.id}).';
   }
 
   _Snapshot _capture([String target = 'transaction']) => _Snapshot(
