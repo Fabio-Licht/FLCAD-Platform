@@ -24,6 +24,7 @@ import 'package:flcad_mobile/features/projects/data/project_repository.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flcad_mobile/features/projects/models/project.dart';
 import 'package:flcad_mobile/features/projects/models/project_status.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -269,7 +270,8 @@ void main() {
       }
 
       Future<Set<String>> documentRoots() async => harness.cad.runtime.document!
-          .entities.values
+          .entities
+          .values
           .where(
             (entity) =>
                 entity.kind == CadDocumentEntityKind.sketch &&
@@ -356,7 +358,219 @@ void main() {
         harness.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
         contains(ids.first),
       );
+    },
+  );
 
+  test(
+    'partial Engine after Save/Open still enters sibling Sketches and keeps geometry',
+    () async {
+      final harness = await _p0Harness(
+        'p0-switch-partial-engine',
+        openSketch: false,
+        mesh: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final created = await _createThreeSketchesIncludingSection(harness);
+      _logSketchState(
+        harness.cad,
+        harness.controller,
+        'after-create',
+        created.ids,
+      );
+      await _enterExitEachSketch(harness, created.ids);
+      await harness.controller.saveProject();
+      _logSketchState(
+        harness.cad,
+        harness.controller,
+        'after-save',
+        created.ids,
+      );
+
+      final reopened = await _reopen(harness, 'p0-switch-partial-engine');
+      addTearDown(reopened.controller.dispose);
+      addTearDown(reopened.cad.dispose);
+      _logSketchState(
+        reopened.cad,
+        reopened.controller,
+        'after-open',
+        created.ids,
+      );
+      expect(
+        reopened.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+        created.ids.toSet(),
+      );
+
+      _simulatePartialEngine(reopened.controller, keepId: created.ids.first);
+      _logSketchState(
+        reopened.cad,
+        reopened.controller,
+        'partial-engine',
+        created.ids,
+      );
+
+      await reopened.controller.reopenSketchForEditing(created.ids.first);
+      expect(reopened.controller.error, isNull);
+      expect(reopened.controller.activeSketch!.id, created.ids.first);
+      expect(
+        reopened.controller.sketchApi!.engine.activeSketchId,
+        created.ids.first,
+      );
+      _logSketchState(
+        reopened.cad,
+        reopened.controller,
+        'entered-sketch-1',
+        created.ids,
+      );
+      expect(
+        _documentSketchRoots(reopened.cad).toSet(),
+        created.ids.toSet(),
+        reason:
+            '7730604 roots must stay in Explorer after the first enter-edit',
+      );
+      for (final id in created.ids) {
+        expect(
+          _documentSketchChildren(reopened.cad, id),
+          isNotEmpty,
+          reason: 'Sibling geometry of $id must survive entering Sketch 1',
+        );
+      }
+      await _editLineLength(
+        reopened.controller,
+        created.lineIds[created.ids.first]!,
+        11.0,
+      );
+      await reopened.controller.finishSketch();
+      expect(
+        reopened.controller.error,
+        isNull,
+        reason: reopened.controller.error,
+      );
+      _logSketchState(
+        reopened.cad,
+        reopened.controller,
+        'exited-sketch-1',
+        created.ids,
+      );
+
+      for (var index = 1; index < created.ids.length; index++) {
+        final id = created.ids[index];
+        try {
+          await reopened.controller.reopenSketchForEditing(id);
+        } catch (error, stack) {
+          debugPrint('P0 original switch exception: $error');
+          debugPrint('$stack');
+          rethrow;
+        }
+        expect(
+          reopened.controller.error,
+          isNull,
+          reason: reopened.controller.error,
+        );
+        expect(reopened.controller.activeSketch!.id, id);
+        expect(reopened.controller.sketchApi!.engine.activeSketchId, id);
+        expect(reopened.controller.stage, SketchSurfaceStage.sketchActive);
+        expect(
+          reopened.controller.sketchApi!.entity(created.lineIds[id]!),
+          isA<SketchLine>(),
+        );
+        await _editLineLength(
+          reopened.controller,
+          created.lineIds[id]!,
+          12.0 + index,
+        );
+        _logSketchState(
+          reopened.cad,
+          reopened.controller,
+          'entered-sketch-${index + 1}',
+          created.ids,
+        );
+        await reopened.controller.finishSketch();
+        expect(
+          reopened.controller.error,
+          isNull,
+          reason: reopened.controller.error,
+        );
+        _logSketchState(
+          reopened.cad,
+          reopened.controller,
+          'exited-sketch-${index + 1}',
+          created.ids,
+        );
+      }
+
+      await reopened.controller.saveProject();
+      final verified = await _reopen(harness, 'p0-switch-partial-engine');
+      addTearDown(verified.controller.dispose);
+      addTearDown(verified.cad.dispose);
+      _logSketchState(
+        verified.cad,
+        verified.controller,
+        'final-open',
+        created.ids,
+      );
+      expect(
+        verified.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+        created.ids.toSet(),
+      );
+      expect(_documentSketchRoots(verified.cad).toSet(), created.ids.toSet());
+      for (final id in created.ids) {
+        await verified.controller.reopenSketchForEditing(id);
+        expect(verified.controller.error, isNull);
+        expect(verified.controller.activeSketch!.id, id);
+        expect(
+          verified.controller.sketchApi!.entity(created.lineIds[id]!),
+          isA<SketchLine>(),
+        );
+        expect(_documentSketchChildren(verified.cad, id), isNotEmpty);
+        expect(
+          _visibleSketchChildIds(verified.cad, id),
+          isNotEmpty,
+          reason: 'Visible geometry of $id must survive Save/Open',
+        );
+        await verified.controller.finishSketch();
+        expect(verified.controller.error, isNull);
+      }
+    },
+  );
+
+  test(
+    'three Sketches including a Section conversion survive enter-exit Save/Open',
+    () async {
+      final harness = await _p0Harness(
+        'p0-three-sketch-section-switch',
+        openSketch: false,
+        mesh: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final created = await _createThreeSketchesIncludingSection(harness);
+      await _enterExitEachSketch(harness, created.ids);
+      await harness.controller.saveProject();
+
+      final reopened = await _reopen(harness, 'p0-three-sketch-section-switch');
+      addTearDown(reopened.controller.dispose);
+      addTearDown(reopened.cad.dispose);
+      expect(
+        reopened.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
+        created.ids.toSet(),
+      );
+      for (final id in created.ids) {
+        await reopened.controller.reopenSketchForEditing(id);
+        expect(reopened.controller.error, isNull);
+        expect(reopened.controller.activeSketch!.id, id);
+        expect(
+          reopened.controller.sketchApi!.entity(created.lineIds[id]!),
+          isA<SketchLine>(),
+        );
+        expect(_visibleSketchChildIds(reopened.cad, id), isNotEmpty);
+        await reopened.controller.finishSketch();
+        expect(reopened.controller.error, isNull);
+      }
     },
   );
 
@@ -407,6 +621,45 @@ void main() {
         harness.controller.sketchApi!.sketches.map((item) => item.id).toSet(),
         {ids[0], ids[1]},
       );
+    },
+  );
+
+  test(
+    'persist rejects an unloaded child before writing any Sketch file',
+    () async {
+      final harness = await _p0Harness(
+        'p0-persist-preflight',
+        openSketch: true,
+      );
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+
+      final sketch = harness.controller.activeSketch!;
+      final line = harness.controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(4, 0),
+      );
+      await harness.controller.persist();
+      final rootFile = File(
+        '${harness.directory.path}${Platform.pathSeparator}CAD'
+        '${Platform.pathSeparator}Sketch${Platform.pathSeparator}'
+        '${sketch.id.replaceAll(':', '_')}.json',
+      );
+      final before = await rootFile.readAsString();
+      harness.controller.sketchApi!.engine.entities.remove(line.id);
+
+      await expectLater(
+        harness.controller.persist(),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('not loaded'),
+          ),
+        ),
+      );
+      expect(await rootFile.readAsString(), before);
     },
   );
 
@@ -820,6 +1073,152 @@ Future<_P0Harness> _p0Harness(
     controller: controller,
     projectManager: projectManager,
     projects: projects,
+  );
+}
+
+typedef _ThreeSketches = ({List<String> ids, Map<String, String> lineIds});
+
+Future<_ThreeSketches> _createThreeSketchesIncludingSection(
+  _P0Harness harness,
+) async {
+  final ids = <String>[];
+  final lineIds = <String, String>{};
+  harness.controller.selectWorldSketchPlane(SketchPlaneType.xy);
+  await harness.controller.openSketch();
+  var sketch = harness.controller.activeSketch!;
+  ids.add(sketch.id);
+  lineIds[sketch.id] = harness.controller.sketchApi!.builders.line
+      .build(const SketchVector(0, 0), const SketchVector(6, 0))
+      .id;
+  await harness.controller.finishSketch();
+  expect(harness.controller.error, isNull);
+
+  harness.controller.selectWorldSketchPlane(SketchPlaneType.yz);
+  await harness.controller.openSketch(forceNew: true);
+  sketch = harness.controller.activeSketch!;
+  ids.add(sketch.id);
+  lineIds[sketch.id] = harness.controller.sketchApi!.builders.line
+      .build(const SketchVector(0, 0), const SketchVector(0, 7))
+      .id;
+  await harness.controller.finishSketch();
+  expect(harness.controller.error, isNull);
+
+  await harness.controller.createWorldReferenceCurve(SketchPlaneType.xy);
+  final section = harness.controller.sections.sections.last;
+  harness.cad.runtime.select({section.id});
+  await harness.controller.createSketchFromSelectedSection();
+  sketch = harness.controller.activeSketch!;
+  ids.add(sketch.id);
+  expect(sketch.metadata['sourceSectionId'], section.id);
+  final sectionLine = sketch.entityIds
+      .map(harness.controller.sketchApi!.entity)
+      .whereType<SketchLine>()
+      .firstOrNull;
+  expect(
+    sectionLine,
+    isNotNull,
+    reason: 'Section conversion must create lines',
+  );
+  lineIds[sketch.id] = sectionLine!.id;
+  await harness.controller.finishSketch();
+  expect(harness.controller.error, isNull);
+  expect(ids, hasLength(3));
+  expect(ids.toSet(), hasLength(3));
+  return (ids: ids, lineIds: lineIds);
+}
+
+Future<void> _enterExitEachSketch(_P0Harness harness, List<String> ids) async {
+  for (final id in ids) {
+    await harness.controller.reopenSketchForEditing(id);
+    expect(harness.controller.error, isNull);
+    expect(harness.controller.activeSketch!.id, id);
+    expect(harness.controller.sketchApi!.engine.activeSketchId, id);
+    await harness.controller.finishSketch();
+    expect(harness.controller.error, isNull);
+  }
+}
+
+Future<void> _editLineLength(
+  OperationalReverseEngineeringController controller,
+  String lineId,
+  double length,
+) async {
+  await controller.updateSketchEntityParameters(lineId, {'length': length});
+  expect(controller.error, isNull, reason: controller.error);
+  final edited = controller.sketchApi!.entity(lineId)! as SketchLine;
+  expect(edited.parameters['length'], closeTo(length, 1e-9));
+}
+
+void _simulatePartialEngine(
+  OperationalReverseEngineeringController controller, {
+  required String keepId,
+}) {
+  final engine = controller.sketchApi!.engine;
+  for (final id in engine.sketches.keys.toList()) {
+    if (id == keepId) continue;
+    final removed = engine.sketches.remove(id);
+    for (final entityId in removed?.entityIds ?? const <String>[]) {
+      engine.entities.remove(entityId);
+    }
+  }
+  engine.activeSketchId = keepId;
+}
+
+Iterable<String> _documentSketchRoots(DesktopCadController cad) => cad
+    .runtime
+    .document!
+    .entities
+    .values
+    .where(
+      (entity) =>
+          entity.kind == CadDocumentEntityKind.sketch &&
+          entity.data['sketch'] is Map &&
+          entity.data['deleted'] != true,
+    )
+    .map((entity) => entity.id);
+
+Iterable<CadDocumentEntity> _documentSketchChildren(
+  DesktopCadController cad,
+  String sketchId,
+) => cad.runtime.document!.entities.values.where(
+  (entity) =>
+      entity.data['parentSketchId'] == sketchId &&
+      entity.data['sketchEntity'] is Map &&
+      entity.data['deleted'] != true,
+);
+
+Iterable<String> _visibleSketchChildIds(
+  DesktopCadController cad,
+  String sketchId,
+) => _documentSketchChildren(cad, sketchId)
+    .where((entity) {
+      if (entity.data['sceneVisible'] == false) return false;
+      final scene = cad.runtime.scene.find(entity.id);
+      return scene == null || scene.visible;
+    })
+    .map((entity) => entity.id);
+
+void _logSketchState(
+  DesktopCadController cad,
+  OperationalReverseEngineeringController controller,
+  String step,
+  List<String> ids,
+) {
+  final document = cad.runtime.document;
+  final engine = controller.sketchApi?.engine;
+  final sceneIds = cad.runtime.scene.entities.map((item) => item.id).toList();
+  debugPrint(
+    '[p0-switch $step] '
+    'edit=${controller.stage.name} '
+    'controller=${controller.activeSketch?.id} '
+    'engineActive=${engine?.activeSketchId} '
+    'engineCount=${engine?.sketches.length} '
+    'documentRoots=${_documentSketchRoots(cad).length} '
+    'ids=$ids '
+    'children=${ids.map((id) => '$id:${_documentSketchChildren(cad, id).length}').join(',')} '
+    'visible=${ids.map((id) => '$id:${_visibleSketchChildIds(cad, id).length}').join(',')} '
+    'scene=${sceneIds.length} '
+    'docEntities=${document?.entities.length}',
   );
 }
 

@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
@@ -424,6 +425,23 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String? get configuredProjectId => runtime.read('project.configuredId');
   set configuredProjectId(String? value) =>
       runtime.write('project.configuredId', value);
+  int _configurationEpoch = 0;
+  String? _configurationReadyProjectId;
+  Future<void>? _configurationInFlight;
+
+  Future<void> _awaitProjectConfiguration() async {
+    final pending = _configurationInFlight;
+    if (pending != null) await pending;
+    final projectId = runtime.document?.projectId;
+    if (projectId != null &&
+        (_configurationReadyProjectId != projectId ||
+            configuredProjectId != projectId)) {
+      throw StateError(
+        'Sketch Engine configuration is not complete for project $projectId.',
+      );
+    }
+  }
+
   String? get sketchOpenDiagnostic =>
       runtime.read<String>('sketch.open.diagnostic');
   SketchEngineApi? get sketchApi => runtime.read('sketch.api');
@@ -3558,37 +3576,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _sketchReconstructionSuggestionFingerprints = const {};
     var sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
     final persisted = runtime.document?.entities[id]?.data['sketch'];
-    if (sketch == null && persisted is Map) {
+    if (persisted is Map) {
       final restored = Sketch.fromJson(Map<String, dynamic>.from(persisted));
-      final restoredEntities = <SketchEntity>[];
-      final document = runtime.document;
-      if (document != null) {
-        for (final entityId in restored.entityIds) {
-          final documentEntity = document.entities[entityId];
-          final raw = documentEntity?.data['sketchEntity'];
-          if (raw is Map) {
-            restoredEntities.add(
-              SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
-            );
-          }
-        }
-        for (final documentEntity in document.entities.values) {
-          if (documentEntity.data['parentSketchId'] != restored.id) continue;
-          final raw = documentEntity.data['sketchEntity'];
-          if (raw is! Map ||
-              restoredEntities.any(
-                (entity) => entity.id == documentEntity.id,
-              )) {
-            continue;
-          }
-          restoredEntities.add(
-            SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
-          );
-        }
+      final restoredEntities = _sketchEntitiesFromDocument(restored);
+      final missingFromEngine = restoredEntities.any(
+        (entity) => sketchApi?.entity(entity.id) == null,
+      );
+      if (sketch == null || missingFromEngine) {
+        sketchApi?.restoreSketch(
+          sketch ?? restored,
+          entities: restoredEntities,
+        );
+        sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
+        sketch ??= restored;
       }
-      sketchApi?.restoreSketch(restored, entities: restoredEntities);
-      sketch = sketchApi?.sketches.where((item) => item.id == id).firstOrNull;
-      sketch ??= restored;
     }
     if (sketch == null) throw StateError('Unknown Sketch: $id');
     _reconcileSketchEntityMembership(sketch);
@@ -3603,6 +3604,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     selectedSketchEntityIds.clear();
     runtime.select({id});
     notifyListeners();
+  }
+
+  List<SketchEntity> _sketchEntitiesFromDocument(Sketch restored) {
+    final restoredEntities = <SketchEntity>[];
+    final document = runtime.document;
+    if (document == null) return restoredEntities;
+    for (final entityId in restored.entityIds) {
+      final documentEntity = document.entities[entityId];
+      final raw = documentEntity?.data['sketchEntity'];
+      if (raw is Map) {
+        restoredEntities.add(
+          SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
+        );
+      }
+    }
+    for (final documentEntity in document.entities.values) {
+      if (documentEntity.data['parentSketchId'] != restored.id) continue;
+      final raw = documentEntity.data['sketchEntity'];
+      if (raw is! Map ||
+          restoredEntities.any((entity) => entity.id == documentEntity.id)) {
+        continue;
+      }
+      restoredEntities.add(
+        SketchEntity.fromJson(Map<String, dynamic>.from(raw)),
+      );
+    }
+    return restoredEntities;
   }
 
   /// Repairs projects created before Sketch root membership was persisted
@@ -3629,6 +3657,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> reopenSketchForEditing(String id) async {
+    await _awaitProjectConfiguration();
     final api = sketchApi ?? (throw StateError('SketchEngine is unavailable.'));
     selectSketch(id);
     cancelSketchCommand();
@@ -5526,10 +5555,47 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     required String projectId,
     required Directory projectDirectory,
   }) async {
-    if (configuredProjectId == projectId) {
+    if (_configurationReadyProjectId == projectId &&
+        configuredProjectId == projectId) {
       _installBeforeSaveHook();
       return;
     }
+    final pending = _configurationInFlight;
+    if (pending != null && configuredProjectId == projectId) {
+      await pending;
+      return;
+    }
+    final epoch = ++_configurationEpoch;
+    _configurationReadyProjectId = null;
+    final previous = _configurationInFlight;
+    // A project switch invalidates the previous configuration. Wait for it to
+    // unwind before starting the new one; epoch checks prevent stale callbacks
+    // from publishing into the new project.
+    if (previous != null) await previous.catchError((_) {});
+    final operation = _configureProject(
+      projectId: projectId,
+      projectDirectory: projectDirectory,
+      epoch: epoch,
+    );
+    _configurationInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (_configurationEpoch == epoch &&
+          identical(_configurationInFlight, operation)) {
+        _configurationInFlight = null;
+      }
+    }
+  }
+
+  bool _configurationIsCurrent(String projectId, int epoch) =>
+      _configurationEpoch == epoch && runtime.document?.projectId == projectId;
+
+  Future<void> _configureProject({
+    required String projectId,
+    required Directory projectDirectory,
+    required int epoch,
+  }) async {
     cancelSketchPointReferenceCapture(notify: false);
     selectedSketchEntityIds.clear();
     selectedConstraintIds.clear();
@@ -5574,23 +5640,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     _registerOperationalCommands();
     await sketch.load();
+    if (!_configurationIsCurrent(projectId, epoch)) return;
     await constraints.load();
+    if (!_configurationIsCurrent(projectId, epoch)) return;
     final surfaces = await surfaceGenerationApi!.load();
+    if (!_configurationIsCurrent(projectId, epoch)) return;
     for (final surface in surfaces) {
+      if (!_configurationIsCurrent(projectId, epoch)) return;
       await _upsertSurface(surface, command: 'restore.surface');
     }
     activeSurface = surfaces.lastOrNull;
     final professionalSurfaces = await professionalSurfaceApi!.load();
+    if (!_configurationIsCurrent(projectId, epoch)) return;
     for (final surface in professionalSurfaces) {
+      if (!_configurationIsCurrent(projectId, epoch)) return;
       final handle = surface.handle;
       if (handle != null) {
         await _upsertProfessionalSurface(surface, command: 'restore.surface');
       }
     }
     final references = await _referenceApi.list(projectId);
+    if (!_configurationIsCurrent(projectId, epoch)) return;
     for (final reference in references.where(
       (item) => item.status == ReferenceStatus.valid,
     )) {
+      if (!_configurationIsCurrent(projectId, epoch)) return;
       await _upsertReference(reference, command: 'restore.reference');
     }
     activeReference = references
@@ -5658,10 +5732,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
     }
     await refreshReconstructionManager(persist: false);
+    if (_configurationIsCurrent(projectId, epoch)) {
+      _configurationReadyProjectId = projectId;
+    }
     notifyListeners();
   }
 
   void detachProject() {
+    _configurationEpoch++;
+    _configurationReadyProjectId = null;
     _clearArcRadiusEditPreview();
     clearSketchReconstructionSelection(notify: false);
     _sketchReconstructionSuggestions = const [];
@@ -16280,6 +16359,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> persist() async {
+    await _awaitProjectConfiguration();
     await sketchApi?.persist();
     await editorApi?.persist();
     await constraintApi?.persist();
@@ -16298,6 +16378,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
     _operationalCommandDepth++;
     try {
+      await _awaitProjectConfiguration();
       await commands.dispatch(id, parameters);
     } catch (value) {
       if (value case ArcRadiusEditConfirmationRequired failure) {
@@ -18303,6 +18384,47 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         )
         .map((item) => item.id)
         .toSet();
+    // 7730604 kept unhydrated Sketch roots in Explorer. Their child curves
+    // and constraints are the same documentary identity: a partially loaded
+    // Engine must not treat them as deletions, or the viewport goes empty,
+    // later persist hits missing entity IDs, and sibling Sketches cannot
+    // re-enter edit.
+    // A root that is present in the Engine is authoritative for its current
+    // membership (including intentional Undo/delete). Only roots absent from
+    // the Engine are considered partially rehydrated and retain documentary
+    // children until selectSketch() can restore them.
+    final engineSketchIds = allSketches.map((sketch) => sketch.id).toSet();
+    final partiallyRehydratedRootIds = persistedSketchRootIds.difference(
+      engineSketchIds,
+    );
+    final persistedSketchMemberIds = <String>{...partiallyRehydratedRootIds};
+    for (final rootId in partiallyRehydratedRootIds) {
+      final root = document.entities[rootId];
+      for (final key in const [
+        'geometricEntities',
+        'constraints',
+        'dimensions',
+      ]) {
+        final listed = root?.data[key];
+        if (listed is List) {
+          persistedSketchMemberIds.addAll(listed.whereType<String>());
+        }
+      }
+      final sketchJson = root?.data['sketch'];
+      if (sketchJson is Map) {
+        final entityIds = sketchJson['entityIds'];
+        if (entityIds is List) {
+          persistedSketchMemberIds.addAll(entityIds.whereType<String>());
+        }
+      }
+    }
+    for (final item in document.entities.values) {
+      if (item.data['deleted'] == true) continue;
+      final parentId = item.data['parentSketchId'];
+      if (parentId is String && partiallyRehydratedRootIds.contains(parentId)) {
+        persistedSketchMemberIds.add(item.id);
+      }
+    }
     final constraintIds = {
       ...constraints.map((item) => item.id),
       ...dimensions.map((item) => item.id),
@@ -18313,12 +18435,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .where(
           (id) =>
               !currentIds.contains(id) &&
-              !persistedSketchRootIds.contains(id),
+              !persistedSketchMemberIds.contains(id),
         );
     final staleConstraints = document.entities.values
         .where((item) => item.kind == CadDocumentEntityKind.constraint)
         .map((item) => item.id)
-        .where((id) => !constraintIds.contains(id));
+        .where(
+          (id) =>
+              !constraintIds.contains(id) &&
+              !persistedSketchMemberIds.contains(id),
+        );
     await runtime.mutate(
       command: 'sketch.synchronize',
       remove: [...stale, ...staleConstraints],

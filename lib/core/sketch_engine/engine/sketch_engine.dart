@@ -71,7 +71,6 @@ class SketchEngine {
     Sketch sketch, {
     Iterable<SketchEntity> entities = const <SketchEntity>[],
   }) {
-    if (sketches.containsKey(sketch.id)) return;
     final restoredEntities = entities.toList(growable: false);
     final duplicate =
         restoredEntities.map((entity) => entity.id).toSet().length !=
@@ -79,19 +78,22 @@ class SketchEngine {
     if (duplicate) {
       throw StateError('Sketch ${sketch.id} contains duplicate entity IDs.');
     }
+    var target = sketches[sketch.id];
+    if (target == null) {
+      sketches[sketch.id] = sketch;
+      graphs.sketch.addNode(sketch.id);
+      target = sketch;
+    }
     for (final entity in restoredEntities) {
       final existing = this.entities[entity.id];
       if (existing != null) {
+        if (target.entityIds.contains(entity.id)) continue;
         throw StateError(
           'Sketch entity ID ${entity.id} belongs to another restored Sketch.',
         );
       }
-    }
-    sketches[sketch.id] = sketch;
-    graphs.sketch.addNode(sketch.id);
-    for (final entity in restoredEntities) {
-      if (!sketch.entityIds.contains(entity.id)) {
-        sketch.entityIds.add(entity.id);
+      if (!target.entityIds.contains(entity.id)) {
+        target.entityIds.add(entity.id);
       }
       entity.graphNode = entity.graphNode.isEmpty
           ? entity.id
@@ -237,10 +239,32 @@ class SketchEngine {
   }
 
   Future<void> persist() async {
+    // Validate the complete in-memory graph before writing any file.  This
+    // prevents a partially rehydrated Engine from persisting earlier Sketches
+    // and then failing when it reaches an unloaded child entity.
+    final missing = <String>[];
+    for (final sketch in sketches.values) {
+      for (final id in sketch.entityIds) {
+        if (!entities.containsKey(id)) {
+          missing.add('${sketch.id}:$id');
+        }
+      }
+    }
+    if (missing.isNotEmpty) {
+      throw StateError(
+        'Cannot persist Sketch entities that are not loaded: ${missing.join(', ')}',
+      );
+    }
     for (final sketch in sketches.values) {
       await repository.saveSketch(sketch);
       for (final id in sketch.entityIds) {
-        await repository.saveEntity(sketch.id, entities[id]!);
+        final entity = entities[id];
+        if (entity == null) {
+          throw StateError(
+            'Cannot persist Sketch ${sketch.id}: entity $id is listed but not loaded.',
+          );
+        }
+        await repository.saveEntity(sketch.id, entity);
       }
     }
     await repository.saveSupport(
