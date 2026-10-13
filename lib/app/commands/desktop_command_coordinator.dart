@@ -36,6 +36,74 @@ class DesktopCommandCoordinator {
   late final EngineeringCommandRouter router;
   Future<void> _saveTail = Future<void>.value();
 
+  /// Session owner of each operational command currently installed in
+  /// [registry].
+  ///
+  /// The coordinator (and its registry) outlives the individual project
+  /// sessions: `CadRuntime.open`/`close` clear the whole runtime state map, so
+  /// a runtime-store marker cannot tell whether this registry already holds a
+  /// command.  Operational handlers capture the Workspace session controller,
+  /// therefore the session that installs them owns their lifecycle and
+  /// releases them when it is disposed.
+  final Map<String, Object> _sessionCommandOwners = <String, Object>{};
+
+  /// Command ids currently owned by a Workspace session.
+  Iterable<String> get sessionCommandIds => _sessionCommandOwners.keys;
+
+  /// Installs the operational command set of one Workspace session.
+  ///
+  /// Registration is idempotent for [owner]: configuring or reopening a
+  /// project never registers the same id twice.  Ids still owned by a previous
+  /// session are released first, because a rebuilt session must never dispatch
+  /// into a disposed controller.  Ids registered by any other part of the
+  /// platform (Project, Import/Export, Workspace, …) are never replaced —
+  /// that conflict is surfaced instead of being swallowed.
+  void installSessionCommands({
+    required Object owner,
+    required List<RegisteredEngineeringCommand> commands,
+  }) {
+    // Pre-flight: the whole set is validated before anything is mutated, so a
+    // conflict or a repeated id can never leave a partially installed session.
+    final incoming = <String>{};
+    for (final command in commands) {
+      if (!incoming.add(command.id)) {
+        throw StateError('Command already registered: ${command.id}');
+      }
+      if (!registry.contains(command.id)) continue;
+      final currentOwner = _sessionCommandOwners[command.id];
+      if (identical(currentOwner, owner)) continue;
+      if (currentOwner != null) continue;
+      throw StateError('Command already registered: ${command.id}');
+    }
+    final stale = _sessionCommandOwners.entries
+        .where((entry) => !identical(entry.value, owner))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final id in stale) {
+      registry.unregister(id);
+      _sessionCommandOwners.remove(id);
+    }
+    for (final command in commands) {
+      if (identical(_sessionCommandOwners[command.id], owner)) continue;
+      registry.register(command);
+      _sessionCommandOwners[command.id] = owner;
+    }
+  }
+
+  /// Releases the ids that [owner] still holds.  Ids already adopted by a
+  /// newer session are left untouched, so an out of order dispose cannot strip
+  /// the live session.
+  void releaseSessionCommands(Object owner) {
+    final owned = _sessionCommandOwners.entries
+        .where((entry) => identical(entry.value, owner))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final id in owned) {
+      registry.unregister(id);
+      _sessionCommandOwners.remove(id);
+    }
+  }
+
   /// Canonical project save entry point. Menu, Ctrl+S and workspace callers
   /// share this tail so Sketch/document writes cannot interleave.
   Future<void> saveProject({String? expectedProjectId}) {

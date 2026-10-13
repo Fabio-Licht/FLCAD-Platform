@@ -362,10 +362,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'project.beforeSave',
       _beforeSaveCallback,
     );
+    // Command identity belongs to this session, not to a project: install the
+    // operational command set once when the session starts, so reopening or
+    // switching projects only reconfigures project data.
+    _registerOperationalCommands();
   }
 
   @override
   void dispose() {
+    // Hand the operational command ids back before this session stops serving
+    // them; a later session installs its own handlers over the same registry.
+    commands.releaseSessionCommands(this);
+    _operationalCommandsInstalled = false;
     try {
       runtime.write('sketch.reconstruction.hovered', null);
       runtime.write('sketch.reconstruction.selected', null);
@@ -3130,10 +3138,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   final SketchHealthAnalyzer _sketchHealthAnalyzer =
       const SketchHealthAnalyzer();
-  // The command coordinator outlives individual project runtime maps. Keep
-  // this guard locally so reopening a project does not register the same
-  // operational commands a second time.
-  var _operationalCommandsRegistered = false;
+  // Command identity is session scoped, never project scoped: this flag only
+  // records that this session already handed its operational command set to
+  // the shared registry, so reconfiguring a project stays idempotent.
+  var _operationalCommandsInstalled = false;
   final RecognitionResultAdapter _recognitionResults =
       const RecognitionResultAdapter();
   final IntelligentSurfaceAssistant _surfaceAssistant =
@@ -5264,14 +5272,6 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return _stableSketch(api.sketches.where(matches));
   }
 
-  bool get _commandsRegistered =>
-      _operationalCommandsRegistered ||
-      (runtime.read<bool>('commands.registered') ?? false);
-  set _commandsRegistered(bool value) {
-    _operationalCommandsRegistered = value;
-    runtime.write('commands.registered', value);
-  }
-
   List<SketchEntity> get sketchEntities {
     final sketch = activeSketch;
     final api = sketchApi;
@@ -5752,7 +5752,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       ),
       repository: ProfessionalSurfaceRepository(projectDirectory),
     );
-    _registerOperationalCommands();
+    // Operational commands are installed once per session (see the
+    // constructor); project configuration only rebinds project data.
     await sketch.load();
     if (!_configurationIsCurrent(projectId, epoch)) return;
     await constraints.load();
@@ -16508,13 +16509,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void _registerOperationalCommands() {
-    if (_commandsRegistered) return;
+    if (_operationalCommandsInstalled) return;
+    final pending = <RegisteredEngineeringCommand>[];
     void register({
       required String id,
       required Future<Object?> Function(Map<String, Object?>) execute,
       required Future<Object?> Function(Map<String, Object?>) undo,
       Future<Object?> Function(Map<String, Object?>)? redo,
-    }) => commands.registry.register(
+    }) => pending.add(
       RegisteredEngineeringCommand(
         id: id,
         module: 'SketchSurface',
@@ -18103,7 +18105,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         },
       );
     }
-    _commandsRegistered = true;
+    // The registry belongs to the desktop command coordinator, which outlives
+    // this session. Installing the whole set at once keeps command identity
+    // with the session that owns the handlers, and a rebuilt session replaces
+    // the previous set instead of colliding with it.
+    commands.installSessionCommands(owner: this, commands: pending);
+    _operationalCommandsInstalled = true;
   }
 
   String _planarSurfaceId(String sketchId) {

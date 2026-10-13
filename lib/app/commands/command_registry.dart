@@ -35,6 +35,17 @@ class CommandRegistry {
     _commands[command.id] = command;
   }
 
+  bool contains(String id) => _commands.containsKey(id);
+
+  /// Removes a previously registered command.  Callers own the lifecycle of
+  /// the ids they registered, so removing an unknown id is a contract
+  /// violation rather than something to ignore.
+  void unregister(String id) {
+    if (_commands.remove(id) == null) {
+      throw StateError('Command is not registered: $id');
+    }
+  }
+
   RegisteredEngineeringCommand resolve(String id) {
     final command = _commands[id];
     if (command == null) throw StateError('Command is not registered: $id');
