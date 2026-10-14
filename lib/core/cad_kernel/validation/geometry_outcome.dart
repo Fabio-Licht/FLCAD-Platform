@@ -35,7 +35,97 @@ enum GeometryOperationClass {
   importShape,
   exportShape,
   mesh,
-  unknown,
+  unknown;
+
+  /// Deduz a classe de operação a partir do identificador nativo do funil
+  /// (ex.: `occ-extrude`, `occ-generate-sphere`, `occ-sewing`).
+  ///
+  /// A heurística é explícita e conservadora: é deterministicamente ordenada
+  /// (verbo antes de substantivo, `remove fillet` antes de `fillet`) e tokens
+  /// desconhecidos caem em [GeometryOperationClass.unknown] em vez de serem
+  /// adivinhados. Ela nunca afirma sucesso geométrico: só agrupa a operação.
+  static GeometryOperationClass fromNativeToken(String token) {
+    // O funil monta `occ-<operacao-com-hifens>`; normaliza tudo para um texto
+    // simples com espaços antes de comparar palavras-chave.
+    final normalized = token
+        .toLowerCase()
+        .replaceAll('occ-', '')
+        .replaceAll('-', ' ')
+        .replaceAll('_', ' ')
+        .trim();
+    bool hasAny(List<String> needles) => needles.any(normalized.contains);
+    if (normalized.contains('remove fillet')) {
+      return GeometryOperationClass.removeFillet;
+    }
+    if (normalized.contains('fillet')) return GeometryOperationClass.fillet;
+    if (normalized.contains('chamfer')) return GeometryOperationClass.chamfer;
+    if (normalized.contains('extrude')) return GeometryOperationClass.extrude;
+    if (normalized.contains('revolve')) return GeometryOperationClass.revolve;
+    if (hasAny(const ['boolean', 'fuse', 'cut', 'common'])) {
+      return GeometryOperationClass.booleanOp;
+    }
+    if (hasAny(const ['heal', 'repair', 'merge face'])) {
+      return GeometryOperationClass.heal;
+    }
+    if (normalized.contains('loft')) return GeometryOperationClass.loft;
+    if (normalized.contains('sweep')) return GeometryOperationClass.sweep;
+    if (normalized.contains('import')) {
+      return GeometryOperationClass.importShape;
+    }
+    if (normalized.contains('export')) {
+      return GeometryOperationClass.exportShape;
+    }
+    if (normalized.contains('mesh')) return GeometryOperationClass.mesh;
+    // Criações de superfície/estrutura ("CREATE X"/"GENERATE X").
+    if (normalized.startsWith('create ') ||
+        normalized.startsWith('generate ')) {
+      return GeometryOperationClass.surfaceCreate;
+    }
+    // Edições de superfície (verbos) antes dos substantivos de criação, para
+    // que `replace face`/`delete face` não sejam lidos como criação.
+    if (hasAny(const [
+      'offset',
+      'trim',
+      'split',
+      'sew',
+      'join',
+      'extend',
+      'reduce',
+      'replace',
+      'delete',
+      'unsew',
+      'boundary',
+      'blend',
+      'match',
+      'fair',
+      'morph',
+      'nurbs',
+      'patch',
+      'fill',
+      'reverse normal',
+      'transform',
+    ])) {
+      return GeometryOperationClass.surfaceEdit;
+    }
+    // Substantivos de criação sem verbo explícito.
+    if (hasAny(const [
+      'plane',
+      'cylinder',
+      'cone',
+      'sphere',
+      'torus',
+      'face',
+      'shell',
+      'solid',
+      'wire',
+      'edge',
+      'vertex',
+      'surface',
+    ])) {
+      return GeometryOperationClass.surfaceCreate;
+    }
+    return GeometryOperationClass.unknown;
+  }
 }
 
 /// Como a chamada nativa terminou (execução, não qualidade do resultado).
@@ -44,6 +134,11 @@ enum GeometryExecutionStatus {
   nativeFailure,
   invalidPrecondition,
   unsupported,
+
+  /// Falha sem atribuição segura: agendamento, cancelamento, transporte ou
+  /// exceção inesperada. Nunca deve ser rotulada automaticamente como falha
+  /// nativa — a origem é desconhecida, não "nativa".
+  unknownFailure,
 }
 
 /// Classificação final do resultado geométrico.

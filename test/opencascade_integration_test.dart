@@ -34,8 +34,13 @@ void main() {
   test(
     'unavailable native host fails explicitly and preserves fallback',
     () async {
+      // Deterministic by construction: an explicitly unavailable bridge, never
+      // the process PATH or a staged OCCT runtime. The real native host is
+      // verified separately, opt-in, below.
       final manager = KernelManager();
-      OpenCascadeKernelPlugin().register(manager);
+      OpenCascadeKernelPlugin(
+        bridge: const UnavailableOpenCascadeBridge('native host unavailable'),
+      ).register(manager);
       await expectLater(manager.select('opencascade'), throwsStateError);
       expect(manager.active.descriptor.id, 'opencascade');
       expect(
@@ -272,6 +277,44 @@ void main() {
     expect(node.context['kernelVersion'], '7.8.1');
     expect(node.context.toString(), isNot(contains('TopoDS_Shape')));
   });
+
+  // Real native host verification, separated from the deterministic scenario
+  // above. It is opt-in: without FLCAD_OCC_REQUIRE_NATIVE=1 it is a BLOCKED
+  // skip (never an approval), so the suite stays green on machines without the
+  // OCCT runtime while still allowing an explicit fail when someone demands it.
+  final requireNativeHost =
+      (Platform.environment['FLCAD_OCC_REQUIRE_NATIVE'] ?? '') == '1';
+  test(
+    'real OCCT host creates and releases a native shape (opt-in)',
+    () async {
+      final bridge = OpenCascadeFFI.loadOrUnavailable();
+      if (bridge is! OpenCascadeFFI) {
+        fail('FLCAD_OCC_REQUIRE_NATIVE=1 requires a loadable OCCT runtime');
+      }
+      final adapter = OpenCascadeKernelAdapter(bridge: bridge);
+      final handle = await adapter.create(
+        'CREATE VERTEX',
+        const {'x': 0.0, 'y': 0.0, 'z': 0.0},
+        persistentId: 'native-vertex-probe',
+        expectedType: CADShapeType.vertex,
+        transaction: KernelTransaction(
+          'tx-native-probe',
+          'project',
+          'opencascade',
+          DateTime(2026),
+          TransactionStatus.active,
+          const [],
+        ),
+      );
+      expect(handle.kernelId, 'opencascade');
+      expect(handle.persistentId, 'native-vertex-probe');
+      await adapter.destroy(handle);
+      await adapter.unload();
+    },
+    skip: requireNativeHost
+        ? false
+        : 'opt-in: set FLCAD_OCC_REQUIRE_NATIVE=1 with the OCCT runtime staged',
+  );
 }
 
 class _RecordingBridge

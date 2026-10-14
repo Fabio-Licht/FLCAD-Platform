@@ -13,6 +13,7 @@ import '../ids/persistent_id_service.dart';
 import '../io/kernel_io_models.dart';
 import '../models/kernel_models.dart';
 import '../runtime/kernel_runtime.dart';
+import '../validation/geometry_outcome.dart';
 import 'open_cascade_bridge.dart';
 import 'open_cascade_ffi.dart';
 
@@ -35,6 +36,7 @@ class OpenCascadeKernelAdapter
     KernelAnalytics? analytics,
     PersistentIdService? ids,
     Object? nativeLibraryKey,
+    this.onGeometryOutcome,
   }) : _libraryKey = nativeLibraryKey,
        _bridge = bridge,
        _bridgeFactory = bridgeFactory ?? OpenCascadeFFI.loadOrUnavailable,
@@ -51,6 +53,14 @@ class OpenCascadeKernelAdapter
   OpenCascadeNativeBridge get _nativeBridge => _bridge ??= _bridgeFactory();
   final PersistentIdService _ids;
   final KernelRuntime runtime;
+
+  /// Observador opcional de resultados geométricos tipados (B.1b.1).
+  ///
+  /// Puramente diagnóstico: recebe [GeometryOutcome] e **nunca** altera o
+  /// resultado, a exceção original, o stack trace, as transações, a custódia
+  /// dos tokens nativos ou as métricas. Ausente por padrão (`null`), o caminho
+  /// e o custo anteriores são preservados.
+  final void Function(GeometryOutcome outcome)? onGeometryOutcome;
   final Map<String, String> _nativeTokens = {};
   final Map<String, String> _nativeMeshTokens = {};
   final Map<String, bool> _surfaceHistory = {};
@@ -87,9 +97,102 @@ class OpenCascadeKernelAdapter
       handle.kernelId == descriptor.id &&
       _nativeMeshTokens.containsKey(handle.persistentId);
 
-  Future<T> _legacyOperation<T>(Future<T> Function() operation) async {
-    await initialize();
-    return _participant!.run(operation);
+  /// Executa uma operação nativa na custódia da sessão.
+  ///
+  /// B.1b.1: `nativeOperation` (opcional) liga a observabilidade tipada do
+  /// funil de criação. Ela é *passiva*: só classifica execução nativa —
+  /// [GeometryOutcome.notVerified] em sucesso e [GeometryOutcome.failure] em
+  /// erro. Nunca emite `successChanged`/`successUnchanged`, porque neste nível
+  /// não existe validação BREP; nunca publica shapes/tokens; nunca altera o
+  /// resultado.
+  ///
+  /// A observação fica deliberadamente *dentro* desta camada (que só enxerga
+  /// `initialize()` + `participant.run()`), de modo que erros de agendamento ou
+  /// cancelamento do [runtime] não sejam rotulados como falha nativa. Como
+  /// [create] é despachada com `runInIsolate: false`, o observador é chamado no
+  /// isolate proprietário do adapter, com dados Dart simples — nenhum
+  /// [ShapeHandle] nativo cruza isolate algum.
+  Future<T> _legacyOperation<T>(
+    Future<T> Function() operation, {
+    String? nativeOperation,
+  }) async {
+    final observer = onGeometryOutcome;
+    final name = nativeOperation;
+    if (observer == null || name == null) {
+      await initialize();
+      return _participant!.run(operation);
+    }
+    try {
+      await initialize();
+      final value = await _participant!.run(operation);
+      _publishGeometryOutcome(
+        observer,
+        GeometryOutcome.notVerified(
+          operation: name,
+          operationClass: GeometryOperationClass.fromNativeToken(name),
+          reason: 'Operação nativa concluiu sem validação geométrica BREP.',
+          // Identidade do handle, nunca o token nativo privado.
+          shape: value is ShapeHandle
+              ? GeometryShapeIdentity.fromHandle(value)
+              : null,
+        ),
+      );
+      return value;
+    } catch (error) {
+      _publishGeometryOutcome(observer, _classifiedFailure(name, error));
+      // `rethrow` preserva a exceção original e o stack trace originais.
+      rethrow;
+    }
+  }
+
+  /// Entrega o resultado ao observador opcional.
+  ///
+  /// Observabilidade é diagnóstico: se o consumidor falhar, a falha é
+  /// absorvida aqui de propósito, para que ela jamais altere o resultado da
+  /// operação nem mascare a exceção original.
+  void _publishGeometryOutcome(
+    void Function(GeometryOutcome outcome) observer,
+    GeometryOutcome outcome,
+  ) {
+    try {
+      observer(outcome);
+    } catch (_) {
+      // Ignorado intencionalmente: só o diagnóstico falhou.
+    }
+  }
+
+  /// Classifica a falha do funil de criação sem perder a exceção original.
+  ///
+  /// Deliberadamente conservadora: só `UnsupportedError`, `ArgumentError` e
+  /// `StateError` (o sinal canônico de falha do bridge nativo) recebem rótulo
+  /// específico; **qualquer** outra exceção vira `unknownFailure` — nunca é
+  /// rotulada automaticamente como falha nativa.
+  GeometryOutcome _classifiedFailure(String nativeOperation, Object error) {
+    final (execution, reason) = switch (error) {
+      UnsupportedError() => (
+        GeometryExecutionStatus.unsupported,
+        'Operação não suportada pelo bridge nativo OCCT.',
+      ),
+      ArgumentError() => (
+        GeometryExecutionStatus.invalidPrecondition,
+        'Pré-condição inválida: a operação não chegou a executar.',
+      ),
+      StateError() => (
+        GeometryExecutionStatus.nativeFailure,
+        'O bridge nativo OCCT reportou falha.',
+      ),
+      _ => (
+        GeometryExecutionStatus.unknownFailure,
+        'Falha não classificada: a exceção original foi preservada.',
+      ),
+    };
+    return GeometryOutcome.failure(
+      operation: nativeOperation,
+      operationClass: GeometryOperationClass.fromNativeToken(nativeOperation),
+      reason: reason,
+      execution: execution,
+      attributes: {'errorType': error.runtimeType.toString()},
+    );
   }
 
   Future<void> _initialize() async {
@@ -499,7 +602,7 @@ class OpenCascadeKernelAdapter
         fingerprint: shape.fingerprint,
         metadata: shape.metadata,
       );
-    }),
+    }, nativeOperation: 'occ-${operation.toLowerCase().replaceAll(' ', '-')}'),
     entityCount: 1,
     runInIsolate: false,
   );
