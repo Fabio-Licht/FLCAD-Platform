@@ -10,6 +10,7 @@ import 'multi_window_panel_transport.dart';
 import 'panel_protocol.dart';
 import 'panel_shell.dart';
 import 'panel_inspector_view_model.dart';
+import 'panel_inspector_widgets.dart';
 import 'panel_presentation_models.dart';
 import 'panel_window_native_bridge.dart';
 
@@ -510,14 +511,14 @@ class _InspectorDetachedPanel extends StatelessWidget {
           _InspectorNotice(message)
         else ...[
           if (document != null)
-            _StructuredInspectorEntityCard(
+            _SharedInspectorEntityCard(
               entity: document,
               presentation: structuredById[document['id']],
               onDimensionSubmitted: onDimensionSubmitted,
               enabled: !stale,
             ),
           for (final entity in operational)
-            _StructuredInspectorEntityCard(
+            _SharedInspectorEntityCard(
               entity: entity,
               presentation: structuredById[entity['id']],
             ),
@@ -527,12 +528,97 @@ class _InspectorDetachedPanel extends StatelessWidget {
   }
 }
 
-class _StructuredInspectorEntityCard extends StatefulWidget {
-  const _StructuredInspectorEntityCard({
+class _SharedInspectorEntityCard extends StatefulWidget {
+  const _SharedInspectorEntityCard({
     required this.entity,
     required this.presentation,
     this.onDimensionSubmitted,
     this.enabled = false,
+  });
+
+  final Map entity;
+  final InspectorEntityModel? presentation;
+  final Future<String> Function(String entityId, double value)?
+  onDimensionSubmitted;
+  final bool enabled;
+
+  @override
+  State<_SharedInspectorEntityCard> createState() =>
+      _SharedInspectorEntityCardState();
+}
+
+class _SharedInspectorEntityCardState
+    extends State<_SharedInspectorEntityCard> {
+  bool _advanced = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final model = widget.presentation;
+    if (model == null) {
+      return const _InspectorNotice('Propriedades indisponíveis.');
+    }
+    final sections = model.sections
+        .where((section) => section.advanced == _advanced)
+        .where((section) => section.properties.isNotEmpty);
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            InspectorEntityHeader(entity: model),
+            const SizedBox(height: 8),
+            InspectorModeSelector(
+              advanced: _advanced,
+              onChanged: (value) => setState(() => _advanced = value),
+            ),
+            const SizedBox(height: 8),
+            for (final section in sections) ...[
+              InspectorPropertySection(
+                section: section,
+                children: [
+                  for (final property in section.properties)
+                    _propertyWidget(model, property),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _propertyWidget(
+    InspectorEntityModel model,
+    InspectorPropertyModel property,
+  ) {
+    if (property.id == 'drivingDimension' &&
+        property.access == PanelPropertyAccess.editable &&
+        widget.onDimensionSubmitted != null &&
+        property.value is num) {
+      return InspectorNumericEditor(
+        label: property.label,
+        value: (property.value as num).toDouble(),
+        unit: property.unit ?? 'mm',
+        precision: property.precision,
+        enabled:
+            widget.enabled &&
+            property.availability == PanelPropertyAvailability.available,
+        onSubmitted: (value) => widget.onDimensionSubmitted!(model.id, value),
+      );
+    }
+    return InspectorPropertyRow(property: property);
+  }
+}
+
+class _StructuredInspectorEntityCard extends StatefulWidget {
+  const _StructuredInspectorEntityCard({
+    required this.entity,
+    required this.presentation,
+    required this.onDimensionSubmitted,
+    required this.enabled,
   });
 
   final Map entity;
