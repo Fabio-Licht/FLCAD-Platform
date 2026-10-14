@@ -2845,8 +2845,12 @@ class _OfficialEngineeringWorkspaceState
     final transport = MultiWindowPanelTransport(
       backend: backend,
       isMainWindow: true,
-      panelWindowIdResolver: (panelId) =>
-          _panelWindowHost?.attachmentFor(PanelId.explorer)?.windowId,
+      panelWindowIdResolver: (panelId) {
+        final id = panelIdFromName(panelId);
+        return id == null
+            ? null
+            : _panelWindowHost?.attachmentFor(id)?.windowId;
+      },
     );
     final host = PanelWindowHost(
       backend: backend,
@@ -2863,7 +2867,9 @@ class _OfficialEngineeringWorkspaceState
       source: CadRuntimePanelSessionSource(widget.cad.runtime),
     )..start();
     transport.onMainWindowControl = (method, arguments) {
-      if (method == 'panel_dock') unawaited(_dockExplorer());
+      if (method != 'panel_dock') return;
+      final panelId = panelIdFromName(arguments['panelId'] as String? ?? '');
+      if (panelId != null) unawaited(_dockPanel(panelId));
     };
     _panelTransport = transport;
     _panelBridge = bridge;
@@ -2918,7 +2924,7 @@ class _OfficialEngineeringWorkspaceState
       // The bridge registers its channels asynchronously: wait for them before
       // the window starts handshaking.
       await _panelTransport?.ready;
-      final adopt = await _liveExplorerWindow();
+      final adopt = await _livePanelWindow(PanelId.explorer);
       final attachment = await host.restorePersisted(
         PanelId.explorer,
         windowId: adopt,
@@ -2945,11 +2951,11 @@ class _OfficialEngineeringWorkspaceState
   ///
   /// Adopting it is what keeps a Workspace remount from opening a second window
   /// while the previous session is still tearing its own down.
-  Future<String?> _liveExplorerWindow() async {
+  Future<String?> _livePanelWindow(PanelId panelId) async {
     final backend = _panelTransport?.backend;
     if (backend == null) return null;
     for (final window in await backend.listWindows()) {
-      if (window.panelId == PanelId.explorer) return window.windowId;
+      if (window.panelId == panelId) return window.windowId;
     }
     return null;
   }
@@ -3005,12 +3011,22 @@ class _OfficialEngineeringWorkspaceState
   }
 
   Future<void> _dockExplorer() async {
+    await _dockPanel(PanelId.explorer);
+  }
+
+  /// Docks one detached panel without coupling the host to Explorer.
+  ///
+  /// Explorer remains the only panel with an in-window renderer in this
+  /// increment; the generic host/bridge lifecycle is nevertheless shared by
+  /// every [PanelId].
+  Future<void> _dockPanel(PanelId panelId) async {
     final host = _panelWindowHost;
     if (host == null) return;
-    final closed = await host.dock(PanelId.explorer);
+    final closed = await host.dock(panelId);
     await _setShellCloseGuard(host.hasAttachments);
-    _panelBridge?.disconnectPanel(PanelId.explorer);
+    await _panelBridge?.disconnectPanel(panelId);
     if (!mounted) return;
+    if (panelId != PanelId.explorer) return;
     setState(() => _explorerDetached = false);
     widget.cad.setStatus(
       closed
@@ -3028,10 +3044,12 @@ class _OfficialEngineeringWorkspaceState
     final affected = {...closed, ...detachedByDisplay};
     if (affected.isEmpty || !mounted) return;
     for (final panelId in affected) {
-      _panelBridge?.disconnectPanel(panelId);
+      await _panelBridge?.disconnectPanel(panelId);
     }
-    setState(() => _explorerDetached = false);
-    widget.cad.setStatus('Janela do Explorer fechada; painel reencaixado.');
+    if (affected.contains(PanelId.explorer)) {
+      setState(() => _explorerDetached = false);
+      widget.cad.setStatus('Janela do Explorer fechada; painel reencaixado.');
+    }
   }
 
   /// Arms the "close the panels first" barrier while a panel is detached.
@@ -3063,16 +3081,19 @@ class _OfficialEngineeringWorkspaceState
         // A session teardown closes the window but keeps the operator's
         // detached preference: only an explicit Dock stores the panel as
         // docked (that is what stops a later launch from reopening it).
-        var closed = await host.dock(PanelId.explorer, persist: false);
-        if (!closed) {
-          // One retry: the panel may still have been booting.
-          closed = await host.dock(PanelId.explorer, persist: false);
-        }
-        _panelBridge?.disconnectPanel(PanelId.explorer);
-        if (!closed) {
-          debugPrint(
-            '[panel-window] shell closing with a panel window still alive',
-          );
+        for (final panelId in host.attachments.keys.toList()) {
+          var closed = await host.dock(panelId, persist: false);
+          if (!closed) {
+            // One retry: the panel may still have been booting.
+            closed = await host.dock(panelId, persist: false);
+          }
+          await _panelBridge?.disconnectPanel(panelId);
+          if (!closed) {
+            debugPrint(
+              '[panel-window] shell closing with a panel window still alive '
+              '(${panelId.name})',
+            );
+          }
         }
       }
       await _setShellCloseGuard(false);
@@ -3094,7 +3115,9 @@ class _OfficialEngineeringWorkspaceState
     windowManager.removeListener(this);
     final panelHost = _panelWindowHost;
     if (panelHost != null && panelHost.hasAttachments) {
-      unawaited(panelHost.dock(PanelId.explorer, persist: false));
+      for (final panelId in panelHost.attachments.keys.toList()) {
+        unawaited(panelHost.dock(panelId, persist: false));
+      }
     }
     _panelBridge?.dispose();
     unawaited(_panelTransport?.close() ?? Future<void>.value());

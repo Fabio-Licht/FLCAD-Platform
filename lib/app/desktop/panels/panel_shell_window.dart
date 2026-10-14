@@ -68,13 +68,19 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
   @override
   void initState() {
     super.initState();
-    _endpoint = PanelShellEndpoint(
-      panelId: widget.config.panelId,
-      transport: widget.transport,
-      capabilities: const [
+    final capabilities = switch (widget.config.panelId) {
+      // Explorer is the only functional detached renderer in MM4.3a.1.
+      PanelId.explorer => const [
         PanelCapabilities.explorer,
         PanelCapabilities.selection,
       ],
+      // Unsupported panel identities receive no mutation capabilities yet.
+      _ => const <String>[],
+    };
+    _endpoint = PanelShellEndpoint(
+      panelId: widget.config.panelId,
+      transport: widget.transport,
+      capabilities: capabilities,
       clientInstanceId: 'panel-shell:${widget.config.windowId}',
     );
     windowManager.addListener(this);
@@ -232,7 +238,9 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
                     'geometria automática desativada. Reencaixe pelo botão.',
               ),
             Expanded(
-              child: rows == null
+              child: widget.config.panelId != PanelId.explorer
+                  ? const _UnsupportedDetachedPanel()
+                  : rows == null
                   ? const Center(child: CircularProgressIndicator())
                   : rows.isEmpty
                   ? const Center(child: Text('Nenhum objeto no projeto.'))
@@ -339,6 +347,21 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
     PanelLifecycleState.suspended => 'suspenso',
     PanelLifecycleState.disconnected => 'desconectado',
   };
+}
+
+/// Placeholder for panel identities whose detached renderer is intentionally
+/// not part of MM4.3a.1 yet. It prevents an unsupported panel from presenting
+/// Explorer data by accident.
+class _UnsupportedDetachedPanel extends StatelessWidget {
+  const _UnsupportedDetachedPanel();
+
+  @override
+  Widget build(BuildContext context) => const Center(
+    child: Padding(
+      padding: EdgeInsets.all(20),
+      child: Text('Este painel ainda não possui renderer destacável.'),
+    ),
+  );
 }
 
 class _Banner extends StatelessWidget {

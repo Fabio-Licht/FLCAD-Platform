@@ -60,6 +60,17 @@ class PanelWindowHost {
   bool get hasAttachments => attachments.isNotEmpty;
   PanelWindowAttachment? attachmentFor(PanelId panelId) => attachments[panelId];
 
+  /// Returns the attachment that owns [windowId], if any.
+  ///
+  /// Window ids are process-wide. Keeping this lookup in the host prevents a
+  /// restored window from being adopted by two panel identities at once.
+  PanelWindowAttachment? attachmentForWindow(String windowId) {
+    for (final attachment in attachments.values) {
+      if (attachment.windowId == windowId) return attachment;
+    }
+    return null;
+  }
+
   /// MM2 physical geometry -> window_manager logical units.
   RectData toLogical(PanelGeometry geometry) {
     final ratio = _devicePixelRatio() <= 0 ? 1.0 : _devicePixelRatio();
@@ -269,6 +280,17 @@ class PanelWindowHost {
     final geometry = entry.geometry;
     if (!entry.isDetached || geometry == null) return null;
     if (windowId != null) {
+      final existing = attachments[panelId];
+      if (existing?.windowId == windowId) {
+        await focus(panelId);
+        return existing;
+      }
+      final owner = attachmentForWindow(windowId);
+      if (owner != null && owner.panelId != panelId) {
+        // A native window can belong to only one panel identity. Refuse the
+        // adoption instead of silently stealing another panel's channel.
+        return null;
+      }
       final attachment = PanelWindowAttachment(
         panelId: panelId,
         windowId: windowId,
