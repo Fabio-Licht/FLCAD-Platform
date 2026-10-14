@@ -46,6 +46,7 @@ import '../cad_viewport/scene/cad_scene_graph.dart';
 import '../cad_viewport/scene/cad_scene_bounds.dart';
 import '../cad_viewport/selection/viewport_picking_controller.dart';
 import '../commands/desktop_command_coordinator.dart';
+import '../commands/command_palette.dart';
 import '../engineering_bridge/operational_reverse_engineering_controller.dart';
 import '../engineering_bridge/selection/geometry_selection_manager.dart';
 import '../engineering_bridge/widgets/recognition_workspace_panel.dart';
@@ -840,6 +841,11 @@ class _DesktopShellState extends State<DesktopShell> {
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: 'Pesquisar comandos',
+            onPressed: () => _openCommandPalette(context),
+            icon: const Icon(Icons.search),
+          ),
           PopupMenuButton<String>(
             tooltip: 'Arquivo',
             onSelected: (value) async {
@@ -950,6 +956,17 @@ class _DesktopShellState extends State<DesktopShell> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _openCommandPalette(BuildContext context) async {
+    await showSearch<void>(
+      context: context,
+      delegate: DesktopCommandPaletteDelegate(
+        isRegistered: commands.registry.contains,
+        canExecute: CommandPalettePolicy.canExecute,
+        execute: commands.dispatch,
       ),
     );
   }
