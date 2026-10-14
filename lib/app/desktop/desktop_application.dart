@@ -1524,7 +1524,7 @@ class _OfficialEngineeringWorkspaceState
           onChanged: (value) => setState(() => advancedInspector = value),
         ),
         const SizedBox(height: 10),
-        _InspectorSection(
+        _SharedInspectorReadOnlySection(
           title: 'Identity',
           children: [
             _InspectorProperty(label: 'Name', value: shortName),
@@ -1547,7 +1547,7 @@ class _OfficialEngineeringWorkspaceState
         ),
         if (ReferenceTreeTaxonomy.isProjectedReference(entity)) ...[
           const SizedBox(height: 8),
-          _InspectorSection(
+          _SharedInspectorReadOnlySection(
             title: 'Reference Origin',
             children: [
               _InspectorProperty(
@@ -1582,7 +1582,7 @@ class _OfficialEngineeringWorkspaceState
               final reference = ManagedCadReference.fromJson(
                 Map<String, dynamic>.from(raw),
               );
-              return _InspectorSection(
+              return _SharedInspectorReadOnlySection(
                 title: 'Managed CAD Reference',
                 children: [
                   _InspectorProperty(
@@ -1815,7 +1815,7 @@ class _OfficialEngineeringWorkspaceState
           Builder(
             builder: (context) {
               final sketch = Sketch.fromJson(Map<String, dynamic>.from(raw));
-              return _InspectorSection(
+              return _SharedInspectorReadOnlySection(
                 title: 'Sketch Support',
                 children: [
                   _InspectorProperty(
@@ -14651,6 +14651,26 @@ class _InspectorSection extends StatelessWidget {
       ),
     ),
   );
+}
+
+class _SharedInspectorReadOnlySection extends StatelessWidget {
+  const _SharedInspectorReadOnlySection({
+    required this.title,
+    required this.children,
+  });
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => InspectorPropertySection(
+        section: InspectorSectionModel(
+          id: title,
+          label: title,
+          properties: const [],
+        ),
+        children: children,
+      );
 }
 
 class _InspectorProperty extends StatelessWidget {
