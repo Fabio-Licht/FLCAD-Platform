@@ -108,7 +108,7 @@ void main() {
         expect(
           transport.toPanelOfType('snapshot'),
           isEmpty,
-          reason: 'versÃ£o incompatÃ­vel nÃ£o recebe projeÃ§Ã£o',
+          reason: 'versão incompatível não recebe projeção',
         );
       }
     });
@@ -401,7 +401,7 @@ void main() {
         expect(
           limited.transport.toMainOfType('result'),
           isEmpty,
-          reason: 'resultados voltam ao painel, nÃ£o ao main',
+          reason: 'resultados voltam ao painel, não ao main',
         );
         expect(
           limited.transport.toPanelOfType('result').last['errorCode'],

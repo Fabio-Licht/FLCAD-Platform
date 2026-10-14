@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../../core/cad_kernel/manager/kernel_manager.dart';
 import '../../core/cad_document/cad_document.dart';
@@ -72,6 +73,15 @@ import 'contextual_reference_actions.dart';
 import 'contextual_reference_preview_session.dart';
 import 'explorer_tree_projection.dart';
 import 'inspector_value_formatter.dart';
+import 'layout/display_service.dart';
+import 'layout/panel_identity.dart';
+import 'layout/panel_layout.dart';
+import 'layout/panel_layout_store.dart';
+import 'panels/desktop_panel_window_backend.dart';
+import 'panels/multi_window_panel_transport.dart';
+import 'panels/panel_bridge.dart';
+import 'panels/panel_session_source.dart';
+import 'panels/panel_window_host.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'reference_tree_taxonomy.dart';
@@ -1319,12 +1329,22 @@ class OfficialEngineeringWorkspace extends StatefulWidget {
 }
 
 class _OfficialEngineeringWorkspaceState
-    extends State<OfficialEngineeringWorkspace> {
+    extends State<OfficialEngineeringWorkspace>
+    with WindowListener {
   String module = 'AI Engineering';
   ProfessionalSurfaceTool? toolbarSurfaceTool;
   int toolbarEntityConstructor = 0;
   PrimitiveSurfaceType? toolbarPrimitiveType;
   final Set<String> openToolWindows = <String>{};
+  // G124-UX.MM4.1 - janela Explorer destacável (spike, somente Explorer).
+  MultiWindowPanelTransport? _panelTransport;
+  PanelBridge? _panelBridge;
+  PanelWindowHost? _panelWindowHost;
+  bool _explorerDetached = false;
+  String? _explorerPanelError;
+  bool _shellCloseGuardArmed = false;
+  bool _closingShell = false;
+  Timer? _panelReconcileTimer;
   final modelingViewport = ModelingViewportController();
   CadSceneGraph get scene => widget.cad.runtime.scene;
   final camera = CadCameraController();
@@ -2809,8 +2829,197 @@ class _OfficialEngineeringWorkspaceState
     if (mounted) setState(() {});
   }
 
+  // ---------------------------------------------------------------- painéis
+  // G124-UX.MM4.1: o Explorer pode rodar na sua própria janela Windows. O main
+  // continua sendo a única fonte de verdade: a janela recebe a projeção do MM3
+  // e devolve intents validados (seleção), nunca tocando o CAD.
+
+  Future<void> _ensurePanelInfrastructure() async {
+    if (_panelWindowHost != null) return;
+    final backend = DesktopPanelWindowBackend();
+    final transport = MultiWindowPanelTransport(
+      backend: backend,
+      isMainWindow: true,
+      panelWindowIdResolver: (panelId) =>
+          _panelWindowHost?.attachmentFor(PanelId.explorer)?.windowId,
+    );
+    final host = PanelWindowHost(
+      backend: backend,
+      layoutStore: PanelLayoutStore.forConfigDirectory(
+        await getApplicationSupportDirectory(),
+      ),
+      displays: createPlatformDisplayService(),
+      devicePixelRatio: () => MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
+    );
+    final bridge = PanelBridge(
+      transport: transport,
+      source: CadRuntimePanelSessionSource(widget.cad.runtime),
+    )..start();
+    transport.onMainWindowControl = (method, arguments) {
+      if (method == 'panel_dock') unawaited(_dockExplorer());
+    };
+    _panelTransport = transport;
+    _panelBridge = bridge;
+    _panelWindowHost = host;
+    // Resolve the shell HWND once. `preventClose`, `close` and `getBounds` all
+    // target `native_window`, which stays null until this call: without it the
+    // close request would be posted to a null window and the shell would never
+    // leave.
+    try {
+      await windowManager.ensureInitialized();
+    } on Object catch (error) {
+      debugPrint('[panel-window] window control unavailable: $error');
+    }
+    // The shell has to know when the operator closes it: see
+    // [_closeShellWithPanels].
+    windowManager.addListener(this);
+    _panelReconcileTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_reconcilePanelWindows()),
+    );
+  }
+
+  Future<PanelGeometry> _requestedExplorerGeometry() async {
+    final saved = (await _panelWindowHost!.prepareLayout())
+        .entryFor(PanelId.explorer)
+        .geometry;
+    if (saved != null) return saved;
+    try {
+      final bounds = await windowManager.getBounds();
+      return PanelGeometry(
+        left: bounds.right + 8,
+        top: bounds.top + 40,
+        width: 340,
+        height: 620,
+      );
+    } on Object {
+      return const PanelGeometry(left: 120, top: 120, width: 340, height: 620);
+    }
+  }
+
+  Future<void> _detachExplorer() async {
+    if (mounted) setState(() => _explorerPanelError = null);
+    try {
+      await _ensurePanelInfrastructure();
+      final host = _panelWindowHost!;
+      final attachment = await host.detach(
+        PanelId.explorer,
+        requestedGeometry: await _requestedExplorerGeometry(),
+      );
+      if (attachment == null) {
+        if (mounted) {
+          setState(
+            () => _explorerPanelError =
+                'Não foi possível abrir a janela do Explorer.',
+          );
+        }
+        return;
+      }
+      await _panelTransport?.ready;
+      await _setShellCloseGuard(host.hasAttachments);
+      if (!mounted) return;
+      setState(() => _explorerDetached = true);
+      widget.cad.setStatus('Explorer destacado para outra janela.');
+    } on Object catch (error) {
+      if (!mounted) return;
+      debugPrint('[panel-window] detach failed: $error');
+      setState(
+        () => _explorerPanelError = 'Falha ao destacar o Explorer: $error',
+      );
+    }
+  }
+
+  Future<void> _dockExplorer() async {
+    final host = _panelWindowHost;
+    if (host == null) return;
+    final closed = await host.dock(PanelId.explorer);
+    await _setShellCloseGuard(host.hasAttachments);
+    _panelBridge?.disconnectPanel(PanelId.explorer);
+    if (!mounted) return;
+    setState(() => _explorerDetached = false);
+    widget.cad.setStatus(
+      closed
+          ? 'Explorer reencaixado na janela principal.'
+          : 'Explorer reencaixado; feche a janela destacada com o X.',
+    );
+  }
+
+  Future<void> _reconcilePanelWindows() async {
+    final host = _panelWindowHost;
+    if (host == null || !host.hasAttachments) return;
+    final closed = await host.reconcileWindows();
+    final detachedByDisplay = await host.reconcileDisplays();
+    await _setShellCloseGuard(host.hasAttachments);
+    final affected = {...closed, ...detachedByDisplay};
+    if (affected.isEmpty || !mounted) return;
+    for (final panelId in affected) {
+      _panelBridge?.disconnectPanel(panelId);
+    }
+    setState(() => _explorerDetached = false);
+    widget.cad.setStatus('Janela do Explorer fechada; painel reencaixado.');
+  }
+
+  /// Arms the "close the panels first" barrier while a panel is detached.
+  ///
+  /// Destroying the main window while a panel is still open leaves the process
+  /// alive with an orphan panel window: the secondary engine's platform runner
+  /// lives on this very thread, so once the shell stops pumping messages its
+  /// shutdown never completes (measured: process stuck with a single thread and
+  /// a live `FLUTTER_MULTI_WINDOW_WIN32_WINDOW`). The barrier is only armed
+  /// while a panel is actually detached, so the normal close path stays
+  /// untouched.
+  Future<void> _setShellCloseGuard(bool armed) async {
+    if (armed == _shellCloseGuardArmed) return;
+    _shellCloseGuardArmed = armed;
+    try {
+      await windowManager.setPreventClose(armed);
+    } on Object catch (error) {
+      debugPrint('[panel-window] close guard unavailable: $error');
+    }
+  }
+
+  /// Docks every panel and only then lets the shell window close.
+  Future<void> _closeShellWithPanels() async {
+    if (_closingShell) return;
+    _closingShell = true;
+    try {
+      final host = _panelWindowHost;
+      if (host != null && host.hasAttachments) {
+        var closed = await host.dock(PanelId.explorer);
+        if (!closed) {
+          // One retry: the panel may still have been booting.
+          closed = await host.dock(PanelId.explorer);
+        }
+        _panelBridge?.disconnectPanel(PanelId.explorer);
+        if (!closed) {
+          debugPrint(
+            '[panel-window] shell closing with a panel window still alive',
+          );
+        }
+      }
+      await _setShellCloseGuard(false);
+      await windowManager.close();
+    } on Object catch (error) {
+      debugPrint('[panel-window] shell close failed: $error');
+      _closingShell = false;
+    }
+  }
+
+  @override
+  void onWindowClose() {
+    unawaited(_closeShellWithPanels());
+  }
+
   @override
   void dispose() {
+    _panelReconcileTimer?.cancel();
+    windowManager.removeListener(this);
+    final panelHost = _panelWindowHost;
+    if (panelHost != null && panelHost.hasAttachments) {
+      unawaited(panelHost.dock(PanelId.explorer));
+    }
+    _panelBridge?.dispose();
+    unawaited(_panelTransport?.close() ?? Future<void>.value());
     contextualReferencePreview.cancel();
     intersectionSelection.dispose();
     alignmentCoordinateSystemSelection.dispose();
@@ -5753,19 +5962,33 @@ class _OfficialEngineeringWorkspaceState
                   Positioned.fill(
                     child: Row(
                       children: [
-                        _DockableSidePanel(
-                          panelId: 'explorer',
-                          title: 'Explorer',
-                          icon: Icons.account_tree,
-                          width: 240,
-                          child: widget.cad.runtime.document == null
-                              ? const _EmptyState(
-                                  icon: Icons.folder_outlined,
-                                  message:
-                                      'Open a project to populate the engineering tree.',
-                                )
-                              : _documentExplorer(context),
-                        ),
+                        if (_explorerDetached)
+                          _DetachedPanelRail(
+                            panelId: PanelId.explorer,
+                            title: 'Explorer',
+                            icon: Icons.account_tree,
+                            error: _explorerPanelError,
+                            onReturn: () => unawaited(_dockExplorer()),
+                            onFocus: () => unawaited(
+                              _panelWindowHost?.focus(PanelId.explorer) ??
+                                  Future<void>.value(),
+                            ),
+                          )
+                        else
+                          _DockableSidePanel(
+                            panelId: 'explorer',
+                            title: 'Explorer',
+                            icon: Icons.account_tree,
+                            width: 240,
+                            onDetach: () => unawaited(_detachExplorer()),
+                            child: widget.cad.runtime.document == null
+                                ? const _EmptyState(
+                                    icon: Icons.folder_outlined,
+                                    message:
+                                        'Open a project to populate the engineering tree.',
+                                  )
+                                : _documentExplorer(context),
+                          ),
                         const VerticalDivider(),
                         Expanded(
                           child: Stack(
@@ -14393,6 +14616,89 @@ class _SketchInspectorNumberPropertyState
   );
 }
 
+/// Rail shown in the main window while a panel lives in its own window.
+///
+/// Keeps the workspace layout stable and gives the operator the two actions
+/// that matter: focus the detached window or bring the panel back.
+class _DetachedPanelRail extends StatelessWidget {
+  const _DetachedPanelRail({
+    required this.panelId,
+    required this.title,
+    required this.icon,
+    required this.onReturn,
+    required this.onFocus,
+    this.error,
+  });
+
+  final PanelId panelId;
+  final String title;
+  final IconData icon;
+  final VoidCallback onReturn;
+  final VoidCallback onFocus;
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return SizedBox(
+      key: ValueKey('detached-${panelId.name}'),
+      width: 44,
+      child: Material(
+        color: colors.surfaceContainerHigh,
+        child: Column(
+          children: [
+            const SizedBox(height: 8),
+            Tooltip(
+              message: '$title está em outra janela (focar)',
+              child: InkWell(
+                onTap: onFocus,
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(icon, size: 16, color: colors.primary),
+                ),
+              ),
+            ),
+            Tooltip(
+              message: 'Trazer $title de volta',
+              child: InkWell(
+                onTap: onReturn,
+                child: const Padding(
+                  padding: EdgeInsets.all(6),
+                  child: Icon(Icons.push_pin, size: 16),
+                ),
+              ),
+            ),
+            if (error != null)
+              Tooltip(
+                message: error!,
+                child: Padding(
+                  padding: const EdgeInsets.all(6),
+                  child: Icon(
+                    Icons.error_outline,
+                    size: 16,
+                    color: colors.error,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: RotatedBox(
+                quarterTurns: 3,
+                child: Center(
+                  child: Text(
+                    '$title · janela destacada',
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _DockableSidePanel extends StatefulWidget {
   const _DockableSidePanel({
     required this.panelId,
@@ -14401,6 +14707,7 @@ class _DockableSidePanel extends StatefulWidget {
     required this.width,
     required this.child,
     this.initiallyCollapsed = false,
+    this.onDetach,
   });
   final String panelId;
   final String title;
@@ -14408,6 +14715,9 @@ class _DockableSidePanel extends StatefulWidget {
   final double width;
   final Widget child;
   final bool initiallyCollapsed;
+
+  /// G124-UX.MM4.1: detaches this panel to its own Windows window.
+  final VoidCallback? onDetach;
 
   @override
   State<_DockableSidePanel> createState() => _DockableSidePanelState();
@@ -14503,6 +14813,12 @@ class _DockableSidePanelState extends State<_DockableSidePanel> {
                   icon: pinned ? Icons.push_pin : Icons.push_pin_outlined,
                   onPressed: () => setState(() => pinned = !pinned),
                 ),
+                if (widget.onDetach != null)
+                  _PanelHeaderButton(
+                    tooltip: 'Destacar painel para outra janela',
+                    icon: Icons.open_in_new,
+                    onPressed: widget.onDetach!,
+                  ),
                 _PanelHeaderButton(
                   tooltip: 'Close',
                   icon: Icons.close,

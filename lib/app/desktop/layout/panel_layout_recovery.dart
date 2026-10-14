@@ -141,7 +141,7 @@ class PanelLayoutRecovery {
           PanelRecoveryAction(
             id,
             PanelRecoveryKind.singleScreenFallback,
-            'Um Ãºnico monitor: ${descriptor.title} voltou para a janela '
+            'Um único monitor: ${descriptor.title} voltou para a janela '
             'principal.',
           ),
         );
@@ -205,7 +205,7 @@ class PanelLayoutRecovery {
             PanelRecoveryAction(
               id,
               PanelRecoveryKind.monitorConfigurationChanged,
-              'ConfiguraÃ§Ã£o do monitor mudou; ${descriptor.title} foi '
+              'Configuração do monitor mudou; ${descriptor.title} foi '
               'reancorado ao mesmo dispositivo.',
             ),
           );
@@ -254,7 +254,7 @@ class PanelLayoutRecovery {
           PanelRecoveryAction(
             id,
             PanelRecoveryKind.invalidGeometry,
-            'Geometria invÃ¡lida para ${descriptor.title}; tamanho padrÃ£o '
+            'Geometria inválida para ${descriptor.title}; tamanho padrão '
             'aplicado.',
           ),
         );
@@ -282,7 +282,7 @@ class PanelLayoutRecovery {
           PanelRecoveryAction(
             id,
             PanelRecoveryKind.offScreen,
-            '${descriptor.title} estava fora da Ã¡rea visÃ­vel; reposicionado em '
+            '${descriptor.title} estava fora da área visível; reposicionado em '
             '${target.deviceName}.',
           ),
         );

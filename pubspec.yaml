@@ -45,6 +45,10 @@ dependencies:
   ffi: ^2.1.4
   file_picker: ^12.0.0
 
+  # G124-UX.MM4.1 spike: real independent Windows windows for panel docking.
+  desktop_multi_window: ^0.3.1
+  window_manager: ^0.5.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -296,7 +296,7 @@ void main() {
 
     test('recovers from corrupt preferences with defaults', () async {
       final file = File('${directory.path}/${PanelLayoutStore.fileName}');
-      await file.writeAsString('{ isto nÃ£o Ã© json');
+      await file.writeAsString('{ isto não é json');
       final store = PanelLayoutStore(file);
 
       final result = await store.load();

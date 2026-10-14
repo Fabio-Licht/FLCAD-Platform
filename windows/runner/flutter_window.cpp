@@ -2,6 +2,8 @@
 
 #include <optional>
 
+#include <desktop_multi_window/desktop_multi_window_plugin.h>
+
 #include "flutter/generated_plugin_registrant.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
@@ -25,6 +27,22 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  // G124-UX.MM4.1A: every window created by desktop_multi_window owns its own
+  // Flutter engine, and method channels are not shared between engines. The
+  // plugin exposes the documented hook below so the application plugins
+  // (window_manager, screen_retriever, ...) exist in the secondary engine too.
+  // The callback runs once per created window, before the plugin registers its
+  // own internal channel, and never for this main window.
+  DesktopMultiWindowSetWindowCreatedCallback([](void* controller) {
+    if (controller == nullptr) return;
+    auto* flutter_view_controller =
+        reinterpret_cast<flutter::FlutterViewController*>(controller);
+    auto* registry = flutter_view_controller->engine();
+    if (registry == nullptr) return;
+    // Panel windows render the projection only: the native CAD viewport host is
+    // deliberately not created here, it stays owned by the main window.
+    RegisterPlugins(registry);
+  });
   native_viewport_registrar_ =
       std::make_unique<flutter::PluginRegistrarWindows>(
           flutter_controller_->engine()->GetRegistrarForPlugin(
