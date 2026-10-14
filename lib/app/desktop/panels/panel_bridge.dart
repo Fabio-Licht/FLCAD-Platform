@@ -299,8 +299,9 @@ class PanelBridge {
 
     // Rules 6 and 7: whitelist, capability and payload validation run before
     // anything reaches the CAD session.
+    late final PanelActionSpec spec;
     try {
-      validatePanelAction(
+      spec = validatePanelAction(
         action: intent.action,
         params: intent.params,
         grantedCapabilities: connection.capabilities,
@@ -308,6 +309,16 @@ class PanelBridge {
       );
     } on PanelProtocolException catch (error) {
       _reject(intent, error.code, error.message);
+      return;
+    }
+    if (spec.requiresCurrentRevision &&
+        (intent.baseRevision == null ||
+            intent.baseRevision != connection.lastRevisionSent)) {
+      _reject(
+        intent,
+        PanelErrorCode.outOfOrderRevision,
+        'editable panel intents require the latest snapshot revision',
+      );
       return;
     }
 
@@ -330,6 +341,19 @@ class PanelBridge {
           await source.setEntityVisibility(
             intent.params['id']! as String,
             visible: intent.params['visible']! as bool,
+          );
+        case panelActionInspectorDimensionEdit:
+          if (!source.supportsInspectorDimensionEdit) {
+            _reject(
+              intent,
+              PanelErrorCode.unknownAction,
+              'inspector dimension editing is not available in this session',
+            );
+            return;
+          }
+          await source.editDrivingDimension(
+            intent.params['entityId']! as String,
+            (intent.params['value']! as num).toDouble(),
           );
       }
     } on Object catch (error) {

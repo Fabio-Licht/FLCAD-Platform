@@ -117,6 +117,25 @@ class PanelShellEndpoint {
     return requestId;
   }
 
+  Future<String> editDrivingDimension({
+    required String entityId,
+    required double value,
+  }) async {
+    final requestId = _nextRequestId();
+    _send(
+      PanelIntent(
+        panelId: panelId,
+        sessionId: sessionId ?? -1,
+        projectId: projectId,
+        action: panelActionInspectorDimensionEdit,
+        params: {'entityId': entityId, 'value': value},
+        requestId: requestId,
+        baseRevision: revision,
+      ),
+    );
+    return requestId;
+  }
+
   void dispose() {
     if (!_connected) return;
     _connected = false;

@@ -547,7 +547,8 @@ class _DesktopShellState extends State<DesktopShell> {
     // Platform.environment fallback is kDebugMode only and never FLUTTER_TEST.
     _autoloadPolicy = DevelopmentCalotaAutoloadPolicy.resolve(
       debugMode: kDebugMode && !const bool.fromEnvironment('FLUTTER_TEST'),
-      debugEnvironment: kDebugMode && !const bool.fromEnvironment('FLUTTER_TEST')
+      debugEnvironment:
+          kDebugMode && !const bool.fromEnvironment('FLUTTER_TEST')
           ? Platform.environment
           : const <String, String>{},
     );
@@ -677,7 +678,8 @@ class _DesktopShellState extends State<DesktopShell> {
           await cad.runtime.setEntityVisibility(importedId, true);
         }
         final publication = cad.runtime.managedImportPublication;
-        final visible = importedId != null &&
+        final visible =
+            importedId != null &&
             cad.runtime.scene.find(importedId)?.visible == true;
         final meshPublished =
             publication != null &&
@@ -696,8 +698,7 @@ class _DesktopShellState extends State<DesktopShell> {
       reportStatus: cad.setStatus,
       log: _logDevAutoload,
     );
-    if (_devCalotaIsolationBlocked &&
-        _devCalotaIsolationBlockMessage != null) {
+    if (_devCalotaIsolationBlocked && _devCalotaIsolationBlockMessage != null) {
       cad.setStatus(_devCalotaIsolationBlockMessage!);
     }
   }
@@ -2868,7 +2869,14 @@ class _OfficialEngineeringWorkspaceState
     );
     final bridge = PanelBridge(
       transport: transport,
-      source: CadRuntimePanelSessionSource(widget.cad.runtime),
+      source: CadRuntimePanelSessionSource(
+        widget.cad.runtime,
+        editDrivingDimensionCallback: (entityId, value) =>
+            widget.commands.dispatch('reverse.sketch.dimension.edit', {
+              'id': entityId,
+              'value': value,
+            }),
+      ),
     )..start();
     transport.onMainWindowControl = (method, arguments) {
       if (method != 'panel_dock') return;
@@ -2936,10 +2944,7 @@ class _OfficialEngineeringWorkspaceState
       // the window starts handshaking.
       await _panelTransport?.ready;
       final adopt = await _livePanelWindow(panelId);
-      final attachment = await host.restorePersisted(
-        panelId,
-        windowId: adopt,
-      );
+      final attachment = await host.restorePersisted(panelId, windowId: adopt);
       if (attachment == null) return;
       await _setShellCloseGuard(host.hasAttachments);
       if (!mounted) return;
@@ -3024,9 +3029,11 @@ class _OfficialEngineeringWorkspaceState
         if (mounted) {
           setState(() {
             if (panelId == PanelId.explorer) {
-              _explorerPanelError = 'Não foi possível abrir a janela do Explorer.';
+              _explorerPanelError =
+                  'Não foi possível abrir a janela do Explorer.';
             } else {
-              _inspectorPanelError = 'Não foi possível abrir a janela do Inspector.';
+              _inspectorPanelError =
+                  'Não foi possível abrir a janela do Inspector.';
             }
           });
         }
@@ -6706,364 +6713,372 @@ class _OfficialEngineeringWorkspaceState
                           ),
                         ),
                         const VerticalDivider(),
-                        if (!_inspectorDetached) _DockableSidePanel(
-                          panelId: 'inspector',
-                          title: 'Property Inspector',
-                          icon: Icons.tune,
-                          width: 280,
-                          onDetach: () => unawaited(_detachInspector()),
-                          child:
-                              _sketchEnvironmentInspector() ??
-                              _operationalInspector() ??
-                              _documentEntityInspector() ??
-                              (module == 'Sketch'
-                                  ? Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          'State: ${operational.stage.name}',
-                                        ),
-                                        Text(
-                                          'Sketch entities: ${operational.sketchEntities.length}',
-                                        ),
-                                        Text(
-                                          'Constraints: ${operational.constraints.length}',
-                                        ),
-                                        if (operational.surfacePlan != null)
+                        if (!_inspectorDetached)
+                          _DockableSidePanel(
+                            panelId: 'inspector',
+                            title: 'Property Inspector',
+                            icon: Icons.tune,
+                            width: 280,
+                            onDetach: () => unawaited(_detachInspector()),
+                            child:
+                                _sketchEnvironmentInspector() ??
+                                _operationalInspector() ??
+                                _documentEntityInspector() ??
+                                (module == 'Sketch'
+                                    ? Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
                                           Text(
-                                            'Surface quality: ${(operational.surfacePlan!.candidates.first.quality * 100).toStringAsFixed(1)}%',
-                                          ),
-                                        if (operational.activeSurface !=
-                                            null) ...[
-                                          Text(
-                                            'Continuity: ${operational.activeSurface!.continuity.name}',
+                                            'State: ${operational.stage.name}',
                                           ),
                                           Text(
-                                            'Confidence: ${(operational.activeSurface!.confidence * 100).toStringAsFixed(1)}%',
+                                            'Sketch entities: ${operational.sketchEntities.length}',
                                           ),
                                           Text(
-                                            'Kernel shape: ${operational.activeSurface!.handle.persistentId}',
+                                            'Constraints: ${operational.constraints.length}',
                                           ),
-                                        ],
-                                        if (operational
-                                                .professionalSurfacePreview !=
-                                            null) ...[
-                                          const Divider(),
-                                          const Text(
-                                            'Surface Edit Preview',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                          Text(
-                                            'Operation: ${operational.professionalSurfacePreview!.definition.tool.name}',
-                                          ),
-                                          Text(
-                                            'Status: ${operational.professionalSurfacePreview!.definition.status.name}',
-                                          ),
-                                          Text(
-                                            'Inputs: ${operational.professionalSurfacePreview!.definition.references.length}',
-                                          ),
-                                          Text(
-                                            'Transient ShapeHandle: ${operational.professionalSurfacePreview!.definition.handle?.persistentId ?? '-'}',
-                                          ),
-                                          const Text(
-                                            'Document impact: none until Apply',
-                                          ),
-                                          const Text(
-                                            'Cancel discards the complete preview.',
-                                          ),
-                                          for (final parameter
-                                              in operational
-                                                  .professionalSurfacePreview!
-                                                  .definition
-                                                  .parameters
-                                                  .entries
-                                                  .where(
-                                                    (entry) =>
-                                                        entry.key !=
-                                                            'shapeHandles' &&
-                                                        entry.key !=
-                                                            'sourceEntityIds',
-                                                  ))
+                                          if (operational.surfacePlan != null)
                                             Text(
-                                              '${parameter.key}: ${parameter.value}',
+                                              'Surface quality: ${(operational.surfacePlan!.candidates.first.quality * 100).toStringAsFixed(1)}%',
                                             ),
-                                        ],
-                                        if (operational
-                                            .professionalSurfaceValidationCompleted) ...[
-                                          const Divider(),
-                                          const Text(
-                                            'BRep Validation',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
+                                          if (operational.activeSurface !=
+                                              null) ...[
+                                            Text(
+                                              'Continuity: ${operational.activeSurface!.continuity.name}',
                                             ),
-                                          ),
+                                            Text(
+                                              'Confidence: ${(operational.activeSurface!.confidence * 100).toStringAsFixed(1)}%',
+                                            ),
+                                            Text(
+                                              'Kernel shape: ${operational.activeSurface!.handle.persistentId}',
+                                            ),
+                                          ],
                                           if (operational
-                                              .professionalSurfaceValidation
-                                              .isEmpty)
+                                                  .professionalSurfacePreview !=
+                                              null) ...[
+                                            const Divider(),
                                             const Text(
-                                              'Valid: BRepCheck reported no errors.',
-                                            )
-                                          else
-                                            for (final diagnostic
-                                                in operational
-                                                    .professionalSurfaceValidation)
-                                              Text(diagnostic),
-                                        ],
-                                        if (operational
-                                                .professionalSurfaceOperationReport
-                                            case final report?) ...[
-                                          const Divider(),
-                                          const Text(
-                                            'Operation Result',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.w700,
-                                            ),
-                                          ),
-                                          Text('State: ${report['state']}'),
-                                          Text(
-                                            'Affected entities: ${report['affectedEntities']}',
-                                          ),
-                                          Text(
-                                            'Boundaries/loops: ${report['boundaries']}/${report['loops']}',
-                                          ),
-                                          Text(
-                                            'Tolerance: ${report['tolerance']}',
-                                          ),
-                                          for (final entry
-                                              in report.entries.where(
-                                                (entry) => !const {
-                                                  'operation',
-                                                  'state',
-                                                  'affectedEntities',
-                                                  'boundaries',
-                                                  'loops',
-                                                  'tolerance',
-                                                  'diagnostics',
-                                                  'result',
-                                                }.contains(entry.key),
-                                              ))
-                                            Text(
-                                              '${entry.key}: ${entry.value}',
-                                            ),
-                                          Text(
-                                            'Final diagnostic: ${report['result']}',
-                                          ),
-                                        ],
-                                      ],
-                                    )
-                                  : module == 'Transform'
-                                  ? Builder(
-                                      builder: (context) {
-                                        final selected =
-                                            geometrySelection.selectedIds;
-                                        if (selected.isEmpty) {
-                                          return const Text(
-                                            'Select an entity to transform.',
-                                          );
-                                        }
-                                        final entity = widget
-                                            .cad
-                                            .runtime
-                                            .document
-                                            ?.entities[selected.first];
-                                        final matrix =
-                                            entity?.placement?.matrix.values ??
-                                            entity?.data['transformMatrix'];
-                                        final collectionId =
-                                            entity?.data['collectionId']
-                                                as String?;
-                                        final collection = collectionId == null
-                                            ? null
-                                            : widget
-                                                  .cad
-                                                  .runtime
-                                                  .document
-                                                  ?.entities[collectionId];
-                                        return Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              entity?.data['name'] as String? ??
-                                                  entity?.id ??
-                                                  '-',
-                                            ),
-                                            Text(
-                                              'Type: ${entity?.kind.name ?? '-'}',
-                                            ),
-                                            Text(
-                                              'Selected: ${selected.length}',
-                                            ),
-                                            Text(
-                                              'Collection: ${collection?.data['name'] ?? '-'}',
-                                            ),
-                                            Text(
-                                              'Position/rotation: ${matrix is List ? 'transformed' : 'identity'}',
-                                            ),
-                                            Text(
-                                              'Active system: ${operational.manualTransformMode?.name ?? 'World'}',
-                                            ),
-                                            if (entity?.shape != null)
-                                              const Text(
-                                                'Native BRep transform: OCCT',
+                                              'Surface Edit Preview',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w700,
                                               ),
-                                            if (entity?.placement != null)
-                                              const Text(
-                                                'Placement rígido não destrutivo',
+                                            ),
+                                            Text(
+                                              'Operation: ${operational.professionalSurfacePreview!.definition.tool.name}',
+                                            ),
+                                            Text(
+                                              'Status: ${operational.professionalSurfacePreview!.definition.status.name}',
+                                            ),
+                                            Text(
+                                              'Inputs: ${operational.professionalSurfacePreview!.definition.references.length}',
+                                            ),
+                                            Text(
+                                              'Transient ShapeHandle: ${operational.professionalSurfacePreview!.definition.handle?.persistentId ?? '-'}',
+                                            ),
+                                            const Text(
+                                              'Document impact: none until Apply',
+                                            ),
+                                            const Text(
+                                              'Cancel discards the complete preview.',
+                                            ),
+                                            for (final parameter
+                                                in operational
+                                                    .professionalSurfacePreview!
+                                                    .definition
+                                                    .parameters
+                                                    .entries
+                                                    .where(
+                                                      (entry) =>
+                                                          entry.key !=
+                                                              'shapeHandles' &&
+                                                          entry.key !=
+                                                              'sourceEntityIds',
+                                                    ))
+                                              Text(
+                                                '${parameter.key}: ${parameter.value}',
                                               ),
                                           ],
-                                        );
-                                      },
-                                    )
-                                  : module == 'Sections'
-                                  ? Builder(
-                                      builder: (context) {
-                                        final entity =
-                                            operational.selectedSection;
-                                        final section = entity?.data['section'];
-                                        if (section is! Map) {
-                                          final sketch =
-                                              operational.activeSketch;
-                                          if (sketch == null) {
+                                          if (operational
+                                              .professionalSurfaceValidationCompleted) ...[
+                                            const Divider(),
+                                            const Text(
+                                              'BRep Validation',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                            if (operational
+                                                .professionalSurfaceValidation
+                                                .isEmpty)
+                                              const Text(
+                                                'Valid: BRepCheck reported no errors.',
+                                              )
+                                            else
+                                              for (final diagnostic
+                                                  in operational
+                                                      .professionalSurfaceValidation)
+                                                Text(diagnostic),
+                                          ],
+                                          if (operational
+                                                  .professionalSurfaceOperationReport
+                                              case final report?) ...[
+                                            const Divider(),
+                                            const Text(
+                                              'Operation Result',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                            Text('State: ${report['state']}'),
+                                            Text(
+                                              'Affected entities: ${report['affectedEntities']}',
+                                            ),
+                                            Text(
+                                              'Boundaries/loops: ${report['boundaries']}/${report['loops']}',
+                                            ),
+                                            Text(
+                                              'Tolerance: ${report['tolerance']}',
+                                            ),
+                                            for (final entry
+                                                in report.entries.where(
+                                                  (entry) => !const {
+                                                    'operation',
+                                                    'state',
+                                                    'affectedEntities',
+                                                    'boundaries',
+                                                    'loops',
+                                                    'tolerance',
+                                                    'diagnostics',
+                                                    'result',
+                                                  }.contains(entry.key),
+                                                ))
+                                              Text(
+                                                '${entry.key}: ${entry.value}',
+                                              ),
+                                            Text(
+                                              'Final diagnostic: ${report['result']}',
+                                            ),
+                                          ],
+                                        ],
+                                      )
+                                    : module == 'Transform'
+                                    ? Builder(
+                                        builder: (context) {
+                                          final selected =
+                                              geometrySelection.selectedIds;
+                                          if (selected.isEmpty) {
                                             return const Text(
-                                              'Select a Section or associated Sketch.',
+                                              'Select an entity to transform.',
                                             );
                                           }
-                                          final metadata = sketch.metadata;
-                                          String metric(String key) =>
-                                              ((metadata[key] as num?) ?? 0)
-                                                  .toDouble()
-                                                  .toStringAsFixed(6);
+                                          final entity = widget
+                                              .cad
+                                              .runtime
+                                              .document
+                                              ?.entities[selected.first];
+                                          final matrix =
+                                              entity
+                                                  ?.placement
+                                                  ?.matrix
+                                                  .values ??
+                                              entity?.data['transformMatrix'];
+                                          final collectionId =
+                                              entity?.data['collectionId']
+                                                  as String?;
+                                          final collection =
+                                              collectionId == null
+                                              ? null
+                                              : widget
+                                                    .cad
+                                                    .runtime
+                                                    .document
+                                                    ?.entities[collectionId];
                                           return Column(
                                             crossAxisAlignment:
                                                 CrossAxisAlignment.start,
                                             children: [
-                                              Text(sketch.name),
                                               Text(
-                                                'Entities: ${sketch.entityIds.length}',
+                                                entity?.data['name']
+                                                        as String? ??
+                                                    entity?.id ??
+                                                    '-',
                                               ),
                                               Text(
-                                                'Points: ${metadata['pointCount'] ?? 0}',
+                                                'Type: ${entity?.kind.name ?? '-'}',
                                               ),
                                               Text(
-                                                'Segments: ${metadata['segmentCount'] ?? 0}',
+                                                'Selected: ${selected.length}',
                                               ),
                                               Text(
-                                                'Maximum error: ${metric('maximumError')} mm',
+                                                'Collection: ${collection?.data['name'] ?? '-'}',
                                               ),
                                               Text(
-                                                'Mean error: ${metric('meanError')} mm',
+                                                'Position/rotation: ${matrix is List ? 'transformed' : 'identity'}',
                                               ),
                                               Text(
-                                                'Tolerance: ${metric('tolerance')} mm',
+                                                'Active system: ${operational.manualTransformMode?.name ?? 'World'}',
+                                              ),
+                                              if (entity?.shape != null)
+                                                const Text(
+                                                  'Native BRep transform: OCCT',
+                                                ),
+                                              if (entity?.placement != null)
+                                                const Text(
+                                                  'Placement rígido não destrutivo',
+                                                ),
+                                            ],
+                                          );
+                                        },
+                                      )
+                                    : module == 'Sections'
+                                    ? Builder(
+                                        builder: (context) {
+                                          final entity =
+                                              operational.selectedSection;
+                                          final section =
+                                              entity?.data['section'];
+                                          if (section is! Map) {
+                                            final sketch =
+                                                operational.activeSketch;
+                                            if (sketch == null) {
+                                              return const Text(
+                                                'Select a Section or associated Sketch.',
+                                              );
+                                            }
+                                            final metadata = sketch.metadata;
+                                            String metric(String key) =>
+                                                ((metadata[key] as num?) ?? 0)
+                                                    .toDouble()
+                                                    .toStringAsFixed(6);
+                                            return Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              children: [
+                                                Text(sketch.name),
+                                                Text(
+                                                  'Entities: ${sketch.entityIds.length}',
+                                                ),
+                                                Text(
+                                                  'Points: ${metadata['pointCount'] ?? 0}',
+                                                ),
+                                                Text(
+                                                  'Segments: ${metadata['segmentCount'] ?? 0}',
+                                                ),
+                                                Text(
+                                                  'Maximum error: ${metric('maximumError')} mm',
+                                                ),
+                                                Text(
+                                                  'Mean error: ${metric('meanError')} mm',
+                                                ),
+                                                Text(
+                                                  'Tolerance: ${metric('tolerance')} mm',
+                                                ),
+                                                Text(
+                                                  'Association: ${metadata['associationState'] ?? 'detached'}',
+                                                ),
+                                                Text(
+                                                  'Updated: ${metadata['lastUpdatedAt'] ?? '-'}',
+                                                ),
+                                              ],
+                                            );
+                                          }
+                                          return Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                entity!.data['name'] as String,
                                               ),
                                               Text(
-                                                'Association: ${metadata['associationState'] ?? 'detached'}',
+                                                'Segments: ${section['segmentCount']}',
                                               ),
                                               Text(
-                                                'Updated: ${metadata['lastUpdatedAt'] ?? '-'}',
+                                                'Loops: ${section['loopCount']}',
+                                              ),
+                                              Text(
+                                                'Length: ${(section['length'] as num).toStringAsFixed(3)} mm',
+                                              ),
+                                              Text(
+                                                'Closed: ${section['closed']}',
+                                              ),
+                                              Text(
+                                                'Projected area: ${(section['projectedArea'] as num).toStringAsFixed(3)} mm²',
+                                              ),
+                                              Text(
+                                                'Tolerance: ${section['toleranceUsed']}',
+                                              ),
+                                              const SizedBox(height: 8),
+                                              FilledButton.tonalIcon(
+                                                icon: const Icon(
+                                                  Icons.delete_outline,
+                                                ),
+                                                label: const Text(
+                                                  'Delete Section',
+                                                ),
+                                                onPressed: () => _sectionAction(
+                                                  () => operational.sections
+                                                      .remove(entity.id),
+                                                ),
                                               ),
                                             ],
                                           );
-                                        }
-                                        return Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: [
-                                            Text(
-                                              entity!.data['name'] as String,
-                                            ),
-                                            Text(
-                                              'Segments: ${section['segmentCount']}',
-                                            ),
-                                            Text(
-                                              'Loops: ${section['loopCount']}',
-                                            ),
-                                            Text(
-                                              'Length: ${(section['length'] as num).toStringAsFixed(3)} mm',
-                                            ),
-                                            Text(
-                                              'Closed: ${section['closed']}',
-                                            ),
-                                            Text(
-                                              'Projected area: ${(section['projectedArea'] as num).toStringAsFixed(3)} mm²',
-                                            ),
-                                            Text(
-                                              'Tolerance: ${section['toleranceUsed']}',
+                                        },
+                                      )
+                                    : module == 'Recognition'
+                                    ? Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          const Text('Alignment guidance'),
+                                          if (operational.activeReference ==
+                                              null)
+                                            const Text(
+                                              'Accept a planar hypothesis and create its official reference.',
+                                            )
+                                          else ...[
+                                            const Text(
+                                              'Deseja criar um Sistema de Coordenadas utilizando essas referências?',
                                             ),
                                             const SizedBox(height: 8),
-                                            FilledButton.tonalIcon(
-                                              icon: const Icon(
-                                                Icons.delete_outline,
-                                              ),
-                                              label: const Text(
-                                                'Delete Section',
-                                              ),
-                                              onPressed: () => _sectionAction(
-                                                () => operational.sections
-                                                    .remove(entity.id),
-                                              ),
+                                            const Text(
+                                              'Deseja alinhar a peça utilizando este sistema?',
                                             ),
+                                            if (operational
+                                                    .alignmentTransform !=
+                                                null)
+                                              Text(
+                                                'Preview ativo: plano → ${operational.alignmentTarget}. Confirme somente após revisar a posição final.',
+                                              ),
                                           ],
-                                        );
-                                      },
-                                    )
-                                  : module == 'Recognition'
-                                  ? Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        const Text('Alignment guidance'),
-                                        if (operational.activeReference == null)
-                                          const Text(
-                                            'Accept a planar hypothesis and create its official reference.',
-                                          )
-                                        else ...[
-                                          const Text(
-                                            'Deseja criar um Sistema de Coordenadas utilizando essas referências?',
-                                          ),
-                                          const SizedBox(height: 8),
-                                          const Text(
-                                            'Deseja alinhar a peça utilizando este sistema?',
-                                          ),
-                                          if (operational.alignmentTransform !=
-                                              null)
-                                            Text(
-                                              'Preview ativo: plano → ${operational.alignmentTarget}. Confirme somente após revisar a posição final.',
-                                            ),
                                         ],
-                                      ],
-                                    )
-                                  : modelingViewport.selection.isEmpty
-                                  ? const _EmptyState(
-                                      icon: Icons.touch_app_outlined,
-                                      message:
-                                          'Select an engineering object to inspect its properties.',
-                                    )
-                                  : ModelingPropertyInspector(
-                                      context: InteractionContext(
-                                        stage: InteractionStage.selected,
-                                        selection: modelingViewport.selection,
-                                        message: 'Selection synchronized',
-                                      ),
-                                      onParameterChanged: (key, value) =>
-                                          widget.cad.setStatus(
-                                            'Parameter $key updated to $value.',
-                                          ),
-                                    )),
-                        ),
+                                      )
+                                    : modelingViewport.selection.isEmpty
+                                    ? const _EmptyState(
+                                        icon: Icons.touch_app_outlined,
+                                        message:
+                                            'Select an engineering object to inspect its properties.',
+                                      )
+                                    : ModelingPropertyInspector(
+                                        context: InteractionContext(
+                                          stage: InteractionStage.selected,
+                                          selection: modelingViewport.selection,
+                                          message: 'Selection synchronized',
+                                        ),
+                                        onParameterChanged: (key, value) =>
+                                            widget.cad.setStatus(
+                                              'Parameter $key updated to $value.',
+                                            ),
+                                      )),
+                          ),
                         if (_inspectorDetached)
                           _DetachedPanelRail(
                             panelId: PanelId.inspector,
                             title: 'Property Inspector',
                             icon: Icons.tune,
                             error: _inspectorPanelError,
-                            onReturn: () => unawaited(
-                              _dockPanel(PanelId.inspector),
-                            ),
+                            onReturn: () =>
+                                unawaited(_dockPanel(PanelId.inspector)),
                             onFocus: () => unawaited(
                               _panelWindowHost?.focus(PanelId.inspector) ??
                                   Future<void>.value(),

@@ -77,6 +77,7 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
         PanelCapabilities.selection,
       ],
       // Unsupported panel identities receive no mutation capabilities yet.
+      PanelId.inspector => const [PanelCapabilities.inspectorEdit],
       _ => const <String>[],
     };
     _endpoint = PanelShellEndpoint(
@@ -244,6 +245,8 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
                 PanelId.inspector => _InspectorDetachedPanel(
                   viewModel: _endpoint.viewModel,
                   stale: _endpoint.viewModelIsStale,
+                  onDimensionSubmitted: (entityId, value) => _endpoint
+                      .editDrivingDimension(entityId: entityId, value: value),
                 ),
                 PanelId.explorer =>
                   rows == null
@@ -378,10 +381,16 @@ class _UnsupportedDetachedPanel extends StatelessWidget {
 }
 
 class _InspectorDetachedPanel extends StatelessWidget {
-  const _InspectorDetachedPanel({required this.viewModel, required this.stale});
+  const _InspectorDetachedPanel({
+    required this.viewModel,
+    required this.stale,
+    required this.onDimensionSubmitted,
+  });
 
   final Map<String, Object?> viewModel;
   final bool stale;
+  final Future<String> Function(String entityId, double value)
+  onDimensionSubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -408,7 +417,12 @@ class _InspectorDetachedPanel extends StatelessWidget {
         if (message != null)
           _InspectorNotice(message)
         else ...[
-          if (document != null) _InspectorEntityCard(entity: document),
+          if (document != null)
+            _InspectorEntityCard(
+              entity: document,
+              onDimensionSubmitted: onDimensionSubmitted,
+              enabled: !stale,
+            ),
           for (final entity in operational)
             _InspectorEntityCard(entity: entity),
         ],
@@ -430,9 +444,16 @@ class _InspectorNotice extends StatelessWidget {
 }
 
 class _InspectorEntityCard extends StatelessWidget {
-  const _InspectorEntityCard({required this.entity});
+  const _InspectorEntityCard({
+    required this.entity,
+    this.onDimensionSubmitted,
+    this.enabled = false,
+  });
 
   final Map entity;
+  final Future<String> Function(String entityId, double value)?
+  onDimensionSubmitted;
+  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -455,15 +476,91 @@ class _InspectorEntityCard extends StatelessWidget {
               '${entity['type'] ?? '-'} · ${entity['selectionDomain'] ?? '-'}',
             ),
             for (final entry in properties.entries)
-              _InspectorPropertyRow(
-                name: entry.key.toString(),
-                value: entry.value,
-              ),
+              entry.key == 'drivingDimension' &&
+                      entry.value is Map &&
+                      onDimensionSubmitted != null
+                  ? _InspectorDimensionEditor(
+                      entityId: entity['id'] as String? ?? '',
+                      dimension: Map<Object?, Object?>.from(entry.value as Map),
+                      enabled: enabled,
+                      onSubmitted: onDimensionSubmitted!,
+                    )
+                  : _InspectorPropertyRow(
+                      name: entry.key.toString(),
+                      value: entry.value,
+                    ),
           ],
         ),
       ),
     );
   }
+}
+
+class _InspectorDimensionEditor extends StatefulWidget {
+  const _InspectorDimensionEditor({
+    required this.entityId,
+    required this.dimension,
+    required this.enabled,
+    required this.onSubmitted,
+  });
+
+  final String entityId;
+  final Map<Object?, Object?> dimension;
+  final bool enabled;
+  final Future<String> Function(String entityId, double value) onSubmitted;
+
+  @override
+  State<_InspectorDimensionEditor> createState() =>
+      _InspectorDimensionEditorState();
+}
+
+class _InspectorDimensionEditorState extends State<_InspectorDimensionEditor> {
+  late final TextEditingController _controller;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(
+      text: (widget.dimension['value'] as num?)?.toString() ?? '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit(String raw) async {
+    final value = double.tryParse(raw.trim());
+    if (value == null || !value.isFinite || value <= 0) {
+      setState(() => _error = 'Valor positivo inválido');
+      return;
+    }
+    setState(() => _error = null);
+    try {
+      await widget.onSubmitted(widget.entityId, value);
+    } on Object catch (error) {
+      if (mounted) setState(() => _error = '$error');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 5),
+    child: TextField(
+      controller: _controller,
+      enabled: widget.enabled,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      decoration: InputDecoration(
+        labelText: 'Driving dimension (${widget.dimension['unit'] ?? 'mm'})',
+        errorText: _error,
+        isDense: true,
+      ),
+      onSubmitted: _submit,
+    ),
+  );
 }
 
 class _InspectorPropertyRow extends StatelessWidget {

@@ -73,6 +73,19 @@ abstract final class PanelInspectorViewModel {
     if (data['sceneVisible'] is bool) {
       properties['visibility'] = data['sceneVisible'];
     }
+    final dimension = data['dimension'];
+    if (dimension is Map &&
+        dimension['value'] is num &&
+        dimension['value'].isFinite &&
+        (dimension['value'] as num) > 0) {
+      final type = dimension['type'];
+      properties['drivingDimension'] = {
+        'type': type is String ? type : 'linear',
+        'value': (dimension['value'] as num).toDouble(),
+        'unit': type == 'angular' ? 'deg' : 'mm',
+        'editable': true,
+      };
+    }
     final sceneGeometry = data['sceneGeometry'];
     if (sceneGeometry is Map) {
       final point = sceneGeometry['position'] ?? sceneGeometry['origin'];

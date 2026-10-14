@@ -43,6 +43,10 @@ abstract class PanelSessionSource {
 
   /// Applies a document visibility change in the main session.
   Future<void> setEntityVisibility(String id, {required bool visible});
+
+  bool get supportsInspectorDimensionEdit;
+
+  Future<void> editDrivingDimension(String entityId, double value);
 }
 
 /// In-memory source used by the harness and by the protocol tests.
@@ -54,6 +58,7 @@ class FakePanelSessionSource implements PanelSessionSource {
         const [],
     this.supportsVisibility = true,
     this.visibilityGate,
+    this.dimensionEditGate,
     this.selectionGate,
   }) : _entities = List.of(entities);
 
@@ -68,6 +73,8 @@ class FakePanelSessionSource implements PanelSessionSource {
 
   /// Optional hook: lets a test make visibility application fail.
   final Future<void> Function(String id, bool visible)? visibilityGate;
+
+  final Future<void> Function(String id, double value)? dimensionEditGate;
 
   /// Optional hook: lets a test switch projects while an intent is in flight.
   final Future<void> Function(Set<String> ids)? selectionGate;
@@ -85,6 +92,10 @@ class FakePanelSessionSource implements PanelSessionSource {
   int visibilityApplications = 0;
   final List<Set<String>> appliedSelections = [];
   final List<({String id, bool visible})> appliedVisibilities = [];
+  final List<({String id, double value})> appliedDimensionEdits = [];
+
+  @override
+  bool get supportsInspectorDimensionEdit => dimensionEditGate != null;
 
   @override
   Set<String> get selection => Set.unmodifiable(_selection);
@@ -159,6 +170,17 @@ class FakePanelSessionSource implements PanelSessionSource {
     _mutated();
   }
 
+  @override
+  Future<void> editDrivingDimension(String id, double value) async {
+    final gate = dimensionEditGate;
+    if (gate == null) {
+      throw StateError('inspector dimension editing is unavailable');
+    }
+    await gate(id, value);
+    appliedDimensionEdits.add((id: id, value: value));
+    _mutated();
+  }
+
   /// Simulates a main-side change (selection made in the viewport, document
   /// updated, project opened/closed, session replaced).
   void setSelection(Iterable<String> ids) {
@@ -210,13 +232,18 @@ class FakePanelSessionSource implements PanelSessionSource {
 /// existing safe APIs (`select` for the geometry selection and
 /// `setEntityVisibility`, which runs inside the runtime's transaction).
 class CadRuntimePanelSessionSource implements PanelSessionSource {
-  CadRuntimePanelSessionSource(this.runtime) {
+  CadRuntimePanelSessionSource(
+    this.runtime, {
+    this.editDrivingDimensionCallback,
+  }) {
     runtime.addListener(_forwardChange);
     runtime.operationalSelection.addListener(_forwardChange);
     runtime.operationalEntities.addListener(_forwardChange);
   }
 
   final CadRuntime runtime;
+  final Future<void> Function(String entityId, double value)?
+  editDrivingDimensionCallback;
   final List<void Function()> _listeners = [];
 
   @override
@@ -278,6 +305,24 @@ class CadRuntimePanelSessionSource implements PanelSessionSource {
   @override
   Future<void> setEntityVisibility(String id, {required bool visible}) =>
       runtime.setEntityVisibility(id, visible);
+
+  @override
+  bool get supportsInspectorDimensionEdit =>
+      editDrivingDimensionCallback != null;
+
+  @override
+  Future<void> editDrivingDimension(String entityId, double value) async {
+    final entity = runtime.document?.entities[entityId];
+    final dimension = entity?.data['dimension'];
+    if (entity == null || dimension is! Map || !value.isFinite || value <= 0) {
+      throw StateError('selected entity is not an editable driving dimension');
+    }
+    final callback = editDrivingDimensionCallback;
+    if (callback == null) {
+      throw StateError('inspector dimension editing is unavailable');
+    }
+    await callback(entityId, value);
+  }
 
   void _forwardChange() {
     for (final listener in List<void Function()>.of(_listeners)) {

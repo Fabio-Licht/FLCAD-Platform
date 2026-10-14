@@ -47,6 +47,7 @@ abstract final class PanelCapabilities {
   static const String explorer = 'explorer';
   static const String selection = 'selection';
   static const String visibility = 'visibility';
+  static const String inspectorEdit = 'inspector.edit';
 
   static const List<String> all = [explorer, selection, visibility];
 }
@@ -118,6 +119,7 @@ class PanelActionSpec {
     required this.capability,
     required this.allowedParams,
     required this.validate,
+    this.requiresCurrentRevision = false,
   });
 
   final String name;
@@ -125,10 +127,13 @@ class PanelActionSpec {
   final Set<String> allowedParams;
   final void Function(Map<String, Object?> params, PanelProtocolLimits limits)
   validate;
+  final bool requiresCurrentRevision;
 }
 
 const String panelActionSelectionSet = 'selection.set';
 const String panelActionVisibilitySet = 'visibility.set';
+const String panelActionInspectorDimensionEdit =
+    'inspector.sketch.dimension.edit';
 
 final Map<String, PanelActionSpec> panelActionCatalog = {
   panelActionSelectionSet: PanelActionSpec(
@@ -184,6 +189,28 @@ final Map<String, PanelActionSpec> panelActionCatalog = {
         throw const PanelProtocolException(
           PanelErrorCode.invalidPayload,
           'visibility.set requires a boolean "visible".',
+        );
+      }
+    },
+  ),
+  panelActionInspectorDimensionEdit: PanelActionSpec(
+    name: panelActionInspectorDimensionEdit,
+    capability: PanelCapabilities.inspectorEdit,
+    allowedParams: const {'entityId', 'value'},
+    requiresCurrentRevision: true,
+    validate: (params, limits) {
+      final id = params['entityId'];
+      final value = params['value'];
+      if (id is! String || id.isEmpty || id.length > limits.maxIdLength) {
+        throw const PanelProtocolException(
+          PanelErrorCode.invalidPayload,
+          'inspector dimension edit requires a bounded entityId.',
+        );
+      }
+      if (value is! num || !value.isFinite || value <= 0 || value > 1e12) {
+        throw const PanelProtocolException(
+          PanelErrorCode.invalidPayload,
+          'inspector dimension edit requires a finite positive value.',
         );
       }
     },
