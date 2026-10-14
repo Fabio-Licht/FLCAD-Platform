@@ -10,7 +10,7 @@ import 'multi_window_panel_transport.dart';
 import 'panel_protocol.dart';
 import 'panel_shell.dart';
 import 'panel_inspector_view_model.dart';
-import 'panel_view_model.dart';
+import 'panel_presentation_models.dart';
 import 'panel_window_native_bridge.dart';
 
 /// Identity of the window this isolate is running (parsed from the entrypoint
@@ -198,14 +198,11 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
 
   @override
   Widget build(BuildContext context) {
-    final rows = (_endpoint.viewModel[PanelViewModelKeys.entities] as List?)
-        ?.whereType<Map>()
-        .toList(growable: false);
-    final selection =
-        (_endpoint.viewModel[PanelViewModelKeys.selection] as List?)
-            ?.whereType<String>()
-            .toSet() ??
-        const <String>{};
+    final explorer = ExplorerTreeModel.fromSnapshot(_endpoint.viewModel);
+    final selectedCount = {
+      ...explorer.documentSelection,
+      ...explorer.operationalSelection,
+    }.length;
     final status = _statusLabel();
     return MaterialApp(
       debugShowCheckedModeBanner: false,
@@ -248,42 +245,21 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
                   onDimensionSubmitted: (entityId, value) => _endpoint
                       .editDrivingDimension(entityId: entityId, value: value),
                 ),
-                PanelId.explorer =>
-                  rows == null
-                      ? const Center(child: CircularProgressIndicator())
-                      : rows.isEmpty
-                      ? const Center(child: Text('Nenhum objeto no projeto.'))
-                      : ListView.builder(
-                          itemCount: rows.length,
-                          itemBuilder: (context, index) {
-                            final row = rows[index];
-                            final id = row['id'] as String? ?? '';
-                            final selected = selection.contains(id);
-                            return ListTile(
-                              dense: true,
-                              selected: selected,
-                              title: Text(
-                                row['label'] as String? ?? id,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                              subtitle: Text(
-                                '${row['kind']}'
+                PanelId.explorer => _ExplorerDetachedPanel(
+                  model: explorer,
+                  onSelect: (id) => _endpoint.setSelection([id]),
+                ),
+                /*
                                 '${row['visible'] == false ? ' · oculto' : ''}',
                               ),
-                              onTap: id.isEmpty
-                                  ? null
-                                  : () => _endpoint.setSelection([id]),
-                            );
-                          },
-                        ),
+                */
                 _ => const _UnsupportedDetachedPanel(),
               },
             ),
             Builder(
               builder: (context) => _footer(
                 Theme.of(context).colorScheme,
-                selection.length,
+                selectedCount,
                 status,
               ),
             ),
@@ -378,6 +354,111 @@ class _UnsupportedDetachedPanel extends StatelessWidget {
       child: Text('Este painel ainda não possui renderer destacável.'),
     ),
   );
+}
+
+class _ExplorerDetachedPanel extends StatefulWidget {
+  const _ExplorerDetachedPanel({required this.model, required this.onSelect});
+
+  final ExplorerTreeModel model;
+  final ValueChanged<String> onSelect;
+
+  @override
+  State<_ExplorerDetachedPanel> createState() => _ExplorerDetachedPanelState();
+}
+
+class _ExplorerDetachedPanelState extends State<_ExplorerDetachedPanel> {
+  final Set<String> _expanded = <String>{};
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.model.groups.every((group) => group.nodes.isEmpty)) {
+      return const Center(child: Text('Nenhum objeto no projeto.'));
+    }
+    return ListView(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      children: [
+        for (final group in widget.model.groups)
+          ExpansionTile(
+            key: PageStorageKey<String>('explorer-group:${group.id}'),
+            initiallyExpanded: _expanded.contains(group.id),
+            onExpansionChanged: (expanded) => setState(() {
+              if (expanded) {
+                _expanded.add(group.id);
+              } else {
+                _expanded.remove(group.id);
+              }
+            }),
+            dense: true,
+            tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+            leading: const Icon(Icons.folder_outlined, size: 17),
+            title: Text(
+              group.label,
+              style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
+            ),
+            children: [
+              for (final node in _orderedNodes(group.nodes)) _nodeTile(node),
+            ],
+          ),
+      ],
+    );
+  }
+
+  List<ExplorerNodeModel> _orderedNodes(List<ExplorerNodeModel> nodes) {
+    final byParent = <String?, List<ExplorerNodeModel>>{};
+    for (final node in nodes) {
+      (byParent[node.parentId] ??= <ExplorerNodeModel>[]).add(node);
+    }
+    final ordered = <ExplorerNodeModel>[];
+    void visit(String? parent) {
+      for (final node in byParent[parent] ?? const <ExplorerNodeModel>[]) {
+        ordered.add(node);
+        visit(node.id);
+      }
+    }
+    visit(null);
+    for (final node in nodes) {
+      if (!ordered.contains(node)) ordered.add(node);
+    }
+    return ordered;
+  }
+
+  Widget _nodeTile(ExplorerNodeModel node) {
+    final selected = widget.model.documentSelection.contains(node.id) ||
+        widget.model.operationalSelection.contains(node.id);
+    return ListTile(
+      dense: true,
+      minTileHeight: 29,
+      visualDensity: const VisualDensity(vertical: -4),
+      contentPadding: const EdgeInsets.only(left: 30, right: 8),
+      selected: selected,
+      leading: Icon(_iconFor(node.iconSemantic), size: 16),
+      title: Text(
+        node.label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 11),
+      ),
+      subtitle: Text(
+        '${node.kind}${node.visible ? '' : ' · oculto'}',
+        style: const TextStyle(fontSize: 9),
+      ),
+      onTap: node.available ? () => widget.onSelect(node.id) : null,
+    );
+  }
+
+  IconData _iconFor(String semantic) => switch (semantic) {
+        'mesh' => Icons.grid_on,
+        'solid' => Icons.view_in_ar_outlined,
+        'surface' => Icons.layers_outlined,
+        'sketch' => Icons.gesture,
+        'curve' => Icons.show_chart,
+        'plane' => Icons.crop_landscape,
+        'axis' => Icons.swap_vert,
+        'point' => Icons.circle_outlined,
+        'coordinateSystem' => Icons.my_location,
+        'section' => Icons.content_cut,
+        _ => Icons.category_outlined,
+      };
 }
 
 class _InspectorDetachedPanel extends StatelessWidget {

@@ -22,8 +22,9 @@ void main() {
       'expandedGroups': ['Construction'],
     });
 
-    expect(model.groups.single.nodes.single.parentId, 'sketch-1');
-    expect(model.groups.single.nodes.single.iconSemantic, 'edge');
+    final construction = model.groups.singleWhere((group) => group.id == 'Construction');
+    expect(construction.nodes.single.parentId, 'sketch-1');
+    expect(construction.nodes.single.iconSemantic, 'edge');
     expect(model.documentSelection, contains('edge-1'));
     expect(model.operationalSelection, contains('op-1'));
     expect(ExplorerTreeModel.fromJson(model.toJson()).toJson(), model.toJson());

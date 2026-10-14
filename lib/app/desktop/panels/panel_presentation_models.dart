@@ -11,6 +11,19 @@ enum PanelPropertyAvailability { available, unavailable }
 enum PanelPropertyAccess { readOnly, editable }
 
 final class ExplorerTreeModel {
+  static const semanticGroups = [
+    'Entidades',
+    'Meshes',
+    'References',
+    'Sketches',
+    'Curves',
+    'Surfaces',
+    'Solids',
+    'Reference Curves',
+    'Inspection',
+    'Construction',
+  ];
+
   ExplorerTreeModel({
     required this.groups,
     required Iterable<String> documentSelection,
@@ -29,15 +42,31 @@ final class ExplorerTreeModel {
     final rawRows = snapshot['entities'];
     final rows = rawRows is List ? rawRows.whereType<Map>() : const <Map>[];
     final rawGroups = snapshot['groups'];
-    final groupNames = rawGroups is Map
-        ? (rawGroups.keys.whereType<String>().toList()..sort())
-        : <String>[];
+    final rowGroups = rows
+        .map((row) => row['group'])
+        .whereType<String>()
+        .toSet();
+    final groupNames = <String>{
+      ...semanticGroups,
+      ...rowGroups,
+      if (rawGroups is Map)
+        ...rawGroups.keys.whereType<String>().where(rowGroups.contains),
+    }.toList()..sort();
     final groups = <String, List<ExplorerNodeModel>>{
       for (final name in groupNames) name: <ExplorerNodeModel>[],
     };
     for (final raw in rows) {
       final node = ExplorerNodeModel.fromSnapshot(raw);
       (groups[node.group] ??= <ExplorerNodeModel>[]).add(node);
+    }
+    for (final nodes in groups.values) {
+      nodes.sort((a, b) {
+        final aChild = a.parentId == null ? 0 : 1;
+        final bChild = b.parentId == null ? 0 : 1;
+        return aChild != bChild
+            ? aChild.compareTo(bChild)
+            : a.id.compareTo(b.id);
+      });
     }
     final sortedGroups = groups.entries
         .map(
@@ -51,8 +80,15 @@ final class ExplorerTreeModel {
       ..sort((a, b) => a.id.compareTo(b.id));
     return ExplorerTreeModel(
       groups: sortedGroups,
-      documentSelection: _strings(snapshot['documentSelection'] ?? snapshot['selection']),
-      operationalSelection: _strings(snapshot['operationalSelection']),
+      documentSelection: _strings(
+        snapshot['explorer.documentSelection'] ??
+            snapshot['documentSelection'] ??
+            snapshot['selection'],
+      ),
+      operationalSelection: _strings(
+        snapshot['explorer.operationalSelection'] ??
+            snapshot['operationalSelection'],
+      ),
       expandedGroups: _strings(snapshot['expandedGroups']),
     );
   }

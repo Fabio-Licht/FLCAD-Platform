@@ -124,6 +124,9 @@ class FakePanelSessionSource implements PanelSessionSource {
           'id': entity.id,
           'label': entity.label,
           'kind': entity.kind,
+          'group': entity.kind,
+          'iconSemantic': entity.kind,
+          'available': true,
           'visible': entity.visible,
         },
     ],
@@ -133,6 +136,8 @@ class FakePanelSessionSource implements PanelSessionSource {
         kind: _entities.where((entity) => entity.kind == kind).length,
     },
     PanelViewModelKeys.selection: _selection.toList()..sort(),
+    PanelViewModelKeys.explorerDocumentSelection: _selection.toList()..sort(),
+    PanelViewModelKeys.explorerOperationalSelection: const <String>[],
     PanelViewModelKeys.status: 'ready',
     PanelViewModelKeys.empty: projectId == null,
     PanelViewModelKeys.truncated:

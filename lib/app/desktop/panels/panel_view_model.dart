@@ -16,6 +16,9 @@ abstract final class PanelViewModelKeys {
   static const String entities = 'entities';
   static const String groups = 'groups';
   static const String selection = 'selection';
+  static const String explorerDocumentSelection = 'explorer.documentSelection';
+  static const String explorerOperationalSelection =
+      'explorer.operationalSelection';
   static const String status = 'status';
   static const String empty = 'empty';
   static const String truncated = 'truncated';
@@ -39,6 +42,8 @@ abstract final class PanelViewModelKeys {
     entities,
     groups,
     selection,
+    explorerDocumentSelection,
+    explorerOperationalSelection,
     status,
     empty,
     truncated,
@@ -71,13 +76,20 @@ abstract final class PanelViewModel {
     final rows = <Map<String, Object?>>[];
     for (final entity in document.entities.values) {
       if (rows.length >= maxEntities) break;
+      final parentSketch = entity.data['parentSketchId'];
+      final parentSurface = entity.data['parentSurfaceId'];
       rows.add({
         'id': entity.id,
         'label': _label(entity),
         'kind': entity.kind.name,
+        'group': _group(entity),
+        'iconSemantic': _iconSemantic(entity),
+        'available': entity.data['deleted'] != true,
         'visible': entity.data['sceneVisible'] as bool? ?? true,
-        if (entity.data['parentSketchId'] case final String parent)
-          'parent': parent,
+        if (parentSketch is String)
+          'parent': parentSketch,
+        if (parentSketch == null && parentSurface is String)
+          'parent': parentSurface,
       });
     }
     rows.sort((first, second) {
@@ -96,6 +108,8 @@ abstract final class PanelViewModel {
     for (final row in rows) {
       final kind = row['kind']! as String;
       counts[kind] = (counts[kind] ?? 0) + 1;
+      final group = row['group'] as String?;
+      if (group != null) counts[group] = (counts[group] ?? 0) + 1;
     }
     final keys = counts.keys.toList()..sort();
     return {for (final key in keys) key: counts[key]};
@@ -129,6 +143,10 @@ abstract final class PanelViewModel {
       PanelViewModelKeys.entities: rows,
       PanelViewModelKeys.groups: groupCounts(rows),
       PanelViewModelKeys.selection: sortedSelection,
+      PanelViewModelKeys.explorerDocumentSelection:
+          documentSelection.toList()..sort(),
+      PanelViewModelKeys.explorerOperationalSelection:
+          operationalSelection.toList()..sort(),
       PanelViewModelKeys.status: status,
       PanelViewModelKeys.empty: document == null,
       // Explicit, never silent: the panel knows the projection is partial.
@@ -187,6 +205,31 @@ abstract final class PanelViewModel {
       entity.data['name'] as String? ??
       entity.data['label'] as String? ??
       entity.id;
+
+  static String _group(CadDocumentEntity entity) {
+    final workspaceGroup = entity.data['workspaceGroup'];
+    if (workspaceGroup is String && workspaceGroup.isNotEmpty) {
+      return workspaceGroup;
+    }
+    if (entity.data['constructionEntity'] is Map) return 'Entidades';
+    return switch (entity.kind.name) {
+      'import' => 'Meshes',
+      'sketch' => 'Sketches',
+      'curve' => 'Curves',
+      'surface' => 'Surfaces',
+      'solid' => 'Solids',
+      'section' => 'Reference Curves',
+      _ => 'Construction',
+    };
+  }
+
+  static String _iconSemantic(CadDocumentEntity entity) {
+    final semantic = entity.data['cadSemanticKind'];
+    if (semantic is String && semantic.isNotEmpty) return semantic;
+    final sceneKind = entity.data['sceneKind'];
+    if (sceneKind is String && sceneKind.isNotEmpty) return sceneKind;
+    return entity.kind.name;
+  }
 
   static bool _sameValue(Object? first, Object? second) {
     if (identical(first, second)) return true;
