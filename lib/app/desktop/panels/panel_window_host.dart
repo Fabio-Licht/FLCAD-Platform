@@ -153,7 +153,17 @@ class PanelWindowHost {
     attachments[panelId] = attachment;
     detachCount++;
     await _configureWindow(panelId, windowId, geometry);
+    await _bindPanelToMainWindow(panelId);
     return attachment;
+  }
+
+  Future<void> _bindPanelToMainWindow(PanelId panelId) async {
+    // The secondary engine registers its HWND during startup. Binding is
+    // retried independently so a slow engine cannot lose ownership.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      if (await backend.bindPanelToMainWindow(panelId)) break;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
   }
 
   /// Applies title and geometry to the freshly created window.
@@ -299,6 +309,7 @@ class PanelWindowHost {
       attachments[panelId] = attachment;
       adoptedWindows++;
       await _configureWindow(panelId, windowId, geometry);
+      await _bindPanelToMainWindow(panelId);
       return attachment;
     }
     final attachment = await detach(panelId, requestedGeometry: geometry);

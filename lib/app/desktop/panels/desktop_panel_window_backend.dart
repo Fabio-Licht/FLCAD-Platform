@@ -4,7 +4,9 @@ import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../layout/panel_identity.dart';
 import 'panel_window_backend.dart';
+import 'panel_window_native_bridge.dart';
 
 /// Channel prefix shared by the bridge and the panel windows.
 const String panelIntentsChannel = 'flcad.panel.intents';
@@ -130,6 +132,10 @@ class DesktopPanelWindowBackend implements PanelWindowBackend {
       // Window already gone.
     }
   }
+
+  @override
+  Future<bool> bindPanelToMainWindow(PanelId panelId) =>
+      PanelWindowNativeBridge.bindPanel(panelId);
 
   @override
   Future<List<String>> listWindowIds() async {

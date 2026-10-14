@@ -11,6 +11,7 @@ import 'panel_protocol.dart';
 import 'panel_shell.dart';
 import 'panel_inspector_view_model.dart';
 import 'panel_view_model.dart';
+import 'panel_window_native_bridge.dart';
 
 /// Identity of the window this isolate is running (parsed from the entrypoint
 /// arguments `desktop_multi_window` hands to the sub-window).
@@ -175,6 +176,7 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
     if (_closing || !widget.windowControlAvailable) return;
     _closing = true;
     try {
+      await PanelWindowNativeBridge.unregisterPanel(widget.config.panelId);
       await windowManager.setPreventClose(false);
       await windowManager.close();
     } on Object catch (error) {

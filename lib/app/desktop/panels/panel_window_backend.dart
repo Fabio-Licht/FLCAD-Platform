@@ -49,6 +49,10 @@ abstract class PanelWindowBackend {
 
   Future<void> showWindow(String windowId);
 
+  /// Establishes the native owner relationship, when supported. Only the
+  /// stable panel identity crosses this seam; HWNDs remain native.
+  Future<bool> bindPanelToMainWindow(PanelId panelId);
+
   Future<List<String>> listWindowIds();
 
   /// Panels currently materialised, with the panel each window was created for.
@@ -131,6 +135,8 @@ class LoopbackPanelWindowBackend implements PanelWindowBackend {
   /// Window-control methods delivered to a panel window (`<windowId>:<method>`),
   /// mirroring the native window channel.
   final List<String> windowControls = [];
+
+  final List<PanelId> boundPanels = [];
 
   /// Models a panel that honours `panel_close`: the real panel closes its own
   /// window, so it leaves the tracking map. Set to false to model a wedged
@@ -220,6 +226,12 @@ class LoopbackPanelWindowBackend implements PanelWindowBackend {
 
   @override
   Future<void> showWindow(String windowId) async {}
+
+  @override
+  Future<bool> bindPanelToMainWindow(PanelId panelId) async {
+    boundPanels.add(panelId);
+    return true;
+  }
 
   @override
   Future<List<String>> listWindowIds() async =>
