@@ -131,6 +131,41 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     operationalResolver = OperationalEntityResolver(operationalEntities);
     operationalSelection = OperationalSelectionManager(operationalEntities)
       ..notificationAllowed = () => !_closingAdmission;
+    // `selection` is a view over the geometry selection manager, but that
+    // manager only notifies its own listeners. Projections (the MM3 panel
+    // bridge, and any future one) observe the runtime, so a selection made
+    // directly through the manager - Inspector inputs, entity lists, viewport
+    // picks - used to leave a detached panel showing a stale selection until
+    // some unrelated notification arrived. Forwarding keeps a single
+    // notification surface without touching selection semantics.
+    geometrySelection.addListener(_forwardSelectionChange);
+  }
+
+  /// True when a forwarded selection notification is already queued.
+  bool _selectionForwardPending = false;
+
+  /// Forwards geometry-selection changes to the runtime notification surface.
+  ///
+  /// The forward is coalesced by a microtask and is superseded by any explicit
+  /// [notifyListeners] - a document transaction publishes the reconciled
+  /// selection itself, and the writers depend on that ordering and on the exact
+  /// notification count - so only selection changes that no other path would
+  /// publish get an extra notification.
+  void _forwardSelectionChange() {
+    if (_selectionForwardPending) return;
+    _selectionForwardPending = true;
+    scheduleMicrotask(() {
+      if (!_selectionForwardPending) return;
+      _selectionForwardPending = false;
+      if (_notifierDisposed || _closingAdmission) return;
+      notifyListeners();
+    });
+  }
+
+  @override
+  void notifyListeners() {
+    _selectionForwardPending = false;
+    super.notifyListeners();
   }
 
   final CadDocumentRepository _repository;
@@ -3752,6 +3787,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             final managed = _managedGeometry.values.toList();
             _managedGeometry.clear();
             await Future.wait(managed.map((value) => value.dispose()));
+            geometrySelection.removeListener(_forwardSelectionChange);
+            _selectionForwardPending = false;
             operationalSelection.dispose();
             operationalEntities.dispose();
             geometrySelection.dispose();
