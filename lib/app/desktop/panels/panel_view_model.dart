@@ -1,6 +1,8 @@
 import '../../../../core/cad_document/cad_document.dart';
+import '../../operational_entities/operational_entity.dart';
 import '../layout/panel_identity.dart';
 import 'panel_protocol.dart';
+import 'panel_inspector_view_model.dart';
 
 /// Keys of the projection exchanged with a panel window.
 ///
@@ -18,6 +20,16 @@ abstract final class PanelViewModelKeys {
   static const String empty = 'empty';
   static const String truncated = 'truncated';
   static const String entityCount = 'entityCount';
+  static const String inspectorSelectionState =
+      PanelInspectorViewModelKeys.selectionState;
+  static const String inspectorDocumentSelectionIds =
+      PanelInspectorViewModelKeys.documentSelectionIds;
+  static const String inspectorOperationalSelectionIds =
+      PanelInspectorViewModelKeys.operationalSelectionIds;
+  static const String inspectorDocumentEntity =
+      PanelInspectorViewModelKeys.documentEntity;
+  static const String inspectorOperationalEntities =
+      PanelInspectorViewModelKeys.operationalEntities;
 
   static const List<String> all = [
     panelId,
@@ -31,6 +43,11 @@ abstract final class PanelViewModelKeys {
     empty,
     truncated,
     entityCount,
+    inspectorSelectionState,
+    inspectorDocumentSelectionIds,
+    inspectorOperationalSelectionIds,
+    inspectorDocumentEntity,
+    inspectorOperationalEntities,
   ];
 }
 
@@ -92,6 +109,9 @@ abstract final class PanelViewModel {
     required int stateRevision,
     required CadDocument? document,
     required Set<String> selection,
+    Set<String> documentSelection = const {},
+    List<String> operationalSelection = const [],
+    Map<String, OperationalEntity?> operationalEntities = const {},
     String status = '',
     PanelProtocolLimits limits = const PanelProtocolLimits(),
   }) {
@@ -101,7 +121,7 @@ abstract final class PanelViewModel {
     );
     final totalEntities = document?.entities.length ?? 0;
     final sortedSelection = selection.toList()..sort();
-    return {
+    final result = <String, Object?>{
       PanelViewModelKeys.panelId: panelId.name,
       PanelViewModelKeys.projectId: projectId,
       PanelViewModelKeys.sessionId: sessionId,
@@ -115,6 +135,17 @@ abstract final class PanelViewModel {
       PanelViewModelKeys.truncated: rows.length < totalEntities,
       PanelViewModelKeys.entityCount: totalEntities,
     };
+    if (panelId == PanelId.inspector) {
+      result.addAll(
+        PanelInspectorViewModel.build(
+          document: document,
+          documentSelection: documentSelection,
+          operationalSelection: operationalSelection,
+          operationalEntities: operationalEntities,
+        ),
+      );
+    }
+    return result;
   }
 
   /// Keys whose value differs between two projections.

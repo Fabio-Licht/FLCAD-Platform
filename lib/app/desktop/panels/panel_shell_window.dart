@@ -9,6 +9,7 @@ import 'desktop_panel_window_backend.dart';
 import 'multi_window_panel_transport.dart';
 import 'panel_protocol.dart';
 import 'panel_shell.dart';
+import 'panel_inspector_view_model.dart';
 import 'panel_view_model.dart';
 
 /// Identity of the window this isolate is running (parsed from the entrypoint
@@ -215,8 +216,7 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
             // return the fallback light scheme, painting the header and the
             // footer as light strips over the dark body.
             Builder(
-              builder: (context) =>
-                  _header(Theme.of(context).colorScheme),
+              builder: (context) => _header(Theme.of(context).colorScheme),
             ),
             if (_endpoint.lastOmittedKeys.isNotEmpty)
               const _Banner(
@@ -238,36 +238,42 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
                     'geometria automática desativada. Reencaixe pelo botão.',
               ),
             Expanded(
-              child: widget.config.panelId != PanelId.explorer
-                  ? const _UnsupportedDetachedPanel()
-                  : rows == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : rows.isEmpty
-                  ? const Center(child: Text('Nenhum objeto no projeto.'))
-                  : ListView.builder(
-                      itemCount: rows.length,
-                      itemBuilder: (context, index) {
-                        final row = rows[index];
-                        final id = row['id'] as String? ?? '';
-                        final selected = selection.contains(id);
-                        return ListTile(
-                          dense: true,
-                          selected: selected,
-                          title: Text(
-                            row['label'] as String? ?? id,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            '${row['kind']}'
-                            '${row['visible'] == false ? ' · oculto' : ''}',
-                          ),
-                          onTap: id.isEmpty
-                              ? null
-                              : () => _endpoint.setSelection([id]),
-                        );
-                      },
-                    ),
+              child: switch (widget.config.panelId) {
+                PanelId.inspector => _InspectorDetachedPanel(
+                  viewModel: _endpoint.viewModel,
+                  stale: _endpoint.viewModelIsStale,
+                ),
+                PanelId.explorer =>
+                  rows == null
+                      ? const Center(child: CircularProgressIndicator())
+                      : rows.isEmpty
+                      ? const Center(child: Text('Nenhum objeto no projeto.'))
+                      : ListView.builder(
+                          itemCount: rows.length,
+                          itemBuilder: (context, index) {
+                            final row = rows[index];
+                            final id = row['id'] as String? ?? '';
+                            final selected = selection.contains(id);
+                            return ListTile(
+                              dense: true,
+                              selected: selected,
+                              title: Text(
+                                row['label'] as String? ?? id,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                              subtitle: Text(
+                                '${row['kind']}'
+                                '${row['visible'] == false ? ' · oculto' : ''}',
+                              ),
+                              onTap: id.isEmpty
+                                  ? null
+                                  : () => _endpoint.setSelection([id]),
+                            );
+                          },
+                        ),
+                _ => const _UnsupportedDetachedPanel(),
+              },
             ),
             Builder(
               builder: (context) => _footer(
@@ -289,7 +295,12 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
     color: scheme.surfaceContainerHigh,
     child: Row(
       children: [
-        const Icon(Icons.account_tree, size: 16),
+        Icon(
+          widget.config.panelId == PanelId.inspector
+              ? Icons.tune
+              : Icons.account_tree,
+          size: 16,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
@@ -362,6 +373,127 @@ class _UnsupportedDetachedPanel extends StatelessWidget {
       child: Text('Este painel ainda não possui renderer destacável.'),
     ),
   );
+}
+
+class _InspectorDetachedPanel extends StatelessWidget {
+  const _InspectorDetachedPanel({required this.viewModel, required this.stale});
+
+  final Map<String, Object?> viewModel;
+  final bool stale;
+
+  @override
+  Widget build(BuildContext context) {
+    final state =
+        viewModel[PanelInspectorViewModelKeys.selectionState] as String? ??
+        'none';
+    final document =
+        viewModel[PanelInspectorViewModelKeys.documentEntity] as Map?;
+    final operational =
+        (viewModel[PanelInspectorViewModelKeys.operationalEntities] as List?)
+            ?.whereType<Map>()
+            .toList(growable: false) ??
+        const <Map>[];
+    final message = switch (state) {
+      'none' => 'Nenhuma entidade selecionada.',
+      'multiple' => 'Seleção múltipla: propriedades individuais indisponíveis.',
+      'unavailable' => 'A entidade selecionada não está disponível.',
+      _ => null,
+    };
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        if (stale) const _InspectorNotice('Atualizando a seleção…'),
+        if (message != null)
+          _InspectorNotice(message)
+        else ...[
+          if (document != null) _InspectorEntityCard(entity: document),
+          for (final entity in operational)
+            _InspectorEntityCard(entity: entity),
+        ],
+      ],
+    );
+  }
+}
+
+class _InspectorNotice extends StatelessWidget {
+  const _InspectorNotice(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 20),
+    child: Text(text, textAlign: TextAlign.center),
+  );
+}
+
+class _InspectorEntityCard extends StatelessWidget {
+  const _InspectorEntityCard({required this.entity});
+
+  final Map entity;
+
+  @override
+  Widget build(BuildContext context) {
+    final rawProperties = entity['properties'];
+    final properties = rawProperties is Map ? rawProperties : const {};
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              entity['name'] as String? ??
+                  entity['id'] as String? ??
+                  'Entidade',
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${entity['type'] ?? '-'} · ${entity['selectionDomain'] ?? '-'}',
+            ),
+            for (final entry in properties.entries)
+              _InspectorPropertyRow(
+                name: entry.key.toString(),
+                value: entry.value,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InspectorPropertyRow extends StatelessWidget {
+  const _InspectorPropertyRow({required this.name, required this.value});
+
+  final String name;
+  final Object? value;
+
+  @override
+  Widget build(BuildContext context) {
+    final rawValue = value;
+    final display = rawValue is Map && rawValue['display'] is String
+        ? rawValue['display'] as String
+        : rawValue.toString();
+    return Padding(
+      padding: const EdgeInsets.only(top: 5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: Text(name, style: const TextStyle(fontSize: 11))),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              display,
+              textAlign: TextAlign.right,
+              style: const TextStyle(fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _Banner extends StatelessWidget {

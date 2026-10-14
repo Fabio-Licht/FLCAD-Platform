@@ -1342,9 +1342,12 @@ class _OfficialEngineeringWorkspaceState
   PanelWindowHost? _panelWindowHost;
   bool _explorerDetached = false;
   String? _explorerPanelError;
+  bool _inspectorDetached = false;
+  String? _inspectorPanelError;
   bool _shellCloseGuardArmed = false;
   bool _closingShell = false;
   bool _explorerRestoreEvaluated = false;
+  bool _inspectorRestoreEvaluated = false;
   Timer? _panelReconcileTimer;
   final modelingViewport = ModelingViewportController();
   CadSceneGraph get scene => widget.cad.runtime.scene;
@@ -2814,7 +2817,8 @@ class _OfficialEngineeringWorkspaceState
     );
     _synchronizeScene();
     // G124-UX.MM4.2: the operator may have left the Explorer in its own window.
-    unawaited(_restoreDetachedPanelOnce());
+    unawaited(_restoreDetachedPanelOnce(PanelId.explorer));
+    unawaited(_restoreDetachedPanelOnce(PanelId.inspector));
   }
 
   void _alignmentCaptureStateChanged() {
@@ -2903,9 +2907,16 @@ class _OfficialEngineeringWorkspaceState
   /// The stored preference is authoritative: an explicit Dock writes the panel
   /// as docked and is therefore never reopened, while a session teardown keeps
   /// the preference (see [PanelWindowHost.dock]).
-  Future<void> _restoreDetachedPanelOnce() async {
-    if (_explorerRestoreEvaluated) return;
-    _explorerRestoreEvaluated = true;
+  Future<void> _restoreDetachedPanelOnce(PanelId panelId) async {
+    final evaluated = panelId == PanelId.explorer
+        ? _explorerRestoreEvaluated
+        : _inspectorRestoreEvaluated;
+    if (evaluated) return;
+    if (panelId == PanelId.explorer) {
+      _explorerRestoreEvaluated = true;
+    } else {
+      _inspectorRestoreEvaluated = true;
+    }
     try {
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
@@ -2914,7 +2925,7 @@ class _OfficialEngineeringWorkspaceState
       );
       final detached = await PanelWindowHost.hasDetachedPreference(
         store,
-        panelId: PanelId.explorer,
+        panelId: panelId,
         displays: createPlatformDisplayService(),
       );
       if (!detached) return;
@@ -2924,25 +2935,33 @@ class _OfficialEngineeringWorkspaceState
       // The bridge registers its channels asynchronously: wait for them before
       // the window starts handshaking.
       await _panelTransport?.ready;
-      final adopt = await _livePanelWindow(PanelId.explorer);
+      final adopt = await _livePanelWindow(panelId);
       final attachment = await host.restorePersisted(
-        PanelId.explorer,
+        panelId,
         windowId: adopt,
       );
       if (attachment == null) return;
       await _setShellCloseGuard(host.hasAttachments);
       if (!mounted) return;
-      setState(() => _explorerDetached = true);
+      setState(() {
+        if (panelId == PanelId.explorer) {
+          _explorerDetached = true;
+        } else {
+          _inspectorDetached = true;
+        }
+      });
       widget.cad.setStatus(
         adopt == null
-            ? 'Explorer restaurado na janela destacada.'
-            : 'Janela do Explorer reconectada.',
+            ? '${panelDescriptor(panelId).title} restaurado na janela destacada.'
+            : 'Janela do ${panelDescriptor(panelId).title} reconectada.',
       );
     } on Object catch (error) {
       debugPrint('[panel-window] restore failed: $error');
       if (!mounted) return;
       setState(
-        () => _explorerPanelError = 'Falha ao restaurar o Explorer: $error',
+        () => panelId == PanelId.explorer
+            ? _explorerPanelError = 'Falha ao restaurar o Explorer: $error'
+            : _inspectorPanelError = 'Falha ao restaurar o Inspector: $error',
       );
     }
   }
@@ -2960,55 +2979,86 @@ class _OfficialEngineeringWorkspaceState
     return null;
   }
 
-  Future<PanelGeometry> _requestedExplorerGeometry() async {
+  Future<PanelGeometry> _requestedPanelGeometry(PanelId panelId) async {
     final saved = (await _panelWindowHost!.prepareLayout())
-        .entryFor(PanelId.explorer)
+        .entryFor(panelId)
         .geometry;
     if (saved != null) return saved;
+    final size = panelDescriptor(panelId).defaultSize;
     try {
       final bounds = await windowManager.getBounds();
       return PanelGeometry(
         left: bounds.right + 8,
         top: bounds.top + 40,
-        width: 340,
-        height: 620,
+        width: size.width,
+        height: size.height,
       );
     } on Object {
-      return const PanelGeometry(left: 120, top: 120, width: 340, height: 620);
+      return PanelGeometry(
+        left: 120,
+        top: 120,
+        width: size.width,
+        height: size.height,
+      );
     }
   }
 
-  Future<void> _detachExplorer() async {
-    if (mounted) setState(() => _explorerPanelError = null);
+  Future<void> _detachPanel(PanelId panelId) async {
+    if (mounted) {
+      setState(() {
+        if (panelId == PanelId.explorer) {
+          _explorerPanelError = null;
+        } else {
+          _inspectorPanelError = null;
+        }
+      });
+    }
     try {
       await _ensurePanelInfrastructure();
       final host = _panelWindowHost!;
       final attachment = await host.detach(
-        PanelId.explorer,
-        requestedGeometry: await _requestedExplorerGeometry(),
+        panelId,
+        requestedGeometry: await _requestedPanelGeometry(panelId),
       );
       if (attachment == null) {
         if (mounted) {
-          setState(
-            () => _explorerPanelError =
-                'Não foi possível abrir a janela do Explorer.',
-          );
+          setState(() {
+            if (panelId == PanelId.explorer) {
+              _explorerPanelError = 'Não foi possível abrir a janela do Explorer.';
+            } else {
+              _inspectorPanelError = 'Não foi possível abrir a janela do Inspector.';
+            }
+          });
         }
         return;
       }
       await _panelTransport?.ready;
       await _setShellCloseGuard(host.hasAttachments);
       if (!mounted) return;
-      setState(() => _explorerDetached = true);
-      widget.cad.setStatus('Explorer destacado para outra janela.');
+      setState(() {
+        if (panelId == PanelId.explorer) {
+          _explorerDetached = true;
+        } else {
+          _inspectorDetached = true;
+        }
+      });
+      widget.cad.setStatus(
+        '${panelDescriptor(panelId).title} destacado para outra janela.',
+      );
     } on Object catch (error) {
       if (!mounted) return;
       debugPrint('[panel-window] detach failed: $error');
       setState(
-        () => _explorerPanelError = 'Falha ao destacar o Explorer: $error',
+        () => panelId == PanelId.explorer
+            ? _explorerPanelError = 'Falha ao destacar o Explorer: $error'
+            : _inspectorPanelError = 'Falha ao destacar o Inspector: $error',
       );
     }
   }
+
+  Future<void> _detachExplorer() => _detachPanel(PanelId.explorer);
+
+  Future<void> _detachInspector() => _detachPanel(PanelId.inspector);
 
   Future<void> _dockExplorer() async {
     await _dockPanel(PanelId.explorer);
@@ -3026,12 +3076,17 @@ class _OfficialEngineeringWorkspaceState
     await _setShellCloseGuard(host.hasAttachments);
     await _panelBridge?.disconnectPanel(panelId);
     if (!mounted) return;
-    if (panelId != PanelId.explorer) return;
-    setState(() => _explorerDetached = false);
+    setState(() {
+      if (panelId == PanelId.explorer) {
+        _explorerDetached = false;
+      } else if (panelId == PanelId.inspector) {
+        _inspectorDetached = false;
+      }
+    });
     widget.cad.setStatus(
       closed
-          ? 'Explorer reencaixado na janela principal.'
-          : 'Explorer reencaixado; feche a janela destacada com o X.',
+          ? '${panelDescriptor(panelId).title} reencaixado na janela principal.'
+          : '${panelDescriptor(panelId).title} reencaixado; feche a janela destacada com o X.',
     );
   }
 
@@ -3049,6 +3104,10 @@ class _OfficialEngineeringWorkspaceState
     if (affected.contains(PanelId.explorer)) {
       setState(() => _explorerDetached = false);
       widget.cad.setStatus('Janela do Explorer fechada; painel reencaixado.');
+    }
+    if (affected.contains(PanelId.inspector)) {
+      setState(() => _inspectorDetached = false);
+      widget.cad.setStatus('Janela do Inspector fechada; painel reencaixado.');
     }
   }
 
@@ -6647,11 +6706,12 @@ class _OfficialEngineeringWorkspaceState
                           ),
                         ),
                         const VerticalDivider(),
-                        _DockableSidePanel(
+                        if (!_inspectorDetached) _DockableSidePanel(
                           panelId: 'inspector',
                           title: 'Property Inspector',
                           icon: Icons.tune,
                           width: 280,
+                          onDetach: () => unawaited(_detachInspector()),
                           child:
                               _sketchEnvironmentInspector() ??
                               _operationalInspector() ??
@@ -6995,6 +7055,20 @@ class _OfficialEngineeringWorkspaceState
                                           ),
                                     )),
                         ),
+                        if (_inspectorDetached)
+                          _DetachedPanelRail(
+                            panelId: PanelId.inspector,
+                            title: 'Property Inspector',
+                            icon: Icons.tune,
+                            error: _inspectorPanelError,
+                            onReturn: () => unawaited(
+                              _dockPanel(PanelId.inspector),
+                            ),
+                            onFocus: () => unawaited(
+                              _panelWindowHost?.focus(PanelId.inspector) ??
+                                  Future<void>.value(),
+                            ),
+                          ),
                         const VerticalDivider(),
                         _DockableSidePanel(
                           panelId: 'assistant',

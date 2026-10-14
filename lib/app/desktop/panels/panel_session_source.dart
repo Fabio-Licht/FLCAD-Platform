@@ -210,9 +210,14 @@ class FakePanelSessionSource implements PanelSessionSource {
 /// existing safe APIs (`select` for the geometry selection and
 /// `setEntityVisibility`, which runs inside the runtime's transaction).
 class CadRuntimePanelSessionSource implements PanelSessionSource {
-  CadRuntimePanelSessionSource(this.runtime);
+  CadRuntimePanelSessionSource(this.runtime) {
+    runtime.addListener(_forwardChange);
+    runtime.operationalSelection.addListener(_forwardChange);
+    runtime.operationalEntities.addListener(_forwardChange);
+  }
 
   final CadRuntime runtime;
+  final List<void Function()> _listeners = [];
 
   @override
   String? get projectId => runtime.document?.projectId;
@@ -251,16 +256,21 @@ class CadRuntimePanelSessionSource implements PanelSessionSource {
     stateRevision: stateRevision,
     document: runtime.document,
     selection: runtime.selection,
+    documentSelection: runtime.geometrySelection.selectedIds,
+    operationalSelection: runtime.operationalSelection.selectedIds,
+    operationalEntities: {
+      for (final id in runtime.operationalSelection.selectedIds)
+        id: runtime.operationalEntities.find(id),
+    },
     status: runtime.document?.revision.toString() ?? '',
     limits: limits,
   );
 
   @override
-  void addListener(void Function() listener) => runtime.addListener(listener);
+  void addListener(void Function() listener) => _listeners.add(listener);
 
   @override
-  void removeListener(void Function() listener) =>
-      runtime.removeListener(listener);
+  void removeListener(void Function() listener) => _listeners.remove(listener);
 
   @override
   Future<void> applySelection(Set<String> ids) async => runtime.select(ids);
@@ -268,6 +278,12 @@ class CadRuntimePanelSessionSource implements PanelSessionSource {
   @override
   Future<void> setEntityVisibility(String id, {required bool visible}) =>
       runtime.setEntityVisibility(id, visible);
+
+  void _forwardChange() {
+    for (final listener in List<void Function()>.of(_listeners)) {
+      listener();
+    }
+  }
 }
 
 /// Re-exported so the bridge can build Explorer rows without importing the
