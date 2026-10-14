@@ -82,6 +82,8 @@ import 'panels/multi_window_panel_transport.dart';
 import 'panels/panel_bridge.dart';
 import 'panels/panel_session_source.dart';
 import 'panels/panel_window_host.dart';
+import 'panels/panel_inspector_widgets.dart';
+import 'panels/panel_presentation_models.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'reference_tree_taxonomy.dart';
@@ -1435,14 +1437,9 @@ class _OfficialEngineeringWorkspaceState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SegmentedButton<bool>(
-          segments: const [
-            ButtonSegment(value: false, label: Text('Basic')),
-            ButtonSegment(value: true, label: Text('Advanced')),
-          ],
-          selected: {advancedInspector},
-          onSelectionChanged: (value) =>
-              setState(() => advancedInspector = value.first),
+        InspectorModeSelector(
+          advanced: advancedInspector,
+          onChanged: (value) => setState(() => advancedInspector = value),
         ),
         const SizedBox(height: 10),
         _InspectorSection(
@@ -1522,14 +1519,9 @@ class _OfficialEngineeringWorkspaceState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        SegmentedButton<bool>(
-          segments: const [
-            ButtonSegment(value: false, label: Text('Basic')),
-            ButtonSegment(value: true, label: Text('Advanced')),
-          ],
-          selected: {advancedInspector},
-          onSelectionChanged: (value) =>
-              setState(() => advancedInspector = value.first),
+        InspectorModeSelector(
+          advanced: advancedInspector,
+          onChanged: (value) => setState(() => advancedInspector = value),
         ),
         const SizedBox(height: 10),
         _InspectorSection(
@@ -14667,30 +14659,28 @@ class _InspectorProperty extends StatelessWidget {
   final Object? value;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 3),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 92,
-          child: Text(
-            label,
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-              fontSize: 12,
-            ),
-          ),
+  Widget build(BuildContext context) => InspectorPropertyRow(
+        property: InspectorPropertyModel(
+          id: label,
+          label: label,
+          value: _safeInspectorValue(value),
+          availability: value == null
+              ? PanelPropertyAvailability.unavailable
+              : PanelPropertyAvailability.available,
         ),
-        Expanded(
-          child: Text(
-            '$value',
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
-    ),
-  );
+      );
+}
+
+Object? _safeInspectorValue(Object? value) {
+  try {
+    return InspectorPropertyModel(
+      id: 'value',
+      label: 'Valor',
+      value: value,
+    ).value;
+  } on ArgumentError {
+    return value?.toString();
+  }
 }
 
 class SketchInspectorNumberProperty extends StatefulWidget {
