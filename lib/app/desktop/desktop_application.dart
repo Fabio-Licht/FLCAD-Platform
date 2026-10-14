@@ -87,6 +87,7 @@ import 'panels/panel_inspector_widgets.dart';
 import 'panels/panel_presentation_models.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
+import 'activity_navigation.dart';
 import 'reference_tree_taxonomy.dart';
 import 'sketch/sketch_continuity_repair_panel.dart';
 import 'sketch/sketch_reconstruction_panel.dart';
@@ -1434,19 +1435,6 @@ class _OfficialEngineeringWorkspaceState
   /// True only when the operator explicitly asked for a new Sketch. A plain
   /// return to the Sketch module reuses the root already bound to the support.
   bool forceNewSketchOnSupportPick = false;
-  static const modules = [
-    'Reverse Engineering',
-    'AI Engineering',
-    'Recognition',
-    'Reference',
-    'Entidades',
-    'Sketch',
-    'Curves',
-    'Surfaces',
-    'Solids',
-    'Sections',
-    'Transform',
-  ];
   ModelingSelection? get documentSelection {
     final document = widget.cad.document;
     if (document == null) return null;
@@ -5712,6 +5700,113 @@ class _OfficialEngineeringWorkspaceState
     };
   }
 
+  Future<void> _selectModule(String item) async {
+    if (item == 'Sketch') {
+      if (operational.stage == SketchSurfaceStage.sketchActive) {
+        if (mounted) {
+          setState(() {
+            module = 'Sketch';
+            choosingSketchSupport = false;
+            openToolWindows.add('Sketch');
+          });
+        }
+      } else {
+        _beginDirectSketchSupportSelection();
+      }
+    }
+    if (item != 'Sketch' && mounted) {
+      setState(() {
+        module = item;
+        openToolWindows.add(item);
+      });
+    }
+    try {
+      await widget.commands.dispatch(
+        'workspace.${item.toLowerCase().replaceAll(' ', '_')}',
+      );
+    } catch (error) {
+      // A workspace panel is a local UI surface and must still open when no
+      // coordinator command is registered for that module yet.
+      widget.cad.setStatus('$item aberto.');
+    }
+    if (item == 'Reverse Engineering') {
+      await operational.persistReverseEngineeringStudioState();
+    }
+  }
+
+  Widget _activityNavigation(BuildContext context) {
+    final group = ActivityNavigation.groupFor(module);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      child: Row(
+        children: [
+          PopupMenuButton<String>(
+            tooltip: 'Atividades',
+            onSelected: _selectModule,
+            itemBuilder: (_) => [
+              for (final activity in ActivityNavigation.groups) ...[
+                PopupMenuItem<String>(
+                  enabled: false,
+                  child: Text(
+                    activity.label,
+                    style: const TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+                for (final item in activity.modules)
+                  PopupMenuItem<String>(
+                    value: item,
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 22,
+                          child: item == module
+                              ? const Icon(Icons.check, size: 16)
+                              : null,
+                        ),
+                        Expanded(child: Text(ActivityNavigation.labelFor(item))),
+                        if (ActivityNavigation.isPlaceholder(item))
+                          const Padding(
+                            padding: EdgeInsets.only(left: 8),
+                            child: Text(
+                              'ambiente',
+                              style: TextStyle(fontSize: 10),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+              ],
+            ],
+            child: Chip(
+              avatar: const Icon(Icons.dashboard_outlined, size: 16),
+              label: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(ActivityNavigation.labelFor(module)),
+                  const SizedBox(width: 4),
+                  const Icon(Icons.arrow_drop_down, size: 18),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            group,
+            style: Theme.of(context).textTheme.labelMedium,
+          ),
+          if (module == 'Surfaces') ...[
+            const SizedBox(width: 8),
+            _surfaceToolbarMenu(),
+          ],
+          if (module == 'Entidades') ...[
+            const SizedBox(width: 8),
+            _entityToolbarMenu(),
+          ],
+        ],
+      ),
+    );
+  }
+
   Widget? _activeToolWindowContent() {
     final recognizedStlPlanePreview = _recognizedStlPlanePreview();
     return switch (module) {
@@ -6081,79 +6176,7 @@ class _OfficialEngineeringWorkspaceState
         ]),
         builder: (context, _) => Column(
           children: [
-            SizedBox(
-              height: 44,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                children: [
-                  for (final item in modules)
-                    if (item == 'Surfaces')
-                      _surfaceToolbarMenu()
-                    else if (item == 'Entidades')
-                      _entityToolbarMenu()
-                    else
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 3),
-                        child: ChoiceChip(
-                          avatar: item == 'AI Engineering'
-                              ? const Icon(Icons.psychology_outlined, size: 16)
-                              : item == 'Reverse Engineering'
-                              ? const Icon(
-                                  Icons.account_tree_outlined,
-                                  size: 16,
-                                )
-                              : null,
-                          label: Text(
-                            item,
-                            style: TextStyle(
-                              fontWeight: item == 'AI Engineering'
-                                  ? FontWeight.w600
-                                  : FontWeight.w500,
-                            ),
-                          ),
-                          selected: module == item,
-                          onSelected: (_) async {
-                            if (item == 'Sketch') {
-                              if (operational.stage ==
-                                  SketchSurfaceStage.sketchActive) {
-                                if (mounted) {
-                                  setState(() {
-                                    module = 'Sketch';
-                                    choosingSketchSupport = false;
-                                    openToolWindows.add('Sketch');
-                                  });
-                                }
-                              } else {
-                                _beginDirectSketchSupportSelection();
-                              }
-                            }
-                            if (item != 'Sketch' && mounted) {
-                              setState(() {
-                                module = item;
-                                openToolWindows.add(item);
-                              });
-                            }
-                            try {
-                              await widget.commands.dispatch(
-                                'workspace.${item.toLowerCase().replaceAll(' ', '_')}',
-                              );
-                            } catch (error) {
-                              // A workspace panel is a local UI surface and must
-                              // still open when no coordinator command is
-                              // registered for that module yet.
-                              widget.cad.setStatus('$item aberto.');
-                            }
-                            if (item == 'Reverse Engineering') {
-                              await operational
-                                  .persistReverseEngineeringStudioState();
-                            }
-                          },
-                        ),
-                      ),
-                ],
-              ),
-            ),
+            _activityNavigation(context),
             const Divider(),
             Expanded(
               child: Stack(
