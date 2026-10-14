@@ -503,7 +503,7 @@ abstract final class TechnicalValueFormatter {
       return '${(value as num).toStringAsFixed(precision)}${unit == null ? '' : ' $unit'}';
     }
     if (value is num) return '$value${unit == null ? '' : ' $unit'}';
-    if (value is bool) return value ? 'Yes' : 'No';
+    if (value is bool) return value ? 'Sim' : 'Não';
     return value.toString();
   }
 }
