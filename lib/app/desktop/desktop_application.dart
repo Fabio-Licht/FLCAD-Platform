@@ -72,6 +72,8 @@ import 'desktop_theme.dart';
 import 'development_calota_autoload.dart';
 import 'contextual_reference_actions.dart';
 import 'contextual_reference_preview_session.dart';
+import 'reference_context_presentation.dart';
+import 'reference_contextual_panel.dart';
 import 'explorer_tree_projection.dart';
 import 'inspector_value_formatter.dart';
 import 'layout/display_service.dart';
@@ -858,7 +860,10 @@ class _DesktopShellState extends State<DesktopShell> {
               ),
               child: Text(
                 shellDestination,
-                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
+                style: const TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -5763,7 +5768,9 @@ class _OfficialEngineeringWorkspaceState
                               ? const Icon(Icons.check, size: 16)
                               : null,
                         ),
-                        Expanded(child: Text(ActivityNavigation.labelFor(item))),
+                        Expanded(
+                          child: Text(ActivityNavigation.labelFor(item)),
+                        ),
                         if (ActivityNavigation.isPlaceholder(item))
                           const Padding(
                             padding: EdgeInsets.only(left: 8),
@@ -5790,10 +5797,7 @@ class _OfficialEngineeringWorkspaceState
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            group,
-            style: Theme.of(context).textTheme.labelMedium,
-          ),
+          Text(group, style: Theme.of(context).textTheme.labelMedium),
           if (module == 'Surfaces') ...[
             const SizedBox(width: 8),
             _surfaceToolbarMenu(),
@@ -9030,6 +9034,8 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
   String? surfaceType;
   Map<String, Object?>? faceAnalytic;
   ContextualReferenceAction? draft;
+  bool useCompactReferencePilot = true;
+  String? referencePilotError;
   bool intersectionEditorOpen = false;
   String? lastIntersectionPreviewKey;
   bool alignmentCoordinateSystemEditorOpen = false;
@@ -9148,6 +9154,7 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
 
   void _intersectionSelectionChanged() {
     if (!mounted) return;
+    referencePilotError = null;
     setState(() {});
     final planeId = widget.intersectionSelection.planeEntityId;
     final axisId = widget.intersectionSelection.axisEntityId;
@@ -9377,7 +9384,10 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
     final planeId = widget.intersectionSelection.planeEntityId;
     final axisId = widget.intersectionSelection.axisEntityId;
     if (planeId == null || axisId == null || busy) return;
-    setState(() => busy = true);
+    setState(() {
+      busy = true;
+      referencePilotError = null;
+    });
     try {
       final result = await widget.runtime.previewPlaneAxisIntersectionPoint(
         planeEntityId: planeId,
@@ -9402,12 +9412,11 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
       }
     } catch (error) {
       _cancelPreview();
-      widget.onStatus(
-        error
-            .toString()
-            .replaceFirst('Bad state: ', '')
-            .replaceFirst('FormatException: ', ''),
-      );
+      referencePilotError = error
+          .toString()
+          .replaceFirst('Bad state: ', '')
+          .replaceFirst('FormatException: ', '');
+      widget.onStatus(referencePilotError!);
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -9712,6 +9721,31 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
           AlignmentCoordinateSystemSlot.viewportOrigin => 'Ponto na geometria',
         };
     final existingReference = selectedReference != null;
+    final referencePilotPresentation =
+        ReferenceContextPresentation.planeAxisIntersection(
+          planeOptions: [
+            for (final candidate in planeCandidates)
+              ReferenceContextOption(
+                id: candidate.id,
+                label: candidate.data['name'] as String? ?? candidate.id,
+              ),
+          ],
+          axisOptions: [
+            for (final candidate in axisCandidates)
+              ReferenceContextOption(
+                id: candidate.id,
+                label: candidate.data['name'] as String? ?? candidate.id,
+              ),
+          ],
+          planeId: intersectionPlaneId,
+          axisId: intersectionAxisId,
+          activeSlot: activeIntersectionSlot?.name,
+          previewActive:
+              draft == ContextualReferenceAction.planeAxisIntersectionPoint &&
+              preview.active,
+          busy: busy,
+          diagnostic: referencePilotError,
+        );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -9806,8 +9840,69 @@ class _ManagedCadReferencePanelState extends State<_ManagedCadReferencePanel> {
             label: const Text('Ponto por interseção Plano + Eixo'),
           ),
         ],
-        if (canIntersectPlaneAxis && intersectionEditorOpen) ...[
+        if (canIntersectPlaneAxis &&
+            intersectionEditorOpen &&
+            useCompactReferencePilot) ...[
+          ReferenceContextualPanel(
+            presentation: referencePilotPresentation,
+            onChoosePlane: (value) {
+              _cancelPreview();
+              referencePilotError = null;
+              lastIntersectionPreviewKey = null;
+              widget.intersectionSelection.choose(
+                PlaneAxisIntersectionSlot.plane,
+                value,
+              );
+            },
+            onPickPlane: () {
+              _cancelPreview();
+              referencePilotError = null;
+              lastIntersectionPreviewKey = null;
+              widget.intersectionSelection.begin(
+                PlaneAxisIntersectionSlot.plane,
+              );
+              widget.onStatus(
+                'Clique em um plano de References ou WCS na viewport.',
+              );
+            },
+            onChooseAxis: (value) {
+              _cancelPreview();
+              referencePilotError = null;
+              lastIntersectionPreviewKey = null;
+              widget.intersectionSelection.choose(
+                PlaneAxisIntersectionSlot.axis,
+                value,
+              );
+            },
+            onPickAxis: () {
+              _cancelPreview();
+              referencePilotError = null;
+              lastIntersectionPreviewKey = null;
+              widget.intersectionSelection.begin(
+                PlaneAxisIntersectionSlot.axis,
+              );
+              widget.onStatus(
+                'Clique em um eixo de References ou WCS na viewport.',
+              );
+            },
+            onPreview: _previewPlaneAxisIntersection,
+            onApply: () => _applyDraft(entity),
+            onCancel: _cancelCurrentPreview,
+            onShowDetailed: () =>
+                setState(() => useCompactReferencePilot = false),
+          ),
+        ],
+        if (canIntersectPlaneAxis &&
+            intersectionEditorOpen &&
+            !useCompactReferencePilot) ...[
           const SizedBox(height: 10),
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              onPressed: () => setState(() => useCompactReferencePilot = true),
+              child: const Text('Usar painel compacto'),
+            ),
+          ),
           if (activeIntersectionSlot != null) ...[
             DecoratedBox(
               decoration: BoxDecoration(
@@ -14728,13 +14823,13 @@ class _SharedInspectorReadOnlySection extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => InspectorPropertySection(
-        section: InspectorSectionModel(
-          id: title,
-          label: title,
-          properties: const [],
-        ),
-        children: children,
-      );
+    section: InspectorSectionModel(
+      id: title,
+      label: title,
+      properties: const [],
+    ),
+    children: children,
+  );
 }
 
 class _InspectorProperty extends StatelessWidget {
@@ -14744,15 +14839,15 @@ class _InspectorProperty extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => InspectorPropertyRow(
-        property: InspectorPropertyModel(
-          id: label,
-          label: label,
-          value: _safeInspectorValue(value),
-          availability: value == null
-              ? PanelPropertyAvailability.unavailable
-              : PanelPropertyAvailability.available,
-        ),
-      );
+    property: InspectorPropertyModel(
+      id: label,
+      label: label,
+      value: _safeInspectorValue(value),
+      availability: value == null
+          ? PanelPropertyAvailability.unavailable
+          : PanelPropertyAvailability.available,
+    ),
+  );
 }
 
 Object? _safeInspectorValue(Object? value) {
