@@ -33,6 +33,8 @@ abstract final class PanelViewModelKeys {
       PanelInspectorViewModelKeys.documentEntity;
   static const String inspectorOperationalEntities =
       PanelInspectorViewModelKeys.operationalEntities;
+  static const String inspectorPresentation =
+      PanelInspectorViewModelKeys.presentation;
 
   static const List<String> all = [
     panelId,
@@ -53,6 +55,7 @@ abstract final class PanelViewModelKeys {
     inspectorOperationalSelectionIds,
     inspectorDocumentEntity,
     inspectorOperationalEntities,
+    inspectorPresentation,
   ];
 }
 

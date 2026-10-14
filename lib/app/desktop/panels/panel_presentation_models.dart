@@ -270,17 +270,20 @@ final class InspectorEntityModel {
       selectionDomain: raw['selectionDomain'] as String? ?? 'unknown',
       available: raw['available'] == true,
       sections: [
-        InspectorSectionModel(
-          id: 'properties',
-          label: 'Properties',
-          properties: [
-            for (final entry in entries)
-              InspectorPropertyModel.fromSnapshot(
-                key: entry.key.toString(),
-                value: entry.value,
-              ),
-          ],
-        ),
+        for (final category in _categories)
+          InspectorSectionModel(
+            id: category.$1,
+            label: category.$2,
+            advanced: category.$3,
+            properties: [
+              for (final entry in entries)
+                if (_categoryFor(entry.key.toString()) == category.$1)
+                  InspectorPropertyModel.fromSnapshot(
+                    key: entry.key.toString(),
+                    value: entry.value,
+                  ),
+            ],
+          ),
       ],
     );
   }
@@ -306,6 +309,35 @@ final class InspectorEntityModel {
         'available': available,
         'sections': [for (final section in sections) section.toJson()],
       };
+
+  static const _categories = [
+    ('identity', 'Identidade', false),
+    ('reference', 'Referência', false),
+    ('geometry', 'Geometria', false),
+    ('feature', 'Feature', true),
+    ('sketch', 'Sketch', true),
+    ('dimension', 'Cota', false),
+    ('topology', 'Topologia', true),
+    ('surface', 'Superfície', true),
+    ('advanced', 'Avançado', true),
+  ];
+
+  static String _categoryFor(String key) => switch (key) {
+        'name' || 'format' || 'sceneKind' || 'visibility' => 'identity',
+        'origin' || 'tolerance' || 'confidence' => 'reference',
+        'vertexCount' ||
+        'triangleCount' ||
+        'bounds' ||
+        'normals' ||
+        'area' ||
+        'volume' ||
+        'length' => 'geometry',
+        'featureLifecycle' => 'feature',
+        'drivingDimension' => 'dimension',
+        'cadSemanticKind' || 'cadVisualType' || 'stepTechnicalName' =>
+          'advanced',
+        _ => 'advanced',
+      };
 }
 
 final class InspectorSectionModel {
@@ -313,21 +345,25 @@ final class InspectorSectionModel {
     required this.id,
     required this.label,
     required Iterable<InspectorPropertyModel> properties,
+    this.advanced = false,
   }) : properties = List.unmodifiable(properties);
 
   final String id;
   final String label;
+  final bool advanced;
   final List<InspectorPropertyModel> properties;
 
   Map<String, Object?> toJson() => {
         'id': id,
         'label': label,
+        'advanced': advanced,
         'properties': [for (final property in properties) property.toJson()],
       };
 
   factory InspectorSectionModel.fromJson(Map raw) => InspectorSectionModel(
         id: raw['id'] as String? ?? '',
         label: raw['label'] as String? ?? '',
+        advanced: raw['advanced'] == true,
         properties: raw['properties'] is List
             ? (raw['properties'] as List)
                   .whereType<Map>()
@@ -409,24 +445,60 @@ final class InspectorPropertyModel {
       };
 
   static String _friendlyLabel(String key) => switch (key) {
-        'drivingDimension' => 'Driving dimension',
-        'triangleCount' => 'Triangles',
-        'vertexCount' => 'Vertices',
-        'sceneKind' => 'Scene type',
-        'cadSemanticKind' => 'CAD semantic type',
-        'cadVisualType' => 'CAD visual type',
-        'sceneEntityId' => 'Scene entity',
-        'meanCurvature' => 'Mean curvature',
-        'measurementSafe' => 'Measurement safe',
-        'presentationOnly' => 'Presentation only',
-        _ => key,
+        'name' => 'Nome',
+        'format' => 'Formato',
+        'visibility' => 'Visibilidade',
+        'origin' => 'Origem',
+        'tolerance' => 'Tolerância',
+        'confidence' => 'Confiança',
+        'drivingDimension' => 'Cota',
+        'triangleCount' => 'Triângulos',
+        'vertexCount' => 'Vértices',
+        'bounds' => 'Caixa envolvente',
+        'normals' => 'Normais',
+        'area' => 'Área',
+        'volume' => 'Volume',
+        'length' => 'Comprimento',
+        'sceneKind' => 'Tipo de cena',
+        'cadSemanticKind' => 'Tipo semântico CAD',
+        'cadVisualType' => 'Tipo visual CAD',
+        'stepTechnicalName' => 'Nome STEP',
+        'featureLifecycle' => 'Ciclo de vida',
+        'sceneEntityId' => 'Entidade de cena',
+        'meanCurvature' => 'Curvatura média',
+        'measurementSafe' => 'Medição segura',
+        'presentationOnly' => 'Somente apresentação',
+        'ownerId' => 'ID do proprietário',
+        'ownerDomain' => 'Proprietário',
+        'documentId' => 'ID do documento',
+        'revision' => 'Revisão',
+        'health' => 'Saúde',
+        _ => _humanize(key),
       };
+
+  static String _humanize(String key) {
+    final spaced = key
+        .replaceAllMapped(RegExp(r'([a-z0-9])([A-Z])'), (match) {
+          return '${match.group(1)} ${match.group(2)}';
+        })
+        .replaceAll('_', ' ')
+        .trim();
+    if (spaced.isEmpty) return 'Technical property';
+    return spaced[0].toUpperCase() + spaced.substring(1);
+  }
 }
 
 abstract final class TechnicalValueFormatter {
   static String format(Object? value, {String? unit, int precision = 3}) {
     if (value == null) return 'Unavailable';
-    if (value is Map && value['display'] is String) return value['display'] as String;
+    if (value is Map && value['display'] is String) {
+      return value['display'] as String;
+    }
+    if (value is Map && value['min'] is List && value['max'] is List) {
+      final min = (value['min'] as List).join(', ');
+      final max = (value['max'] as List).join(', ');
+      return '($min) → ($max)${value['unit'] == null ? '' : ' ${value['unit']}'}';
+    }
     if (value is double) {
       return '${(value as num).toStringAsFixed(precision)}${unit == null ? '' : ' $unit'}';
     }

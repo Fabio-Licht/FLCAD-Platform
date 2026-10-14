@@ -50,13 +50,19 @@ void main() {
       },
     });
 
-    final properties = model.entities.single.sections.single.properties;
-    expect(properties.first.label, 'Driving dimension');
-    expect(properties.first.unit, 'mm');
-    expect(properties.first.access, PanelPropertyAccess.editable);
-    expect(properties.first.intent, 'inspector.sketch.dimension.edit');
-    expect(properties[1].label, 'Triangles');
-    expect(properties[1].access, PanelPropertyAccess.readOnly);
+    final sections = model.entities.single.sections;
+    final properties = [
+      for (final section in sections)
+        ...section.properties,
+    ];
+    final dimension = properties.singleWhere((property) => property.id == 'drivingDimension');
+    final triangles = properties.singleWhere((property) => property.id == 'triangleCount');
+    expect(dimension.label, 'Cota');
+    expect(dimension.unit, 'mm');
+    expect(dimension.access, PanelPropertyAccess.editable);
+    expect(dimension.intent, 'inspector.sketch.dimension.edit');
+    expect(triangles.label, 'Triângulos');
+    expect(triangles.access, PanelPropertyAccess.readOnly);
     expect(InspectorPresentationModel.fromJson(model.toJson()).toJson(), model.toJson());
   });
 

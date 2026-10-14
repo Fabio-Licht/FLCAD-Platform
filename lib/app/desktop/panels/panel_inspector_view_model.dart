@@ -1,8 +1,10 @@
 import '../../operational_entities/operational_entity.dart';
 import '../../../core/cad_document/cad_document.dart';
+import 'panel_presentation_models.dart';
 
 /// Presentation-only keys used by the detached Inspector.
 abstract final class PanelInspectorViewModelKeys {
+  static const presentation = 'inspector.presentation';
   static const selectionState = 'inspector.selectionState';
   static const documentSelectionIds = 'inspector.documentSelectionIds';
   static const operationalSelectionIds = 'inspector.operationalSelectionIds';
@@ -43,7 +45,7 @@ abstract final class PanelInspectorViewModel {
         : selectedCount > 1
         ? 'multiple'
         : 'single';
-    return {
+    final result = <String, Object?>{
       PanelInspectorViewModelKeys.selectionState: selectionState,
       PanelInspectorViewModelKeys.documentSelectionIds: documentIds,
       PanelInspectorViewModelKeys.operationalSelectionIds: operationalIds,
@@ -52,6 +54,9 @@ abstract final class PanelInspectorViewModel {
           : null,
       PanelInspectorViewModelKeys.operationalEntities: operationalRows,
     };
+    result[PanelInspectorViewModelKeys.presentation] =
+        InspectorPresentationModel.fromSnapshot(result).toJson();
+    return result;
   }
 
   static Map<String, Object?> _documentEntity(

@@ -485,6 +485,17 @@ class _InspectorDetachedPanel extends StatelessWidget {
             ?.whereType<Map>()
             .toList(growable: false) ??
         const <Map>[];
+    final structured = viewModel[PanelInspectorViewModelKeys.presentation]
+        is Map
+        ? InspectorPresentationModel.fromJson(
+            Map<String, Object?>.from(
+              viewModel[PanelInspectorViewModelKeys.presentation] as Map,
+            ),
+          )
+        : InspectorPresentationModel.fromSnapshot(viewModel);
+    final structuredById = {
+      for (final entity in structured.entities) entity.id: entity,
+    };
     final message = switch (state) {
       'none' => 'Nenhuma entidade selecionada.',
       'multiple' => 'Seleção múltipla: propriedades individuais indisponíveis.',
@@ -499,17 +510,143 @@ class _InspectorDetachedPanel extends StatelessWidget {
           _InspectorNotice(message)
         else ...[
           if (document != null)
-            _InspectorEntityCard(
+            _StructuredInspectorEntityCard(
               entity: document,
+              presentation: structuredById[document['id']],
               onDimensionSubmitted: onDimensionSubmitted,
               enabled: !stale,
             ),
           for (final entity in operational)
-            _InspectorEntityCard(entity: entity),
+            _StructuredInspectorEntityCard(
+              entity: entity,
+              presentation: structuredById[entity['id']],
+            ),
         ],
       ],
     );
   }
+}
+
+class _StructuredInspectorEntityCard extends StatefulWidget {
+  const _StructuredInspectorEntityCard({
+    required this.entity,
+    required this.presentation,
+    this.onDimensionSubmitted,
+    this.enabled = false,
+  });
+
+  final Map entity;
+  final InspectorEntityModel? presentation;
+  final Future<String> Function(String entityId, double value)?
+  onDimensionSubmitted;
+  final bool enabled;
+
+  @override
+  State<_StructuredInspectorEntityCard> createState() =>
+      _StructuredInspectorEntityCardState();
+}
+
+class _StructuredInspectorEntityCardState
+    extends State<_StructuredInspectorEntityCard> {
+  bool _advanced = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final model = widget.presentation;
+    if (model == null) return _InspectorEntityCard(entity: widget.entity);
+    final sections = model.sections
+        .where((section) => section.advanced == _advanced)
+        .where((section) => section.properties.isNotEmpty);
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              model.name,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${model.type} · ${model.selectionDomain == 'document' ? 'documental' : 'operacional'}',
+            ),
+            const SizedBox(height: 8),
+            SegmentedButton<bool>(
+              segments: const [
+                ButtonSegment(value: false, label: Text('Básico')),
+                ButtonSegment(value: true, label: Text('Avançado')),
+              ],
+              selected: {_advanced},
+              onSelectionChanged: (value) =>
+                  setState(() => _advanced = value.first),
+            ),
+            const SizedBox(height: 8),
+            for (final section in sections) ...[
+              _DetachedInspectorSection(
+                title: section.label,
+                children: [
+                  for (final property in section.properties)
+                    if (property.id == 'drivingDimension' &&
+                        property.access == PanelPropertyAccess.editable &&
+                        widget.onDimensionSubmitted != null)
+                      _InspectorDimensionEditor(
+                        entityId: model.id,
+                        dimension: {
+                          'value': property.value,
+                          'unit': property.unit ?? 'mm',
+                        },
+                        enabled: widget.enabled,
+                        onSubmitted: widget.onDimensionSubmitted!,
+                      )
+                    else
+                      _InspectorPropertyRow(
+                        name: property.label,
+                        value: property.availability ==
+                                PanelPropertyAvailability.unavailable
+                          ? 'Indisponível'
+                            : TechnicalValueFormatter.format(
+                                property.value,
+                                unit: property.unit,
+                                precision: property.precision,
+                              ),
+                      ),
+                ],
+              ),
+              const SizedBox(height: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DetachedInspectorSection extends StatelessWidget {
+  const _DetachedInspectorSection({required this.title, required this.children});
+
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => DecoratedBox(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+          borderRadius: BorderRadius.circular(3),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+              const Divider(height: 12),
+              ...children,
+            ],
+          ),
+        ),
+      );
 }
 
 class _InspectorNotice extends StatelessWidget {
@@ -525,16 +662,9 @@ class _InspectorNotice extends StatelessWidget {
 }
 
 class _InspectorEntityCard extends StatelessWidget {
-  const _InspectorEntityCard({
-    required this.entity,
-    this.onDimensionSubmitted,
-    this.enabled = false,
-  });
+  const _InspectorEntityCard({required this.entity});
 
   final Map entity;
-  final Future<String> Function(String entityId, double value)?
-  onDimensionSubmitted;
-  final bool enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -557,19 +687,10 @@ class _InspectorEntityCard extends StatelessWidget {
               '${entity['type'] ?? '-'} · ${entity['selectionDomain'] ?? '-'}',
             ),
             for (final entry in properties.entries)
-              entry.key == 'drivingDimension' &&
-                      entry.value is Map &&
-                      onDimensionSubmitted != null
-                  ? _InspectorDimensionEditor(
-                      entityId: entity['id'] as String? ?? '',
-                      dimension: Map<Object?, Object?>.from(entry.value as Map),
-                      enabled: enabled,
-                      onSubmitted: onDimensionSubmitted!,
-                    )
-                  : _InspectorPropertyRow(
-                      name: entry.key.toString(),
-                      value: entry.value,
-                    ),
+              _InspectorPropertyRow(
+                name: entry.key.toString(),
+                value: entry.value,
+              ),
           ],
         ),
       ),
