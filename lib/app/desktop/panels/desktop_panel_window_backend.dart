@@ -137,6 +137,25 @@ class DesktopPanelWindowBackend implements PanelWindowBackend {
     return windows.map((controller) => controller.windowId).toList();
   }
 
+  @override
+  Future<List<PanelWindowRef>> listWindows() async {
+    try {
+      final windows = await WindowController.getAll();
+      return [
+        for (final controller in windows)
+          PanelWindowRef(
+            windowId: controller.windowId,
+            panelId: panelIdFromWindowArguments(controller.arguments),
+          ),
+      ];
+    } on Object catch (error) {
+      // A backend that cannot enumerate windows must not break the caller: an
+      // empty answer only means "nothing to adopt".
+      debugPrint('[panel-window] listWindows failed: $error');
+      return const [];
+    }
+  }
+
   /// Applies the geometry requested by the main window (runs in the panel).
   static Future<void> applyPanelConfiguration(
     Map<Object?, Object?> arguments,

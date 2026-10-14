@@ -54,6 +54,8 @@ class PanelWindowHost {
   int geometryAppliedCount = 0;
   int geometryFailures = 0;
   int dockFailures = 0;
+  int adoptedWindows = 0;
+  int preservedPreferenceDocks = 0;
 
   bool get hasAttachments => attachments.isNotEmpty;
   PanelWindowAttachment? attachmentFor(PanelId panelId) => attachments[panelId];
@@ -184,7 +186,11 @@ class PanelWindowHost {
   /// Returns false when the window did not acknowledge the close: the caller
   /// can then report it instead of pretending the panel returned safely (the
   /// operator can still close it with the X, which destroys the engine).
-  Future<bool> dock(PanelId panelId, {bool closeWindow = true}) async {
+  Future<bool> dock(
+    PanelId panelId, {
+    bool closeWindow = true,
+    bool persist = true,
+  }) async {
     final attachment = attachments.remove(panelId);
     if (attachment == null) return true;
     var closed = !closeWindow;
@@ -196,7 +202,14 @@ class PanelWindowHost {
       }
     }
     dockCount++;
-    await _persist(panelId, geometry: attachment.geometry, detached: false);
+    if (persist) {
+      await _persist(panelId, geometry: attachment.geometry, detached: false);
+    } else {
+      // Session teardown (the shell closing, or the Workspace being remounted):
+      // the window goes away but the operator's detached preference stays, so
+      // the next session can restore the panel.
+      preservedPreferenceDocks++;
+    }
     if (!closed) {
       dockFailures++;
       // The window is still alive: keep tracking it so a later reconcile can
@@ -242,12 +255,58 @@ class PanelWindowHost {
   }
 
   /// Restores an attachment persisted in an earlier session.
-  Future<PanelWindowAttachment?> restorePersisted(PanelId panelId) async {
+  ///
+  /// [windowId] adopts a window that is already open - a remount must never
+  /// materialise a second one - instead of creating a new window. Returns null
+  /// when the stored preference no longer wants the panel detached (an explicit
+  /// Dock, or the single-screen recovery that brings it back into the shell).
+  Future<PanelWindowAttachment?> restorePersisted(
+    PanelId panelId, {
+    String? windowId,
+  }) async {
     final layout = await prepareLayout();
     final entry = layout.entryFor(panelId);
     final geometry = entry.geometry;
     if (!entry.isDetached || geometry == null) return null;
-    return detach(panelId, requestedGeometry: geometry);
+    if (windowId != null) {
+      final attachment = PanelWindowAttachment(
+        panelId: panelId,
+        windowId: windowId,
+        geometry: geometry,
+      );
+      attachments[panelId] = attachment;
+      adoptedWindows++;
+      await _configureWindow(panelId, windowId, geometry);
+      return attachment;
+    }
+    final attachment = await detach(panelId, requestedGeometry: geometry);
+    if (attachment == null) {
+      // A restore that could not materialise the window must not erase the
+      // operator's preference (detach() rolls the stored intent back): keep the
+      // intent so a later session can try again.
+      await _persist(panelId, geometry: geometry, detached: true);
+    }
+    return attachment;
+  }
+
+  /// Read-only peek used *before* the panel infrastructure is built at startup.
+  ///
+  /// The stored layout is recovered against the current displays, so a
+  /// preference that cannot materialise (single screen, invalid geometry, a
+  /// layout written by a newer format) reports false and nothing is created.
+  static Future<bool> hasDetachedPreference(
+    PanelLayoutStoreBase store, {
+    required PanelId panelId,
+    required DisplayService displays,
+    PanelLayoutRecovery recovery = const PanelLayoutRecovery(),
+  }) async {
+    final loaded = await store.load();
+    if (loaded.readOnly) return false;
+    final layout = recovery
+        .recover(layout: loaded.layout, displays: displays)
+        .layout;
+    final entry = layout.entryFor(panelId);
+    return entry.isDetached && entry.geometry != null;
   }
 
   PanelGeometry _recoverGeometry(PanelId panelId, PanelGeometry requested) {

@@ -1344,6 +1344,7 @@ class _OfficialEngineeringWorkspaceState
   String? _explorerPanelError;
   bool _shellCloseGuardArmed = false;
   bool _closingShell = false;
+  bool _explorerRestoreEvaluated = false;
   Timer? _panelReconcileTimer;
   final modelingViewport = ModelingViewportController();
   CadSceneGraph get scene => widget.cad.runtime.scene;
@@ -2812,6 +2813,8 @@ class _OfficialEngineeringWorkspaceState
       _alignmentCaptureStateChanged,
     );
     _synchronizeScene();
+    // G124-UX.MM4.2: the operator may have left the Explorer in its own window.
+    unawaited(_restoreDetachedPanelOnce());
   }
 
   void _alignmentCaptureStateChanged() {
@@ -2834,7 +2837,9 @@ class _OfficialEngineeringWorkspaceState
   // continua sendo a única fonte de verdade: a janela recebe a projeção do MM3
   // e devolve intents validados (seleção), nunca tocando o CAD.
 
-  Future<void> _ensurePanelInfrastructure() async {
+  Future<void> _ensurePanelInfrastructure({
+    PanelLayoutStoreBase? layoutStore,
+  }) async {
     if (_panelWindowHost != null) return;
     final backend = DesktopPanelWindowBackend();
     final transport = MultiWindowPanelTransport(
@@ -2845,9 +2850,11 @@ class _OfficialEngineeringWorkspaceState
     );
     final host = PanelWindowHost(
       backend: backend,
-      layoutStore: PanelLayoutStore.forConfigDirectory(
-        await getApplicationSupportDirectory(),
-      ),
+      layoutStore:
+          layoutStore ??
+          PanelLayoutStore.forConfigDirectory(
+            await getApplicationSupportDirectory(),
+          ),
       displays: createPlatformDisplayService(),
       devicePixelRatio: () => MediaQuery.maybeDevicePixelRatioOf(context) ?? 1,
     );
@@ -2877,6 +2884,74 @@ class _OfficialEngineeringWorkspaceState
       const Duration(seconds: 2),
       (_) => unawaited(_reconcilePanelWindows()),
     );
+  }
+
+  /// G124-UX.MM4.2: materialises the panel the operator left detached.
+  ///
+  /// Lifecycle: it runs once per Workspace session, after the first frame (the
+  /// shell is laid out and the device pixel ratio is known), and it only builds
+  /// the panel infrastructure when the *recovered* preference still keeps the
+  /// Explorer detached. The channels are registered before the window exists,
+  /// so the panel's handshake always finds the main side listening.
+  ///
+  /// The stored preference is authoritative: an explicit Dock writes the panel
+  /// as docked and is therefore never reopened, while a session teardown keeps
+  /// the preference (see [PanelWindowHost.dock]).
+  Future<void> _restoreDetachedPanelOnce() async {
+    if (_explorerRestoreEvaluated) return;
+    _explorerRestoreEvaluated = true;
+    try {
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted) return;
+      final store = PanelLayoutStore.forConfigDirectory(
+        await getApplicationSupportDirectory(),
+      );
+      final detached = await PanelWindowHost.hasDetachedPreference(
+        store,
+        panelId: PanelId.explorer,
+        displays: createPlatformDisplayService(),
+      );
+      if (!detached) return;
+      await _ensurePanelInfrastructure(layoutStore: store);
+      final host = _panelWindowHost;
+      if (host == null) return;
+      // The bridge registers its channels asynchronously: wait for them before
+      // the window starts handshaking.
+      await _panelTransport?.ready;
+      final adopt = await _liveExplorerWindow();
+      final attachment = await host.restorePersisted(
+        PanelId.explorer,
+        windowId: adopt,
+      );
+      if (attachment == null) return;
+      await _setShellCloseGuard(host.hasAttachments);
+      if (!mounted) return;
+      setState(() => _explorerDetached = true);
+      widget.cad.setStatus(
+        adopt == null
+            ? 'Explorer restaurado na janela destacada.'
+            : 'Janela do Explorer reconectada.',
+      );
+    } on Object catch (error) {
+      debugPrint('[panel-window] restore failed: $error');
+      if (!mounted) return;
+      setState(
+        () => _explorerPanelError = 'Falha ao restaurar o Explorer: $error',
+      );
+    }
+  }
+
+  /// A window the Explorer already owns, if one is still open.
+  ///
+  /// Adopting it is what keeps a Workspace remount from opening a second window
+  /// while the previous session is still tearing its own down.
+  Future<String?> _liveExplorerWindow() async {
+    final backend = _panelTransport?.backend;
+    if (backend == null) return null;
+    for (final window in await backend.listWindows()) {
+      if (window.panelId == PanelId.explorer) return window.windowId;
+    }
+    return null;
   }
 
   Future<PanelGeometry> _requestedExplorerGeometry() async {
@@ -2985,10 +3060,13 @@ class _OfficialEngineeringWorkspaceState
     try {
       final host = _panelWindowHost;
       if (host != null && host.hasAttachments) {
-        var closed = await host.dock(PanelId.explorer);
+        // A session teardown closes the window but keeps the operator's
+        // detached preference: only an explicit Dock stores the panel as
+        // docked (that is what stops a later launch from reopening it).
+        var closed = await host.dock(PanelId.explorer, persist: false);
         if (!closed) {
           // One retry: the panel may still have been booting.
-          closed = await host.dock(PanelId.explorer);
+          closed = await host.dock(PanelId.explorer, persist: false);
         }
         _panelBridge?.disconnectPanel(PanelId.explorer);
         if (!closed) {
@@ -3016,7 +3094,7 @@ class _OfficialEngineeringWorkspaceState
     windowManager.removeListener(this);
     final panelHost = _panelWindowHost;
     if (panelHost != null && panelHost.hasAttachments) {
-      unawaited(panelHost.dock(PanelId.explorer));
+      unawaited(panelHost.dock(PanelId.explorer, persist: false));
     }
     _panelBridge?.dispose();
     unawaited(_panelTransport?.close() ?? Future<void>.value());

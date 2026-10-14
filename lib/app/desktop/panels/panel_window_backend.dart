@@ -1,4 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
+
+import '../layout/panel_identity.dart';
 
 /// Window + channel seam used by the detachable-panel spike.
 ///
@@ -47,6 +50,33 @@ abstract class PanelWindowBackend {
   Future<void> showWindow(String windowId);
 
   Future<List<String>> listWindowIds();
+
+  /// Panels currently materialised, with the panel each window was created for.
+  ///
+  /// A remount must adopt a window that is still open instead of creating a
+  /// second one, and the arguments the window was created with are what
+  /// identify it.
+  Future<List<PanelWindowRef>> listWindows();
+}
+
+/// One live panel window and the panel it was opened for (when known).
+class PanelWindowRef {
+  const PanelWindowRef({required this.windowId, this.panelId});
+
+  final String windowId;
+  final PanelId? panelId;
+}
+
+/// Reads the panel id out of the JSON payload a panel window was created with.
+PanelId? panelIdFromWindowArguments(String? arguments) {
+  if (arguments == null || arguments.isEmpty) return null;
+  try {
+    final payload = jsonDecode(arguments);
+    if (payload is! Map) return null;
+    return panelIdFromName(payload['panelId'] as String? ?? '');
+  } on Object {
+    return null;
+  }
 }
 
 /// Logical window rectangle (window_manager works in DPI-scaled units).
@@ -84,9 +114,13 @@ class RectData {
 class LoopbackPanelWindowBackend implements PanelWindowBackend {
   final Map<String, Future<Object?> Function(String, Object?)> _handlers = {};
   final Map<String, RectData> windowBounds = {};
+  final Map<String, String> windowArguments = {};
   final List<String> createdWindows = [];
   final List<String> closedWindows = [];
   int _nextWindowId = 1;
+
+  /// Models a platform that refuses to materialise another window.
+  bool failCreateWindows = false;
 
   /// Messages that could not be delivered (no handler registered), which models
   /// a broken channel.
@@ -160,8 +194,10 @@ class LoopbackPanelWindowBackend implements PanelWindowBackend {
     required RectData logicalBounds,
     required bool hiddenAtLaunch,
   }) async {
+    if (failCreateWindows) return null;
     final id = 'loopback-window-${_nextWindowId++}';
     createdWindows.add(id);
+    windowArguments[id] = arguments;
     windowBounds[id] = logicalBounds;
     return id;
   }
@@ -174,6 +210,7 @@ class LoopbackPanelWindowBackend implements PanelWindowBackend {
     if (!honorPanelClose) return;
     closedWindows.add(windowId);
     windowBounds.remove(windowId);
+    windowArguments.remove(windowId);
   }
 
   @override
@@ -187,4 +224,13 @@ class LoopbackPanelWindowBackend implements PanelWindowBackend {
   @override
   Future<List<String>> listWindowIds() async =>
       windowBounds.keys.toList(growable: false);
+
+  @override
+  Future<List<PanelWindowRef>> listWindows() async => [
+    for (final windowId in windowBounds.keys)
+      PanelWindowRef(
+        windowId: windowId,
+        panelId: panelIdFromWindowArguments(windowArguments[windowId]),
+      ),
+  ];
 }
