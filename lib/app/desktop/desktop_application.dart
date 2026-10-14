@@ -818,25 +818,47 @@ class _DesktopShellState extends State<DesktopShell> {
         colmapLabInitializing: widget.colmapLabInitializing,
       ),
     ];
+    final shellProject = commands.projects.current?.name ?? 'Sem projeto';
+    final shellDestination = switch (destination) {
+      0 => 'Início',
+      1 => 'Workspace',
+      _ => 'Configurações',
+    };
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: 16,
+        titleSpacing: 10,
         title: Row(
           children: [
-            Image.asset(DesktopAssets.logo, width: 34, height: 34),
-            const SizedBox(width: 10),
-            const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'FLCAD Reverse AI',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                ),
-                Text(
-                  'Engineering Intelligence Platform',
-                  style: TextStyle(fontSize: 11),
-                ),
-              ],
+            Image.asset(DesktopAssets.logo, width: 28, height: 28),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'FLCAD Reverse AI',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                  ),
+                  Text(
+                    shellProject,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                ],
+              ),
+            ),
+            Container(
+              margin: const EdgeInsets.only(left: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                shellDestination,
+                style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
+              ),
             ),
           ],
         ),
@@ -901,17 +923,17 @@ class _DesktopShellState extends State<DesktopShell> {
               icon: const Icon(Icons.view_in_ar),
             ),
           IconButton(
-            tooltip: 'Undo',
+            tooltip: 'Desfazer',
             onPressed: commands.undo,
             icon: const Icon(Icons.undo),
           ),
           IconButton(
-            tooltip: 'Redo',
+            tooltip: 'Refazer',
             onPressed: commands.redo,
             icon: const Icon(Icons.redo),
           ),
           IconButton(
-            tooltip: 'About',
+            tooltip: 'Sobre',
             onPressed: () => showDialog<void>(
               context: context,
               builder: (_) => const AboutFLCADDialog(),
@@ -927,12 +949,14 @@ class _DesktopShellState extends State<DesktopShell> {
             selectedIndex: destination,
             onDestinationSelected: (value) =>
                 setState(() => destination = value),
-            labelType: NavigationRailLabelType.all,
+            minWidth: 56,
+            minExtendedWidth: 76,
+            labelType: NavigationRailLabelType.selected,
             destinations: const [
               NavigationRailDestination(
                 icon: Icon(Icons.home_outlined),
                 selectedIcon: Icon(Icons.home),
-                label: Text('Home'),
+                label: Text('Início'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.view_quilt_outlined),
@@ -942,7 +966,7 @@ class _DesktopShellState extends State<DesktopShell> {
               NavigationRailDestination(
                 icon: Icon(Icons.settings_outlined),
                 selectedIcon: Icon(Icons.settings),
-                label: Text('Settings'),
+                label: Text('Configurações'),
               ),
             ],
           ),
