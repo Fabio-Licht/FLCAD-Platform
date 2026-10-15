@@ -90,6 +90,7 @@ import 'panels/panel_presentation_models.dart';
 import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'activity_navigation.dart';
+import 'shell_presentation.dart';
 import 'reference_tree_taxonomy.dart';
 import 'tool_window_layout.dart';
 import 'sketch/sketch_continuity_repair_panel.dart';
@@ -370,7 +371,7 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   );
   @override
   Widget build(BuildContext context) => Scaffold(
-    appBar: AppBar(title: const Text('Welcome to FLCAD Reverse AI')),
+    appBar: AppBar(title: const Text(ShellPresentation.welcome)),
     body: Center(
       child: SizedBox(
         width: 720,
@@ -391,13 +392,17 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
                 FilledButton(
                   key: ValueKey('wizard-continue-${details.stepIndex}'),
                   onPressed: details.onStepContinue,
-                  child: Text(step == 2 ? 'Finish' : 'Continue'),
+                  child: Text(
+                    step == 2
+                        ? ShellPresentation.finish
+                        : ShellPresentation.continueLabel,
+                  ),
                 ),
                 if (details.onStepCancel != null) ...[
                   const SizedBox(width: 8),
                   TextButton(
                     onPressed: details.onStepCancel,
-                    child: const Text('Back'),
+                    child: const Text(ShellPresentation.back),
                   ),
                 ],
               ],
@@ -405,31 +410,34 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
           ),
           steps: [
             Step(
-              title: const Text('Language'),
+              title: const Text(ShellPresentation.language),
               content: DropdownButtonFormField<String>(
                 initialValue: language,
                 items: const [
                   DropdownMenuItem(
                     value: 'pt-BR',
-                    child: Text('Português (Brasil)'),
+                    child: Text(ShellPresentation.portugueseBrazil),
                   ),
-                  DropdownMenuItem(value: 'en-US', child: Text('English')),
+                  DropdownMenuItem(
+                    value: 'en-US',
+                    child: Text(ShellPresentation.english),
+                  ),
                 ],
                 onChanged: (value) => setState(() => language = value!),
               ),
             ),
             Step(
-              title: const Text('Theme'),
+              title: const Text(ShellPresentation.theme),
               content: SegmentedButton<DesktopThemePreference>(
                 segments: const [
                   ButtonSegment(
                     value: DesktopThemePreference.dark,
-                    label: Text('Dark'),
+                    label: Text(ShellPresentation.dark),
                     icon: Icon(Icons.dark_mode),
                   ),
                   ButtonSegment(
                     value: DesktopThemePreference.light,
-                    label: Text('Light'),
+                    label: Text(ShellPresentation.light),
                     icon: Icon(Icons.light_mode),
                   ),
                 ],
@@ -439,12 +447,12 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
               ),
             ),
             Step(
-              title: const Text('Default directory'),
+              title: const Text(ShellPresentation.defaultDirectory),
               content: TextField(
                 controller: directory,
                 decoration: const InputDecoration(
-                  labelText: 'Project directory',
-                  hintText: 'Choose a project directory in Settings',
+                  labelText: ShellPresentation.projectDirectory,
+                  hintText: ShellPresentation.chooseProjectDirectory,
                 ),
               ),
             ),
@@ -871,7 +879,7 @@ class _DesktopShellState extends State<DesktopShell> {
         ),
         actions: [
           IconButton(
-            tooltip: 'Pesquisar comandos',
+            tooltip: ShellPresentation.searchTools,
             onPressed: () => _openCommandPalette(context),
             icon: const Icon(Icons.search),
           ),
@@ -884,11 +892,11 @@ class _DesktopShellState extends State<DesktopShell> {
             itemBuilder: (_) => [
               PopupMenuItem(
                 value: 'project:save',
-                child: Text('Salvar Projeto'),
+                child: Text(ShellPresentation.saveProject),
               ),
               PopupMenuItem(
                 value: 'project:close',
-                child: Text('Fechar Projeto'),
+                child: Text(ShellPresentation.closeProject),
               ),
               PopupMenuDivider(),
               PopupMenuItem(enabled: false, child: Text('Importar')),
@@ -968,7 +976,7 @@ class _DesktopShellState extends State<DesktopShell> {
               NavigationRailDestination(
                 icon: Icon(Icons.view_quilt_outlined),
                 selectedIcon: Icon(Icons.view_quilt),
-                label: Text('Workspace'),
+                label: Text(ShellPresentation.workspace),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.settings_outlined),
@@ -1054,7 +1062,7 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
     final project = await showDialog<Project>(
       context: context,
       builder: (context) => SimpleDialog(
-        title: const Text('Open Project'),
+        title: const Text(ShellPresentation.openProject),
         children: [
           for (final project in commands.projects.visibleProjects)
             SimpleDialogOption(
@@ -1068,7 +1076,7 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
           if (commands.projects.visibleProjects.isEmpty)
             const Padding(
               padding: EdgeInsets.all(24),
-              child: Text('No projects available.'),
+              child: Text(ShellPresentation.noProjects),
             ),
         ],
       ),
@@ -1094,7 +1102,7 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
           padding: const EdgeInsets.all(32),
           children: [
             Text(
-              'Home Dashboard',
+              ShellPresentation.dashboard,
               style: Theme.of(context).textTheme.headlineMedium,
             ),
             const SizedBox(height: 6),
@@ -1109,12 +1117,12 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
               children: [
                 _DashboardAction(
                   icon: Icons.add_box_outlined,
-                  label: 'Novo Projeto',
+                  label: ShellPresentation.newProject,
                   onTap: () => _newProject(context),
                 ),
                 _DashboardAction(
                   icon: Icons.folder_open,
-                  label: 'Abrir Projeto',
+                  label: ShellPresentation.openProject,
                   onTap: () => _openProject(context),
                 ),
                 _DashboardAction(
@@ -1152,7 +1160,7 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
                   label: 'Configurações',
                   onTap: () => ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(
-                      content: Text('Use Settings in the navigation rail.'),
+                      content: Text(ShellPresentation.settingsHint),
                     ),
                   ),
                 ),
@@ -1160,15 +1168,14 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
             ),
             const SizedBox(height: 28),
             Text(
-              'Projetos Recentes',
+              ShellPresentation.recentProjects,
               style: Theme.of(context).textTheme.titleLarge,
             ),
             const SizedBox(height: 10),
             if (commands.projects.visibleProjects.isEmpty)
               const _EmptyState(
                 icon: Icons.history,
-                message:
-                    'No recent projects. Open or create a project to begin.',
+                message: ShellPresentation.noRecentProjects,
               )
             else
               for (final project in commands.projects.visibleProjects.take(8))
@@ -1186,12 +1193,12 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.lightbulb_outline),
-                  title: const Text('Engineering tip'),
+                  title: const Text(ShellPresentation.engineeringTip),
                   subtitle: const Text(
                     'Validate the project coordinate system before reconstruction.',
                   ),
                   trailing: IconButton(
-                    tooltip: 'Disable tips',
+                    tooltip: ShellPresentation.disableTips,
                     onPressed: () => controller.update(
                       settings.copyWith(engineeringTips: false),
                     ),
@@ -1204,7 +1211,7 @@ class _DesktopHomeDashboardState extends State<DesktopHomeDashboard> {
             OutlinedButton.icon(
               onPressed: onWorkspace,
               icon: const Icon(Icons.arrow_forward),
-              label: const Text('Open Engineering Workspace'),
+              label: Text(ShellPresentation.openEngineeringWorkspace),
             ),
           ],
         ),
@@ -1271,19 +1278,26 @@ class _InlineNewProjectPanelState extends State<_InlineNewProjectPanel> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('New Project', style: Theme.of(context).textTheme.titleLarge),
+            Text(
+              ShellPresentation.newProject,
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
             const SizedBox(height: 20),
             TextField(
               controller: name,
               autofocus: true,
               onSubmitted: (_) => _create(),
-              decoration: const InputDecoration(labelText: 'Project name'),
+              decoration: const InputDecoration(
+                labelText: ShellPresentation.projectName,
+              ),
             ),
             const SizedBox(height: 12),
             TextField(
               controller: client,
               onSubmitted: (_) => _create(),
-              decoration: const InputDecoration(labelText: 'Client'),
+              decoration: const InputDecoration(
+                labelText: ShellPresentation.client,
+              ),
             ),
             const SizedBox(height: 20),
             Row(
@@ -1291,7 +1305,7 @@ class _InlineNewProjectPanelState extends State<_InlineNewProjectPanel> {
               children: [
                 TextButton(
                   onPressed: busy ? null : widget.onCancel,
-                  child: const Text('Cancel'),
+                  child: const Text(ShellPresentation.cancel),
                 ),
                 const SizedBox(width: 8),
                 FilledButton(
@@ -1301,7 +1315,7 @@ class _InlineNewProjectPanelState extends State<_InlineNewProjectPanel> {
                           dimension: 18,
                           child: CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Text('Create'),
+                      : const Text(ShellPresentation.create),
                 ),
               ],
             ),
@@ -5931,7 +5945,7 @@ class _OfficialEngineeringWorkspaceState
   Widget _surfaceToolbarMenu() => Padding(
     padding: const EdgeInsets.symmetric(horizontal: 3),
     child: PopupMenuButton<ProfessionalSurfaceTool>(
-      tooltip: 'Surface commands',
+      tooltip: ShellPresentation.surfaceCommands,
       position: PopupMenuPosition.under,
       onSelected: (tool) async {
         setState(() {
@@ -5946,7 +5960,10 @@ class _OfficialEngineeringWorkspaceState
         }
       },
       itemBuilder: (context) => [
-        const PopupMenuItem(enabled: false, child: Text('Create Surface')),
+        const PopupMenuItem(
+          enabled: false,
+          child: Text(ShellPresentation.createSurface),
+        ),
         for (final tool in const [
           ProfessionalSurfaceTool.loft,
           ProfessionalSurfaceTool.sweep,
@@ -5992,7 +6009,7 @@ class _OfficialEngineeringWorkspaceState
         label: const Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text('Surfaces'),
+            Text(ShellPresentation.surfaces),
             SizedBox(width: 4),
             Icon(Icons.arrow_drop_down),
           ],
@@ -7561,9 +7578,9 @@ class _OfficialEngineeringWorkspaceState
                 children: [
                   Icon(Icons.check_circle_outline, size: 16),
                   SizedBox(width: 6),
-                  Text('Ready'),
+                  Text(ShellPresentation.ready),
                   Spacer(),
-                  Text('OpenCascade · Project First · Consultative AI'),
+                  Text(ShellPresentation.footer),
                 ],
               ),
             ),
