@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -14,6 +15,10 @@ import '../../../core/geometric_kernel/geometry/vectors.dart';
 import '../../operational_entities/operational_entity.dart';
 import '../../operational_entities/operational_entity_resolver.dart';
 import 'native_viewport_bridge.dart';
+import 'viewport_render_diagnostics.dart';
+
+const bool _viewportDiagnosticsEnabled =
+    kDebugMode && bool.fromEnvironment('FLCAD_DEV_VIEWPORT_DIAGNOSTICS');
 
 class CadManagedFaceSelectionController extends ChangeNotifier {
   ManagedCadFaceHighlight? _selection;
@@ -139,6 +144,7 @@ class _IntegratedCadViewportWidgetState
   Offset? _lastHoverPosition;
   ManagedCadFaceHighlight? _managedFaceHover;
   ManagedCadFaceHighlight? _managedFaceSelection;
+  ViewportRenderDiagnosticReport? _diagnosticReport;
   final ViewportPickingController _overlayPicking = ViewportPickingController();
   CadViewportPick? _captureHover;
   late final FocusNode _viewportFocusNode;
@@ -206,6 +212,22 @@ class _IntegratedCadViewportWidgetState
     } else if (_nativeActive) {
       native.setCamera(widget.camera);
     }
+    _recordViewportDiagnostics();
+  }
+
+  void _recordViewportDiagnostics() {
+    if (!_viewportDiagnosticsEnabled) return;
+    final report = buildViewportRenderDiagnostic(
+      scene: widget.scene,
+      backend: backend,
+      requestedBackend: _requestedBackend,
+      style: _renderStyle,
+      fallbackReason: _unsupportedReason,
+      highlightActive:
+          _managedFaceSelection != null || _managedFaceHover != null,
+    );
+    _diagnosticReport = report;
+    debugPrint('[viewport-diagnostic] ${report.toStructuredLog()}');
   }
 
   bool _canPublishTap(int token, CadSceneGraph scene) =>
@@ -421,8 +443,11 @@ class _IntegratedCadViewportWidgetState
         final current = _pendingHover!;
         _pendingHover = null;
         final result = await native.pick(current.dx, current.dy);
-        final source = result == null ? null : widget.scene.find(result.entityId);
-        final managedFace = result?.kind == NativePickKind.face && source != null
+        final source = result == null
+            ? null
+            : widget.scene.find(result.entityId);
+        final managedFace =
+            result?.kind == NativePickKind.face && source != null
             ? managedCadFaceHighlight(source, result!.subId)
             : null;
         final resolved = !widget.enableInspectionHover || managedFace != null
@@ -536,6 +561,7 @@ class _IntegratedCadViewportWidgetState
     _managedFaceSelection = widget.managedFaceSelectionController?.selection;
     if (widget.enableInspectionHover) operationalResolver.prepare(widget.scene);
     _requestedBackend = backend;
+    if (!Platform.isWindows) _recordViewportDiagnostics();
   }
 
   @override
@@ -597,11 +623,13 @@ class _IntegratedCadViewportWidgetState
       _switchBackend(ViewportBackend.flutterCanvas, recovery: true);
       return;
     }
+    _recordViewportDiagnostics();
     if (mounted) setState(() {});
   }
 
   void _sceneChanged() {
     _tapGeneration++;
+    _recordViewportDiagnostics();
     final selectedFace = _managedFaceSelection;
     final selectedSource = selectedFace == null
         ? null
@@ -685,6 +713,7 @@ class _IntegratedCadViewportWidgetState
         _nativeSize = size;
         await native.resize(size.width, size.height);
       }
+      _recordViewportDiagnostics();
       return;
     }
     if (!_nativeSupportsMode) {
@@ -720,6 +749,7 @@ class _IntegratedCadViewportWidgetState
             revision != _cameraRevision);
       }
     }
+    _recordViewportDiagnostics();
     _initializing = false;
     if (mounted && generation == _backendGeneration && !native.available) {
       // Queue cleanup after this initialization has drained.
@@ -776,6 +806,7 @@ class _IntegratedCadViewportWidgetState
           _backendNotice = 'Native GPU indisponível. Flutter Canvas ativo.';
         }
       });
+      _recordViewportDiagnostics();
       _operationalSelectionChanged();
       _publishManagedFaceSelection(_managedFaceSelection);
       await _viewportReady();
@@ -1043,6 +1074,27 @@ class _IntegratedCadViewportWidgetState
                         child: Text(
                           _backendNotice ??
                               'Preparando backend de visualização…',
+                        ),
+                      ),
+                    ),
+                  ),
+                if (_viewportDiagnosticsEnabled && _diagnosticReport != null)
+                  Positioned(
+                    right: 10,
+                    top: 60,
+                    child: IgnorePointer(
+                      child: Card(
+                        margin: EdgeInsets.zero,
+                        child: Padding(
+                          padding: const EdgeInsets.all(6),
+                          child: Text(
+                            '${_diagnosticReport!.backend} · '
+                            '${_diagnosticReport!.mode} · '
+                            '${_diagnosticReport!.entities.length} ent.\n'
+                            'tri: ${_diagnosticReport!.entities.fold<int>(0, (sum, item) => sum + item.triangles)} · '
+                            'arestas: ${_diagnosticReport!.entities.fold<int>(0, (sum, item) => sum + item.topologicalEdges)}',
+                            style: Theme.of(context).textTheme.labelSmall,
+                          ),
                         ),
                       ),
                     ),
