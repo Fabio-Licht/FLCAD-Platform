@@ -20,6 +20,7 @@ import 'rendering/cad_root_color.dart';
 import 'scene/cad_scene_graph.dart';
 import 'scene/cad_scene_bounds.dart';
 import 'rendering/stl_display_lod.dart';
+import 'rendering/shaded_debug_experiments.dart';
 import 'selection/viewport_picking_controller.dart';
 
 enum CadRenderStyle { shaded, wireframe, hiddenLine, transparent, ghost }
@@ -62,6 +63,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.renderStyle,
     this.onRenderStyleChanged,
     this.showRenderControls = true,
+    this.hideReferenceOverlays = false,
     this.onViewportReady,
   });
 
@@ -107,6 +109,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final CadRenderStyle? renderStyle;
   final ValueChanged<CadRenderStyle>? onRenderStyleChanged;
   final bool showRenderControls;
+  final bool hideReferenceOverlays;
 
   /// Called after a valid layout has resized the actual interaction camera.
   final VoidCallback? onViewportReady;
@@ -577,6 +580,7 @@ class _ProfessionalCadViewportWidgetState
                                 widget.onSketchSupportPick != null,
                             navigationActive: _isMouseNavigating,
                             orbitActive: _isOrbiting,
+                            hideReferenceOverlays: widget.hideReferenceOverlays,
                           ),
                         ),
                       ),
@@ -1168,6 +1172,7 @@ class _CadScenePainter extends CustomPainter {
     required this.highlightSketchSupports,
     required this.navigationActive,
     required this.orbitActive,
+    required this.hideReferenceOverlays,
   }) : super(repaint: Listenable.merge([scene, camera]));
   final CadSceneGraph scene;
   final CadCameraController camera;
@@ -1183,6 +1188,7 @@ class _CadScenePainter extends CustomPainter {
   final bool highlightSketchSupports;
   final bool navigationActive;
   final bool orbitActive;
+  final bool hideReferenceOverlays;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1241,6 +1247,9 @@ class _CadScenePainter extends CustomPainter {
     }
     final projected = <_ProjectedTriangle>[];
     for (final entity in scene.entities.where((item) => item.visible)) {
+      if (hideReferenceOverlays && isShadedReferenceOverlay(entity)) {
+        continue;
+      }
       if (entity.kind == CadSceneEntityKind.surface &&
           entity.geometry['shaded'] == false) {
         continue;

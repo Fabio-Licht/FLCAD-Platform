@@ -9,6 +9,7 @@ import '../rendering/cad_root_color.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
 import '../rendering/mesh_derived_edge_classifier.dart';
 import '../rendering/mesh_derived_edge_refiner.dart';
+import '../rendering/shaded_debug_experiments.dart';
 import '../rendering/stl_display_lod.dart';
 import '../camera/cad_camera_controller.dart';
 
@@ -312,12 +313,15 @@ class CadSceneDisplayAdapter {
       'selected': entity.selected,
     };
     if (includeGeometry) {
+      final presentationNormals = kFlcadDevShadedDerivedNormals
+          ? (shadedDerivedNormals(presentation) ?? presentation['normals'])
+          : presentation['normals'];
       StlDisplayLod.preflight(presentation);
       if (StlDisplayLod.simplified(presentation)) {
         // Native LOD already carries indexed vertices and winding normals.
         // Keep sharing them: no corner expansion or full List copies here.
         result['nodes'] = presentation['nodes'];
-        result['normals'] = presentation['normals'];
+        result['normals'] = presentationNormals;
         result['triangles'] = presentation['triangles'];
         result['presentationLod'] = presentation['presentationLod'];
         final meshEdges = _meshDerivedEdgesForEntity(entity, presentation);
@@ -327,7 +331,7 @@ class CadSceneDisplayAdapter {
       final chunks = CadCanvasNormalPipeline.build(
         (presentation['nodes'] as List).cast<num>(),
         (presentation['triangles'] as List).cast<num>(),
-        nativeNormals: (presentation['normals'] as List?)?.cast<num>(),
+        nativeNormals: (presentationNormals as List?)?.cast<num>(),
       );
       result['nodes'] = [for (final chunk in chunks) ...chunk.xyz];
       result['normals'] = [for (final chunk in chunks) ...chunk.normals];

@@ -16,6 +16,7 @@ import '../../operational_entities/operational_entity.dart';
 import '../../operational_entities/operational_entity_resolver.dart';
 import 'native_viewport_bridge.dart';
 import 'viewport_render_diagnostics.dart';
+import '../rendering/shaded_debug_experiments.dart';
 
 const bool _viewportDiagnosticsEnabled =
     kDebugMode && bool.fromEnvironment('FLCAD_DEV_VIEWPORT_DIAGNOSTICS');
@@ -986,6 +987,8 @@ class _IntegratedCadViewportWidgetState
                       // the native triangle-only pick buffer.
                       enablePicking: true,
                       enableEntityHover: !useNative,
+                      hideReferenceOverlays:
+                          kFlcadDevShadedHideReferenceOverlays,
                       onNavigationChanged: useNative
                           ? (navigating) {
                               _nativeNavigating = navigating;

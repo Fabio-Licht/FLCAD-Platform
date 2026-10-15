@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import '../professional_cad_viewport_widget.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
 import '../rendering/mesh_derived_edge_classifier.dart';
+import '../rendering/shaded_debug_experiments.dart';
 import '../scene/cad_scene_graph.dart';
 import 'native_viewport_bridge.dart';
 
@@ -24,6 +25,8 @@ class ViewportRenderDiagnosticReport {
     required this.selectedEntityCount,
     required this.highlightActive,
     this.nativeSceneReady = false,
+    this.referenceOverlaysVisible = true,
+    this.derivedNormalsActive = false,
   });
 
   final String backend;
@@ -37,6 +40,8 @@ class ViewportRenderDiagnosticReport {
   final int selectedEntityCount;
   final bool highlightActive;
   final bool nativeSceneReady;
+  final bool referenceOverlaysVisible;
+  final bool derivedNormalsActive;
 
   Map<String, Object?> toJson() => {
     'backend': backend,
@@ -50,6 +55,8 @@ class ViewportRenderDiagnosticReport {
     'selectedEntityCount': selectedEntityCount,
     'highlightActive': highlightActive,
     'nativeSceneReady': nativeSceneReady,
+    'referenceOverlaysVisible': referenceOverlaysVisible,
+    'derivedNormalsActive': derivedNormalsActive,
   };
 
   String toStructuredLog() => jsonEncode(toJson());
@@ -73,6 +80,7 @@ String viewportDiagnosticOverlayText(ViewportRenderDiagnosticReport report) {
     'tri: $triangles · arestas: $edges',
     'sceneReady: ${report.nativeSceneReady}',
     'meshDerived: $meshSegments→$meshSegments',
+    'overlays: ${report.referenceOverlaysVisible ? 'on' : 'off'} · derivedNormals: ${report.derivedNormalsActive}',
   ];
   return lines.join('\n');
 }
@@ -169,6 +177,8 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
     highlightActive:
         highlightActive || visible.any((entity) => entity.selected),
     nativeSceneReady: native && nativeSceneReady,
+    referenceOverlaysVisible: !kFlcadDevShadedHideReferenceOverlays,
+    derivedNormalsActive: kFlcadDevShadedDerivedNormals,
   );
 }
 
