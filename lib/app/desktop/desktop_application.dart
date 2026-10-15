@@ -91,6 +91,7 @@ import 'plane_axis_intersection_selection.dart';
 import 'alignment_coordinate_system_selection.dart';
 import 'activity_navigation.dart';
 import 'reference_tree_taxonomy.dart';
+import 'tool_window_layout.dart';
 import 'sketch/sketch_continuity_repair_panel.dart';
 import 'sketch/sketch_reconstruction_panel.dart';
 
@@ -12677,6 +12678,8 @@ class _ProfessionalToolWindowState extends State<_ProfessionalToolWindow> {
   late Size windowSize;
   final GlobalKey _contentKey = GlobalKey();
   bool _autoResizeScheduled = false;
+  bool _placementScheduled = false;
+  bool _initialPlacementDone = false;
   bool docked = false;
   bool visible = true;
 
@@ -12721,6 +12724,30 @@ class _ProfessionalToolWindowState extends State<_ProfessionalToolWindow> {
     });
   }
 
+  void _schedulePlacementGuard(Size viewport) {
+    if (_placementScheduled) return;
+    _placementScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _placementScheduled = false;
+      if (!mounted || docked) return;
+      final next = _initialPlacementDone
+          ? ToolWindowLayout.clampPosition(
+              position: position,
+              viewport: viewport,
+              window: windowSize,
+            )
+          : ToolWindowLayout.initialPosition(
+              viewport: viewport,
+              window: windowSize,
+            );
+      if (next == position && _initialPlacementDone) return;
+      setState(() {
+        position = next;
+        _initialPlacementDone = true;
+      });
+    });
+  }
+
   @override
   Widget build(BuildContext context) => _buildOverlayWindow(context);
 
@@ -12734,130 +12761,141 @@ class _ProfessionalToolWindowState extends State<_ProfessionalToolWindow> {
             onPressed: () => setState(() => visible = true),
           ),
         )
-      : Positioned(
-          left: docked ? 0 : position.dx,
-          top: docked ? 0 : position.dy,
-          bottom: docked ? 0 : null,
-          width: windowSize.width,
-          height: docked ? null : windowSize.height,
-          child: Material(
-            elevation: docked ? 0 : 8,
-            color: Theme.of(context).colorScheme.surface,
-            shape: RoundedRectangleBorder(
-              side: BorderSide(
-                color: Theme.of(context).colorScheme.outlineVariant,
-              ),
-              borderRadius: BorderRadius.circular(docked ? 0 : 3),
-            ),
-            clipBehavior: Clip.antiAlias,
-            child: Stack(
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+      : LayoutBuilder(
+          builder: (context, constraints) {
+            final viewport = constraints.biggest;
+            _schedulePlacementGuard(viewport);
+            return Positioned(
+              left: docked ? 0 : position.dx,
+              top: docked ? 0 : position.dy,
+              bottom: docked ? 0 : null,
+              width: windowSize.width,
+              height: docked ? null : windowSize.height,
+              child: Material(
+                elevation: docked ? 0 : 8,
+                color: Theme.of(context).colorScheme.surface,
+                shape: RoundedRectangleBorder(
+                  side: BorderSide(
+                    color: Theme.of(context).colorScheme.outlineVariant,
+                  ),
+                  borderRadius: BorderRadius.circular(docked ? 0 : 3),
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Stack(
                   children: [
-                    GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanUpdate: docked
-                          ? null
-                          : (details) => setState(() {
-                              position = Offset(
-                                math.max(0, position.dx + details.delta.dx),
-                                math.max(0, position.dy + details.delta.dy),
-                              );
-                            }),
-                      child: Container(
-                        height: 34,
-                        padding: const EdgeInsets.only(left: 10, right: 2),
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.surfaceContainerHigh,
-                        child: Row(
-                          children: [
-                            const _CadExplorerGlyph(
-                              _CadGlyphKind.construction,
-                              size: 16,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                widget.title,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w700,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanUpdate: docked
+                              ? null
+                              : (details) => setState(() {
+                                  position = Offset(
+                                    math.max(0, position.dx + details.delta.dx),
+                                    math.max(0, position.dy + details.delta.dy),
+                                  );
+                                }),
+                          child: Container(
+                            height: 34,
+                            padding: const EdgeInsets.only(left: 10, right: 2),
+                            color: Theme.of(
+                              context,
+                            ).colorScheme.surfaceContainerHigh,
+                            child: Row(
+                              children: [
+                                const _CadExplorerGlyph(
+                                  _CadGlyphKind.construction,
+                                  size: 16,
                                 ),
-                              ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    widget.title,
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: docked
+                                      ? 'Float window'
+                                      : 'Dock window',
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () =>
+                                      setState(() => docked = !docked),
+                                  icon: Icon(
+                                    docked
+                                        ? Icons.open_in_new
+                                        : Icons.push_pin_outlined,
+                                    size: 16,
+                                  ),
+                                ),
+                                IconButton(
+                                  tooltip: 'Close',
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () async {
+                                    await widget.onClose?.call();
+                                    if (mounted) {
+                                      setState(() => visible = false);
+                                    }
+                                  },
+                                  icon: const Icon(Icons.close, size: 16),
+                                ),
+                              ],
                             ),
-                            IconButton(
-                              tooltip: docked ? 'Float window' : 'Dock window',
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () => setState(() => docked = !docked),
-                              icon: Icon(
-                                docked
-                                    ? Icons.open_in_new
-                                    : Icons.push_pin_outlined,
-                                size: 16,
-                              ),
-                            ),
-                            IconButton(
-                              tooltip: 'Close',
-                              visualDensity: VisualDensity.compact,
-                              onPressed: () async {
-                                await widget.onClose?.call();
-                                if (mounted) setState(() => visible = false);
-                              },
-                              icon: const Icon(Icons.close, size: 16),
-                            ),
-                          ],
+                          ),
+                        ),
+                        const Divider(),
+                        Expanded(
+                          child: SingleChildScrollView(
+                            controller: widget.scrollController,
+                            padding: const EdgeInsets.all(10),
+                            child:
+                                NotificationListener<
+                                  SizeChangedLayoutNotification
+                                >(
+                                  onNotification: (_) {
+                                    _scheduleAutomaticExpansion();
+                                    return false;
+                                  },
+                                  child: SizeChangedLayoutNotifier(
+                                    child: KeyedSubtree(
+                                      key: _contentKey,
+                                      child: widget.child,
+                                    ),
+                                  ),
+                                ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (!docked)
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onPanUpdate: (details) => setState(() {
+                            windowSize = ToolWindowLayout.resize(
+                              current: windowSize,
+                              delta: details.delta,
+                              viewport: viewport,
+                            );
+                          }),
+                          child: const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CustomPaint(painter: _ResizeGripPainter()),
+                          ),
                         ),
                       ),
-                    ),
-                    const Divider(),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        controller: widget.scrollController,
-                        padding: const EdgeInsets.all(10),
-                        child:
-                            NotificationListener<SizeChangedLayoutNotification>(
-                              onNotification: (_) {
-                                _scheduleAutomaticExpansion();
-                                return false;
-                              },
-                              child: SizeChangedLayoutNotifier(
-                                child: KeyedSubtree(
-                                  key: _contentKey,
-                                  child: widget.child,
-                                ),
-                              ),
-                            ),
-                      ),
-                    ),
                   ],
                 ),
-                if (!docked)
-                  Positioned(
-                    right: 0,
-                    bottom: 0,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.opaque,
-                      onPanUpdate: (details) => setState(() {
-                        windowSize = Size(
-                          (windowSize.width + details.delta.dx).clamp(260, 520),
-                          (windowSize.height + details.delta.dy).clamp(
-                            240,
-                            720,
-                          ),
-                        );
-                      }),
-                      child: const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CustomPaint(painter: _ResizeGripPainter()),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
 }
 
