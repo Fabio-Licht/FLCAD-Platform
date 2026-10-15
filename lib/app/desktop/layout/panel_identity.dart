@@ -91,7 +91,7 @@ const Map<PanelId, PanelDescriptor> panelCatalog = {
   PanelId.inspector: PanelDescriptor(
     id: PanelId.inspector,
     workspaceId: 'inspector',
-    title: 'Property Inspector',
+    title: 'Inspector',
     kind: PanelKind.primary,
     defaultSide: PanelDockSide.right,
     defaultWidth: 280,

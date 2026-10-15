@@ -6,6 +6,113 @@
 /// existing panel snapshots, not a second source of document state.
 library;
 
+/// Normalização visual compartilhada entre os Inspectors docked e detached.
+///
+/// Os valores recebidos do domínio continuam técnicos; somente os textos
+/// exibidos ao usuário passam por esta camada.
+abstract final class InspectorPresentationLabels {
+  static String section(String value) => switch (value) {
+    'Operational Entity' => 'Entidade operacional',
+    'Advanced' => 'Avançado',
+    'Identity' => 'Identidade',
+    'Reference Origin' => 'Origem da referência',
+    'Managed CAD Reference' => 'Referência CAD gerenciada',
+    'Sketch Support' => 'Suporte do Sketch',
+    'Feature Lifecycle' => 'Ciclo de vida do recurso',
+    'Line' => 'Linha',
+    'Driving Dimension' => 'Cota controladora',
+    'Constraint' => 'Restrição',
+    'Recognition' => 'Reconhecimento',
+    'Reference Curve' => 'Curva de referência',
+    'Surface Quality' => 'Qualidade da superfície',
+    'Professional Extrude' => 'Extrusão',
+    'Professional Revolve' => 'Revolução',
+    'Professional Loft' => 'Loft',
+    'Professional Sweep' => 'Sweep',
+    'Professional Blend' => 'Blend',
+    'Professional Surface Fillet' => 'Filete de superfície',
+    'Professional Sew Body' => 'Costura de corpo',
+    'Planar Surface' => 'Superfície planar',
+    _ => value,
+  };
+
+  static String property(String value) => switch (value) {
+    'Name' => 'Nome',
+    'Type' => 'Tipo',
+    'Visibility' => 'Visibilidade',
+    'Origin' => 'Origem',
+    'Tolerance' => 'Tolerância',
+    'Confidence' => 'Confiança',
+    'Source Entity' => 'Entidade de origem',
+    'Source Format' => 'Formato de origem',
+    'Source Face' => 'Face de origem',
+    'Normal' => 'Normal',
+    'X Direction' => 'Direção X',
+    'Y Direction' => 'Direção Y',
+    'Source Plane' => 'Plano de origem',
+    'Source Mesh' => 'Malha de origem',
+    'Generated Entities' => 'Entidades geradas',
+    'Dynamic Update' => 'Atualização dinâmica',
+    'Continuity relations' => 'Relações de continuidade',
+    'Feature ID' => 'ID do recurso',
+    'State' => 'Estado',
+    'Workspace' => 'Área de trabalho',
+    'Created By' => 'Criado por',
+    'References' => 'Referências',
+    'Children' => 'Filhos',
+    'Dependencies' => 'Dependências',
+    'Used By' => 'Usado por',
+    'History Events' => 'Eventos do histórico',
+    'Start Point' => 'Ponto inicial',
+    'End Point' => 'Ponto final',
+    'Length' => 'Comprimento',
+    'Direction' => 'Direção',
+    'Angle' => 'Ângulo',
+    'Layer' => 'Camada',
+    'Value' => 'Valor',
+    'Text X' => 'Texto X',
+    'Text Y' => 'Texto Y',
+    'Anchor' => 'Âncora',
+    'Entities' => 'Entidades',
+    'Quality' => 'Qualidade',
+    'Suggestion' => 'Sugestão',
+    'Reconstruction Strategy' => 'Estratégia de reconstrução',
+    'Region' => 'Região',
+    'Participating Surfaces' => 'Superfícies participantes',
+    'Boundaries' => 'Limites',
+    'Distance' => 'Distância',
+    'Output' => 'Saída',
+    'Kernel' => 'Kernel',
+    'Sections' => 'Seções',
+    'Continuity' => 'Continuidade',
+    'Profile' => 'Perfil',
+    'Path' => 'Trajetória',
+    'Display' => 'Exibição',
+    'Offset' => 'Deslocamento',
+    _ => value,
+  };
+
+  static String selectionDomain(String value) => switch (value) {
+    'document' => 'documental',
+    'operational' => 'operacional',
+    _ => value,
+  };
+
+  static String nodeKind(String value) => switch (value) {
+    'mesh' => 'malha',
+    'solid' => 'sólido',
+    'surface' => 'superfície',
+    'sketch' => 'Sketch',
+    'curve' => 'curva',
+    'plane' => 'plano',
+    'axis' => 'eixo',
+    'point' => 'ponto',
+    'coordinateSystem' => 'sistema de coordenadas',
+    'section' => 'seção',
+    _ => value,
+  };
+}
+
 enum PanelPropertyAvailability { available, unavailable }
 
 enum PanelPropertyAccess { readOnly, editable }
@@ -29,9 +136,9 @@ final class ExplorerTreeModel {
     required Iterable<String> documentSelection,
     required Iterable<String> operationalSelection,
     required Iterable<String> expandedGroups,
-  })  : documentSelection = Set.unmodifiable(documentSelection),
-        operationalSelection = Set.unmodifiable(operationalSelection),
-        expandedGroups = Set.unmodifiable(expandedGroups);
+  }) : documentSelection = Set.unmodifiable(documentSelection),
+       operationalSelection = Set.unmodifiable(operationalSelection),
+       expandedGroups = Set.unmodifiable(expandedGroups);
 
   final List<ExplorerGroupModel> groups;
   final Set<String> documentSelection;
@@ -68,16 +175,17 @@ final class ExplorerTreeModel {
             : a.id.compareTo(b.id);
       });
     }
-    final sortedGroups = groups.entries
-        .map(
-          (entry) => ExplorerGroupModel(
-            id: entry.key,
-            label: entry.key,
-            nodes: entry.value,
-          ),
-        )
-        .toList()
-      ..sort((a, b) => a.id.compareTo(b.id));
+    final sortedGroups =
+        groups.entries
+            .map(
+              (entry) => ExplorerGroupModel(
+                id: entry.key,
+                label: entry.key,
+                nodes: entry.value,
+              ),
+            )
+            .toList()
+          ..sort((a, b) => a.id.compareTo(b.id));
     return ExplorerTreeModel(
       groups: sortedGroups,
       documentSelection: _strings(
@@ -94,20 +202,17 @@ final class ExplorerTreeModel {
   }
 
   Map<String, Object?> toJson() => {
-        'groups': [for (final group in groups) group.toJson()],
-        'documentSelection': documentSelection.toList()..sort(),
-        'operationalSelection': operationalSelection.toList()..sort(),
-        'expandedGroups': expandedGroups.toList()..sort(),
-      };
+    'groups': [for (final group in groups) group.toJson()],
+    'documentSelection': documentSelection.toList()..sort(),
+    'operationalSelection': operationalSelection.toList()..sort(),
+    'expandedGroups': expandedGroups.toList()..sort(),
+  };
 
   factory ExplorerTreeModel.fromJson(Map<String, Object?> json) {
     final rawGroups = json['groups'];
     return ExplorerTreeModel(
       groups: rawGroups is List
-          ? rawGroups
-                .whereType<Map>()
-                .map(ExplorerGroupModel.fromJson)
-                .toList()
+          ? rawGroups.whereType<Map>().map(ExplorerGroupModel.fromJson).toList()
           : const [],
       documentSelection: _strings(json['documentSelection']),
       operationalSelection: _strings(json['operationalSelection']),
@@ -115,9 +220,8 @@ final class ExplorerTreeModel {
     );
   }
 
-  static Set<String> _strings(Object? value) => value is Iterable
-      ? value.whereType<String>().toSet()
-      : <String>{};
+  static Set<String> _strings(Object? value) =>
+      value is Iterable ? value.whereType<String>().toSet() : <String>{};
 }
 
 final class ExplorerGroupModel {
@@ -132,20 +236,20 @@ final class ExplorerGroupModel {
   final List<ExplorerNodeModel> nodes;
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'label': label,
-        'nodes': [for (final node in nodes) node.toJson()],
-      };
+    'id': id,
+    'label': label,
+    'nodes': [for (final node in nodes) node.toJson()],
+  };
 
   factory ExplorerGroupModel.fromJson(Map raw) => ExplorerGroupModel(
-        id: raw['id'] as String? ?? '',
-        label: raw['label'] as String? ?? raw['id'] as String? ?? '',
-        nodes: raw['nodes'] is List
-            ? (raw['nodes'] as List)
-                  .whereType<Map>()
-                  .map(ExplorerNodeModel.fromSnapshot)
-            : const <ExplorerNodeModel>[],
-      );
+    id: raw['id'] as String? ?? '',
+    label: raw['label'] as String? ?? raw['id'] as String? ?? '',
+    nodes: raw['nodes'] is List
+        ? (raw['nodes'] as List).whereType<Map>().map(
+            ExplorerNodeModel.fromSnapshot,
+          )
+        : const <ExplorerNodeModel>[],
+  );
 }
 
 final class ExplorerNodeModel {
@@ -190,16 +294,16 @@ final class ExplorerNodeModel {
   }
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'label': label,
-        'kind': kind,
-        'iconSemantic': iconSemantic,
-        'group': group,
-        if (parentId != null) 'parent': parentId,
-        'visible': visible,
-        'available': available,
-        'actions': actions.toList()..sort(),
-      };
+    'id': id,
+    'label': label,
+    'kind': kind,
+    'iconSemantic': iconSemantic,
+    'group': group,
+    if (parentId != null) 'parent': parentId,
+    'visible': visible,
+    'available': available,
+    'actions': actions.toList()..sort(),
+  };
 }
 
 final class InspectorPresentationModel {
@@ -211,10 +315,14 @@ final class InspectorPresentationModel {
   final String selectionState;
   final List<InspectorEntityModel> entities;
 
-  factory InspectorPresentationModel.fromSnapshot(Map<String, Object?> snapshot) {
+  factory InspectorPresentationModel.fromSnapshot(
+    Map<String, Object?> snapshot,
+  ) {
     final entities = <InspectorEntityModel>[];
     final document = snapshot['inspector.documentEntity'];
-    if (document is Map) entities.add(InspectorEntityModel.fromSnapshot(document));
+    if (document is Map) {
+      entities.add(InspectorEntityModel.fromSnapshot(document));
+    }
     final operational = snapshot['inspector.operationalEntities'];
     if (operational is List) {
       for (final entity in operational.whereType<Map>()) {
@@ -231,16 +339,16 @@ final class InspectorPresentationModel {
       InspectorPresentationModel(
         selectionState: json['selectionState'] as String? ?? 'none',
         entities: json['entities'] is List
-            ? (json['entities'] as List)
-                  .whereType<Map>()
-                  .map(InspectorEntityModel.fromJson)
+            ? (json['entities'] as List).whereType<Map>().map(
+                InspectorEntityModel.fromJson,
+              )
             : const <InspectorEntityModel>[],
       );
 
   Map<String, Object?> toJson() => {
-        'selectionState': selectionState,
-        'entities': [for (final entity in entities) entity.toJson()],
-      };
+    'selectionState': selectionState,
+    'entities': [for (final entity in entities) entity.toJson()],
+  };
 }
 
 final class InspectorEntityModel {
@@ -289,32 +397,32 @@ final class InspectorEntityModel {
   }
 
   factory InspectorEntityModel.fromJson(Map raw) => InspectorEntityModel(
-        id: raw['id'] as String? ?? '',
-        name: raw['name'] as String? ?? '',
-        type: raw['type'] as String? ?? 'unknown',
-        selectionDomain: raw['selectionDomain'] as String? ?? 'unknown',
-        available: raw['available'] == true,
-        sections: raw['sections'] is List
-            ? (raw['sections'] as List)
-                  .whereType<Map>()
-                  .map(InspectorSectionModel.fromJson)
-            : const <InspectorSectionModel>[],
-      );
+    id: raw['id'] as String? ?? '',
+    name: raw['name'] as String? ?? '',
+    type: raw['type'] as String? ?? 'unknown',
+    selectionDomain: raw['selectionDomain'] as String? ?? 'unknown',
+    available: raw['available'] == true,
+    sections: raw['sections'] is List
+        ? (raw['sections'] as List).whereType<Map>().map(
+            InspectorSectionModel.fromJson,
+          )
+        : const <InspectorSectionModel>[],
+  );
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'name': name,
-        'type': type,
-        'selectionDomain': selectionDomain,
-        'available': available,
-        'sections': [for (final section in sections) section.toJson()],
-      };
+    'id': id,
+    'name': name,
+    'type': type,
+    'selectionDomain': selectionDomain,
+    'available': available,
+    'sections': [for (final section in sections) section.toJson()],
+  };
 
   static const _categories = [
     ('identity', 'Identidade', false),
     ('reference', 'Referência', false),
     ('geometry', 'Geometria', false),
-    ('feature', 'Feature', true),
+    ('feature', 'Ciclo de vida do recurso', true),
     ('sketch', 'Sketch', true),
     ('dimension', 'Cota', false),
     ('topology', 'Topologia', true),
@@ -323,21 +431,20 @@ final class InspectorEntityModel {
   ];
 
   static String _categoryFor(String key) => switch (key) {
-        'name' || 'format' || 'sceneKind' || 'visibility' => 'identity',
-        'origin' || 'tolerance' || 'confidence' => 'reference',
-        'vertexCount' ||
-        'triangleCount' ||
-        'bounds' ||
-        'normals' ||
-        'area' ||
-        'volume' ||
-        'length' => 'geometry',
-        'featureLifecycle' => 'feature',
-        'drivingDimension' => 'dimension',
-        'cadSemanticKind' || 'cadVisualType' || 'stepTechnicalName' =>
-          'advanced',
-        _ => 'advanced',
-      };
+    'name' || 'format' || 'sceneKind' || 'visibility' => 'identity',
+    'origin' || 'tolerance' || 'confidence' => 'reference',
+    'vertexCount' ||
+    'triangleCount' ||
+    'bounds' ||
+    'normals' ||
+    'area' ||
+    'volume' ||
+    'length' => 'geometry',
+    'featureLifecycle' => 'feature',
+    'drivingDimension' => 'dimension',
+    'cadSemanticKind' || 'cadVisualType' || 'stepTechnicalName' => 'advanced',
+    _ => 'advanced',
+  };
 }
 
 final class InspectorSectionModel {
@@ -354,22 +461,22 @@ final class InspectorSectionModel {
   final List<InspectorPropertyModel> properties;
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'label': label,
-        'advanced': advanced,
-        'properties': [for (final property in properties) property.toJson()],
-      };
+    'id': id,
+    'label': label,
+    'advanced': advanced,
+    'properties': [for (final property in properties) property.toJson()],
+  };
 
   factory InspectorSectionModel.fromJson(Map raw) => InspectorSectionModel(
-        id: raw['id'] as String? ?? '',
-        label: raw['label'] as String? ?? '',
-        advanced: raw['advanced'] == true,
-        properties: raw['properties'] is List
-            ? (raw['properties'] as List)
-                  .whereType<Map>()
-                  .map(InspectorPropertyModel.fromJson)
-            : const <InspectorPropertyModel>[],
-      );
+    id: raw['id'] as String? ?? '',
+    label: raw['label'] as String? ?? '',
+    advanced: raw['advanced'] == true,
+    properties: raw['properties'] is List
+        ? (raw['properties'] as List).whereType<Map>().map(
+            InspectorPropertyModel.fromJson,
+          )
+        : const <InspectorPropertyModel>[],
+  );
 }
 
 final class InspectorPropertyModel {
@@ -399,7 +506,8 @@ final class InspectorPropertyModel {
   }) {
     final map = value is Map ? value : const <Object?, Object?>{};
     final rawValue = map.containsKey('value') ? map['value'] : value;
-    final editable = map['editable'] == true &&
+    final editable =
+        map['editable'] == true &&
         key == 'drivingDimension' &&
         rawValue is num &&
         rawValue.isFinite;
@@ -419,32 +527,33 @@ final class InspectorPropertyModel {
   }
 
   factory InspectorPropertyModel.fromJson(Map raw) => InspectorPropertyModel(
-        id: raw['id'] as String? ?? '',
-        label: raw['label'] as String? ?? '',
-        value: raw['value'],
-        unit: raw['unit'] as String?,
-        precision: raw['precision'] is int ? raw['precision'] as int : 3,
-        availability: raw['availability'] == 'unavailable'
-            ? PanelPropertyAvailability.unavailable
-            : PanelPropertyAvailability.available,
-        access: raw['access'] == 'editable'
-            ? PanelPropertyAccess.editable
-            : PanelPropertyAccess.readOnly,
-        intent: raw['intent'] as String?,
-      );
+    id: raw['id'] as String? ?? '',
+    label: raw['label'] as String? ?? '',
+    value: raw['value'],
+    unit: raw['unit'] as String?,
+    precision: raw['precision'] is int ? raw['precision'] as int : 3,
+    availability: raw['availability'] == 'unavailable'
+        ? PanelPropertyAvailability.unavailable
+        : PanelPropertyAvailability.available,
+    access: raw['access'] == 'editable'
+        ? PanelPropertyAccess.editable
+        : PanelPropertyAccess.readOnly,
+    intent: raw['intent'] as String?,
+  );
 
   Map<String, Object?> toJson() => {
-        'id': id,
-        'label': label,
-        'value': value,
-        if (unit != null) 'unit': unit,
-        'precision': precision,
-        'availability': availability.name,
-        'access': access.name,
-        if (intent != null) 'intent': intent,
-      };
+    'id': id,
+    'label': label,
+    'value': value,
+    if (unit != null) 'unit': unit,
+    'precision': precision,
+    'availability': availability.name,
+    'access': access.name,
+    if (intent != null) 'intent': intent,
+  };
 
-  static String _friendlyLabel(String key) => switch (key) {
+  static String _friendlyLabel(String key) =>
+      InspectorPresentationLabels.property(switch (key) {
         'name' => 'Nome',
         'format' => 'Formato',
         'visibility' => 'Visibilidade',
@@ -474,7 +583,7 @@ final class InspectorPropertyModel {
         'revision' => 'Revisão',
         'health' => 'Saúde',
         _ => _humanize(key),
-      };
+      });
 
   static String _humanize(String key) {
     final spaced = key
@@ -511,7 +620,9 @@ abstract final class TechnicalValueFormatter {
 Object? _jsonValue(Object? value) {
   if (value == null || value is String || value is bool) return value;
   if (value is num) {
-    if (!value.isFinite) throw ArgumentError('non-finite values are not serializable');
+    if (!value.isFinite) {
+      throw ArgumentError('non-finite values are not serializable');
+    }
     return value;
   }
   if (value is List) return List.unmodifiable(value.map(_jsonValue));

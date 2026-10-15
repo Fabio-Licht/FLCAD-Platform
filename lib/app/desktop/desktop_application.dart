@@ -2047,7 +2047,7 @@ class _OfficialEngineeringWorkspaceState
                         !(raw['visible'] as bool? ?? true),
                       ),
                       icon: const Icon(Icons.visibility_off_outlined, size: 16),
-                      label: const Text('Hide'),
+                      label: const Text('Ocultar'),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -2055,7 +2055,7 @@ class _OfficialEngineeringWorkspaceState
                     child: OutlinedButton.icon(
                       onPressed: () => operational.deleteConstraint(entity.id),
                       icon: const Icon(Icons.delete_outline, size: 16),
-                      label: const Text('Delete'),
+                      label: const Text('Excluir'),
                     ),
                   ),
                 ],
@@ -5130,16 +5130,16 @@ class _OfficialEngineeringWorkspaceState
       final replacement = await showDialog<String>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Rename'),
+          title: const Text('Renomear'),
           content: TextField(controller: controller, autofocus: true),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: const Text('Cancelar'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, controller.text),
-              child: const Text('Rename'),
+              child: const Text('Renomear'),
             ),
           ],
         ),
@@ -5211,18 +5211,21 @@ class _OfficialEngineeringWorkspaceState
                       enabled:
                           collection ||
                           entity.kind == CadDocumentEntityKind.section,
-                      child: const Text('Rename'),
+                      child: const Text('Renomear'),
                     ),
                     PopupMenuItem(
                       value: 'visibility',
-                      child: Text(visible ? 'Hide' : 'Show'),
+                      child: Text(visible ? 'Ocultar' : 'Mostrar'),
                     ),
                     PopupMenuItem(
                       value: 'duplicate',
                       enabled: collection,
-                      child: const Text('Duplicate'),
+                      child: const Text('Duplicar'),
                     ),
-                    const PopupMenuItem(value: 'delete', child: Text('Delete')),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Excluir'),
+                    ),
                     const PopupMenuDivider(),
                     if (!collection)
                       const PopupMenuItem(
@@ -5231,7 +5234,7 @@ class _OfficialEngineeringWorkspaceState
                       ),
                     const PopupMenuItem(
                       value: 'properties',
-                      child: Text('Properties'),
+                      child: Text('Propriedades'),
                     ),
                   ],
                 );
@@ -5297,24 +5300,24 @@ class _OfficialEngineeringWorkspaceState
                   itemBuilder: (_) => [
                     const PopupMenuItem(
                       value: 'visibility',
-                      child: Text('Show/Hide'),
+                      child: Text('Mostrar/Ocultar'),
                     ),
                     const PopupMenuItem(
                       value: 'lock',
-                      child: Text('Lock/Unlock'),
+                      child: Text('Bloquear/Desbloquear'),
                     ),
                     const PopupMenuItem(
                       value: 'active',
-                      child: Text('Make Active'),
+                      child: Text('Tornar ativo'),
                     ),
                     const PopupMenuItem(
                       value: 'duplicate',
-                      child: Text('Duplicate'),
+                      child: Text('Duplicar'),
                     ),
                     if (entity.data['systemCollection'] != true)
                       const PopupMenuItem(
                         value: 'delete',
-                        child: Text('Move to Recycle Bin'),
+                        child: Text('Mover para a lixeira'),
                       ),
                   ],
                 )
@@ -5328,10 +5331,10 @@ class _OfficialEngineeringWorkspaceState
                     }
                   },
                   itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'restore', child: Text('Restore')),
+                    PopupMenuItem(value: 'restore', child: Text('Restaurar')),
                     PopupMenuItem(
                       value: 'purge',
-                      child: Text('Delete Permanently'),
+                      child: Text('Excluir permanentemente'),
                     ),
                   ],
                 )
@@ -5377,22 +5380,25 @@ class _OfficialEngineeringWorkspaceState
                     if (entity.kind == CadDocumentEntityKind.section)
                       const PopupMenuItem(
                         value: 'rename',
-                        child: Text('Rename'),
+                        child: Text('Renomear'),
                       ),
                     PopupMenuItem(
                       value: 'visibility',
-                      child: Text(visible ? 'Hide' : 'Show'),
+                      child: Text(visible ? 'Ocultar' : 'Mostrar'),
                     ),
                     const PopupMenuItem<String>(
                       enabled: false,
                       value: 'duplicate',
-                      child: Text('Duplicate'),
+                      child: Text('Duplicar'),
                     ),
-                    const PopupMenuItem(value: 'delete', child: Text('Delete')),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Text('Excluir'),
+                    ),
                     const PopupMenuDivider(),
                     const PopupMenuItem(
                       value: 'properties',
-                      child: Text('Properties'),
+                      child: Text('Propriedades'),
                     ),
                   ],
                 ),
@@ -14856,7 +14862,7 @@ class _InspectorSection extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            title,
+            InspectorPresentationLabels.section(title),
             style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
           ),
           const Divider(height: 12),
@@ -14880,7 +14886,7 @@ class _SharedInspectorReadOnlySection extends StatelessWidget {
   Widget build(BuildContext context) => InspectorPropertySection(
     section: InspectorSectionModel(
       id: title,
-      label: title,
+      label: InspectorPresentationLabels.section(title),
       properties: const [],
     ),
     children: children,
@@ -14896,7 +14902,7 @@ class _InspectorProperty extends StatelessWidget {
   Widget build(BuildContext context) => InspectorPropertyRow(
     property: InspectorPropertyModel(
       id: label,
-      label: label,
+      label: InspectorPresentationLabels.property(label),
       value: _safeInspectorValue(value),
       availability: value == null
           ? PanelPropertyAvailability.unavailable

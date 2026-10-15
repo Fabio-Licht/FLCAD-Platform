@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../layout/panel_identity.dart';
 import 'desktop_panel_window_backend.dart';
 import 'multi_window_panel_transport.dart';
 import 'panel_shell_window.dart';
@@ -50,7 +51,9 @@ abstract final class PanelShellEntry {
     if (windowControlAvailable) {
       try {
         await PanelWindowNativeBridge.registerPanel(config.panelId);
-        await windowManager.setTitle('Explorer — painel destacado');
+        await windowManager.setTitle(
+          '${panelDescriptor(config.panelId).title} — painel destacado',
+        );
         // The plugin already shows the window (`SW_SHOW`), and this makes the
         // freshly detached panel come to the front even if a build starts it
         // hidden.

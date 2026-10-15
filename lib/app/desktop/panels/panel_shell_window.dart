@@ -258,11 +258,8 @@ class _PanelShellWindowAppState extends State<PanelShellWindowApp>
               },
             ),
             Builder(
-              builder: (context) => _footer(
-                Theme.of(context).colorScheme,
-                selectedCount,
-                status,
-              ),
+              builder: (context) =>
+                  _footer(Theme.of(context).colorScheme, selectedCount, status),
             ),
           ],
         ),
@@ -416,6 +413,7 @@ class _ExplorerDetachedPanelState extends State<_ExplorerDetachedPanel> {
         visit(node.id);
       }
     }
+
     visit(null);
     for (final node in nodes) {
       if (!ordered.contains(node)) ordered.add(node);
@@ -424,7 +422,8 @@ class _ExplorerDetachedPanelState extends State<_ExplorerDetachedPanel> {
   }
 
   Widget _nodeTile(ExplorerNodeModel node) {
-    final selected = widget.model.documentSelection.contains(node.id) ||
+    final selected =
+        widget.model.documentSelection.contains(node.id) ||
         widget.model.operationalSelection.contains(node.id);
     return ListTile(
       dense: true,
@@ -440,7 +439,7 @@ class _ExplorerDetachedPanelState extends State<_ExplorerDetachedPanel> {
         style: const TextStyle(fontSize: 11),
       ),
       subtitle: Text(
-        '${node.kind}${node.visible ? '' : ' · oculto'}',
+        '${InspectorPresentationLabels.nodeKind(node.kind)}${node.visible ? '' : ' · oculto'}',
         style: const TextStyle(fontSize: 9),
       ),
       onTap: node.available ? () => widget.onSelect(node.id) : null,
@@ -448,18 +447,18 @@ class _ExplorerDetachedPanelState extends State<_ExplorerDetachedPanel> {
   }
 
   IconData _iconFor(String semantic) => switch (semantic) {
-        'mesh' => Icons.grid_on,
-        'solid' => Icons.view_in_ar_outlined,
-        'surface' => Icons.layers_outlined,
-        'sketch' => Icons.gesture,
-        'curve' => Icons.show_chart,
-        'plane' => Icons.crop_landscape,
-        'axis' => Icons.swap_vert,
-        'point' => Icons.circle_outlined,
-        'coordinateSystem' => Icons.my_location,
-        'section' => Icons.content_cut,
-        _ => Icons.category_outlined,
-      };
+    'mesh' => Icons.grid_on,
+    'solid' => Icons.view_in_ar_outlined,
+    'surface' => Icons.layers_outlined,
+    'sketch' => Icons.gesture,
+    'curve' => Icons.show_chart,
+    'plane' => Icons.crop_landscape,
+    'axis' => Icons.swap_vert,
+    'point' => Icons.circle_outlined,
+    'coordinateSystem' => Icons.my_location,
+    'section' => Icons.content_cut,
+    _ => Icons.category_outlined,
+  };
 }
 
 class _InspectorDetachedPanel extends StatelessWidget {
@@ -486,8 +485,8 @@ class _InspectorDetachedPanel extends StatelessWidget {
             ?.whereType<Map>()
             .toList(growable: false) ??
         const <Map>[];
-    final structured = viewModel[PanelInspectorViewModelKeys.presentation]
-        is Map
+    final structured =
+        viewModel[PanelInspectorViewModelKeys.presentation] is Map
         ? InspectorPresentationModel.fromJson(
             Map<String, Object?>.from(
               viewModel[PanelInspectorViewModelKeys.presentation] as Map,
@@ -655,7 +654,7 @@ class _StructuredInspectorEntityCardState
             ),
             const SizedBox(height: 4),
             Text(
-              '${model.type} · ${model.selectionDomain == 'document' ? 'documental' : 'operacional'}',
+              '${model.type} · ${InspectorPresentationLabels.selectionDomain(model.selectionDomain)}',
             ),
             const SizedBox(height: 8),
             SegmentedButton<bool>(
@@ -670,7 +669,7 @@ class _StructuredInspectorEntityCardState
             const SizedBox(height: 8),
             for (final section in sections) ...[
               _DetachedInspectorSection(
-                title: section.label,
+                title: InspectorPresentationLabels.section(section.label),
                 children: [
                   for (final property in section.properties)
                     if (property.id == 'drivingDimension' &&
@@ -688,9 +687,10 @@ class _StructuredInspectorEntityCardState
                     else
                       _InspectorPropertyRow(
                         name: property.label,
-                        value: property.availability ==
+                        value:
+                            property.availability ==
                                 PanelPropertyAvailability.unavailable
-                          ? 'Indisponível'
+                            ? 'Indisponível'
                             : TechnicalValueFormatter.format(
                                 property.value,
                                 unit: property.unit,
@@ -709,30 +709,33 @@ class _StructuredInspectorEntityCardState
 }
 
 class _DetachedInspectorSection extends StatelessWidget {
-  const _DetachedInspectorSection({required this.title, required this.children});
+  const _DetachedInspectorSection({
+    required this.title,
+    required this.children,
+  });
 
   final String title;
   final List<Widget> children;
 
   @override
   Widget build(BuildContext context) => DecoratedBox(
-        decoration: BoxDecoration(
-          color: Theme.of(context).colorScheme.surfaceContainerLow,
-          border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
-          borderRadius: BorderRadius.circular(3),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-              const Divider(height: 12),
-              ...children,
-            ],
-          ),
-        ),
-      );
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.surfaceContainerLow,
+      border: Border.all(color: Theme.of(context).colorScheme.outlineVariant),
+      borderRadius: BorderRadius.circular(3),
+    ),
+    child: Padding(
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 7),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const Divider(height: 12),
+          ...children,
+        ],
+      ),
+    ),
+  );
 }
 
 class _InspectorNotice extends StatelessWidget {
@@ -770,11 +773,13 @@ class _InspectorEntityCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '${entity['type'] ?? '-'} · ${entity['selectionDomain'] ?? '-'}',
+              '${entity['type'] ?? '-'} · ${InspectorPresentationLabels.selectionDomain(entity['selectionDomain']?.toString() ?? '-')}',
             ),
             for (final entry in properties.entries)
               _InspectorPropertyRow(
-                name: entry.key.toString(),
+                name: InspectorPresentationLabels.property(
+                  entry.key.toString(),
+                ),
                 value: entry.value,
               ),
           ],
@@ -842,7 +847,7 @@ class _InspectorDimensionEditorState extends State<_InspectorDimensionEditor> {
       enabled: widget.enabled,
       keyboardType: const TextInputType.numberWithOptions(decimal: true),
       decoration: InputDecoration(
-        labelText: 'Driving dimension (${widget.dimension['unit'] ?? 'mm'})',
+        labelText: 'Cota controladora (${widget.dimension['unit'] ?? 'mm'})',
         errorText: _error,
         isDense: true,
       ),
