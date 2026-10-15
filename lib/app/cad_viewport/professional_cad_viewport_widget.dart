@@ -21,6 +21,7 @@ import 'scene/cad_scene_graph.dart';
 import 'scene/cad_scene_bounds.dart';
 import 'rendering/stl_display_lod.dart';
 import 'rendering/shaded_debug_experiments.dart';
+import 'rendering/reference_visibility_mask.dart';
 import 'selection/viewport_picking_controller.dart';
 
 enum CadRenderStyle { shaded, wireframe, hiddenLine, transparent, ghost }
@@ -64,6 +65,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.onRenderStyleChanged,
     this.showRenderControls = true,
     this.hideReferenceOverlays = false,
+    this.hideExperimentalTransientOverlays = false,
     this.onViewportReady,
   });
 
@@ -110,6 +112,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final ValueChanged<CadRenderStyle>? onRenderStyleChanged;
   final bool showRenderControls;
   final bool hideReferenceOverlays;
+  final bool hideExperimentalTransientOverlays;
 
   /// Called after a valid layout has resized the actual interaction camera.
   final VoidCallback? onViewportReady;
@@ -155,6 +158,7 @@ class _ProfessionalCadViewportWidgetState
   void initState() {
     super.initState();
     picking.copyMeshArrays = widget.renderMeshes;
+    picking.includeReferenceOverlays = !widget.hideReferenceOverlays;
     widget.scene.addListener(_synchronizePicking);
     navigation = _createNavigationEngine();
   }
@@ -163,6 +167,7 @@ class _ProfessionalCadViewportWidgetState
   void didUpdateWidget(covariant ProfessionalCadViewportWidget oldWidget) {
     super.didUpdateWidget(oldWidget);
     picking.copyMeshArrays = widget.renderMeshes;
+    picking.includeReferenceOverlays = !widget.hideReferenceOverlays;
     if (!widget.renderMeshes) {
       meshRenderCaches.clear();
     }
@@ -214,11 +219,11 @@ class _ProfessionalCadViewportWidgetState
               position: event.localPosition,
               camera: widget.camera,
               scene: widget.scene,
-              suggestionCandidateIds:
-                  widget.sketchSuggestionPickCandidateIds,
+              suggestionCandidateIds: widget.sketchSuggestionPickCandidateIds,
             )
           : null;
-      final hit = suggestionHit ??
+      final hit =
+          suggestionHit ??
           picking.pick(
             position: event.localPosition,
             camera: widget.camera,
@@ -341,9 +346,7 @@ class _ProfessionalCadViewportWidgetState
     );
     final next = hit?.entityId;
     widget.onPickCaptureHover?.call(hit);
-    widget.onSketchSuggestionHover?.call(
-      _suggestionHoverPick(hit, position),
-    );
+    widget.onSketchSuggestionHover?.call(_suggestionHoverPick(hit, position));
     widget.onSketchSuggestionHoverPosition?.call(position);
     widget.onManagedFaceHover?.call(hit);
     if (next != hoveredEntityId && mounted) {
@@ -581,6 +584,8 @@ class _ProfessionalCadViewportWidgetState
                             navigationActive: _isMouseNavigating,
                             orbitActive: _isOrbiting,
                             hideReferenceOverlays: widget.hideReferenceOverlays,
+                            hideExperimentalTransientOverlays:
+                                widget.hideExperimentalTransientOverlays,
                           ),
                         ),
                       ),
@@ -1173,6 +1178,7 @@ class _CadScenePainter extends CustomPainter {
     required this.navigationActive,
     required this.orbitActive,
     required this.hideReferenceOverlays,
+    required this.hideExperimentalTransientOverlays,
   }) : super(repaint: Listenable.merge([scene, camera]));
   final CadSceneGraph scene;
   final CadCameraController camera;
@@ -1189,6 +1195,7 @@ class _CadScenePainter extends CustomPainter {
   final bool navigationActive;
   final bool orbitActive;
   final bool hideReferenceOverlays;
+  final bool hideExperimentalTransientOverlays;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -1247,7 +1254,9 @@ class _CadScenePainter extends CustomPainter {
     }
     final projected = <_ProjectedTriangle>[];
     for (final entity in scene.entities.where((item) => item.visible)) {
-      if (hideReferenceOverlays && isShadedReferenceOverlay(entity)) {
+      if ((hideReferenceOverlays && isAuxiliaryReferenceVisual(entity)) ||
+          (hideExperimentalTransientOverlays &&
+              isShadedReferenceOverlay(entity))) {
         continue;
       }
       if (entity.kind == CadSceneEntityKind.surface &&

@@ -17,6 +17,7 @@ import '../../operational_entities/operational_entity_resolver.dart';
 import 'native_viewport_bridge.dart';
 import 'viewport_render_diagnostics.dart';
 import '../rendering/shaded_debug_experiments.dart';
+import '../rendering/reference_visibility_mask.dart';
 
 const bool _viewportDiagnosticsEnabled =
     kDebugMode && bool.fromEnvironment('FLCAD_DEV_VIEWPORT_DIAGNOSTICS');
@@ -143,6 +144,7 @@ class _IntegratedCadViewportWidgetState
   OperationalResolution? _operationalHover;
   bool _hoverRequestActive = false;
   bool _nativeNavigating = false;
+  bool _showReferenceOverlays = true;
   CadRenderStyle _renderStyle = CadRenderStyle.shaded;
   Offset? _pendingHover;
   Offset? _lastHoverPosition;
@@ -323,6 +325,7 @@ class _IntegratedCadViewportWidgetState
     bool additive,
     bool toggle,
   ) {
+    if (!_showReferenceOverlays) return false;
     final pick = _overlayPicking.pick(
       position: position,
       camera: widget.camera,
@@ -512,11 +515,16 @@ class _IntegratedCadViewportWidgetState
   }
 
   void _pickCanvas(CadViewportPick pick) {
+    final source = widget.scene.find(pick.entityId);
+    if (!_showReferenceOverlays &&
+        source != null &&
+        isAuxiliaryReferenceVisual(source)) {
+      return;
+    }
     if (widget.onPickCapture?.call(pick) == true) {
       _selectManagedFace(null);
       return;
     }
-    final source = widget.scene.find(pick.entityId);
     final face = source == null || pick.hit.triangleIndex < 0
         ? null
         : managedCadFaceHighlight(source, pick.hit.triangleIndex + 1);
@@ -987,7 +995,8 @@ class _IntegratedCadViewportWidgetState
                       // the native triangle-only pick buffer.
                       enablePicking: true,
                       enableEntityHover: !useNative,
-                      hideReferenceOverlays:
+                      hideReferenceOverlays: !_showReferenceOverlays,
+                      hideExperimentalTransientOverlays:
                           kFlcadDevShadedHideReferenceOverlays,
                       onNavigationChanged: useNative
                           ? (navigating) {
@@ -1035,6 +1044,28 @@ class _IntegratedCadViewportWidgetState
                     ],
                     selected: {_renderStyle},
                     onSelectionChanged: (value) => _setRenderStyle(value.first),
+                  ),
+                ),
+                Positioned(
+                  top: 58,
+                  left: 10,
+                  child: Tooltip(
+                    message: 'Mostrar ou ocultar referências visuais.',
+                    child: Material(
+                      color: Colors.transparent,
+                      child: FilterChip(
+                        avatar: Icon(
+                          _showReferenceOverlays
+                              ? Icons.visibility_outlined
+                              : Icons.visibility_off_outlined,
+                          size: 18,
+                        ),
+                        label: const Text('Referências'),
+                        selected: _showReferenceOverlays,
+                        onSelected: (value) =>
+                            setState(() => _showReferenceOverlays = value),
+                      ),
+                    ),
                   ),
                 ),
                 Positioned(

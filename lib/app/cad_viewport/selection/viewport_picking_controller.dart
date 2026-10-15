@@ -9,6 +9,7 @@ import '../../engineering_bridge/selection/mesh_bvh.dart';
 import '../../engineering_bridge/selection/professional_picking_pipeline.dart';
 import '../camera/cad_camera_controller.dart';
 import '../scene/cad_scene_graph.dart';
+import '../rendering/reference_visibility_mask.dart';
 import '../scene/cad_scene_bounds.dart';
 import '../rendering/stl_display_lod.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
@@ -144,6 +145,7 @@ class CadViewportPick {
 }
 
 class ViewportPickingController {
+  bool includeReferenceOverlays = true;
   bool _copyMeshArrays = true;
   bool get copyMeshArrays => _copyMeshArrays;
   set copyMeshArrays(bool value) {
@@ -357,6 +359,7 @@ class ViewportPickingController {
     for (final entity in scene.entities.where(
       (item) =>
           item.visible &&
+          (includeReferenceOverlays || !isAuxiliaryReferenceVisual(item)) &&
           (eligibleEntityIds == null || eligibleEntityIds.contains(item.id)),
     )) {
       final pickOnly = cadSceneEntityIsPickOnly(entity);
