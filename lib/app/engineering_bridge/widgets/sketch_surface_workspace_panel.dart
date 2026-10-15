@@ -254,7 +254,7 @@ class _SketchSurfaceWorkspacePanelState
     builder: (context, _) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text('Stage: ${controller.stage.name}'),
+        Text('Etapa: ${controller.stage.name}'),
         const SizedBox(height: 8),
         if (controller.error != null)
           Text(
@@ -272,7 +272,7 @@ class _SketchSurfaceWorkspacePanelState
                   ? null
                   : (widget.onOpenSketch ?? controller.openSketch),
               icon: const Icon(Icons.edit_note),
-              label: const Text('New Sketch'),
+              label: const Text('Novo Sketch'),
             ),
             const SizedBox(height: 6),
             OutlinedButton.icon(
@@ -280,7 +280,7 @@ class _SketchSurfaceWorkspacePanelState
                   ? null
                   : controller.createRecognizedPlane,
               icon: const Icon(Icons.layers_outlined),
-              label: const Text('Create recognized plane'),
+              label: const Text('Criar plano reconhecido'),
             ),
           ],
           if (controller.stage == SketchSurfaceStage.referenceReady) ...[
@@ -291,19 +291,19 @@ class _SketchSurfaceWorkspacePanelState
                 OutlinedButton.icon(
                   onPressed: controller.busy ? null : controller.createAxis,
                   icon: const Icon(Icons.straighten),
-                  label: const Text('Create Axis'),
+                  label: const Text('Criar eixo'),
                 ),
                 OutlinedButton.icon(
                   onPressed: controller.busy ? null : controller.createPoint,
                   icon: const Icon(Icons.adjust),
-                  label: const Text('Create Point'),
+                  label: const Text('Criar ponto'),
                 ),
                 OutlinedButton.icon(
                   onPressed: controller.busy
                       ? null
                       : controller.createCoordinateSystem,
                   icon: const Icon(Icons.threed_rotation),
-                  label: const Text('Create Coordinate System'),
+                  label: const Text('Criar sistema de coordenadas'),
                 ),
               ],
             ),
@@ -313,7 +313,7 @@ class _SketchSurfaceWorkspacePanelState
                   ? null
                   : (widget.onOpenSketch ?? controller.openSketch),
               icon: const Icon(Icons.edit_note),
-              label: const Text('New Sketch'),
+              label: const Text('Novo Sketch'),
             ),
           ],
           if (controller.stage == SketchSurfaceStage.sketchActive) ...[
@@ -345,7 +345,7 @@ class _SketchSurfaceWorkspacePanelState
             SwitchListTile.adaptive(
               dense: true,
               contentPadding: EdgeInsets.zero,
-              title: const Text('Constraint glyphs'),
+              title: const Text('Símbolos de restrição'),
               subtitle: const Text(
                 'Tangent · Parallel · Coincident · Equal · H/V',
               ),
@@ -406,7 +406,7 @@ class _SketchSurfaceWorkspacePanelState
                   ? null
                   : (widget.onFinishSketch ?? controller.finishSketch),
               icon: const Icon(Icons.done),
-              label: const Text('Finish Sketch'),
+              label: const Text('Concluir Sketch'),
             ),
           ],
           if (controller.stage == SketchSurfaceStage.sketchFinished) ...[
@@ -415,7 +415,7 @@ class _SketchSurfaceWorkspacePanelState
                   ? null
                   : controller.previewPlanarSurface,
               icon: const Icon(Icons.visibility_outlined),
-              label: const Text('Preview Surface'),
+              label: const Text('Prévia da superfície'),
             ),
             if (!controller.sketchReadyForSurface)
               Padding(
@@ -436,7 +436,7 @@ class _SketchSurfaceWorkspacePanelState
                 Icons.layers_outlined,
                 color: Colors.lightBlueAccent,
               ),
-              title: Text('Dynamic Surface Preview'),
+              title: Text('Prévia dinâmica da superfície'),
               subtitle: Text(
                 'Temporary translucent film. Editing the Sketch updates it immediately.',
               ),
@@ -446,8 +446,8 @@ class _SketchSurfaceWorkspacePanelState
             const ListTile(
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.check_circle),
-              title: Text('CAD Surface generated'),
-              subtitle: Text('Registered, persisted and visible in the scene.'),
+              title: Text('Superfície CAD gerada'),
+              subtitle: Text('Registrada, persistida e visível na cena.'),
             ),
           ...[
             const Divider(),
@@ -455,7 +455,7 @@ class _SketchSurfaceWorkspacePanelState
               dense: true,
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.waves_outlined),
-              title: Text('Surface Continuity'),
+              title: Text('Continuidade da superfície'),
               subtitle: Text('Build → measure → approve'),
             ),
             Wrap(
@@ -467,7 +467,7 @@ class _SketchSurfaceWorkspacePanelState
                       controller.busy || !controller.canInspectSurfaceContinuity
                       ? null
                       : controller.inspectSelectedG0,
-                  child: const Text('Inspect G0'),
+                  child: const Text('Inspecionar G0'),
                 ),
                 OutlinedButton(
                   onPressed:
@@ -476,7 +476,7 @@ class _SketchSurfaceWorkspacePanelState
                           controller.continuityPreview != null
                       ? null
                       : controller.previewSelectedG1,
-                  child: const Text('Preview G1'),
+                  child: const Text('Prévia G1'),
                 ),
               ],
             ),
@@ -493,7 +493,7 @@ class _SketchSurfaceWorkspacePanelState
                       onPressed: controller.busy
                           ? null
                           : controller.confirmSelectedG1,
-                      child: const Text('Confirm G1'),
+                      child: const Text('Confirmar G1'),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -502,7 +502,7 @@ class _SketchSurfaceWorkspacePanelState
                       onPressed: controller.busy
                           ? null
                           : controller.cancelSelectedG1,
-                      child: const Text('Cancel'),
+                      child: const Text('Cancelar'),
                     ),
                   ),
                 ],
@@ -571,8 +571,8 @@ class _SketchSurfaceWorkspacePanelState
                 runSpacing: 6,
                 children: const [
                   OutlinedButton(onPressed: null, child: Text('Zebra')),
-                  OutlinedButton(onPressed: null, child: Text('Reflection')),
-                  OutlinedButton(onPressed: null, child: Text('Curvature')),
+                  OutlinedButton(onPressed: null, child: Text('Reflexão')),
+                  OutlinedButton(onPressed: null, child: Text('Curvatura')),
                 ],
               ),
               const Text(
@@ -589,13 +589,13 @@ class _SketchSurfaceWorkspacePanelState
               dense: true,
               contentPadding: EdgeInsets.zero,
               leading: Icon(Icons.auto_awesome_motion),
-              title: Text('Professional Surface'),
+              title: Text('Superfície profissional'),
               subtitle: Text('Loft · Sweep · Blend · Offset'),
             ),
             Text(
               '${controller.geometrySelection.shapeHandles.length} kernel shape(s) · ${controller.activeSketch == null ? 0 : 1} active Sketch',
             ),
-            const Text('Create', style: TextStyle(fontWeight: FontWeight.w600)),
+            const Text('Criar', style: TextStyle(fontWeight: FontWeight.w600)),
             Wrap(
               spacing: 6,
               runSpacing: 6,
@@ -658,7 +658,7 @@ class _SketchSurfaceWorkspacePanelState
                 Expanded(
                   child: OutlinedButton.icon(
                     icon: const Icon(Icons.call_split),
-                    label: const Text('Unsew selected'),
+                    label: const Text('Descosturar selecionada'),
                     onPressed: controller.busy
                         ? null
                         : () async {
@@ -677,7 +677,7 @@ class _SketchSurfaceWorkspacePanelState
                 Expanded(
                   child: OutlinedButton.icon(
                     icon: const Icon(Icons.link_off),
-                    label: const Text('Unsew all'),
+                    label: const Text('Descosturar todas'),
                     onPressed: controller.busy
                         ? null
                         : () => controller.unsewBody(
@@ -782,7 +782,7 @@ class _SketchSurfaceWorkspacePanelState
                       SwitchListTile(
                         contentPadding: EdgeInsets.zero,
                         value: sewCompensate,
-                        title: const Text('Authorize gap compensation'),
+                        title: const Text('Autorizar compensação de lacuna'),
                         subtitle: const Text(
                           'Never compensates without explicit authorization.',
                         ),
@@ -1013,14 +1013,14 @@ class _SketchSurfaceWorkspacePanelState
                             onPressed: controller.busy || !_guidedSelectionReady
                                 ? null
                                 : _previewGuidedSurfaceCommand,
-                            child: const Text('Preview'),
+                            child: const Text('Prévia'),
                           ),
                         ),
                         TextButton(
                           onPressed: controller.busy
                               ? null
                               : _cancelGuidedSurfaceCommand,
-                          child: const Text('Cancel'),
+                          child: const Text('Cancelar'),
                         ),
                       ],
                     ),
@@ -1041,14 +1041,14 @@ class _SketchSurfaceWorkspacePanelState
                               setState(() => guidedSurfaceTool = null);
                             }
                           },
-                    child: const Text('Confirm Offset'),
+                    child: const Text('Confirmar Offset'),
                   ),
                 ),
                 TextButton(
                   onPressed: controller.busy
                       ? null
                       : controller.cancelSurfaceOffset,
-                  child: const Text('Cancel'),
+                  child: const Text('Cancelar'),
                 ),
               ],
             ),
@@ -1059,7 +1059,7 @@ class _SketchSurfaceWorkspacePanelState
           if (!_dedicatedSurfaceCommand &&
               controller.selectedProfessionalSurface != null) ...[
             const SizedBox(height: 10),
-            const Text('Edit', style: TextStyle(fontWeight: FontWeight.w600)),
+            const Text('Editar', style: TextStyle(fontWeight: FontWeight.w600)),
             Wrap(
               spacing: 6,
               runSpacing: 6,
@@ -1141,7 +1141,7 @@ class _SketchSurfaceWorkspacePanelState
                       ? null
                       : controller.validateSelectedProfessionalSurface,
                   icon: const Icon(Icons.fact_check_outlined, size: 18),
-                  label: const Text('Validate'),
+                  label: const Text('Validar'),
                 ),
               ],
             ),
@@ -1175,7 +1175,7 @@ class _SketchSurfaceWorkspacePanelState
                   ),
                 TextButton(
                   onPressed: controller.clearProfessionalSurfaceAnalysis,
-                  child: const Text('Close Analysis'),
+                  child: const Text('Fechar análise'),
                 ),
               ],
             ),

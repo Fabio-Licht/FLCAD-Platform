@@ -3624,19 +3624,19 @@ class _OfficialEngineeringWorkspaceState
       });
     }
     if (widget.cad.runtime.document == null) {
-      widget.cad.setStatus('Open a project before creating a Sketch.');
+      widget.cad.setStatus('Abra um projeto antes de criar um Sketch.');
       return;
     }
     widget.cad.setStatus(
-      'Select XY, YZ, ZX or another planar support directly in the viewport. '
-      'Press ESC to cancel.',
+      'Selecione XY, YZ, ZX ou outro suporte planar na viewport. '
+      'Pressione ESC para cancelar.',
     );
   }
 
   Future<void> _openSketchSupportFallback() async {
     final document = widget.cad.runtime.document;
     if (document == null) {
-      widget.cad.setStatus('Open a project before creating a Sketch.');
+      widget.cad.setStatus('Abra um projeto antes de criar um Sketch.');
       return;
     }
     final selectedEntity = geometrySelection.selectedIds.isEmpty
@@ -3651,7 +3651,7 @@ class _OfficialEngineeringWorkspaceState
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Where do you want to create the Sketch?'),
+          title: const Text('Onde criar o Sketch?'),
           content: SizedBox(
             width: 420,
             child: RadioGroup<String>(
@@ -3662,43 +3662,43 @@ class _OfficialEngineeringWorkspaceState
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const RadioListTile(value: 'xy', title: Text('XY Plane')),
-                  const RadioListTile(value: 'yz', title: Text('YZ Plane')),
-                  const RadioListTile(value: 'zx', title: Text('ZX Plane')),
+                  const RadioListTile(value: 'xy', title: Text('Plano XY')),
+                  const RadioListTile(value: 'yz', title: Text('Plano YZ')),
+                  const RadioListTile(value: 'zx', title: Text('Plano ZX')),
                   const Divider(),
                   RadioListTile(
                     value: 'existing',
                     enabled:
                         selectedChoice?.kind == CadDocumentEntityKind.reference,
-                    title: const Text('Existing plane'),
+                    title: const Text('Plano existente'),
                     subtitle: Text(
                       selectedChoice?.kind == CadDocumentEntityKind.reference
                           ? selectedChoice!.data['name'] as String? ??
                                 selectedChoice.id
-                          : 'Select a planar reference first',
+                          : 'Selecione primeiro uma referência planar',
                     ),
                   ),
                   RadioListTile(
                     value: 'face',
                     enabled: selectedChoice?.kind == CadDocumentEntityKind.face,
-                    title: const Text('Planar face'),
+                    title: const Text('Face planar'),
                     subtitle: Text(
                       selectedChoice?.kind == CadDocumentEntityKind.face
                           ? selectedChoice!.data['name'] as String? ??
                                 selectedChoice.id
-                          : 'Select a planar Face first',
+                          : 'Selecione primeiro uma face planar',
                     ),
                   ),
                   RadioListTile(
                     value: 'surface',
                     enabled:
                         selectedChoice?.kind == CadDocumentEntityKind.surface,
-                    title: const Text('Planar surface'),
+                    title: const Text('Superfície planar'),
                     subtitle: Text(
                       selectedChoice?.kind == CadDocumentEntityKind.surface
                           ? selectedChoice!.data['name'] as String? ??
                                 selectedChoice.id
-                          : 'Select a planar Surface first',
+                          : 'Selecione primeiro uma superfície planar',
                     ),
                   ),
                 ],
@@ -3708,11 +3708,11 @@ class _OfficialEngineeringWorkspaceState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: const Text('Cancelar'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Create Sketch'),
+              child: const Text('Criar Sketch'),
             ),
           ],
         ),
@@ -3753,7 +3753,7 @@ class _OfficialEngineeringWorkspaceState
     final plane = operational.activeSketchPlane;
     final planeId = operational.activeSketchPlaneId;
     if (plane == null || planeId == null) {
-      widget.cad.setStatus('Choose a planar Sketch support in the viewport.');
+      widget.cad.setStatus('Escolha um suporte planar de Sketch na viewport.');
       return;
     }
     await operational.openSketch(forceNew: forceNew);
@@ -3802,7 +3802,7 @@ class _OfficialEngineeringWorkspaceState
         openToolWindows.add('Sketch');
       });
     }
-    widget.cad.setStatus('Sketch active · orthographic · support framed.');
+    widget.cad.setStatus('Sketch ativo · ortográfico · suporte enquadrado.');
   }
 
   Future<void> _selectSketchSupportFromViewport(CadViewportPick pick) async {
@@ -3813,11 +3813,11 @@ class _OfficialEngineeringWorkspaceState
           CadDocumentEntityKind.face,
           CadDocumentEntityKind.surface,
         }.contains(entity.kind)) {
-      widget.cad.setStatus('Point to an XY, YZ, ZX or planar support.');
+      widget.cad.setStatus('Aponte para um suporte XY, YZ, ZX ou planar.');
       return;
     }
     if (!operational.isPlanarSketchSupport(entity.id)) {
-      widget.cad.setStatus('The selected entity is not a planar support.');
+      widget.cad.setStatus('A entidade selecionada não é um suporte planar.');
       return;
     }
     try {
@@ -3902,7 +3902,7 @@ class _OfficialEngineeringWorkspaceState
     final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Safe Gap Repair'),
+        title: const Text('Reparo seguro de lacuna'),
         content: Text(
           'A gap of ${(issue.distance ?? 0).toStringAsFixed(3)} mm was found. '
           'Close it automatically?',
@@ -3910,11 +3910,11 @@ class _OfficialEngineeringWorkspaceState
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('No'),
+            child: const Text('Não'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: const Text('Yes'),
+            child: const Text('Sim'),
           ),
         ],
       ),
@@ -3984,7 +3984,7 @@ class _OfficialEngineeringWorkspaceState
       final value = await showDialog<double>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Edit driving dimension'),
+          title: const Text('Editar cota controladora'),
           content: TextField(
             controller: input,
             autofocus: true,
@@ -3996,14 +3996,14 @@ class _OfficialEngineeringWorkspaceState
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: const Text('Cancelar'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(
                 context,
                 double.tryParse(input.text.replaceAll(',', '.')),
               ),
-              child: const Text('Apply'),
+              child: const Text('Aplicar'),
             ),
           ],
         ),
@@ -4254,7 +4254,9 @@ class _OfficialEngineeringWorkspaceState
                           : Icons.visibility_outlined,
                       size: 16,
                     ),
-                    label: Text(selectedConstraint.visible ? 'Hide' : 'Show'),
+                    label: Text(
+                      selectedConstraint.visible ? 'Ocultar' : 'Mostrar',
+                    ),
                   ),
                 ),
                 const SizedBox(width: 6),
@@ -4263,7 +4265,7 @@ class _OfficialEngineeringWorkspaceState
                     onPressed: () =>
                         operational.deleteConstraint(selectedConstraint.id),
                     icon: const Icon(Icons.delete_outline, size: 16),
-                    label: const Text('Delete'),
+                    label: const Text('Excluir'),
                   ),
                 ),
               ],
@@ -4508,7 +4510,7 @@ class _OfficialEngineeringWorkspaceState
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: const Text('Best Fit Spline'),
+          title: const Text('Ajustar spline'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4534,24 +4536,22 @@ class _OfficialEngineeringWorkspaceState
                   ],
                 ),
               ),
-              Text('Points: $pointCount  ·  Segments: $segmentCount'),
+              Text('Pontos: $pointCount  ·  Segmentos: $segmentCount'),
               Text(
-                'Estimated time: ${(pointCount / 5000).clamp(.1, 30).toStringAsFixed(1)} s',
+                'Tempo estimado: ${(pointCount / 5000).clamp(.1, 30).toStringAsFixed(1)} s',
               ),
-              Text('Maximum error target: ${selected.toStringAsFixed(3)} mm'),
-              Text(
-                'Mean error target: ${(selected * .5).toStringAsFixed(3)} mm',
-              ),
+              Text('Erro máximo alvo: ${selected.toStringAsFixed(3)} mm'),
+              Text('Erro médio alvo: ${(selected * .5).toStringAsFixed(3)} mm'),
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Remember this configuration'),
+                title: const Text('Lembrar esta configuração'),
                 value: remember,
                 onChanged: (value) =>
                     setDialogState(() => remember = value ?? false),
               ),
               CheckboxListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Automatic preview'),
+                title: const Text('Prévia automática'),
                 value: automaticPreview,
                 onChanged: (value) {
                   setDialogState(() => automaticPreview = value ?? false);
@@ -4565,17 +4565,17 @@ class _OfficialEngineeringWorkspaceState
               const Text(
                 'Assistant: use the largest tolerance that preserves the engineering profile.',
               ),
-              const Text('Orange: Spline preview'),
+              const Text('Laranja: prévia da spline'),
             ],
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: const Text('Cancelar'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, selected),
-              child: const Text('Create Spline'),
+              child: const Text('Criar spline'),
             ),
           ],
         ),
@@ -4614,23 +4614,23 @@ class _OfficialEngineeringWorkspaceState
         ),
       FilledButton.icon(
         icon: const Icon(Icons.polyline),
-        label: const Text('Create Section'),
+        label: const Text('Criar seção'),
         onPressed: () => _sectionAction(operational.createSection),
       ),
       OutlinedButton.icon(
         icon: const Icon(Icons.draw),
-        label: const Text('Sketch from Section'),
+        label: const Text('Sketch a partir da seção'),
         onPressed: () =>
             _sectionAction(operational.createSketchFromSelectedSection),
       ),
       OutlinedButton.icon(
         icon: const Icon(Icons.gesture),
-        label: const Text('Best Fit Spline'),
+        label: const Text('Ajustar spline'),
         onPressed: _bestFitSpline,
       ),
       OutlinedButton.icon(
         icon: const Icon(Icons.layers_outlined),
-        label: const Text('Toggle Section'),
+        label: const Text('Alternar seção'),
         onPressed: () =>
             _sectionAction(operational.toggleSourceSectionVisibility),
       ),
@@ -4645,7 +4645,7 @@ class _OfficialEngineeringWorkspaceState
       if (operational.activeSketch?.metadata['associationState'] == 'outdated')
         FilledButton.tonalIcon(
           icon: const Icon(Icons.sync_problem),
-          label: const Text('Update Sketch'),
+          label: const Text('Atualizar Sketch'),
           onPressed: () =>
               _sectionAction(operational.updateActiveSketchFromSourceSection),
         ),
@@ -4668,7 +4668,7 @@ class _OfficialEngineeringWorkspaceState
       ),
       OutlinedButton.icon(
         icon: const Icon(Icons.straighten),
-        label: const Text('Section by Axis'),
+        label: const Text('Seção por eixo'),
         onPressed: () =>
             _sectionAction(operational.createSectionsBySelectedAxis),
       ),
@@ -4681,7 +4681,7 @@ class _OfficialEngineeringWorkspaceState
             signed: true,
           ),
           decoration: const InputDecoration(
-            labelText: 'Plane Offset',
+            labelText: 'Deslocamento do plano',
             suffixText: 'mm',
             isDense: true,
           ),
@@ -4732,7 +4732,7 @@ class _OfficialEngineeringWorkspaceState
         ),
       OutlinedButton.icon(
         icon: const Icon(Icons.refresh),
-        label: const Text('Recalculate'),
+        label: const Text('Recalcular'),
         onPressed: operational.selectedSection == null
             ? null
             : () =>
@@ -4797,8 +4797,13 @@ class _OfficialEngineeringWorkspaceState
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('Transform', style: TextStyle(fontWeight: FontWeight.bold)),
-        const Text('Select an entity, configure values, preview, then apply.'),
+        const Text(
+          'Transformação',
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const Text(
+          'Selecione uma entidade, configure os valores, visualize e aplique.',
+        ),
         RadioGroup<TransformDisposition>(
           groupValue: operational.transformDisposition,
           onChanged: operational.chooseTransformDisposition,
@@ -4808,13 +4813,13 @@ class _OfficialEngineeringWorkspaceState
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 value: TransformDisposition.original,
-                title: Text('Transform Original'),
+                title: Text('Transformar original'),
               ),
               RadioListTile<TransformDisposition>(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 value: TransformDisposition.workingCopy,
-                title: Text('Create Working Copy'),
+                title: Text('Criar cópia de trabalho'),
               ),
             ],
           ),
@@ -4831,7 +4836,7 @@ class _OfficialEngineeringWorkspaceState
         ),
         FilledButton.tonalIcon(
           icon: const Icon(Icons.open_with),
-          label: const Text('Move Preview'),
+          label: const Text('Prévia de deslocamento'),
           onPressed: () => _transformAction(
             () => operational.previewMove(
               Vector3(
@@ -4859,7 +4864,7 @@ class _OfficialEngineeringWorkspaceState
                     _number(transformAngle, 'Angle'),
                   ),
                 ),
-                child: Text('Rotate ${axis.$1}'),
+                child: Text('Rotacionar ${axis.$1}'),
               ),
           ],
         ),
@@ -4875,7 +4880,7 @@ class _OfficialEngineeringWorkspaceState
         ),
         FilledButton.tonalIcon(
           icon: const Icon(Icons.aspect_ratio),
-          label: const Text('Scale Preview'),
+          label: const Text('Prévia de escala'),
           onPressed: () => _transformAction(
             () => operational.previewScale(
               Vector3(
@@ -4887,7 +4892,7 @@ class _OfficialEngineeringWorkspaceState
           ),
         ),
         const Divider(),
-        const Text('Transform by Reference'),
+        const Text('Transformar por referência'),
         Wrap(
           spacing: 4,
           children: [
@@ -4921,14 +4926,14 @@ class _OfficialEngineeringWorkspaceState
               ),
             ),
             IconButton(
-              tooltip: 'Cancel preview',
+              tooltip: 'Cancelar prévia',
               onPressed: operational.manualTransformPreview == null
                   ? null
                   : operational.cancelManualTransform,
               icon: const Icon(Icons.close),
             ),
             IconButton(
-              tooltip: 'Reset transform',
+              tooltip: 'Redefinir transformação',
               onPressed: () =>
                   _transformAction(operational.resetSelectedTransform),
               icon: const Icon(Icons.restart_alt),
@@ -4981,13 +4986,13 @@ class _OfficialEngineeringWorkspaceState
           );
         }
         return AlertDialog(
-          title: const Text('Dependency Analysis'),
+          title: const Text('Análise de dependências'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('${entity.data['name'] ?? entity.id} affects:'),
-              if (counts.isEmpty) const Text('No dependent entities.'),
+              if (counts.isEmpty) const Text('Nenhuma entidade dependente.'),
               for (final entry in counts.entries)
                 Text('${entry.value} ${entry.key}'),
               const SizedBox(height: 12),
@@ -5003,12 +5008,12 @@ class _OfficialEngineeringWorkspaceState
             ),
             OutlinedButton(
               onPressed: () => Navigator.pop(context, 'only'),
-              child: const Text('Delete only this entity'),
+              child: const Text('Excluir somente esta entidade'),
             ),
             if (impacted.isNotEmpty)
               FilledButton(
                 onPressed: () => Navigator.pop(context, 'all'),
-                child: const Text('Delete all affected'),
+                child: const Text('Excluir todas as afetadas'),
               ),
           ],
         );

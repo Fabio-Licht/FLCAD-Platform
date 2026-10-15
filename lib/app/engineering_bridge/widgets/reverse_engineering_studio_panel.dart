@@ -29,7 +29,7 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
           const SizedBox(width: 7),
           Expanded(
             child: Text(
-              'Reverse Engineering Workflow',
+              'Fluxo de engenharia reversa',
               style: Theme.of(context).textTheme.titleSmall,
             ),
           ),
@@ -45,15 +45,15 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
           leading: const Icon(Icons.hub_outlined, size: 17),
           title: Text(mesh.meshId, style: const TextStyle(fontSize: 11)),
           subtitle: Text(
-            '${mesh.surfaceCount} surface(s) · ${mesh.pendingRegionCount} pending',
+            '${mesh.surfaceCount} superfície(s) · ${mesh.pendingRegionCount} pendente(s)',
             style: const TextStyle(fontSize: 9),
           ),
           children: [
-            const _ReconstructionBranch('Recognition'),
-            const _ReconstructionBranch('Reference Curves'),
+            const _ReconstructionBranch('Reconhecimento'),
+            const _ReconstructionBranch('Curvas de referência'),
             const _ReconstructionBranch('Sketches'),
-            const _ReconstructionBranch('Surfaces'),
-            const _ReconstructionBranch('Pending Regions'),
+            const _ReconstructionBranch('Superfícies'),
+            const _ReconstructionBranch('Regiões pendentes'),
             for (final region in mesh.regions)
               ListTile(
                 dense: true,
@@ -85,8 +85,8 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
                 ),
                 trailing: IconButton(
                   tooltip: region.status == ReconstructionRegionStatus.ignored
-                      ? 'Restore region'
-                      : 'Ignore region',
+                      ? 'Restaurar região'
+                      : 'Ignorar região',
                   icon: Icon(
                     region.status == ReconstructionRegionStatus.ignored
                         ? Icons.undo
@@ -108,7 +108,7 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.lightbulb_outline, size: 17),
             title: const Text(
-              'Next recommended region',
+              'Próxima região recomendada',
               style: TextStyle(fontSize: 10),
             ),
             subtitle: Text(
@@ -123,7 +123,7 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
         _WorkflowStepTile(step: step, active: step.stage == state.currentStage),
       const Divider(height: 20),
       Text(
-        'Engineering Assistant',
+        'Assistente de engenharia',
         style: Theme.of(context).textTheme.titleSmall,
       ),
       const SizedBox(height: 5),
@@ -132,7 +132,7 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.only(top: 5),
           child: Text(
-            'Blocked: ${state.blockReason}',
+            'Bloqueado: ${state.blockReason}',
             style: TextStyle(
               fontSize: 10,
               color: Theme.of(context).colorScheme.error,
@@ -147,7 +147,7 @@ class ReverseEngineeringStudioPanel extends StatelessWidget {
       ),
       if (state.timelines.isNotEmpty) ...[
         const Divider(height: 20),
-        Text('Timeline', style: Theme.of(context).textTheme.titleSmall),
+        Text('Linha do tempo', style: Theme.of(context).textTheme.titleSmall),
         for (final timeline in state.timelines)
           ExpansionTile(
             dense: true,
@@ -186,20 +186,20 @@ class _CoverageCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const Text(
-            'Mesh Coverage',
+            'Cobertura da malha',
             style: TextStyle(fontWeight: FontWeight.w700),
           ),
           const SizedBox(height: 7),
           LinearProgressIndicator(value: mesh.reconstructedPercent / 100),
           const SizedBox(height: 5),
           Text(
-            '${mesh.reconstructedPercent.toStringAsFixed(1)}% reconstructed · '
-            '${mesh.pendingPercent.toStringAsFixed(1)}% pending',
+            '${mesh.reconstructedPercent.toStringAsFixed(1)}% reconstruída · '
+            '${mesh.pendingPercent.toStringAsFixed(1)}% pendente',
             style: const TextStyle(fontSize: 9.5),
           ),
           Text(
-            '${mesh.reconstructedArea.toStringAsFixed(2)} mm² reconstructed · '
-            '${mesh.pendingArea.toStringAsFixed(2)} mm² remaining',
+            '${mesh.reconstructedArea.toStringAsFixed(2)} mm² reconstruída · '
+            '${mesh.pendingArea.toStringAsFixed(2)} mm² restante',
             style: const TextStyle(fontSize: 9),
           ),
         ],

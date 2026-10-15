@@ -29,7 +29,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
         children: [
           if (controller.canAlign) ...[
             Text(
-              'Alignment Workbench',
+              'Bancada de alinhamento',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             Wrap(
@@ -38,12 +38,12 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               children: [
                 ActionChip(
                   avatar: const Icon(Icons.straighten),
-                  label: const Text('Axis'),
+                  label: const Text('Eixo'),
                   onPressed: controller.createAxis,
                 ),
                 ActionChip(
                   avatar: const Icon(Icons.adjust),
-                  label: const Text('Origin'),
+                  label: const Text('Origem'),
                   onPressed: controller.createPoint,
                 ),
                 ActionChip(
@@ -76,12 +76,12 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   Expanded(
                     child: FilledButton(
                       onPressed: onApplyAlignment ?? controller.applyAlignment,
-                      child: const Text('Apply Alignment'),
+                      child: const Text('Aplicar alinhamento'),
                     ),
                   ),
                   TextButton(
                     onPressed: controller.cancelAlignment,
-                    child: const Text('Cancel'),
+                    child: const Text('Cancelar'),
                   ),
                 ],
               ),
@@ -101,7 +101,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                 ])
                   ActionChip(
                     label: Text(
-                      'Detect ${type[0].toUpperCase()}${type.substring(1)}',
+                      'Detectar ${type[0].toUpperCase()}${type.substring(1)}',
                     ),
                     onPressed: () => controller.detect(type),
                   ),
@@ -109,7 +109,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
             )
           else
             const Text(
-              'Select the mesh in the viewport to grow a homogeneous region.',
+              'Selecione a malha na viewport para criar uma região homogênea.',
             ),
           if (controller.activeRecognitionResult case final result?) ...[
             const SizedBox(height: 8),
@@ -121,25 +121,25 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Recognition',
+                      'Reconhecimento',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                    Text('Type: ${result.type.name}'),
+                    Text('Tipo: ${result.type.name}'),
                     Text(
-                      'Confidence: ${(result.confidence * 100).toStringAsFixed(1)}%',
+                      'Confiança: ${(result.confidence * 100).toStringAsFixed(1)}%',
                     ),
-                    Text('Quality: ${result.quality}'),
+                    Text('Qualidade: ${result.quality}'),
                     for (final parameter in result.parameters.entries)
                       Text('${parameter.key}: ${parameter.value}'),
                     const SizedBox(height: 4),
-                    Text('Suggestion: ${result.suggestion}'),
+                    Text('Sugestão: ${result.suggestion}'),
                     if (controller.activeSurfaceAssistantSuggestion
                         case final assistant?) ...[
                       const SizedBox(height: 6),
-                      Text('Strategy: ${assistant.strategy.name}'),
+                      Text('Estratégia: ${assistant.strategy.name}'),
                       if (assistant.alternatives.isNotEmpty)
                         Text(
-                          'Alternatives: ${assistant.alternatives.map((item) => item.name).join(', ')}',
+                          'Alternativas: ${assistant.alternatives.map((item) => item.name).join(', ')}',
                         ),
                       const SizedBox(height: 8),
                       Row(
@@ -155,14 +155,14 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                                     }
                                   : null,
                               icon: const Icon(Icons.check, size: 16),
-                              label: const Text('Create Surface'),
+                              label: const Text('Criar superfície'),
                             ),
                           ),
                           const SizedBox(width: 6),
                           OutlinedButton(
                             onPressed:
                                 controller.ignoreSurfaceAssistantSuggestion,
-                            child: const Text('Ignore'),
+                            child: const Text('Ignorar'),
                           ),
                         ],
                       ),
@@ -172,7 +172,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           child: Text(
                             result.type.name == 'freeform'
                                 ? 'Advisory only in G-136.'
-                                : 'Confidence below approved limit.',
+                                : 'Confiança abaixo do limite aprovado.',
                             style: TextStyle(
                               fontSize: 9.5,
                               color: Theme.of(context).colorScheme.error,
@@ -181,7 +181,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                         ),
                     ],
                     const Text(
-                      'Knowledge only · no CAD geometry created',
+                      'Somente conhecimento · nenhuma geometria CAD criada',
                       style: TextStyle(fontSize: 9.5),
                     ),
                   ],
@@ -198,14 +198,14 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Recognition MeshRegion',
+                      'Região de malha reconhecida',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                    Text('${region.triangleIndices.length} triangles'),
-                    Text('Area ${region.area.toStringAsFixed(3)}'),
+                    Text('${region.triangleIndices.length} triângulos'),
+                    Text('Área ${region.area.toStringAsFixed(3)}'),
                     if (controller.hypotheses.isNotEmpty)
                       Text(
-                        'Confidence ${(controller.hypotheses.first.recognition.dna.confidence * 100).toStringAsFixed(1)}%',
+                        'Confiança ${(controller.hypotheses.first.recognition.dna.confidence * 100).toStringAsFixed(1)}%',
                       ),
                   ],
                 ),
@@ -214,12 +214,12 @@ class RecognitionWorkspacePanel extends StatelessWidget {
           ],
           if (controller.hypotheses.isEmpty && controller.canDetect) ...[
             const SizedBox(height: 8),
-            const Text('No hypothesis of the selected type was detected.'),
+            const Text('Nenhuma hipótese do tipo selecionado foi detectada.'),
           ],
           if (controller.hypotheses.isNotEmpty) ...[
             const SizedBox(height: 8),
             Text(
-              '${controller.hypotheses.length} hypotheses',
+              '${controller.hypotheses.length} hipóteses',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             const SizedBox(height: 8),
@@ -241,7 +241,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                         await controller.createRecognizedPlane();
                       },
                 icon: const Icon(Icons.verified_outlined),
-                label: const Text('Accept Plane & Create Reference'),
+                label: const Text('Aceitar plano e criar referência'),
               ),
             if (controller.hypotheses.any(
               (item) => item.recognition.winner.type.name != 'plane',
@@ -262,7 +262,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       },
                 icon: const Icon(Icons.verified_outlined),
                 label: Text(
-                  'Accept ${controller.hypotheses.firstWhere((item) => item.recognition.winner.type.name != 'plane').recognition.winner.type.name} & Create Reference',
+                  'Aceitar ${controller.hypotheses.firstWhere((item) => item.recognition.winner.type.name != 'plane').recognition.winner.type.name} e criar referência',
                 ),
               ),
             const SizedBox(height: 8),
@@ -271,7 +271,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                 child: ExpansionTile(
                   title: Text(primitive.recognition.winner.type.name),
                   subtitle: Text(
-                    'Confidence ${(primitive.recognition.dna.confidence * 100).toStringAsFixed(1)}% · Score ${(primitive.recognition.explanation.score * 100).toStringAsFixed(1)}%',
+                    'Confiança ${(primitive.recognition.dna.confidence * 100).toStringAsFixed(1)}% · Pontuação ${(primitive.recognition.explanation.score * 100).toStringAsFixed(1)}%',
                   ),
                   childrenPadding: const EdgeInsets.all(12),
                   children: [
@@ -291,22 +291,22 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       Align(
                         alignment: Alignment.centerLeft,
                         child: Text(
-                          'Alternatives: ${primitive.recognition.alternatives.map((item) => item.type.name).join(', ')}',
+                          'Alternativas: ${primitive.recognition.alternatives.map((item) => item.type.name).join(', ')}',
                         ),
                       ),
                     SegmentedButton<RecognitionDecision>(
                       segments: const [
                         ButtonSegment(
                           value: RecognitionDecision.pending,
-                          label: Text('Pending'),
+                          label: Text('Pendente'),
                         ),
                         ButtonSegment(
                           value: RecognitionDecision.accepted,
-                          label: Text('Accept'),
+                          label: Text('Aceitar'),
                         ),
                         ButtonSegment(
                           value: RecognitionDecision.rejected,
-                          label: Text('Reject'),
+                          label: Text('Rejeitar'),
                         ),
                       ],
                       selected: {
@@ -332,17 +332,17 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                     ? null
                     : controller.createRecognizedPlane,
                 icon: const Icon(Icons.crop_16_9),
-                label: const Text('Create Plane Reference'),
+                label: const Text('Criar referência de plano'),
               ),
           ],
           if (controller.canAlign) ...[
             const Divider(),
             Text(
-              'Alignment Workbench',
+              'Bancada de alinhamento',
               style: Theme.of(context).textTheme.titleSmall,
             ),
             const Text(
-              'Create the axis, origin and coordinate system from the approved plane.',
+              'Crie o eixo, a origem e o sistema de coordenadas a partir do plano aprovado.',
             ),
             Wrap(
               spacing: 6,
@@ -351,22 +351,22 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: controller.createAxis,
                   icon: const Icon(Icons.straighten),
-                  label: const Text('Create Axis'),
+                  label: const Text('Criar eixo'),
                 ),
                 OutlinedButton.icon(
                   onPressed: controller.createPoint,
                   icon: const Icon(Icons.adjust),
-                  label: const Text('Create Origin'),
+                  label: const Text('Criar origem'),
                 ),
                 OutlinedButton.icon(
                   onPressed: controller.createCoordinateSystem,
                   icon: const Icon(Icons.threed_rotation),
-                  label: const Text('Create CSYS'),
+                  label: const Text('Criar sistema de coordenadas'),
                 ),
               ],
             ),
             const SizedBox(height: 8),
-            const Text('Align approved plane to:'),
+            const Text('Alinhar plano aprovado a:'),
             SegmentedButton<String>(
               segments: const [
                 ButtonSegment(value: 'XY', label: Text('XY')),
@@ -391,12 +391,12 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           ? null
                           : (onApplyAlignment ?? controller.applyAlignment),
                       icon: const Icon(Icons.check),
-                      label: const Text('Apply Alignment'),
+                      label: const Text('Aplicar alinhamento'),
                     ),
                   ),
                   TextButton(
                     onPressed: controller.cancelAlignment,
-                    child: const Text('Cancel'),
+                    child: const Text('Cancelar'),
                   ),
                 ],
               ),
