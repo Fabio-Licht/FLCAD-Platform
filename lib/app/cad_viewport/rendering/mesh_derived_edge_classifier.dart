@@ -61,6 +61,7 @@ class MeshDerivedEdgeStatistics {
     required this.weldTolerance,
     required this.normalsAvailable,
     required this.inconsistentNormalFaces,
+    required this.creaseAngleHistogram,
     required this.estimatedBytes,
     required this.truncated,
   });
@@ -79,6 +80,9 @@ class MeshDerivedEdgeStatistics {
   final double weldTolerance;
   final bool normalsAvailable;
   final int inconsistentNormalFaces;
+
+  /// Counts classified crease edges in 10-degree buckets over [0, 90].
+  final List<int> creaseAngleHistogram;
   final int estimatedBytes;
   final bool truncated;
 }
@@ -93,6 +97,77 @@ class MeshDerivedEdgeClassification {
   final List<MeshDerivedEdgeSegment> segments;
   final MeshDerivedEdgeStatistics statistics;
   final List<String> diagnostics;
+}
+
+/// Cached, presentation-only measurements for one classification pass.
+/// This is deliberately separate from the mesh and is never sent to native.
+class MeshDerivedEdgeObservation {
+  MeshDerivedEdgeObservation({
+    required this.classification,
+    required this.elapsedMicros,
+  }) : lengthStatistics = _lengthStatistics(classification.segments);
+
+  final MeshDerivedEdgeClassification classification;
+  final int elapsedMicros;
+  final MeshDerivedEdgeLengthStatistics lengthStatistics;
+}
+
+class MeshDerivedEdgeLengthStatistics {
+  const MeshDerivedEdgeLengthStatistics({
+    required this.minimum,
+    required this.average,
+    required this.maximum,
+    required this.p50,
+    required this.p90,
+    required this.p95,
+    required this.p99,
+  });
+
+  final double minimum;
+  final double average;
+  final double maximum;
+  final double p50;
+  final double p90;
+  final double p95;
+  final double p99;
+}
+
+MeshDerivedEdgeLengthStatistics _lengthStatistics(
+  List<MeshDerivedEdgeSegment> segments,
+) {
+  if (segments.isEmpty) {
+    return const MeshDerivedEdgeLengthStatistics(
+      minimum: 0,
+      average: 0,
+      maximum: 0,
+      p50: 0,
+      p90: 0,
+      p95: 0,
+      p99: 0,
+    );
+  }
+  final lengths = [
+    for (final segment in segments)
+      _length(_subtract(segment.end, segment.start)),
+  ]..sort();
+  double percentile(double fraction) {
+    final position = (lengths.length - 1) * fraction;
+    final lower = position.floor();
+    final upper = position.ceil();
+    if (lower == upper) return lengths[lower];
+    final weight = position - lower;
+    return lengths[lower] + (lengths[upper] - lengths[lower]) * weight;
+  }
+
+  return MeshDerivedEdgeLengthStatistics(
+    minimum: lengths.first,
+    average: lengths.reduce((a, b) => a + b) / lengths.length,
+    maximum: lengths.last,
+    p50: percentile(.50),
+    p90: percentile(.90),
+    p95: percentile(.95),
+    p99: percentile(.99),
+  );
 }
 
 class MeshDerivedEdgeClassifier {
@@ -223,6 +298,7 @@ class MeshDerivedEdgeClassifier {
     var creaseEdges = 0;
     var coplanarEdgesDiscarded = 0;
     var ambiguousEdges = 0;
+    final creaseAngleHistogram = List<int>.filled(9, 0);
     final creaseCosine = math.cos(config.creaseAngleDegrees * math.pi / 180);
     var truncated = limit < inputTriangles;
     for (final entry in edges.entries) {
@@ -236,6 +312,10 @@ class MeshDerivedEdgeClassifier {
         if (cosine < creaseCosine) {
           kind = MeshDerivedEdgeKind.crease;
           creaseEdges++;
+          final angleDegrees =
+              math.acos(cosine.clamp(-1.0, 1.0)) * 180 / math.pi;
+          final bucket = math.min(8, angleDegrees ~/ 10);
+          creaseAngleHistogram[bucket]++;
         } else {
           coplanarEdgesDiscarded++;
         }
@@ -281,6 +361,7 @@ class MeshDerivedEdgeClassifier {
         weldTolerance: weldTolerance,
         normalsAvailable: normalsAvailable,
         inconsistentNormalFaces: inconsistentNormalFaces,
+        creaseAngleHistogram: List.unmodifiable(creaseAngleHistogram),
         estimatedBytes: estimatedBytes,
         truncated: truncated,
       ),
@@ -309,6 +390,7 @@ class MeshDerivedEdgeClassifier {
       weldTolerance: 0,
       normalsAvailable: normalsAvailable,
       inconsistentNormalFaces: 0,
+      creaseAngleHistogram: const [],
       estimatedBytes: 0,
       truncated: false,
     ),

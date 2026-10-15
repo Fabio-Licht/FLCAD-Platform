@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 
 import '../professional_cad_viewport_widget.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
+import '../rendering/mesh_derived_edge_classifier.dart';
 import '../scene/cad_scene_graph.dart';
 import 'native_viewport_bridge.dart';
 
@@ -22,6 +23,7 @@ class ViewportRenderDiagnosticReport {
     required this.alpha,
     required this.selectedEntityCount,
     required this.highlightActive,
+    this.nativeSceneReady = false,
   });
 
   final String backend;
@@ -34,6 +36,7 @@ class ViewportRenderDiagnosticReport {
   final double alpha;
   final int selectedEntityCount;
   final bool highlightActive;
+  final bool nativeSceneReady;
 
   Map<String, Object?> toJson() => {
     'backend': backend,
@@ -46,9 +49,32 @@ class ViewportRenderDiagnosticReport {
     'alpha': alpha,
     'selectedEntityCount': selectedEntityCount,
     'highlightActive': highlightActive,
+    'nativeSceneReady': nativeSceneReady,
   };
 
   String toStructuredLog() => jsonEncode(toJson());
+}
+
+String viewportDiagnosticOverlayText(ViewportRenderDiagnosticReport report) {
+  final triangles = report.entities.fold<int>(
+    0,
+    (sum, item) => sum + item.triangles,
+  );
+  final edges = report.entities.fold<int>(
+    0,
+    (sum, item) => sum + item.topologicalEdges,
+  );
+  final meshSegments = report.entities.fold<int>(
+    0,
+    (sum, item) => sum + ((item.meshDerived?['segments'] as int?) ?? 0),
+  );
+  final lines = <String>[
+    '${report.backend} · ${report.mode} · ${report.entities.length} ent.',
+    'tri: $triangles · arestas: $edges',
+    'sceneReady: ${report.nativeSceneReady}',
+    'meshDerived: $meshSegments→$meshSegments',
+  ];
+  return lines.join('\n');
 }
 
 @immutable
@@ -63,6 +89,7 @@ class ViewportEntityDiagnostic {
     required this.selected,
     required this.transparent,
     required this.classification,
+    this.meshDerived,
   });
 
   final String presentationId;
@@ -74,6 +101,7 @@ class ViewportEntityDiagnostic {
   final bool selected;
   final bool transparent;
   final String classification;
+  final Map<String, Object?>? meshDerived;
 
   Map<String, Object?> toJson() => {
     'presentationId': presentationId,
@@ -85,6 +113,7 @@ class ViewportEntityDiagnostic {
     'selected': selected,
     'transparent': transparent,
     'classification': classification,
+    if (meshDerived != null) 'meshDerived': meshDerived,
   };
 }
 
@@ -108,6 +137,7 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
   required CadRenderStyle style,
   required String? fallbackReason,
   required bool highlightActive,
+  bool nativeSceneReady = false,
 }) {
   final native = backend == ViewportBackend.nativeGpu;
   final effectiveFallback = native
@@ -126,7 +156,11 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
     fallbackReason: effectiveFallback,
     entities: [
       for (var index = 0; index < visible.length; index++)
-        _entityDiagnostic(visible.elementAt(index), index),
+        _entityDiagnostic(
+          visible.elementAt(index),
+          index,
+          nativeSceneReady: native && nativeSceneReady,
+        ),
     ],
     depthTest: native,
     depthWrite: native && style != CadRenderStyle.transparent,
@@ -134,10 +168,15 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
     selectedEntityCount: visible.where((entity) => entity.selected).length,
     highlightActive:
         highlightActive || visible.any((entity) => entity.selected),
+    nativeSceneReady: native && nativeSceneReady,
   );
 }
 
-ViewportEntityDiagnostic _entityDiagnostic(CadSceneEntity entity, int index) {
+ViewportEntityDiagnostic _entityDiagnostic(
+  CadSceneEntity entity,
+  int index, {
+  required bool nativeSceneReady,
+}) {
   final geometry = cadPresentationGeometry(entity.geometry);
   final triangles = geometry['triangles'];
   final normals = geometry['normals'];
@@ -161,6 +200,36 @@ ViewportEntityDiagnostic _entityDiagnostic(CadSceneEntity entity, int index) {
       : type == 'brep_solid' && !hasTopology
       ? 'brep_solido_sem_arestas_topologicas'
       : 'apresentacao_geometrica';
+  final observation = cachedMeshDerivedEdgeObservation(entity);
+  final meshDerived = observation == null
+      ? null
+      : <String, Object?>{
+          'source': meshDerivedEdgeSource,
+          'segments': observation.classification.statistics.segments,
+          'openBoundary':
+              observation.classification.statistics.openBoundaryEdges,
+          'crease': observation.classification.statistics.creaseEdges,
+          'ambiguous': observation.classification.statistics.ambiguousEdges,
+          'coplanarDiscarded':
+              observation.classification.statistics.coplanarEdgesDiscarded,
+          'creaseAngleHistogram':
+              observation.classification.statistics.creaseAngleHistogram,
+          'length': <String, Object?>{
+            'min': observation.lengthStatistics.minimum,
+            'mean': observation.lengthStatistics.average,
+            'max': observation.lengthStatistics.maximum,
+            'p50': observation.lengthStatistics.p50,
+            'p90': observation.lengthStatistics.p90,
+            'p95': observation.lengthStatistics.p95,
+            'p99': observation.lengthStatistics.p99,
+          },
+          'classificationMicros': observation.elapsedMicros,
+          'estimatedBytes':
+              observation.classification.statistics.estimatedBytes,
+          'truncated': observation.classification.statistics.truncated,
+          'diagnostics': observation.classification.diagnostics,
+          'nativeBufferAcknowledged': nativeSceneReady,
+        };
   return ViewportEntityDiagnostic(
     presentationId: 'entity-${index + 1}',
     type: type,
@@ -171,5 +240,6 @@ ViewportEntityDiagnostic _entityDiagnostic(CadSceneEntity entity, int index) {
     selected: entity.selected,
     transparent: entity.transparent,
     classification: classification,
+    meshDerived: meshDerived,
   );
 }

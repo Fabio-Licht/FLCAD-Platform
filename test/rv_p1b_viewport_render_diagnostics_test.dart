@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:flcad_mobile/app/cad_viewport/native/native_viewport_bridge.dart';
 import 'package:flcad_mobile/app/cad_viewport/native/viewport_render_diagnostics.dart';
+import 'package:flcad_mobile/app/cad_viewport/rendering/mesh_derived_edge_classifier.dart';
+import 'package:flcad_mobile/app/cad_viewport/rendering/mesh_derived_edge_refiner.dart';
 import 'package:flcad_mobile/app/cad_viewport/professional_cad_viewport_widget.dart';
 import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
 
@@ -31,6 +33,90 @@ CadSceneEntity _entity(
 CadSceneGraph _scene(CadSceneEntity entity) => CadSceneGraph()..upsert(entity);
 
 void main() {
+  test('inclui estatísticas meshDerived do resultado já classificado', () {
+    final scene = _scene(_entity(CadSceneEntityKind.mesh));
+    // Prime the same cache used by the native adapter. The diagnostic itself
+    // must not classify the mesh again.
+    CadSceneDisplayAdapter().initial(scene);
+    final report = buildViewportRenderDiagnostic(
+      scene: scene,
+      backend: ViewportBackend.nativeGpu,
+      requestedBackend: ViewportBackend.nativeGpu,
+      style: CadRenderStyle.hiddenLine,
+      fallbackReason: null,
+      highlightActive: false,
+      nativeSceneReady: true,
+    );
+    final mesh = report.entities.single.meshDerived!;
+    expect(mesh['source'], meshDerivedEdgeSource);
+    expect(mesh['segments'], 3);
+    expect(mesh['openBoundary'], 3);
+    expect(mesh['crease'], 0);
+    expect(mesh['ambiguous'], 0);
+    expect(mesh['coplanarDiscarded'], 0);
+    expect(mesh['classificationMicros'], isA<int>());
+    expect(mesh['estimatedBytes'], greaterThan(0));
+    expect(mesh['nativeBufferAcknowledged'], isTrue);
+    expect((mesh['length'] as Map)['min'], greaterThan(0));
+    expect(mesh.containsKey('refinement'), isFalse);
+    expect(report.nativeSceneReady, isTrue);
+    final overlay = viewportDiagnosticOverlayText(report);
+    expect(overlay, contains('d3d11 · hiddenLine'));
+    expect(overlay, contains('sceneReady: true'));
+    expect(overlay, contains('meshDerived: 3→3'));
+    scene.dispose();
+  });
+
+  test(
+    'appliedToPresentation só liga com flag experimental e filtro aplicado',
+    () {
+      final scene = _scene(_entity(CadSceneEntityKind.mesh));
+      CadSceneDisplayAdapter().initial(scene);
+      final observation = cachedMeshDerivedEdgeObservation(
+        scene.entities.single,
+      )!;
+      expect(kFlcadDevMeshDerivedEdgeRefinement, isFalse);
+      expect(
+        const MeshDerivedEdgeRefiner().refine(observation.classification).toDiagnostics(
+          experimentalFlag: false,
+        )['appliedToPresentation'],
+        isFalse,
+      );
+      expect(
+        const MeshDerivedEdgeRefiner().refine(observation.classification).toDiagnostics(
+          experimentalFlag: true,
+        )['appliedToPresentation'],
+        const MeshDerivedEdgeRefiner().refine(observation.classification).applied,
+      );
+      scene.dispose();
+    },
+  );
+
+  test(
+    'Shaded nativo não exige arestas e Wireframe STL permanece CAD-only',
+    () {
+      final scene = _scene(_entity(CadSceneEntityKind.mesh));
+      CadSceneDisplayAdapter().initial(scene);
+      final shaded = buildViewportRenderDiagnostic(
+        scene: scene,
+        backend: ViewportBackend.nativeGpu,
+        requestedBackend: ViewportBackend.nativeGpu,
+        style: CadRenderStyle.shaded,
+        fallbackReason: null,
+        highlightActive: false,
+        nativeSceneReady: true,
+      );
+      expect(shaded.mode, 'shaded');
+      expect(nativeSceneUnsupportedReason(scene, style: 0), isNull);
+      expect(
+        nativeSceneUnsupportedReason(scene, style: 2),
+        contains('arestas topológicas'),
+      );
+      expect(viewportDiagnosticOverlayText(shaded), contains('d3d11 · shaded'));
+      scene.dispose();
+    },
+  );
+
   test('marca a ausência de normais sem inventar a origem', () {
     final entity = _entity(CadSceneEntityKind.mesh);
     final geometry = Map<String, dynamic>.from(entity.geometry)
