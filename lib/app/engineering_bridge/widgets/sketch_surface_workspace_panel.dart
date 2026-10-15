@@ -449,207 +449,226 @@ class _SketchSurfaceWorkspacePanelState
               title: Text('Superfície CAD gerada'),
               subtitle: Text('Registrada, persistida e visível na cena.'),
             ),
-          ...[
-            const Divider(),
-            const ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.waves_outlined),
-              title: Text('Continuidade da superfície'),
-              subtitle: Text('Build → measure → approve'),
-            ),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                OutlinedButton(
-                  onPressed:
-                      controller.busy || !controller.canInspectSurfaceContinuity
-                      ? null
-                      : controller.inspectSelectedG0,
-                  child: const Text('Inspecionar G0'),
-                ),
-                OutlinedButton(
-                  onPressed:
-                      controller.busy ||
-                          !controller.canInspectSurfaceContinuity ||
-                          controller.continuityPreview != null
-                      ? null
-                      : controller.previewSelectedG1,
-                  child: const Text('Prévia G1'),
-                ),
-              ],
-            ),
-            if (!controller.canInspectSurfaceContinuity)
-              const Text(
-                'Select exactly two Surfaces to inspect G0 or preview G1.',
-                style: TextStyle(fontSize: 11),
+          ExpansionTile(
+            initiallyExpanded: false,
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Continuidade'),
+            subtitle: const Text('G0/G1 e análise de qualidade'),
+            children: [
+              const Divider(),
+              const ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                leading: Icon(Icons.waves_outlined),
+                title: Text('Continuidade da superfície'),
+                subtitle: Text('Build → measure → approve'),
               ),
-            if (controller.continuityPreview != null)
-              Row(
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
                 children: [
-                  Expanded(
-                    child: FilledButton(
-                      onPressed: controller.busy
-                          ? null
-                          : controller.confirmSelectedG1,
-                      child: const Text('Confirmar G1'),
-                    ),
+                  OutlinedButton(
+                    onPressed:
+                        controller.busy ||
+                            !controller.canInspectSurfaceContinuity
+                        ? null
+                        : controller.inspectSelectedG0,
+                    child: const Text('Inspecionar G0'),
                   ),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: controller.busy
-                          ? null
-                          : controller.cancelSelectedG1,
-                      child: const Text('Cancelar'),
-                    ),
+                  OutlinedButton(
+                    onPressed:
+                        controller.busy ||
+                            !controller.canInspectSurfaceContinuity ||
+                            controller.continuityPreview != null
+                        ? null
+                        : controller.previewSelectedG1,
+                    child: const Text('Prévia G1'),
                   ),
                 ],
               ),
-            if (controller.selectedSurfaceForQuality != null) ...[
-              const SizedBox(height: 8),
-              const Text(
-                'Independent analysis',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              for (final kind in ProfessionalAnalysisKind.values)
-                Builder(
-                  builder: (context) {
-                    final setting = controller.selectedSurfaceAnalysisSettings
-                        .where((item) => item.kind == kind)
-                        .firstOrNull;
-                    final enabled = setting?.enabled ?? false;
-                    final intensity = setting?.intensity ?? 0.7;
-                    return Column(
-                      children: [
-                        CheckboxListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(switch (kind) {
-                            ProfessionalAnalysisKind.zebra => 'Zebra',
-                            ProfessionalAnalysisKind.reflection => 'Reflection',
-                            ProfessionalAnalysisKind.curvature => 'Curvature',
-                          }),
-                          value: enabled,
-                          onChanged: controller.busy
-                              ? null
-                              : (value) => controller.setSurfaceQualityAnalysis(
-                                  kind,
-                                  enabled: value ?? false,
-                                  intensity: intensity,
-                                ),
-                        ),
-                        if (enabled)
-                          Slider(
-                            value: intensity,
-                            min: 0,
-                            max: 1,
-                            divisions: 20,
-                            label: intensity.toStringAsFixed(2),
+              if (!controller.canInspectSurfaceContinuity)
+                const Text(
+                  'Select exactly two Surfaces to inspect G0 or preview G1.',
+                  style: TextStyle(fontSize: 11),
+                ),
+              if (controller.continuityPreview != null)
+                Row(
+                  children: [
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: controller.busy
+                            ? null
+                            : controller.confirmSelectedG1,
+                        child: const Text('Confirmar G1'),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: controller.busy
+                            ? null
+                            : controller.cancelSelectedG1,
+                        child: const Text('Cancelar'),
+                      ),
+                    ),
+                  ],
+                ),
+              if (controller.selectedSurfaceForQuality != null) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Independent analysis',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                for (final kind in ProfessionalAnalysisKind.values)
+                  Builder(
+                    builder: (context) {
+                      final setting = controller.selectedSurfaceAnalysisSettings
+                          .where((item) => item.kind == kind)
+                          .firstOrNull;
+                      final enabled = setting?.enabled ?? false;
+                      final intensity = setting?.intensity ?? 0.7;
+                      return Column(
+                        children: [
+                          CheckboxListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(switch (kind) {
+                              ProfessionalAnalysisKind.zebra => 'Zebra',
+                              ProfessionalAnalysisKind.reflection =>
+                                'Reflection',
+                              ProfessionalAnalysisKind.curvature => 'Curvature',
+                            }),
+                            value: enabled,
                             onChanged: controller.busy
                                 ? null
                                 : (value) =>
                                       controller.setSurfaceQualityAnalysis(
                                         kind,
-                                        enabled: true,
-                                        intensity: value,
+                                        enabled: value ?? false,
+                                        intensity: intensity,
                                       ),
                           ),
-                      ],
-                    );
-                  },
-                ),
-            ] else ...[
-              const SizedBox(height: 8),
-              const Text(
-                'Independent analysis',
-                style: TextStyle(fontWeight: FontWeight.w600),
-              ),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: const [
-                  OutlinedButton(onPressed: null, child: Text('Zebra')),
-                  OutlinedButton(onPressed: null, child: Text('Reflexão')),
-                  OutlinedButton(onPressed: null, child: Text('Curvatura')),
-                ],
-              ),
-              const Text(
-                'Select one Surface to enable the quality analyses.',
-                style: TextStyle(fontSize: 11),
-              ),
-            ],
-          ],
-        ],
-        ...[
-          const Divider(),
-          if (!_dedicatedSurfaceCommand) ...[
-            const ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.auto_awesome_motion),
-              title: Text('Superfície profissional'),
-              subtitle: Text('Loft · Sweep · Blend · Offset'),
-            ),
-            Text(
-              '${controller.geometrySelection.shapeHandles.length} kernel shape(s) · ${controller.activeSketch == null ? 0 : 1} active Sketch',
-            ),
-            const Text('Criar', style: TextStyle(fontWeight: FontWeight.w600)),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                for (final tool in const [
-                  ProfessionalSurfaceTool.loft,
-                  ProfessionalSurfaceTool.sweep,
-                  ProfessionalSurfaceTool.fill,
-                  ProfessionalSurfaceTool.patch,
-                  ProfessionalSurfaceTool.blend,
-                  ProfessionalSurfaceTool.fillet,
-                  ProfessionalSurfaceTool.sew,
-                ])
-                  OutlinedButton.icon(
-                    icon: Icon(switch (tool) {
-                      ProfessionalSurfaceTool.loft => Icons.view_in_ar,
-                      ProfessionalSurfaceTool.sweep => Icons.route,
-                      ProfessionalSurfaceTool.fill => Icons.format_color_fill,
-                      ProfessionalSurfaceTool.patch => Icons.grid_4x4,
-                      ProfessionalSurfaceTool.blend => Icons.rounded_corner,
-                      ProfessionalSurfaceTool.fillet => Icons.blur_circular,
-                      ProfessionalSurfaceTool.sew => Icons.hub_outlined,
-                      _ => Icons.layers,
-                    }),
-                    onPressed: controller.busy
-                        ? null
-                        : () {
-                            if (tool == ProfessionalSurfaceTool.loft ||
-                                tool == ProfessionalSurfaceTool.sweep ||
-                                tool == ProfessionalSurfaceTool.blend ||
-                                tool == ProfessionalSurfaceTool.fill ||
-                                tool == ProfessionalSurfaceTool.fillet ||
-                                tool == ProfessionalSurfaceTool.sew) {
-                              _openGuidedSurfaceCommand(tool);
-                              return;
-                            }
-                            controller.previewProfessionalSurface(tool);
-                          },
-                    label: Text(
-                      tool.name[0].toUpperCase() + tool.name.substring(1),
-                    ),
+                          if (enabled)
+                            Slider(
+                              value: intensity,
+                              min: 0,
+                              max: 1,
+                              divisions: 20,
+                              label: intensity.toStringAsFixed(2),
+                              onChanged: controller.busy
+                                  ? null
+                                  : (value) =>
+                                        controller.setSurfaceQualityAnalysis(
+                                          kind,
+                                          enabled: true,
+                                          intensity: value,
+                                        ),
+                            ),
+                        ],
+                      );
+                    },
                   ),
+              ] else ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Independent analysis',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: const [
+                    OutlinedButton(onPressed: null, child: Text('Zebra')),
+                    OutlinedButton(onPressed: null, child: Text('Reflexão')),
+                    OutlinedButton(onPressed: null, child: Text('Curvatura')),
+                  ],
+                ),
+                const Text(
+                  'Select one Surface to enable the quality analyses.',
+                  style: TextStyle(fontSize: 11),
+                ),
               ],
-            ),
-          ] else
-            ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: const Icon(Icons.auto_awesome_motion),
-              title: Text(
-                '${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name[0].toUpperCase()}${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name.substring(1)} Surface',
-              ),
-              subtitle: const Text('Dedicated command editor'),
-            ),
+            ],
+          ),
+          ExpansionTile(
+            initiallyExpanded:
+                guidedSurfaceTool != null || _dedicatedSurfaceCommand,
+            tilePadding: EdgeInsets.zero,
+            title: const Text('Ferramentas de superfície'),
+            subtitle: const Text('Criar, editar e analisar'),
+            children: [
+              if (!_dedicatedSurfaceCommand) ...[
+                const ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.auto_awesome_motion),
+                  title: Text('Superfície profissional'),
+                  subtitle: Text('Loft · Sweep · Blend · Offset'),
+                ),
+                Text(
+                  '${controller.geometrySelection.shapeHandles.length} kernel shape(s) · ${controller.activeSketch == null ? 0 : 1} active Sketch',
+                ),
+                const Text(
+                  'Criar',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                ),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final tool in const [
+                      ProfessionalSurfaceTool.loft,
+                      ProfessionalSurfaceTool.sweep,
+                      ProfessionalSurfaceTool.fill,
+                      ProfessionalSurfaceTool.patch,
+                      ProfessionalSurfaceTool.blend,
+                      ProfessionalSurfaceTool.fillet,
+                      ProfessionalSurfaceTool.sew,
+                    ])
+                      OutlinedButton.icon(
+                        icon: Icon(switch (tool) {
+                          ProfessionalSurfaceTool.loft => Icons.view_in_ar,
+                          ProfessionalSurfaceTool.sweep => Icons.route,
+                          ProfessionalSurfaceTool.fill =>
+                            Icons.format_color_fill,
+                          ProfessionalSurfaceTool.patch => Icons.grid_4x4,
+                          ProfessionalSurfaceTool.blend => Icons.rounded_corner,
+                          ProfessionalSurfaceTool.fillet => Icons.blur_circular,
+                          ProfessionalSurfaceTool.sew => Icons.hub_outlined,
+                          _ => Icons.layers,
+                        }),
+                        onPressed: controller.busy
+                            ? null
+                            : () {
+                                if (tool == ProfessionalSurfaceTool.loft ||
+                                    tool == ProfessionalSurfaceTool.sweep ||
+                                    tool == ProfessionalSurfaceTool.blend ||
+                                    tool == ProfessionalSurfaceTool.fill ||
+                                    tool == ProfessionalSurfaceTool.fillet ||
+                                    tool == ProfessionalSurfaceTool.sew) {
+                                  _openGuidedSurfaceCommand(tool);
+                                  return;
+                                }
+                                controller.previewProfessionalSurface(tool);
+                              },
+                        label: Text(
+                          tool.name[0].toUpperCase() + tool.name.substring(1),
+                        ),
+                      ),
+                  ],
+                ),
+              ] else
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: const Icon(Icons.auto_awesome_motion),
+                  title: Text(
+                    '${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name[0].toUpperCase()}${(guidedSurfaceTool ?? widget.initialSurfaceTool)!.name.substring(1)} Surface',
+                  ),
+                  subtitle: const Text('Editor da operação'),
+                ),
+            ],
+          ),
           const SizedBox(height: 8),
           if (guidedSurfaceTool == ProfessionalSurfaceTool.sew &&
               controller.selectedSewBody != null) ...[
