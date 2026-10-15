@@ -19,6 +19,13 @@ const bool kFlcadDevShadedDerivedNormals =
       defaultValue: false,
     );
 
+const bool kFlcadDevShadedLightingExperiment =
+    kDebugMode &&
+    bool.fromEnvironment(
+      'FLCAD_DEV_SHADED_LIGHTING_EXPERIMENT',
+      defaultValue: false,
+    );
+
 bool isShadedReferenceOverlay(CadSceneEntity entity) {
   // Transient previews explicitly marked by the owning operation are safe to
   // hide for this visual comparison. Documented planar CAD surfaces are not.
@@ -58,15 +65,30 @@ List<double>? shadedDerivedNormals(Map<String, dynamic> geometry) {
     final ic = triangles[offset + 2];
     if (ia is! num || ib is! num || ic is! num) return null;
     final a = ia.toInt(), b = ib.toInt(), c = ic.toInt();
-    if (a < 0 || b < 0 || c < 0 || a >= vertexCount || b >= vertexCount || c >= vertexCount) {
+    if (a < 0 ||
+        b < 0 ||
+        c < 0 ||
+        a >= vertexCount ||
+        b >= vertexCount ||
+        c >= vertexCount) {
       return null;
     }
-    final ax = (nodes[b * 3] as num).toDouble() - (nodes[a * 3] as num).toDouble();
-    final ay = (nodes[b * 3 + 1] as num).toDouble() - (nodes[a * 3 + 1] as num).toDouble();
-    final az = (nodes[b * 3 + 2] as num).toDouble() - (nodes[a * 3 + 2] as num).toDouble();
-    final bx = (nodes[c * 3] as num).toDouble() - (nodes[a * 3] as num).toDouble();
-    final by = (nodes[c * 3 + 1] as num).toDouble() - (nodes[a * 3 + 1] as num).toDouble();
-    final bz = (nodes[c * 3 + 2] as num).toDouble() - (nodes[a * 3 + 2] as num).toDouble();
+    final ax =
+        (nodes[b * 3] as num).toDouble() - (nodes[a * 3] as num).toDouble();
+    final ay =
+        (nodes[b * 3 + 1] as num).toDouble() -
+        (nodes[a * 3 + 1] as num).toDouble();
+    final az =
+        (nodes[b * 3 + 2] as num).toDouble() -
+        (nodes[a * 3 + 2] as num).toDouble();
+    final bx =
+        (nodes[c * 3] as num).toDouble() - (nodes[a * 3] as num).toDouble();
+    final by =
+        (nodes[c * 3 + 1] as num).toDouble() -
+        (nodes[a * 3 + 1] as num).toDouble();
+    final bz =
+        (nodes[c * 3 + 2] as num).toDouble() -
+        (nodes[a * 3 + 2] as num).toDouble();
     final nx = ay * bz - az * by;
     final ny = az * bx - ax * bz;
     final nz = ax * by - ay * bx;

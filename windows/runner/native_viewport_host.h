@@ -88,6 +88,7 @@ private:
     uint32_t pick[4]{};
     uint32_t managed_face[4]{};
     float normal_view[16];
+    uint32_t lighting[4]{};
   };
 
   void HandleMethod(const flutter::MethodCall<flutter::EncodableValue>& call,
@@ -165,6 +166,7 @@ private:
   FlutterDesktopGpuSurfaceDescriptor surface_descriptor_{};
   uint32_t width_ = 1, height_ = 1;
   uint32_t render_style_ = 0;
+  bool shaded_lighting_experiment_ = false;
   flcad::render::CadCameraSystem camera_;
   double fps_ = 0, upload_ms_ = 0, render_ms_ = 0, picking_ms_ = 0;
   uint64_t frames_ = 0, triangles_ = 0;

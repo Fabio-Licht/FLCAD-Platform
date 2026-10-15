@@ -17,7 +17,7 @@ using namespace DirectX;
 
 namespace {
 const char *kShader = R"(
-cbuffer Scene : register(b0) { row_major float4x4 mvp; float4 color; uint4 pick; uint4 managedFace; row_major float4x4 normalView; };
+cbuffer Scene : register(b0) { row_major float4x4 mvp; float4 color; uint4 pick; uint4 managedFace; row_major float4x4 normalView; uint4 lighting; };
 struct In { float3 p:POSITION; float3 n:NORMAL; };
 struct Out { float4 p:SV_POSITION; float3 n:NORMAL; };
 Out VSMain(In i) { Out o; o.p=mul(float4(i.p,1),mvp); o.n=mul(i.n,(float3x3)normalView); return o; }
@@ -25,8 +25,10 @@ float4 PSMain(Out i,uint primitiveId:SV_PrimitiveID):SV_TARGET {
  float3 n=normalize(i.n);
  // Rigid world-to-view rotation only: preserve oriented surface normals.
  // Bounded camera-linked lights; a back-facing normal keeps ambient light.
- float d=.42+.46*saturate(dot(n,normalize(float3(-.22,.48,.78))))+
-         .12*saturate(dot(n,normalize(float3(.66,-.28,.42))));
+ float ambient=.42, key=.46, fill=.12;
+ if (lighting.x > 0 && pick.x == 0) { ambient=.30; key=.54; fill=.16; }
+ float d=ambient+key*saturate(dot(n,normalize(float3(-.22,.48,.78))))+
+         fill*saturate(dot(n,normalize(float3(.66,-.28,.42))));
  float3 result=color.rgb*d;
  uint faceId=primitiveId+1;
  if(managedFace.y>0 && faceId>=managedFace.x && faceId<managedFace.x+managedFace.y)
@@ -57,7 +59,7 @@ LineOut PSLine(Out i) {
 )";
 
 const char *kPickShader = R"(
-cbuffer Scene : register(b0) { row_major float4x4 mvp; float4 color; uint4 pick; uint4 managedFace; row_major float4x4 normalView; };
+cbuffer Scene : register(b0) { row_major float4x4 mvp; float4 color; uint4 pick; uint4 managedFace; row_major float4x4 normalView; uint4 lighting; };
 struct MeshIn { float3 p:POSITION; float3 n:NORMAL; };
 struct PickIn { float3 p:POSITION; uint id:PICKID; };
 struct Out { float4 p:SV_POSITION; nointerpolation uint id:PICKID; };
@@ -115,6 +117,10 @@ void NativeViewportHost::HandleMethod(
           ? static_cast<uint32_t>(Number(*Find(*arguments, "width"))) : 1;
       const uint32_t height = arguments && Find(*arguments, "height")
           ? static_cast<uint32_t>(Number(*Find(*arguments, "height"))) : 1;
+      if (const auto *lighting = Find(*arguments, "shadedLightingExperiment")) {
+        if (const auto *value = std::get_if<bool>(lighting))
+          shaded_lighting_experiment_ = *value;
+      }
       Initialize(width, height);
       result->Success(flutter::EncodableValue(texture_id_));
     } else if (call.method_name() == "resize" && arguments) {
@@ -671,6 +677,8 @@ void NativeViewportHost::Render() {
   XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(constants.normal_view),
                  frame.view);
   constants.color[0]=.30f;constants.color[1]=.50f;constants.color[2]=.68f;constants.color[3]=1;
+  constants.lighting[0] = shaded_lighting_experiment_ ? 1u : 0u;
+  constants.pick[0] = render_style_;
   UINT stride=sizeof(Vertex),offset=0;
   context_->IASetInputLayout(input_layout_.Get());context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   context_->VSSetShader(vertex_shader_.Get(),nullptr,0);context_->VSSetConstantBuffers(0,1,constants_.GetAddressOf());context_->PSSetShader(pixel_shader_.Get(),nullptr,0);context_->PSSetConstantBuffers(0,1,constants_.GetAddressOf());

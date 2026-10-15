@@ -437,6 +437,7 @@ class NativeViewportBridge extends ChangeNotifier {
   final CadSceneDisplayAdapter adapter = CadSceneDisplayAdapter();
   int? textureId;
   bool available = false;
+
   /// True only after the host has acknowledged the current scene snapshot.
   /// A texture alone is not evidence that presentation buffers are ready.
   bool sceneReady = true;
@@ -516,6 +517,7 @@ class NativeViewportBridge extends ChangeNotifier {
           .invokeMethod<int>('initialize', {
             'width': width.round().clamp(1, 16384),
             'height': height.round().clamp(1, 16384),
+            'shadedLightingExperiment': kFlcadDevShadedLightingExperiment,
           });
       if (_disposed || generation != _generation) return false;
       textureId = initializedTextureId;
