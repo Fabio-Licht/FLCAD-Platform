@@ -8,6 +8,7 @@ import '../scene/cad_scene_graph.dart';
 import '../rendering/cad_root_color.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
 import '../rendering/mesh_derived_edge_classifier.dart';
+import '../rendering/mesh_derived_edge_refiner.dart';
 import '../rendering/stl_display_lod.dart';
 import '../camera/cad_camera_controller.dart';
 
@@ -413,7 +414,9 @@ Map<String, Object?>? _meshDerivedEdgesForEntity(
       )) {
     return null;
   }
-  final segments = classification.segments;
+  final segments = kFlcadDevMeshDerivedEdgeRefinement
+      ? meshDerivedPresentationSegments(classification)
+      : classification.segments;
   if (segments.isEmpty) return null;
   return {
     'source': meshDerivedEdgeSource,
