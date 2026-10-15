@@ -62,6 +62,8 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> index_buffer;
     std::vector<Vertex> display_edges;
     Microsoft::WRL::ComPtr<ID3D11Buffer> display_edge_buffer;
+    std::vector<Vertex> mesh_derived_edges;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> mesh_derived_edge_buffer;
     std::vector<PickVertex> edge_vertices;
     std::vector<PickVertex> point_vertices;
     Microsoft::WRL::ComPtr<ID3D11Buffer> edge_buffer;

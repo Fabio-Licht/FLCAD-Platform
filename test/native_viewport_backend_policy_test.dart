@@ -99,6 +99,26 @@ void main() {
     scene.dispose();
   });
 
+  test('STL Arestas aceita meshDerived, mas Wireframe mantém contrato CAD', () {
+    final scene = CadSceneGraph()
+      ..upsert(
+        const CadSceneEntity(
+          id: 'stl',
+          kind: CadSceneEntityKind.mesh,
+          geometry: {
+            'nodes': [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            'triangles': [0, 1, 2],
+          },
+        ),
+      );
+    expect(nativeSceneUnsupportedReason(scene, style: 1), isNull);
+    expect(
+      nativeSceneUnsupportedReason(scene, style: 2),
+      contains('arestas topológicas'),
+    );
+    scene.dispose();
+  });
+
   test(
     'new window bridge waits for retirement and inactive dispose cannot stop its successor',
     () async {
@@ -165,6 +185,34 @@ void main() {
       camera.dispose();
       scene.dispose();
     },
+  );
+
+  test(
+    'native scene becomes ready only after snapshot acknowledgement',
+    () async {
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'initialize') return 42;
+        if (call.method == 'snapshot' || call.method == 'delta') {
+          return (call.arguments as Map)['revision'];
+        }
+        return null;
+      });
+      final bridge = NativeViewportBridge();
+      final scene = CadSceneGraph()..upsert(entity());
+      expect(await bridge.initialize(800, 600), isTrue);
+      expect(bridge.available, isTrue);
+      expect(bridge.sceneReady, isFalse);
+      await bridge.sendInitial(scene);
+      expect(bridge.sceneReady, isTrue);
+      await bridge.deactivate();
+      expect(bridge.sceneReady, isFalse);
+      bridge.dispose();
+      scene.dispose();
+      messenger.setMockMethodCallHandler(channel, null);
+    },
+    skip: !Platform.isWindows,
   );
 
   test('inactive bridge never encodes or retains scene geometry', () async {

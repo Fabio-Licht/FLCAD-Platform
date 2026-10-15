@@ -494,6 +494,43 @@ void NativeViewportHost::ApplySnapshot(const flutter::EncodableMap& snapshot, bo
         }
       }
     }
+    if (const auto *derived_value = Find(*map, "meshDerivedEdges")) {
+      const auto *derived = std::get_if<flutter::EncodableMap>(derived_value);
+      const auto *source = derived ? std::get_if<std::string>(
+          Find(*derived, "source")) : nullptr;
+      const auto *segments = derived ? std::get_if<flutter::EncodableList>(
+          Find(*derived, "segments")) : nullptr;
+      if (!source || *source != "meshDerived" || !segments ||
+          segments->size() > 250000)
+        throw std::runtime_error("Invalid mesh-derived edge payload");
+      for (const auto &segment_value : *segments) {
+        const auto *segment = std::get_if<flutter::EncodableMap>(&segment_value);
+        const auto *segment_start = segment ? std::get_if<flutter::EncodableList>(
+            Find(*segment, "start")) : nullptr;
+        const auto *end = segment ? std::get_if<flutter::EncodableList>(
+            Find(*segment, "end")) : nullptr;
+        if (!segment || !segment_start || !end || segment_start->size() != 3 ||
+            end->size() != 3)
+          throw std::runtime_error("Invalid mesh-derived edge segment");
+        const auto *kind = std::get_if<std::string>(Find(*segment, "kind"));
+        if (!kind || (*kind != "openBoundary" && *kind != "crease" &&
+                     *kind != "ambiguous"))
+          throw std::runtime_error("Invalid mesh-derived edge kind");
+        Vertex a{static_cast<float>(Number((*segment_start)[0])),
+                 static_cast<float>(Number((*segment_start)[1])),
+                 static_cast<float>(Number((*segment_start)[2])), 0, 0, 1};
+        Vertex b{static_cast<float>(Number((*end)[0])),
+                 static_cast<float>(Number((*end)[1])),
+                 static_cast<float>(Number((*end)[2])), 0, 0, 1};
+        for (const Vertex &v : {a, b}) {
+          if (!std::isfinite(v.x) || !std::isfinite(v.y) ||
+              !std::isfinite(v.z))
+            throw std::runtime_error("Invalid mesh-derived edge point");
+        }
+        entity.mesh_derived_edges.push_back(a);
+        entity.mesh_derived_edges.push_back(b);
+      }
+    }
     Upload(entity);
     entities_[*id] = std::move(entity);
     // A full geometry replacement invalidates renderer-local face identity.
@@ -525,6 +562,13 @@ void NativeViewportHost::Upload(SceneEntity& entity) {
     D3D11_SUBRESOURCE_DATA edges{entity.display_edges.data()};
     Check(device_->CreateBuffer(&vb, &edges, &entity.display_edge_buffer),
           "CAD edges VB");
+  }
+  if (!entity.mesh_derived_edges.empty()) {
+    vb.ByteWidth = static_cast<UINT>(
+        entity.mesh_derived_edges.size() * sizeof(Vertex));
+    D3D11_SUBRESOURCE_DATA edges{entity.mesh_derived_edges.data()};
+    Check(device_->CreateBuffer(&vb, &edges, &entity.mesh_derived_edge_buffer),
+          "mesh-derived edges VB");
   }
 }
 
@@ -696,10 +740,19 @@ void NativeViewportHost::Render() {
     const int offsets[][2] = {{0, 0}, {-1, 0}, {1, 0}, {0, -1}, {0, 1}};
     const int offset_count = 1; // One screen-pixel CAD line; never dilate contours.
     for (const auto &[id, e] : entities_) {
-      if (!e.visible || !e.display_edge_buffer)
+      ID3D11Buffer *edge_buffer =
+          (render_style_ == 1 && e.display_edge_buffer)
+              ? e.display_edge_buffer.Get()
+              : (render_style_ == 1 ? e.mesh_derived_edge_buffer.Get()
+                                    : e.display_edge_buffer.Get());
+      const auto edge_count =
+          (render_style_ == 1 && !e.display_edges.empty())
+              ? e.display_edges.size()
+              : (render_style_ == 1 ? e.mesh_derived_edges.size()
+                                    : e.display_edges.size());
+      if (!e.visible || !edge_buffer || edge_count == 0)
         continue;
-      context_->IASetVertexBuffers(0, 1, e.display_edge_buffer.GetAddressOf(),
-                                   &stride, &offset);
+      context_->IASetVertexBuffers(0, 1, &edge_buffer, &stride, &offset);
       if (render_style_ == 2) {
         const bool selected = e.selected || id == operational_selection_entity_id_;
         constants.color[0] = selected ? .92f : .52f;
@@ -715,7 +768,7 @@ void NativeViewportHost::Render() {
               static_cast<float>(height_), 0, 1};
           context_->RSSetViewports(1, &edge_viewport);
         }
-        context_->Draw(static_cast<UINT>(e.display_edges.size()), 0);
+        context_->Draw(static_cast<UINT>(edge_count), 0);
       }
     }
     context_->RSSetViewports(1, &vp);

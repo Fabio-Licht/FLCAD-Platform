@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import '../scene/cad_scene_graph.dart';
 import '../rendering/cad_root_color.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
+import '../rendering/mesh_derived_edge_classifier.dart';
 import '../rendering/stl_display_lod.dart';
 import '../camera/cad_camera_controller.dart';
 
@@ -113,7 +114,12 @@ String? nativeSceneUnsupportedReason(
     if (payloadIssue != null) {
       return 'Payload Native GPU inválido para $category: $payloadIssue.';
     }
-    if ((style == 1 || style == 2) && geometry['topologicalEdges'] is! List) {
+    final missingTopologicalEdges = geometry['topologicalEdges'] is! List;
+    if ((style == 1 &&
+            missingTopologicalEdges &&
+            (entity.kind != CadSceneEntityKind.mesh ||
+                _meshDerivedEdgesForEntity(entity, geometry) == null)) ||
+        (style == 2 && missingTopologicalEdges)) {
       return '$category sem arestas topológicas CAD para este modo.';
     }
     try {
@@ -313,6 +319,8 @@ class CadSceneDisplayAdapter {
         result['normals'] = presentation['normals'];
         result['triangles'] = presentation['triangles'];
         result['presentationLod'] = presentation['presentationLod'];
+        final meshEdges = _meshDerivedEdgesForEntity(entity, presentation);
+        if (meshEdges != null) result['meshDerivedEdges'] = meshEdges;
         return result;
       }
       final chunks = CadCanvasNormalPipeline.build(
@@ -328,6 +336,8 @@ class CadSceneDisplayAdapter {
       );
       final edges = presentation['topologicalEdges'];
       if (edges is List) result['topologicalEdges'] = edges;
+      final meshEdges = _meshDerivedEdgesForEntity(entity, presentation);
+      if (meshEdges != null) result['meshDerivedEdges'] = meshEdges;
       final faceRanges = presentation['faceTriangleRanges'];
       if (faceRanges is List) result['faceTriangleRanges'] = faceRanges;
       final rgb = cadRootSrgb(entity.geometry);
@@ -344,10 +354,74 @@ class CadSceneDisplayAdapter {
       geometry['triangles'],
       geometry['normals'],
       geometry['topologicalEdges'],
+      geometry['meshDerivedEdges'],
       geometry['faceTriangleRanges'],
       rgb is List && rgb.length == 3 ? (rgb[0], rgb[1], rgb[2]) : null,
     );
   }
+}
+
+final Expando<MeshDerivedEdgeObservation> _meshDerivedCache = Expando(
+  'mesh-derived-edges',
+);
+
+MeshDerivedEdgeObservation? cachedMeshDerivedEdgeObservation(
+  CadSceneEntity entity,
+) {
+  if (entity.kind != CadSceneEntityKind.mesh ||
+      cadPresentationGeometry(entity.geometry)['topologicalEdges'] is List) {
+    return null;
+  }
+  final geometry = cadPresentationGeometry(entity.geometry);
+  return _meshDerivedCache[geometry];
+}
+
+Map<String, Object?>? _meshDerivedEdgesForEntity(
+  CadSceneEntity entity,
+  Map<String, dynamic> geometry,
+) {
+  if (entity.kind != CadSceneEntityKind.mesh ||
+      geometry['topologicalEdges'] is List) {
+    return null;
+  }
+  final nodes = geometry['nodes'];
+  final triangles = geometry['triangles'];
+  if (nodes is! List || triangles is! List) return null;
+  final observation = _meshDerivedCache[geometry] ??= (() {
+    final stopwatch = Stopwatch()..start();
+    final classification = const MeshDerivedEdgeClassifier().classify(
+      vertices: nodes.cast<num>(),
+      triangles: triangles.cast<num>(),
+      normals: (geometry['normals'] as List?)?.cast<num>(),
+      config: const MeshDerivedEdgeClassifierConfig(
+        maxTriangles: 250000,
+        maxEdges: 250000,
+      ),
+    );
+    stopwatch.stop();
+    return MeshDerivedEdgeObservation(
+      classification: classification,
+      elapsedMicros: stopwatch.elapsedMicroseconds,
+    );
+  })();
+  final classification = observation.classification;
+  if (classification.segments.isEmpty ||
+      classification.statistics.truncated ||
+      classification.diagnostics.contains('invalid_triangle_indices') ||
+      classification.diagnostics.contains(
+        'vertices_contain_non_finite_values',
+      )) {
+    return null;
+  }
+  final segments = classification.segments;
+  if (segments.isEmpty) return null;
+  return {
+    'source': meshDerivedEdgeSource,
+    'segments': [
+      for (final segment in segments)
+        {'start': segment.start, 'end': segment.end, 'kind': segment.kind.name},
+    ],
+  };
 }
 
 class NativeViewportBridge extends ChangeNotifier {
@@ -356,6 +430,9 @@ class NativeViewportBridge extends ChangeNotifier {
   final CadSceneDisplayAdapter adapter = CadSceneDisplayAdapter();
   int? textureId;
   bool available = false;
+  /// True only after the host has acknowledged the current scene snapshot.
+  /// A texture alone is not evidence that presentation buffers are ready.
+  bool sceneReady = true;
   NativeViewportStats stats = const NativeViewportStats();
   Timer? _statsTimer;
   bool _disposed = false;
@@ -374,6 +451,7 @@ class NativeViewportBridge extends ChangeNotifier {
   void _failed() {
     if (_disposed) return;
     available = false;
+    sceneReady = false;
     _statsTimer?.cancel();
     notifyListeners();
   }
@@ -384,6 +462,7 @@ class NativeViewportBridge extends ChangeNotifier {
     final ownsHost = identical(_hostOwner, this);
     ++_generation;
     available = false;
+    sceneReady = false;
     _statsTimer?.cancel();
     adapter.clear();
     _pendingScene = null;
@@ -424,6 +503,7 @@ class NativeViewportBridge extends ChangeNotifier {
     if (_disposed) return false;
     final generation = ++_generation;
     _hostOwner = this;
+    sceneReady = false;
     try {
       final initializedTextureId = await _channel
           .invokeMethod<int>('initialize', {
@@ -485,17 +565,23 @@ class NativeViewportBridge extends ChangeNotifier {
             final snapshot = replace
                 ? adapter.initial(next)
                 : adapter.delta(next);
-            if (snapshot.entities.isEmpty) continue;
+            if (snapshot.entities.isEmpty) {
+              if (replace) sceneReady = true;
+              continue;
+            }
             try {
               final ack = await _channel.invokeMethod<int>(
                 replace ? 'snapshot' : 'delta',
                 snapshot.toMessage(),
               );
-              if (!_disposed &&
-                  available &&
-                  generation == _generation &&
-                  ack == snapshot.revision) {
-                acknowledgedSceneRevision = ack!;
+              if (!_disposed && available && generation == _generation) {
+                if (ack == snapshot.revision) {
+                  acknowledgedSceneRevision = ack!;
+                }
+                // Method completion is the host acknowledgement. Real host
+                // snapshots return the revision, while older test/platform
+                // handlers may complete with no value.
+                if (replace) sceneReady = true;
               }
             } on PlatformException {
               if (generation == _generation) _failed();

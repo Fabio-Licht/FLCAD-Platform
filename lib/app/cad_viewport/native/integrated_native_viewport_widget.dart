@@ -133,7 +133,10 @@ class _IntegratedCadViewportWidgetState
   Future<void> _handoff = Future<void>.value();
   String? _backendNotice;
   bool get _nativeActive =>
-      backend == ViewportBackend.nativeGpu && native.available && !_switching;
+      backend == ViewportBackend.nativeGpu &&
+      native.available &&
+      native.sceneReady &&
+      !_switching;
   Timer? _deltaDebounce;
   NativeViewportPick? _nativeHover;
   OperationalResolution? _operationalHover;
@@ -225,6 +228,7 @@ class _IntegratedCadViewportWidgetState
       fallbackReason: _unsupportedReason,
       highlightActive:
           _managedFaceSelection != null || _managedFaceHover != null,
+      nativeSceneReady: native.sceneReady,
     );
     _diagnosticReport = report;
     debugPrint('[viewport-diagnostic] ${report.toStructuredLog()}');
@@ -236,6 +240,7 @@ class _IntegratedCadViewportWidgetState
       identical(scene, widget.scene) &&
       backend == ViewportBackend.nativeGpu &&
       native.available &&
+      native.sceneReady &&
       !_switching &&
       !_nativeNavigating;
 
@@ -708,7 +713,7 @@ class _IntegratedCadViewportWidgetState
         size.height <= 1) {
       return;
     }
-    if (native.available) {
+    if (native.available && native.sceneReady) {
       if (_nativeSize != size) {
         _nativeSize = size;
         await native.resize(size.width, size.height);
@@ -737,7 +742,10 @@ class _IntegratedCadViewportWidgetState
     _nativeSize = size;
     if (ready) {
       await native.sendInitial(widget.scene);
-      if (mounted && generation == _backendGeneration && native.available) {
+      if (mounted &&
+          generation == _backendGeneration &&
+          native.available &&
+          native.sceneReady) {
         await native.sendDelta(widget.scene);
         int revision;
         do {
@@ -751,7 +759,9 @@ class _IntegratedCadViewportWidgetState
     }
     _recordViewportDiagnostics();
     _initializing = false;
-    if (mounted && generation == _backendGeneration && !native.available) {
+    if (mounted &&
+        generation == _backendGeneration &&
+        (!native.available || !native.sceneReady)) {
       // Queue cleanup after this initialization has drained.
       _switchBackend(ViewportBackend.flutterCanvas, recovery: true);
     } else if (mounted && !_switching) {
@@ -844,7 +854,7 @@ class _IntegratedCadViewportWidgetState
       return;
     }
     if (backend == ViewportBackend.nativeGpu) {
-      if (!native.available || _initializing) return;
+      if (!native.available || !native.sceneReady || _initializing) return;
       // Publish the scene delta before delivering Fit to the real camera/host.
       await native.sendDelta(widget.scene);
     }
@@ -852,7 +862,8 @@ class _IntegratedCadViewportWidgetState
         identical(scene, widget.scene) &&
         !_switching &&
         generation == _backendGeneration &&
-        (backend != ViewportBackend.nativeGpu || native.available)) {
+        (backend != ViewportBackend.nativeGpu ||
+            (native.available && native.sceneReady))) {
       widget.onViewportReady?.call();
     }
   }
@@ -1088,11 +1099,7 @@ class _IntegratedCadViewportWidgetState
                         child: Padding(
                           padding: const EdgeInsets.all(6),
                           child: Text(
-                            '${_diagnosticReport!.backend} · '
-                            '${_diagnosticReport!.mode} · '
-                            '${_diagnosticReport!.entities.length} ent.\n'
-                            'tri: ${_diagnosticReport!.entities.fold<int>(0, (sum, item) => sum + item.triangles)} · '
-                            'arestas: ${_diagnosticReport!.entities.fold<int>(0, (sum, item) => sum + item.topologicalEdges)}',
+                            viewportDiagnosticOverlayText(_diagnosticReport!),
                             style: Theme.of(context).textTheme.labelSmall,
                           ),
                         ),

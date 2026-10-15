@@ -24,6 +24,9 @@ void main() {
       expect(initial.entities, hasLength(1));
       expect(initial.entities.single['nodes'], geometry['nodes']);
       expect(initial.entities.single['normals'], [0, 0, 1, 0, 0, 1, 0, 0, 1]);
+      final derived = initial.entities.single['meshDerivedEdges'] as Map;
+      expect(derived['source'], 'meshDerived');
+      expect(derived['segments'], hasLength(3));
 
       expect(adapter.delta(scene).entities, isEmpty);
       scene.select({'mesh:1'});
@@ -36,6 +39,43 @@ void main() {
       expect(adapter.delta(scene).entities.single['removed'], isTrue);
     },
   );
+
+  test('mesh-derived edges stay separate from BREP topology', () {
+    final mesh = CadSceneEntity(
+      id: 'stl:1',
+      kind: CadSceneEntityKind.mesh,
+      geometry: const {
+        'nodes': [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        'triangles': [0, 1, 2],
+      },
+    );
+    final brep = CadSceneEntity(
+      id: 'brep:1',
+      kind: CadSceneEntityKind.surface,
+      geometry: const {
+        'nodes': [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        'triangles': [0, 1, 2],
+        'topologicalEdges': [
+          [0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        ],
+      },
+    );
+    final snapshot = CadSceneDisplayAdapter().initial(
+      CadSceneGraph()
+        ..upsert(mesh)
+        ..upsert(brep),
+    );
+    final stl = snapshot.entities.firstWhere(
+      (entity) => entity['id'] == 'stl:1',
+    );
+    final cad = snapshot.entities.firstWhere(
+      (entity) => entity['id'] == 'brep:1',
+    );
+    expect(stl['meshDerivedEdges'], isA<Map>());
+    expect(stl['topologicalEdges'], isNull);
+    expect(cad['topologicalEdges'], isNotNull);
+    expect(cad['meshDerivedEdges'], isNull);
+  });
 
   test('managed B-Rep face ranges publish once and never in display delta', () {
     final scene = CadSceneGraph()
