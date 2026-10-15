@@ -100,6 +100,7 @@ import 'contracts/bridge_context.dart';
 import 'contracts/bridge_selection.dart';
 import 'selection/mesh_region_builder.dart';
 import 'selection/section_manager.dart';
+import 'selection/section_sketch_connectivity.dart';
 import 'selection/geometry_selection_manager.dart';
 import '../runtime/cad_runtime.dart';
 import '../runtime/world_coordinate_system.dart';
@@ -4096,7 +4097,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final yAxis = normal.cross(xAxis).normalized;
     SketchVector vector(Vector3 value) =>
         SketchVector(value.x, value.y, value.z);
-    final chains = _orderedSectionChains(definition['segments'] as List);
+    final chains = _orderedSectionChainsForSection(definition);
     if (chains.isEmpty) {
       throw StateError('The selected Section has no connected segments.');
     }
@@ -4361,6 +4362,54 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     ];
   }
 
+  double _sectionConnectivityTolerance(Map<String, dynamic> definition) {
+    final recorded = (definition['toleranceUsed'] as num?)?.toDouble();
+    if (recorded != null && recorded.isFinite && recorded > 0) {
+      return recorded;
+    }
+    final absolute = (definition['absoluteTolerance'] as num?)?.toDouble();
+    final relative = (definition['relativeTolerance'] as num?)?.toDouble();
+    final configured = [
+      if (absolute != null && absolute.isFinite && absolute > 0) absolute,
+      if (relative != null && relative.isFinite && relative > 0) relative,
+    ];
+    if (configured.isNotEmpty) return configured.reduce(math.max);
+
+    // Preserve the dimensional legacy fallback when old Section payloads do
+    // not carry any tolerance metadata.
+    final rawSegments = definition['segments'];
+    if (rawSegments is List) {
+      final points = rawSegments
+          .whereType<List>()
+          .expand((segment) => segment)
+          .whereType<List>()
+          .map(Vector3.fromJson);
+      final scale = points.fold<double>(
+        1,
+        (value, point) => math.max(
+          value,
+          math.max(point.x.abs(), math.max(point.y.abs(), point.z.abs())),
+        ),
+      );
+      return math.max(1e-9, scale * 1e-9);
+    }
+    return 1e-9;
+  }
+
+  List<List<Vector3>> _orderedSectionChainsForSection(
+    Map<String, dynamic> definition,
+  ) {
+    final rawSegments = definition['segments'];
+    if (rawSegments is! List) return const [];
+    return SectionSketchConnectivity.orderChains(
+      rawSegments,
+      tolerance: _sectionConnectivityTolerance(definition),
+    );
+  }
+
+  // Kept for compatibility with non-Section callers that use the legacy
+  // scale-derived tolerance.
+  // ignore: unused_element
   List<List<Vector3>> _orderedSectionChains(List<dynamic> rawSegments) {
     final segments = rawSegments
         .map(
@@ -4441,7 +4490,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final definition = Map<String, dynamic>.from(
       source!.data['section'] as Map,
     );
-    final chains = _orderedSectionChains(definition['segments'] as List);
+    final chains = _orderedSectionChainsForSection(definition);
     final spline = sketch.metadata['conversion'] == 'spline';
     final tolerance =
         (sketch.metadata['tolerance'] as num?)?.toDouble() ?? 0.05;
@@ -4610,7 +4659,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .normalized;
     final yAxis = normal.cross(xAxis).normalized;
     final points = <List<double>>[];
-    for (final chain in _orderedSectionChains(definition['segments'] as List)) {
+    for (final chain in _orderedSectionChainsForSection(definition)) {
       final local = chain
           .map(
             (point) => SketchVector(
