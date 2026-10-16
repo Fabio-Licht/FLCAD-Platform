@@ -372,7 +372,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   @override
   void dispose() {
-    _restoreSketchPresentationVisibility();
+    if (_disposed) return;
+    _disposed = true;
+    // Final disposal must not touch SceneGraph: the runtime may already have
+    // disposed it. Normal project/session transitions restore visibility via
+    // detachProject() and _synchronizeSketchScene() while the scene is live.
+    _sketchPresentationVisibility.clear();
     // Hand the operational command ids back before this session stops serving
     // them; a later session installs its own handlers over the same registry.
     commands.releaseSessionCommands(this);
@@ -448,6 +453,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// previous session cannot revive tools, previews or selection.
   int _sketchSessionEpoch = 0;
   final Map<String, bool> _sketchPresentationVisibility = {};
+  bool _disposed = false;
 
   Future<void> _awaitProjectConfiguration() async {
     final projectId = runtime.document?.projectId;
