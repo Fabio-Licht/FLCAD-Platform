@@ -27,6 +27,12 @@ void main() {
       final derived = initial.entities.single['meshDerivedEdges'] as Map;
       expect(derived['source'], 'meshDerived');
       expect(derived['segments'], hasLength(3));
+      expect(
+        (derived['segments'] as List).every(
+          (segment) => segment['kind'] is String,
+        ),
+        isTrue,
+      );
 
       expect(adapter.delta(scene).entities, isEmpty);
       scene.select({'mesh:1'});
