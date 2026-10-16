@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -9,9 +10,15 @@ import '../rendering/cad_root_color.dart';
 import '../rendering/cad_canvas_normal_pipeline.dart';
 import '../rendering/mesh_derived_edge_classifier.dart';
 import '../rendering/mesh_derived_edge_refiner.dart';
+import '../rendering/mesh_silhouette_classifier.dart';
+import '../rendering/mesh_triangle_topology.dart';
 import '../rendering/shaded_debug_experiments.dart';
 import '../rendering/stl_display_lod.dart';
 import '../camera/cad_camera_controller.dart';
+
+const bool _viewportDiagnosticsEnabled =
+    kDebugMode &&
+    bool.fromEnvironment('FLCAD_DEV_VIEWPORT_DIAGNOSTICS', defaultValue: false);
 
 enum ViewportBackend { flutterCanvas, nativeGpu }
 
@@ -190,6 +197,12 @@ class NativeViewportStats {
     this.cameraRadius = 0,
     this.cameraNear = 0,
     this.cameraFar = 0,
+    this.silhouetteAcceptedSegments = 0,
+    this.silhouetteRejectedSegments = 0,
+    this.silhouetteDrawnSegments = 0,
+    this.meshDerivedDrawnSegments = 0,
+    this.displayEdgesDrawnSegments = 0,
+    this.presentationBuffer = 'none',
   });
   final double fps, uploadMs, renderMs, pickingMs;
   final int drawCalls, triangles;
@@ -203,6 +216,12 @@ class NativeViewportStats {
       drawIndexedCalls;
   final int fitCalls;
   final double cameraDistance, cameraRadius, cameraNear, cameraFar;
+  final int silhouetteAcceptedSegments,
+      silhouetteRejectedSegments,
+      silhouetteDrawnSegments,
+      meshDerivedDrawnSegments,
+      displayEdgesDrawnSegments;
+  final String presentationBuffer;
   final bool textureRegistered;
   factory NativeViewportStats.fromMap(
     Map<Object?, Object?> value,
@@ -234,6 +253,17 @@ class NativeViewportStats {
     cameraRadius: (value['cameraRadius'] as num?)?.toDouble() ?? 0,
     cameraNear: (value['cameraNear'] as num?)?.toDouble() ?? 0,
     cameraFar: (value['cameraFar'] as num?)?.toDouble() ?? 0,
+    silhouetteAcceptedSegments:
+        (value['silhouetteAcceptedSegments'] as num?)?.toInt() ?? 0,
+    silhouetteRejectedSegments:
+        (value['silhouetteRejectedSegments'] as num?)?.toInt() ?? 0,
+    silhouetteDrawnSegments:
+        (value['silhouetteDrawnSegments'] as num?)?.toInt() ?? 0,
+    meshDerivedDrawnSegments:
+        (value['meshDerivedDrawnSegments'] as num?)?.toInt() ?? 0,
+    displayEdgesDrawnSegments:
+        (value['displayEdgesDrawnSegments'] as num?)?.toInt() ?? 0,
+    presentationBuffer: value['presentationBuffer'] as String? ?? 'none',
   );
 }
 
@@ -370,6 +400,26 @@ final Expando<MeshDerivedEdgeObservation> _meshDerivedCache = Expando(
   'mesh-derived-edges',
 );
 
+final Expando<MeshTriangleTopology> _meshTopologyCache = Expando(
+  'shared-mesh-triangle-topology',
+);
+
+MeshTriangleTopology? _meshTopologyForEntity(
+  CadSceneEntity entity,
+  Map<String, dynamic> geometry,
+) {
+  if (entity.kind != CadSceneEntityKind.mesh) return null;
+  final nodes = geometry['nodes'];
+  final triangles = geometry['triangles'];
+  if (nodes is! List || triangles is! List) return null;
+  return _meshTopologyCache[geometry] ??= const MeshTriangleTopologyBuilder()
+      .build(
+        vertices: nodes.cast<num>(),
+        triangles: triangles.cast<num>(),
+        config: const MeshTriangleTopologyConfig(maxTriangles: 250000),
+      );
+}
+
 MeshDerivedEdgeObservation? cachedMeshDerivedEdgeObservation(
   CadSceneEntity entity,
 ) {
@@ -394,15 +444,25 @@ Map<String, Object?>? _meshDerivedEdgesForEntity(
   if (nodes is! List || triangles is! List) return null;
   final observation = _meshDerivedCache[geometry] ??= (() {
     final stopwatch = Stopwatch()..start();
-    final classification = const MeshDerivedEdgeClassifier().classify(
-      vertices: nodes.cast<num>(),
-      triangles: triangles.cast<num>(),
-      normals: (geometry['normals'] as List?)?.cast<num>(),
-      config: const MeshDerivedEdgeClassifierConfig(
-        maxTriangles: 250000,
-        maxEdges: 250000,
-      ),
-    );
+    final topology = _meshTopologyForEntity(entity, geometry);
+    final classification = topology == null
+        ? const MeshDerivedEdgeClassifier().classify(
+            vertices: nodes.cast<num>(),
+            triangles: triangles.cast<num>(),
+            normals: (geometry['normals'] as List?)?.cast<num>(),
+            config: const MeshDerivedEdgeClassifierConfig(
+              maxTriangles: 250000,
+              maxEdges: 250000,
+            ),
+          )
+        : const MeshDerivedEdgeClassifier().classifyTopology(
+            topology: topology,
+            normals: (geometry['normals'] as List?)?.cast<num>(),
+            config: const MeshDerivedEdgeClassifierConfig(
+              maxTriangles: 250000,
+              maxEdges: 250000,
+            ),
+          );
     stopwatch.stop();
     return MeshDerivedEdgeObservation(
       classification: classification,
@@ -431,6 +491,88 @@ Map<String, Object?>? _meshDerivedEdgesForEntity(
   };
 }
 
+Map<String, Object?>? _meshSilhouetteEdgesForEntity(
+  CadSceneEntity entity,
+  Map<String, dynamic> geometry,
+  CadCameraController camera,
+  FlcadDevStlSilhouetteMode mode,
+) {
+  if (mode == FlcadDevStlSilhouetteMode.original ||
+      entity.kind != CadSceneEntityKind.mesh ||
+      geometry['topologicalEdges'] is List) {
+    return null;
+  }
+  final topology = _meshTopologyForEntity(entity, geometry);
+  if (topology == null || topology.statistics.truncated) return null;
+  final classification = const MeshSilhouetteClassifier().classifyTopology(
+    topology: topology,
+    camera: MeshSilhouetteCamera(
+      eye: [
+        camera.presentationEye.x,
+        camera.presentationEye.y,
+        camera.presentationEye.z,
+      ],
+      target: [
+        camera.presentationTarget.x,
+        camera.presentationTarget.y,
+        camera.presentationTarget.z,
+      ],
+      up: [camera.up.x, camera.up.y, camera.up.z],
+      projection: camera.projectionMode.name == 'orthographic'
+          ? MeshSilhouetteProjection.orthographic
+          : MeshSilhouetteProjection.perspective,
+    ),
+    config: const MeshSilhouetteClassifierConfig(
+      maxTriangles: 250000,
+      maxEdges: 250000,
+    ),
+  );
+  if (classification.segments.isEmpty || classification.statistics.truncated) {
+    return null;
+  }
+  final segments = <({List<double> start, List<double> end, String kind})>[
+    for (final segment in classification.segments)
+      if (segment.kind == MeshSilhouetteEdgeKind.silhouette ||
+          segment.kind == MeshSilhouetteEdgeKind.openBoundary)
+        (start: segment.start, end: segment.end, kind: segment.kind.name),
+  ];
+  if (mode == FlcadDevStlSilhouetteMode.silhouetteWithCreases) {
+    final meshDerived = const MeshDerivedEdgeClassifier().classifyTopology(
+      topology: topology,
+      normals: (geometry['normals'] as List?)?.cast<num>(),
+      config: const MeshDerivedEdgeClassifierConfig(
+        maxTriangles: 250000,
+        maxEdges: 250000,
+      ),
+    );
+    segments.addAll(
+      meshDerived.segments
+          .where((segment) => segment.kind == MeshDerivedEdgeKind.crease)
+          .map(
+            (segment) => (
+              start: segment.start,
+              end: segment.end,
+              kind: segment.kind.name,
+            ),
+          ),
+    );
+  }
+  final payload = <String, Object?>{
+    'source': 'meshSilhouette',
+    'segments': [
+      for (final segment in segments)
+        {'start': segment.start, 'end': segment.end, 'kind': segment.kind},
+    ],
+  };
+  if (_viewportDiagnosticsEnabled) {
+    payload['diagnostics'] = diagnoseMeshSilhouette(
+      classification,
+      topology,
+    ).toJson();
+  }
+  return payload;
+}
+
 class NativeViewportBridge extends ChangeNotifier {
   int renderStyle = 0;
   static const MethodChannel _channel = MethodChannel('flcad/native_viewport');
@@ -443,6 +585,7 @@ class NativeViewportBridge extends ChangeNotifier {
   bool sceneReady = true;
   NativeViewportStats stats = const NativeViewportStats();
   Timer? _statsTimer;
+  Timer? _silhouetteTimer;
   bool _disposed = false;
   int _generation = 0;
   Future<void>? _shutdown;
@@ -452,6 +595,15 @@ class NativeViewportBridge extends ChangeNotifier {
   int acknowledgedSceneRevision = 0;
   Future<void>? _cameraDelivery;
   CadCameraController? _pendingCamera;
+  CadSceneGraph? _lastScene;
+  CadCameraController? _lastCamera;
+  int _silhouetteGeneration = 0;
+  int silhouetteUpdates = 0;
+  int silhouetteStaleDiscards = 0;
+  int silhouetteSegmentsSent = 0;
+  Map<String, Object?>? silhouetteDiagnostics;
+  String? silhouetteDiagnosticsProjection;
+  int silhouetteDiagnosticsGeneration = 0;
   // The channel/host belongs to the window, including across widget rebuilds.
   static Future<void>? _hostDrain;
   static NativeViewportBridge? _hostOwner;
@@ -476,6 +628,10 @@ class NativeViewportBridge extends ChangeNotifier {
     _pendingScene = null;
     _replacePending = false;
     _pendingCamera = null;
+    _lastScene = null;
+    _lastCamera = null;
+    _silhouetteTimer?.cancel();
+    _silhouetteTimer = null;
     textureId = null;
     if (!ownsHost) return Future<void>.value();
     _hostOwner = null;
@@ -551,6 +707,7 @@ class NativeViewportBridge extends ChangeNotifier {
   Future<void> _publish(CadSceneGraph scene, {required bool replace}) {
     if (!available || _disposed) return Future<void>.value();
     _pendingScene = scene;
+    _lastScene = scene;
     _replacePending |= replace;
     if (_publishing != null) return _publishing!;
     final generation = _generation;
@@ -722,7 +879,110 @@ class NativeViewportBridge extends ChangeNotifier {
         'orthographicHeight': camera.orthographicHeight,
         'panOffsetX': camera.presentationOffsetNdcX,
         'panOffsetY': camera.presentationOffsetNdcY,
+      }).whenComplete(() {
+        _lastCamera = camera;
+        _scheduleStlSilhouettePresentation();
       });
+
+  void _scheduleStlSilhouettePresentation() {
+    if (kFlcadDevStlSilhouetteMode == FlcadDevStlSilhouetteMode.original ||
+        !_nativeSilhouetteEligible()) {
+      return;
+    }
+    _silhouetteTimer?.cancel();
+    final generation = ++_silhouetteGeneration;
+    _silhouetteTimer = Timer(const Duration(milliseconds: 80), () {
+      if (generation != _silhouetteGeneration ||
+          _disposed ||
+          !available ||
+          !_nativeSilhouetteEligible()) {
+        silhouetteStaleDiscards++;
+        return;
+      }
+      final scene = _lastScene;
+      final camera = _lastCamera;
+      if (scene == null || camera == null) return;
+      final entities = <Map<String, Object?>>[];
+      var segmentCount = 0;
+      final diagnosticEntities = <Map<String, Object?>>[];
+      for (final entity in scene.entities.where((e) => e.visible)) {
+        final geometry = cadPresentationGeometry(entity.geometry);
+        final payload = _meshSilhouetteEdgesForEntity(
+          entity,
+          geometry,
+          camera,
+          kFlcadDevStlSilhouetteMode,
+        );
+        if (payload != null) {
+          segmentCount += (payload['segments'] as List).length;
+          final diagnostics = payload['diagnostics'];
+          if (diagnostics is Map) {
+            diagnosticEntities.add({
+              'entity': entity.id,
+              ...diagnostics.cast<String, Object?>(),
+            });
+          }
+          // Diagnostics stay Dart-side. The native presentation contract is
+          // unchanged and receives only source/segments.
+          final presentationPayload = Map<String, Object?>.from(payload)
+            ..remove('diagnostics');
+          entities.add({'id': entity.id, ...presentationPayload});
+        }
+      }
+      silhouetteSegmentsSent = segmentCount;
+      silhouetteUpdates++;
+      if (_viewportDiagnosticsEnabled) {
+        final projection = camera.projectionMode.name;
+        final cameraSignature = _diagnosticCameraSignature(camera);
+        silhouetteDiagnosticsProjection = projection;
+        silhouetteDiagnosticsGeneration = generation;
+        silhouetteDiagnostics = {
+          'mode': flcadDevStlSilhouetteModeLabel,
+          'projection': projection,
+          'camera': cameraSignature,
+          'generation': generation,
+          'segmentsSent': segmentCount,
+          'entities': diagnosticEntities,
+        };
+        debugPrint(
+          '[viewport-diagnostic] silhouette-update '
+          'mode=$flcadDevStlSilhouetteModeLabel '
+          'projection=$projection camera=$cameraSignature '
+          'generation=$generation '
+          'segments=$segmentCount',
+        );
+        debugPrint(
+          '[viewport-diagnostic] silhouette-stats '
+          '${jsonEncode(silhouetteDiagnostics)}',
+        );
+        notifyListeners();
+      }
+      unawaited(
+        _invoke('presentationEdges', {
+          'mode': kFlcadDevStlSilhouetteMode.name,
+          'entities': entities,
+        }),
+      );
+    });
+  }
+
+  String _diagnosticCameraSignature(CadCameraController camera) => [
+    camera.presentationEye.x,
+    camera.presentationEye.y,
+    camera.presentationEye.z,
+    camera.presentationTarget.x,
+    camera.presentationTarget.y,
+    camera.presentationTarget.z,
+    camera.up.x,
+    camera.up.y,
+    camera.up.z,
+  ].map((value) => value.toStringAsFixed(4)).join(',');
+
+  bool _nativeSilhouetteEligible() =>
+      available &&
+      sceneReady &&
+      renderStyle == 1 &&
+      kFlcadDevStlSilhouetteMode != FlcadDevStlSilhouetteMode.original;
 
   Future<void> refreshStats() async {
     if (!available) return;

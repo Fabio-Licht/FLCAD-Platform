@@ -77,16 +77,18 @@ void main() {
       )!;
       expect(kFlcadDevMeshDerivedEdgeRefinement, isFalse);
       expect(
-        const MeshDerivedEdgeRefiner().refine(observation.classification).toDiagnostics(
-          experimentalFlag: false,
-        )['appliedToPresentation'],
+        const MeshDerivedEdgeRefiner()
+            .refine(observation.classification)
+            .toDiagnostics(experimentalFlag: false)['appliedToPresentation'],
         isFalse,
       );
       expect(
-        const MeshDerivedEdgeRefiner().refine(observation.classification).toDiagnostics(
-          experimentalFlag: true,
-        )['appliedToPresentation'],
-        const MeshDerivedEdgeRefiner().refine(observation.classification).applied,
+        const MeshDerivedEdgeRefiner()
+            .refine(observation.classification)
+            .toDiagnostics(experimentalFlag: true)['appliedToPresentation'],
+        const MeshDerivedEdgeRefiner()
+            .refine(observation.classification)
+            .applied,
       );
       scene.dispose();
     },
@@ -210,5 +212,59 @@ void main() {
     expect(report.selectedEntityCount, 1);
     expect(report.highlightActive, isTrue);
     expect(report.entities.single.classification, 'preview_transitorio');
+  });
+  test('overlay exibe categorias e percentis da silhueta ja calculados', () {
+    final report = buildViewportRenderDiagnostic(
+      scene: _scene(_entity(CadSceneEntityKind.mesh)),
+      backend: ViewportBackend.nativeGpu,
+      requestedBackend: ViewportBackend.nativeGpu,
+      style: CadRenderStyle.hiddenLine,
+      fallbackReason: null,
+      highlightActive: false,
+      nativeSceneReady: true,
+      silhouetteSegmentsSent: 12534,
+      silhouetteDiagnostics: {
+        'entities': [
+          {
+            'silhouette': 12000,
+            'openBoundary': 500,
+            'ambiguous': 34,
+            'degenerateFaces': 7,
+            'nonManifoldEdges': 2,
+            'shortByCategory': {
+              'silhouette': 80,
+              'openBoundary': 4,
+              'ambiguous': 1,
+            },
+            'lengths': {
+              'silhouette': {'min': .01, 'p50': .25, 'p90': .8, 'max': 2.0},
+            },
+            'continuity': {
+              'components': 42,
+              'openChains': 30,
+              'closedChains': 8,
+              'isolatedComponents': 4,
+              'branchingComponents': 3,
+              'nearNonManifoldComponents': 5,
+              'chainLengths': {'p50': .7, 'p90': 2.4},
+            },
+          },
+        ],
+      },
+    );
+    final overlay = viewportDiagnosticOverlayText(report);
+    expect(overlay, contains('cat: sil 12000'));
+    expect(overlay, contains('open 500'));
+    expect(overlay, contains('amb 34'));
+    expect(overlay, contains('0.0100/0.2500/0.8000/2.0000'));
+    expect(overlay, contains('curtos s/o/a 80/4/1'));
+    expect(overlay, contains('diag: deg 7'));
+    expect(overlay, contains('nm 2'));
+    expect(overlay, contains('total 12534'));
+    expect(overlay, contains('cont: 42 comp · abertas 30 · fechadas 8'));
+    expect(
+      overlay,
+      contains('iso/ram/nm: 4/3/5 · cadeia p50/p90 0.7000/2.4000'),
+    );
   });
 }

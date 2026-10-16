@@ -26,6 +26,40 @@ const bool kFlcadDevShadedLightingExperiment =
       defaultValue: false,
     );
 
+/// Camera-dependent STL edge comparison modes. These are deliberately
+/// compile-time Debug switches: the commercial renderer has no alternate
+/// path unless one of the explicit experiments is requested.
+enum FlcadDevStlSilhouetteMode { original, silhouette, silhouetteWithCreases }
+
+const bool kFlcadDevStlSilhouetteModeB =
+    kDebugMode &&
+    bool.fromEnvironment(
+      'FLCAD_DEV_STL_SILHOUETTE_MODE_B',
+      defaultValue: false,
+    );
+
+const bool kFlcadDevStlSilhouetteModeC =
+    kDebugMode &&
+    bool.fromEnvironment(
+      'FLCAD_DEV_STL_SILHOUETTE_MODE_C',
+      defaultValue: false,
+    );
+
+const FlcadDevStlSilhouetteMode kFlcadDevStlSilhouetteMode =
+    kFlcadDevStlSilhouetteModeC
+    ? FlcadDevStlSilhouetteMode.silhouetteWithCreases
+    : kFlcadDevStlSilhouetteModeB
+    ? FlcadDevStlSilhouetteMode.silhouette
+    : FlcadDevStlSilhouetteMode.original;
+
+String get flcadDevStlSilhouetteModeLabel => switch (
+  kFlcadDevStlSilhouetteMode
+) {
+  FlcadDevStlSilhouetteMode.original => 'A',
+  FlcadDevStlSilhouetteMode.silhouette => 'B',
+  FlcadDevStlSilhouetteMode.silhouetteWithCreases => 'C',
+};
+
 bool isShadedReferenceOverlay(CadSceneEntity entity) {
   // Transient previews explicitly marked by the owning operation are safe to
   // hide for this visual comparison. Documented planar CAD surfaces are not.

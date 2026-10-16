@@ -64,6 +64,10 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> display_edge_buffer;
     std::vector<Vertex> mesh_derived_edges;
     Microsoft::WRL::ComPtr<ID3D11Buffer> mesh_derived_edge_buffer;
+    // Debug-only, camera-dependent presentation edges. This is deliberately
+    // separate from CAD topology and mesh-derived static edges.
+    std::vector<Vertex> mesh_silhouette_edges;
+    Microsoft::WRL::ComPtr<ID3D11Buffer> mesh_silhouette_edge_buffer;
     std::vector<PickVertex> edge_vertices;
     std::vector<PickVertex> point_vertices;
     Microsoft::WRL::ComPtr<ID3D11Buffer> edge_buffer;
@@ -97,6 +101,7 @@ private:
   void Resize(uint32_t width, uint32_t height);
   void Shutdown(std::function<void()> completed = {});
   void ApplySnapshot(const flutter::EncodableMap& snapshot, bool replace);
+  void ApplyPresentationEdges(const flutter::EncodableMap& presentation);
   void RemoveEntity(const std::string& id);
   void Render();
   void Fit();
@@ -175,6 +180,12 @@ private:
   uint64_t constant_buffer_updates_ = 0;
   uint64_t draw_indexed_calls_ = 0;
   uint64_t fit_calls_ = 0;
+  uint64_t silhouette_accepted_segments_ = 0;
+  uint64_t silhouette_rejected_segments_ = 0;
+  uint64_t silhouette_drawn_segments_ = 0;
+  uint64_t mesh_derived_drawn_segments_ = 0;
+  uint64_t display_edges_drawn_segments_ = 0;
+  std::string presentation_buffer_ = "none";
   int64_t scene_revision_ = 0;
   std::atomic<uint64_t> texture_callbacks_{0};
   uint64_t callback_window_count_ = 0;

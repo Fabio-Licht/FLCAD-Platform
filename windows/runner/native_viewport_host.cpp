@@ -130,6 +130,9 @@ void NativeViewportHost::HandleMethod(
     } else if ((call.method_name() == "snapshot" || call.method_name() == "delta") && arguments) {
       ApplySnapshot(*arguments, call.method_name() == "snapshot");
       result->Success(flutter::EncodableValue(scene_revision_));
+    } else if (call.method_name() == "presentationEdges" && arguments) {
+      ApplyPresentationEdges(*arguments);
+      result->Success();
     } else if (call.method_name() == "remove" && arguments) {
       if (const auto* id = std::get_if<std::string>(Find(*arguments, "id"))) RemoveEntity(*id);
       result->Success();
@@ -578,6 +581,85 @@ void NativeViewportHost::Upload(SceneEntity& entity) {
   }
 }
 
+void NativeViewportHost::ApplyPresentationEdges(
+    const flutter::EncodableMap& presentation) {
+  std::scoped_lock lock(mutex_);
+  for (auto &[id, entity] : entities_) {
+    entity.mesh_silhouette_edges.clear();
+    entity.mesh_silhouette_edge_buffer.Reset();
+  }
+  silhouette_accepted_segments_ = 0;
+  silhouette_rejected_segments_ = 0;
+  presentation_buffer_ = "none";
+  const auto *entities = std::get_if<flutter::EncodableList>(
+      Find(presentation, "entities"));
+  if (!entities) {
+    Render();
+    return;
+  }
+  for (const auto &value : *entities) {
+    const auto *map = std::get_if<flutter::EncodableMap>(&value);
+    const auto *id = map ? std::get_if<std::string>(Find(*map, "id")) : nullptr;
+    const auto *source = map ? std::get_if<std::string>(Find(*map, "source")) : nullptr;
+    const auto *segments = map ? std::get_if<flutter::EncodableList>(
+        Find(*map, "segments")) : nullptr;
+    if (!id || !source || *source != "meshSilhouette" || !segments ||
+        segments->size() > 250000) {
+      silhouette_rejected_segments_ += segments ? segments->size() : 0;
+      continue;
+    }
+    const auto found = entities_.find(*id);
+    if (found == entities_.end()) {
+      silhouette_rejected_segments_ += segments->size();
+      continue;
+    }
+    auto &entity = found->second;
+    for (const auto &segment_value : *segments) {
+      const auto *segment = std::get_if<flutter::EncodableMap>(&segment_value);
+      const auto *start = segment ? std::get_if<flutter::EncodableList>(
+          Find(*segment, "start")) : nullptr;
+      const auto *end = segment ? std::get_if<flutter::EncodableList>(
+          Find(*segment, "end")) : nullptr;
+      const auto *kind = segment ? std::get_if<std::string>(
+          Find(*segment, "kind")) : nullptr;
+      if (!segment || !start || !end || !kind || start->size() != 3 ||
+          end->size() != 3 ||
+          (*kind != "silhouette" && *kind != "openBoundary" &&
+           *kind != "crease" && *kind != "ambiguous")) {
+        ++silhouette_rejected_segments_;
+        continue;
+      }
+      Vertex a{static_cast<float>(Number((*start)[0])),
+               static_cast<float>(Number((*start)[1])),
+               static_cast<float>(Number((*start)[2])), 0, 0, 1};
+      Vertex b{static_cast<float>(Number((*end)[0])),
+               static_cast<float>(Number((*end)[1])),
+               static_cast<float>(Number((*end)[2])), 0, 0, 1};
+      if (!std::isfinite(a.x) || !std::isfinite(a.y) ||
+          !std::isfinite(a.z) || !std::isfinite(b.x) ||
+          !std::isfinite(b.y) || !std::isfinite(b.z)) {
+        ++silhouette_rejected_segments_;
+        continue;
+      }
+      entity.mesh_silhouette_edges.push_back(a);
+      entity.mesh_silhouette_edges.push_back(b);
+      ++silhouette_accepted_segments_;
+    }
+    if (!entity.mesh_silhouette_edges.empty() && device_) {
+      D3D11_BUFFER_DESC descriptor{};
+      descriptor.ByteWidth = static_cast<UINT>(
+          entity.mesh_silhouette_edges.size() * sizeof(Vertex));
+      descriptor.Usage = D3D11_USAGE_IMMUTABLE;
+      descriptor.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+      D3D11_SUBRESOURCE_DATA data{entity.mesh_silhouette_edges.data()};
+      Check(device_->CreateBuffer(&descriptor, &data,
+                                  &entity.mesh_silhouette_edge_buffer),
+            "mesh-silhouette edges VB");
+    }
+  }
+  Render();
+}
+
 void NativeViewportHost::SetManagedFaceHighlight(
     ManagedFaceHighlight &highlight, const std::string &entity_id,
     uint32_t presentation_sub_id) {
@@ -726,6 +808,10 @@ void NativeViewportHost::Render() {
     ++draw_indexed_calls_;
     triangles_ += e.indices.size() / 3;
   }
+  silhouette_drawn_segments_ = 0;
+  mesh_derived_drawn_segments_ = 0;
+  display_edges_drawn_segments_ = 0;
+  presentation_buffer_ = "none";
   if ((render_style_ == 1 || render_style_ == 2) && !(render_style_==1&&(operational_selection_index_buffer_||operational_hover_index_buffer_))) {
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
     context_->PSSetShader(line_shader_.Get(), nullptr, 0);
@@ -749,17 +835,31 @@ void NativeViewportHost::Render() {
     const int offset_count = 1; // One screen-pixel CAD line; never dilate contours.
     for (const auto &[id, e] : entities_) {
       ID3D11Buffer *edge_buffer =
-          (render_style_ == 1 && e.display_edge_buffer)
+          (render_style_ == 1 && e.mesh_silhouette_edge_buffer)
+              ? e.mesh_silhouette_edge_buffer.Get()
+              : (render_style_ == 1 && e.display_edge_buffer)
               ? e.display_edge_buffer.Get()
               : (render_style_ == 1 ? e.mesh_derived_edge_buffer.Get()
                                     : e.display_edge_buffer.Get());
       const auto edge_count =
-          (render_style_ == 1 && !e.display_edges.empty())
+          (render_style_ == 1 && !e.mesh_silhouette_edges.empty())
+              ? e.mesh_silhouette_edges.size()
+              : (render_style_ == 1 && !e.display_edges.empty())
               ? e.display_edges.size()
               : (render_style_ == 1 ? e.mesh_derived_edges.size()
                                     : e.display_edges.size());
       if (!e.visible || !edge_buffer || edge_count == 0)
         continue;
+      if (render_style_ == 1 && e.mesh_silhouette_edge_buffer) {
+        silhouette_drawn_segments_ += edge_count / 2;
+        presentation_buffer_ = "meshSilhouette";
+      } else if (render_style_ == 1 && e.display_edge_buffer) {
+        display_edges_drawn_segments_ += edge_count / 2;
+        if (presentation_buffer_ == "none") presentation_buffer_ = "topological";
+      } else if (render_style_ == 1 && e.mesh_derived_edge_buffer) {
+        mesh_derived_drawn_segments_ += edge_count / 2;
+        if (presentation_buffer_ == "none") presentation_buffer_ = "meshDerived";
+      }
       context_->IASetVertexBuffers(0, 1, &edge_buffer, &stride, &offset);
       if (render_style_ == 2) {
         const bool selected = e.selected || id == operational_selection_entity_id_;
@@ -1046,7 +1146,7 @@ void NativeViewportHost::SetCamera(const flutter::EncodableMap& arguments) {
   Render();
 }
 void NativeViewportHost::RemoveEntity(const std::string&id){std::scoped_lock lock(mutex_);entities_.erase(id);if(managed_face_hover_.entity_id==id)managed_face_hover_={};if(managed_face_selection_.entity_id==id)managed_face_selection_={};Render();}
-flutter::EncodableMap NativeViewportHost::Stats()const{std::string gpu;gpu.reserve(adapter_name_.size());for(const wchar_t character:adapter_name_)gpu.push_back(character<=0x7f?static_cast<char>(character):'?');return{{flutter::EncodableValue("fps"),flutter::EncodableValue(fps_)},{flutter::EncodableValue("drawCalls"),flutter::EncodableValue(static_cast<int64_t>(entities_.size()))},{flutter::EncodableValue("triangles"),flutter::EncodableValue(static_cast<int64_t>(triangles_))},{flutter::EncodableValue("uploadMs"),flutter::EncodableValue(upload_ms_)},{flutter::EncodableValue("renderMs"),flutter::EncodableValue(render_ms_)},{flutter::EncodableValue("pickingMs"),flutter::EncodableValue(picking_ms_)},{flutter::EncodableValue("gpu"),flutter::EncodableValue(gpu)},{flutter::EncodableValue("setCameraCalls"),flutter::EncodableValue(static_cast<int64_t>(set_camera_calls_))},{flutter::EncodableValue("renderCalls"),flutter::EncodableValue(static_cast<int64_t>(render_calls_))},{flutter::EncodableValue("constantBufferUpdates"),flutter::EncodableValue(static_cast<int64_t>(constant_buffer_updates_))},{flutter::EncodableValue("drawIndexedCalls"),flutter::EncodableValue(static_cast<int64_t>(draw_indexed_calls_))},{flutter::EncodableValue("fitCalls"),flutter::EncodableValue(static_cast<int64_t>(fit_calls_))},{flutter::EncodableValue("cameraDistance"),flutter::EncodableValue(static_cast<double>(camera_.Distance()))},{flutter::EncodableValue("cameraRadius"),flutter::EncodableValue(static_cast<double>(camera_.Radius()))},{flutter::EncodableValue("cameraNear"),flutter::EncodableValue(static_cast<double>(camera_.NearPlane()))},{flutter::EncodableValue("cameraFar"),flutter::EncodableValue(static_cast<double>(camera_.FarPlane()))},{flutter::EncodableValue("textureId"),flutter::EncodableValue(texture_id_)},{flutter::EncodableValue("textureRegistered"),flutter::EncodableValue(texture_registered_)},{flutter::EncodableValue("textureCallbacks"),flutter::EncodableValue(static_cast<int64_t>(texture_callbacks_.load()))},{flutter::EncodableValue("textureCallbackHz"),flutter::EncodableValue(texture_callback_hz_)},{flutter::EncodableValue("frameMarks"),flutter::EncodableValue(static_cast<int64_t>(frame_marks_.load()))},{flutter::EncodableValue("successfulFrameMarks"),flutter::EncodableValue(static_cast<int64_t>(successful_frame_marks_.load()))},{flutter::EncodableValue("requestedWidth"),flutter::EncodableValue(static_cast<int64_t>(last_requested_width_))},{flutter::EncodableValue("requestedHeight"),flutter::EncodableValue(static_cast<int64_t>(last_requested_height_))},{flutter::EncodableValue("sampledBgra"),flutter::EncodableValue(static_cast<int64_t>(sampled_bgra_))},{flutter::EncodableValue("sampledClearBgra"),flutter::EncodableValue(static_cast<int64_t>(sampled_clear_bgra_))}};}
+flutter::EncodableMap NativeViewportHost::Stats()const{std::string gpu;gpu.reserve(adapter_name_.size());for(const wchar_t character:adapter_name_)gpu.push_back(character<=0x7f?static_cast<char>(character):'?');return{{flutter::EncodableValue("fps"),flutter::EncodableValue(fps_)},{flutter::EncodableValue("drawCalls"),flutter::EncodableValue(static_cast<int64_t>(entities_.size()))},{flutter::EncodableValue("triangles"),flutter::EncodableValue(static_cast<int64_t>(triangles_))},{flutter::EncodableValue("uploadMs"),flutter::EncodableValue(upload_ms_)},{flutter::EncodableValue("renderMs"),flutter::EncodableValue(render_ms_)},{flutter::EncodableValue("pickingMs"),flutter::EncodableValue(picking_ms_)},{flutter::EncodableValue("gpu"),flutter::EncodableValue(gpu)},{flutter::EncodableValue("setCameraCalls"),flutter::EncodableValue(static_cast<int64_t>(set_camera_calls_))},{flutter::EncodableValue("renderCalls"),flutter::EncodableValue(static_cast<int64_t>(render_calls_))},{flutter::EncodableValue("constantBufferUpdates"),flutter::EncodableValue(static_cast<int64_t>(constant_buffer_updates_))},{flutter::EncodableValue("drawIndexedCalls"),flutter::EncodableValue(static_cast<int64_t>(draw_indexed_calls_))},{flutter::EncodableValue("fitCalls"),flutter::EncodableValue(static_cast<int64_t>(fit_calls_))},{flutter::EncodableValue("cameraDistance"),flutter::EncodableValue(static_cast<double>(camera_.Distance()))},{flutter::EncodableValue("cameraRadius"),flutter::EncodableValue(static_cast<double>(camera_.Radius()))},{flutter::EncodableValue("cameraNear"),flutter::EncodableValue(static_cast<double>(camera_.NearPlane()))},{flutter::EncodableValue("cameraFar"),flutter::EncodableValue(static_cast<double>(camera_.FarPlane()))},{flutter::EncodableValue("textureId"),flutter::EncodableValue(texture_id_)},{flutter::EncodableValue("textureRegistered"),flutter::EncodableValue(texture_registered_)},{flutter::EncodableValue("textureCallbacks"),flutter::EncodableValue(static_cast<int64_t>(texture_callbacks_.load()))},{flutter::EncodableValue("textureCallbackHz"),flutter::EncodableValue(texture_callback_hz_)},{flutter::EncodableValue("frameMarks"),flutter::EncodableValue(static_cast<int64_t>(frame_marks_.load()))},{flutter::EncodableValue("successfulFrameMarks"),flutter::EncodableValue(static_cast<int64_t>(successful_frame_marks_.load()))},{flutter::EncodableValue("requestedWidth"),flutter::EncodableValue(static_cast<int64_t>(last_requested_width_))},{flutter::EncodableValue("requestedHeight"),flutter::EncodableValue(static_cast<int64_t>(last_requested_height_))},{flutter::EncodableValue("sampledBgra"),flutter::EncodableValue(static_cast<int64_t>(sampled_bgra_))},{flutter::EncodableValue("sampledClearBgra"),flutter::EncodableValue(static_cast<int64_t>(sampled_clear_bgra_))},{flutter::EncodableValue("silhouetteAcceptedSegments"),flutter::EncodableValue(static_cast<int64_t>(silhouette_accepted_segments_))},{flutter::EncodableValue("silhouetteRejectedSegments"),flutter::EncodableValue(static_cast<int64_t>(silhouette_rejected_segments_))},{flutter::EncodableValue("silhouetteDrawnSegments"),flutter::EncodableValue(static_cast<int64_t>(silhouette_drawn_segments_))},{flutter::EncodableValue("meshDerivedDrawnSegments"),flutter::EncodableValue(static_cast<int64_t>(mesh_derived_drawn_segments_))},{flutter::EncodableValue("displayEdgesDrawnSegments"),flutter::EncodableValue(static_cast<int64_t>(display_edges_drawn_segments_))},{flutter::EncodableValue("presentationBuffer"),flutter::EncodableValue(presentation_buffer_)}};}
 const FlutterDesktopGpuSurfaceDescriptor *
 NativeViewportHost::SurfaceState::Describe(size_t width, size_t height) {
   std::scoped_lock lock(mutex);

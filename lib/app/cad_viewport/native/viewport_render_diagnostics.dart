@@ -27,6 +27,17 @@ class ViewportRenderDiagnosticReport {
     this.nativeSceneReady = false,
     this.referenceOverlaysVisible = true,
     this.derivedNormalsActive = false,
+    this.stlSilhouetteMode = 'original',
+    this.silhouetteUpdates = 0,
+    this.silhouetteStaleDiscards = 0,
+    this.silhouetteSegmentsSent = 0,
+    this.presentationBuffer = 'none',
+    this.silhouetteAcceptedSegments = 0,
+    this.silhouetteRejectedSegments = 0,
+    this.silhouetteDrawnSegments = 0,
+    this.meshDerivedDrawnSegments = 0,
+    this.displayEdgesDrawnSegments = 0,
+    this.silhouetteDiagnostics,
   });
 
   final String backend;
@@ -42,6 +53,15 @@ class ViewportRenderDiagnosticReport {
   final bool nativeSceneReady;
   final bool referenceOverlaysVisible;
   final bool derivedNormalsActive;
+  final String stlSilhouetteMode;
+  final int silhouetteUpdates, silhouetteStaleDiscards, silhouetteSegmentsSent;
+  final String presentationBuffer;
+  final int silhouetteAcceptedSegments,
+      silhouetteRejectedSegments,
+      silhouetteDrawnSegments,
+      meshDerivedDrawnSegments,
+      displayEdgesDrawnSegments;
+  final Map<String, Object?>? silhouetteDiagnostics;
 
   Map<String, Object?> toJson() => {
     'backend': backend,
@@ -57,6 +77,17 @@ class ViewportRenderDiagnosticReport {
     'nativeSceneReady': nativeSceneReady,
     'referenceOverlaysVisible': referenceOverlaysVisible,
     'derivedNormalsActive': derivedNormalsActive,
+    'stlSilhouetteMode': stlSilhouetteMode,
+    'silhouetteUpdates': silhouetteUpdates,
+    'silhouetteStaleDiscards': silhouetteStaleDiscards,
+    'silhouetteSegmentsSent': silhouetteSegmentsSent,
+    'presentationBuffer': presentationBuffer,
+    'silhouetteAcceptedSegments': silhouetteAcceptedSegments,
+    'silhouetteRejectedSegments': silhouetteRejectedSegments,
+    'silhouetteDrawnSegments': silhouetteDrawnSegments,
+    'meshDerivedDrawnSegments': meshDerivedDrawnSegments,
+    'displayEdgesDrawnSegments': displayEdgesDrawnSegments,
+    'silhouetteDiagnostics': silhouetteDiagnostics,
   };
 
   String toStructuredLog() => jsonEncode(toJson());
@@ -82,8 +113,60 @@ String viewportDiagnosticOverlayText(ViewportRenderDiagnosticReport report) {
     'meshDerived: $meshSegments→$meshSegments',
     'overlays: ${report.referenceOverlaysVisible ? 'on' : 'off'} · derivedNormals: ${report.derivedNormalsActive}',
   ];
+  lines.add(
+    'MODE ${report.stlSilhouetteMode} · BUFFER ${report.presentationBuffer}',
+  );
+  lines.add(
+    'sil: sent ${report.silhouetteSegmentsSent} / accepted ${report.silhouetteAcceptedSegments} / drawn ${report.silhouetteDrawnSegments}',
+  );
+  lines.add(
+    'meshDerived drawn ${report.meshDerivedDrawnSegments} · stale ${report.silhouetteStaleDiscards}',
+  );
+  final diagnostic = _firstSilhouetteEntityDiagnostic(
+    report.silhouetteDiagnostics,
+  );
+  if (diagnostic != null) {
+    final lengths = _asMap(diagnostic['lengths']);
+    final silhouetteLengths = _asMap(lengths?['silhouette']);
+    final short = _asMap(diagnostic['shortByCategory']);
+    final continuity = _asMap(diagnostic['continuity']);
+    final chainLengths = _asMap(continuity?['chainLengths']);
+    lines.add(
+      'cat: sil ${diagnostic['silhouette']} · open ${diagnostic['openBoundary']} · amb ${diagnostic['ambiguous']}',
+    );
+    lines.add(
+      'len: ${_metric(silhouetteLengths?['min'])}/${_metric(silhouetteLengths?['p50'] ?? silhouetteLengths?['median'])}/${_metric(silhouetteLengths?['p90'])}/${_metric(silhouetteLengths?['max'])} · curtos s/o/a ${short?['silhouette'] ?? 0}/${short?['openBoundary'] ?? 0}/${short?['ambiguous'] ?? 0}',
+    );
+    lines.add(
+      'diag: deg ${diagnostic['degenerateFaces'] ?? 0} · nm ${diagnostic['nonManifoldEdges'] ?? 0} · total ${report.silhouetteSegmentsSent}',
+    );
+    if (continuity != null) {
+      lines.add(
+        'cont: ${continuity['components'] ?? 0} comp · abertas ${continuity['openChains'] ?? 0} · fechadas ${continuity['closedChains'] ?? 0}',
+      );
+      lines.add(
+        'iso/ram/nm: ${continuity['isolatedComponents'] ?? 0}/${continuity['branchingComponents'] ?? 0}/${continuity['nearNonManifoldComponents'] ?? 0} · cadeia p50/p90 ${_metric(chainLengths?['p50'])}/${_metric(chainLengths?['p90'])}',
+      );
+    }
+  }
   return lines.join('\n');
 }
+
+Map<String, Object?>? _firstSilhouetteEntityDiagnostic(
+  Map<String, Object?>? report,
+) {
+  final entities = report?['entities'];
+  if (entities is! List || entities.isEmpty || entities.first is! Map) {
+    return null;
+  }
+  return _asMap(entities.first);
+}
+
+Map<String, Object?>? _asMap(Object? value) => value is Map
+    ? value.map((key, value) => MapEntry(key.toString(), value))
+    : null;
+
+String _metric(Object? value) => value is num ? value.toStringAsFixed(4) : '-';
 
 @immutable
 class ViewportEntityDiagnostic {
@@ -146,6 +229,11 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
   required String? fallbackReason,
   required bool highlightActive,
   bool nativeSceneReady = false,
+  NativeViewportStats nativeStats = const NativeViewportStats(),
+  int silhouetteUpdates = 0,
+  int silhouetteStaleDiscards = 0,
+  int silhouetteSegmentsSent = 0,
+  Map<String, Object?>? silhouetteDiagnostics,
 }) {
   final native = backend == ViewportBackend.nativeGpu;
   final effectiveFallback = native
@@ -179,6 +267,17 @@ ViewportRenderDiagnosticReport buildViewportRenderDiagnostic({
     nativeSceneReady: native && nativeSceneReady,
     referenceOverlaysVisible: !kFlcadDevShadedHideReferenceOverlays,
     derivedNormalsActive: kFlcadDevShadedDerivedNormals,
+    stlSilhouetteMode: flcadDevStlSilhouetteModeLabel,
+    silhouetteUpdates: silhouetteUpdates,
+    silhouetteStaleDiscards: silhouetteStaleDiscards,
+    silhouetteSegmentsSent: silhouetteSegmentsSent,
+    presentationBuffer: nativeStats.presentationBuffer,
+    silhouetteAcceptedSegments: nativeStats.silhouetteAcceptedSegments,
+    silhouetteRejectedSegments: nativeStats.silhouetteRejectedSegments,
+    silhouetteDrawnSegments: nativeStats.silhouetteDrawnSegments,
+    meshDerivedDrawnSegments: nativeStats.meshDerivedDrawnSegments,
+    displayEdgesDrawnSegments: nativeStats.displayEdgesDrawnSegments,
+    silhouetteDiagnostics: silhouetteDiagnostics,
   );
 }
 

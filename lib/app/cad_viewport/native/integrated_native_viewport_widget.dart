@@ -232,6 +232,11 @@ class _IntegratedCadViewportWidgetState
       highlightActive:
           _managedFaceSelection != null || _managedFaceHover != null,
       nativeSceneReady: native.sceneReady,
+      nativeStats: native.stats,
+      silhouetteUpdates: native.silhouetteUpdates,
+      silhouetteStaleDiscards: native.silhouetteStaleDiscards,
+      silhouetteSegmentsSent: native.silhouetteSegmentsSent,
+      silhouetteDiagnostics: native.silhouetteDiagnostics,
     );
     _diagnosticReport = report;
     debugPrint('[viewport-diagnostic] ${report.toStructuredLog()}');
