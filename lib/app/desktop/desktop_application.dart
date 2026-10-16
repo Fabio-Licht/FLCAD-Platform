@@ -1452,8 +1452,8 @@ class _OfficialEngineeringWorkspaceState
   _sketchSuggestionHoverPresentation = ValueNotifier(null);
   Offset? _sketchSuggestionHoverPosition;
 
-  /// True only when the operator explicitly asked for a new Sketch. A plain
-  /// return to the Sketch module reuses the root already bound to the support.
+  /// True when the operator is creating a Sketch (New Sketch or the Sketch
+  /// module after Exit). Reopening an existing root is an Explorer action.
   bool forceNewSketchOnSupportPick = false;
   ModelingSelection? get documentSelection {
     final document = widget.cad.document;
@@ -3614,7 +3614,7 @@ class _OfficialEngineeringWorkspaceState
     });
   }
 
-  void _beginDirectSketchSupportSelection({bool forceNew = false}) {
+  void _beginDirectSketchSupportSelection({bool forceNew = true}) {
     if (mounted) {
       setState(() {
         module = 'Sketch';
@@ -3734,7 +3734,7 @@ class _OfficialEngineeringWorkspaceState
           if (selectedChoice == null) return;
           operational.selectSketchSupport(selectedChoice.id);
       }
-      await _activateSelectedSketchSupport();
+      await _activateSelectedSketchSupport(forceNew: true);
     } catch (error) {
       widget.cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
     }
@@ -3743,7 +3743,7 @@ class _OfficialEngineeringWorkspaceState
   Future<void> _selectWorldSketchSupport(SketchPlaneType type) async {
     try {
       operational.selectWorldSketchPlane(type);
-      await _activateSelectedSketchSupport();
+      await _activateSelectedSketchSupport(forceNew: true);
     } catch (error) {
       widget.cad.setStatus(error.toString());
     }
@@ -5733,7 +5733,7 @@ class _OfficialEngineeringWorkspaceState
 
   Future<void> _selectModule(String item) async {
     if (item == 'Sketch') {
-      if (operational.stage == SketchSurfaceStage.sketchActive) {
+      if (operational.sketchEditSessionActive) {
         if (mounted) {
           setState(() {
             module = 'Sketch';
@@ -12031,7 +12031,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                 Expanded(
                   child: FilledButton.icon(
                     onPressed:
-                        controller.surfacePreviewActive && !controller.busy
+                        controller.surfaceCadCreationAvailable &&
+                            !controller.busy
                         ? controller.confirmSurface
                         : null,
                     icon: const Icon(Icons.check, size: 16),

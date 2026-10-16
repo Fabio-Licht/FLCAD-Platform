@@ -372,6 +372,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _restoreSketchPresentationVisibility();
     // Hand the operational command ids back before this session stops serving
     // them; a later session installs its own handlers over the same registry.
     commands.releaseSessionCommands(this);
@@ -404,6 +405,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _beforeSaveCallback,
     );
   }
+
   final DesktopCommandCoordinator commands;
   final CadRuntime runtime;
   GeometrySelectionManager get geometrySelection => runtime.geometrySelection;
@@ -441,6 +443,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void>? _configurationBootstrapInFlight;
   String? _configurationBootstrapProjectId;
   Future<void> _sketchEditTail = Future<void>.value();
+
+  /// Bumps on New/Edit/Exit so a late `_synchronizeSketchScene` from a
+  /// previous session cannot revive tools, previews or selection.
+  int _sketchSessionEpoch = 0;
+  final Map<String, bool> _sketchPresentationVisibility = {};
 
   Future<void> _awaitProjectConfiguration() async {
     final projectId = runtime.document?.projectId;
@@ -513,7 +520,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       bootstrapCompleter.completeError(error, stackTrace);
       rethrow;
     } finally {
-      if (identical(_configurationBootstrapInFlight, bootstrapCompleter.future)) {
+      if (identical(
+        _configurationBootstrapInFlight,
+        bootstrapCompleter.future,
+      )) {
         _configurationBootstrapInFlight = null;
         _configurationBootstrapProjectId = null;
       }
@@ -706,7 +716,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final cached = runtime.read<Sketch>('sketch.active');
     final api = sketchApi;
     if (api == null) return cached;
-    final canonicalId = api.engine.activeSketchId ?? cached?.id;
+    // Engine identity is the edit session. After Exit, `closeSketch()` leaves
+    // this null; do not promote the cached finished Sketch back into an
+    // engine-active session (that made New Sketch reopen the previous root).
+    final canonicalId = api.engine.activeSketchId;
     if (canonicalId == null) return cached;
     final canonical = api.sketches
         .where((item) => item.id == canonicalId)
@@ -716,6 +729,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     return canonical ?? cached;
   }
+
+  bool get sketchEditSessionActive =>
+      (stage == SketchSurfaceStage.sketchActive ||
+          stage == SketchSurfaceStage.surfacePreview) &&
+      sketchApi?.engine.activeSketchId != null;
 
   /// Visibility read from the CAD scene, rather than from stale persisted
   /// metadata. The command label and the next toggle must describe what is
@@ -917,7 +935,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ...suggestion.entityIds,
         ...suggestion.usedEntityIds,
       };
-      if (sourceIds.isNotEmpty && !sourceIds.any(_reconstructionSourceIsHoverable)) {
+      if (sourceIds.isNotEmpty &&
+          !sourceIds.any(_reconstructionSourceIsHoverable)) {
         continue;
       }
       ids
@@ -994,12 +1013,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// layer normally shows only [sketchContinuityRepairAttentionJoins], while
   /// keeping this complete set available for explicit inspection and for
   /// resolving a CAD selection deterministically.
-  List<SketchContinuityJoinDiagnostic>
-  get sketchContinuityRepairAllJoins => List.unmodifiable(
-    _sortContinuityJoins(
-      sketchContinuityAnalysis.joins.where((join) => join.nearby),
-    ),
-  );
+  List<SketchContinuityJoinDiagnostic> get sketchContinuityRepairAllJoins =>
+      List.unmodifiable(
+        _sortContinuityJoins(
+          sketchContinuityAnalysis.joins.where((join) => join.nearby),
+        ),
+      );
 
   /// Nearby joins that require operator attention.  A measured C0 join with
   /// no overlap, crossing, branch or constraint mismatch is intentionally
@@ -1029,12 +1048,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       SketchContinuityIssue.none => 3,
     };
     values.sort((first, second) {
-      final bySeverity = severity(first.issue).compareTo(severity(second.issue));
+      final bySeverity = severity(
+        first.issue,
+      ).compareTo(severity(second.issue));
       if (bySeverity != 0) return bySeverity;
       final byDistance = second.gapMillimeters.compareTo(first.gapMillimeters);
       if (byDistance != 0) return byDistance;
-      final firstKey = '${first.first.entityId}:${first.first.name}|${first.second.entityId}:${first.second.name}';
-      final secondKey = '${second.first.entityId}:${second.first.name}|${second.second.entityId}:${second.second.name}';
+      final firstKey =
+          '${first.first.entityId}:${first.first.name}|${first.second.entityId}:${first.second.name}';
+      final secondKey =
+          '${second.first.entityId}:${second.first.name}|${second.second.entityId}:${second.second.name}';
       return firstKey.compareTo(secondKey);
     });
     return values;
@@ -1044,18 +1067,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// available in the selected detail block, but are not used as the normal
   /// row label.
   String sketchContinuityEntityDisplayLabel(String entityId) {
-    final entities = sketchEntities
-        .where(
-          (entity) =>
-              entity.type == SketchEntityType.line ||
-              entity.type == SketchEntityType.arc ||
-              entity.type == SketchEntityType.spline,
-        )
-        .toList(growable: false)
-      ..sort((first, second) => first.id.compareTo(second.id));
+    final entities =
+        sketchEntities
+            .where(
+              (entity) =>
+                  entity.type == SketchEntityType.line ||
+                  entity.type == SketchEntityType.arc ||
+                  entity.type == SketchEntityType.spline,
+            )
+            .toList(growable: false)
+          ..sort((first, second) => first.id.compareTo(second.id));
     final entity = entities.where((item) => item.id == entityId).firstOrNull;
     if (entity == null) return 'Entidade';
-    final sameType = entities.where((item) => item.type == entity.type).toList();
+    final sameType = entities
+        .where((item) => item.type == entity.type)
+        .toList();
     final index = sameType.indexWhere((item) => item.id == entityId);
     final prefix = switch (entity.type) {
       SketchEntityType.line => 'Linha',
@@ -3854,9 +3880,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> _reopenSketchForEditing(String id) async {
     await _awaitProjectConfiguration();
     final api = sketchApi ?? (throw StateError('SketchEngine is unavailable.'));
+    _captureSketchPresentationVisibility();
+    _beginSketchEditSession();
     selectSketch(id);
     cancelSketchCommand();
     api.openSketch(id);
+    final sketch =
+        api.sketches.where((item) => item.id == id).firstOrNull ??
+        activeSketch ??
+        (throw StateError('Unknown Sketch: $id'));
+    _restoreSketchSupportPlane(sketch);
     stage = SketchSurfaceStage.sketchActive;
     selectedSketchEntityIds.clear();
     selectedConstraintIds.clear();
@@ -5406,9 +5439,121 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     bool matches(Sketch sketch) =>
         sketch.metadata['supportEntityId'] == supportId ||
         sketch.plane.parameters['referenceId'] == supportId;
+    final sessionId = api.engine.activeSketchId;
     final active = activeSketch;
-    if (active != null && matches(active)) return active;
+    if (sessionId != null &&
+        active != null &&
+        active.id == sessionId &&
+        matches(active)) {
+      return active;
+    }
     return _stableSketch(api.sketches.where(matches));
+  }
+
+  void _beginSketchEditSession() => _sketchSessionEpoch++;
+
+  void _captureSketchPresentationVisibility() {
+    if (_sketchPresentationVisibility.isNotEmpty) return;
+    final document = runtime.document;
+    if (document == null) return;
+    final roots = document.entities.values
+        .where(
+          (entity) =>
+              entity.data['authoringRoot'] == true &&
+              entity.data['authoringWorkspace'] == 'Sketch',
+        )
+        .map((entity) => entity.id)
+        .toSet();
+    for (final entity in document.entities.values) {
+      final parent = entity.data['parentSketchId'];
+      if (!roots.contains(entity.id) &&
+          (parent is! String || !roots.contains(parent))) {
+        continue;
+      }
+      final scene = runtime.scene.find(entity.id);
+      if (scene != null) {
+        _sketchPresentationVisibility[entity.id] = scene.visible;
+      }
+    }
+  }
+
+  void _applySketchPresentationIsolation() {
+    if (!sketchEditSessionActive) return;
+    final activeId = activeSketch?.id;
+    if (activeId == null) return;
+    final document = runtime.document;
+    if (document == null) return;
+    final roots = document.entities.values
+        .where(
+          (entity) =>
+              entity.data['authoringRoot'] == true &&
+              entity.data['authoringWorkspace'] == 'Sketch',
+        )
+        .map((entity) => entity.id)
+        .toSet();
+    for (final entity in document.entities.values) {
+      final parent = entity.data['parentSketchId'];
+      final rootId = roots.contains(entity.id)
+          ? entity.id
+          : parent is String && roots.contains(parent)
+          ? parent
+          : null;
+      if (rootId == null) continue;
+      final scene = runtime.scene.find(entity.id);
+      if (scene == null) continue;
+      final shouldShow = rootId == activeId;
+      if (scene.visible != shouldShow) {
+        runtime.scene.upsert(scene.copyWith(visible: shouldShow));
+      }
+    }
+  }
+
+  void _restoreSketchPresentationVisibility() {
+    if (_sketchPresentationVisibility.isEmpty) return;
+    for (final entry in _sketchPresentationVisibility.entries) {
+      final scene = runtime.scene.find(entry.key);
+      if (scene != null && scene.visible != entry.value) {
+        runtime.scene.upsert(scene.copyWith(visible: entry.value));
+      }
+    }
+    _sketchPresentationVisibility.clear();
+  }
+
+  /// Restores the Sketch's own support plane into picking without changing
+  /// edit/finished stage. Edit Sketch must not keep drawing on a leftover
+  /// plane from a previous session.
+  void _restoreSketchSupportPlane(Sketch sketch) {
+    final supportId =
+        sketch.metadata['supportEntityId'] as String? ??
+        sketch.plane.parameters['referenceId'] as String?;
+    if (supportId == null) return;
+    try {
+      final plane = _resolveSketchSupport(supportId);
+      runtime.write('sketch.selectedPlane', plane);
+      runtime.write('sketch.selectedPlaneId', supportId);
+    } catch (_) {
+      // Deleted supports still leave the Sketch's own coordinates intact.
+    }
+  }
+
+  void _clearSketchEditTransients({required bool hideSurfacePreview}) {
+    cancelSketchCommand();
+    if (sketchEditingCommandActive) finishSketchEditingTool();
+    selectedSketchEntityIds.clear();
+    selectedConstraintIds.clear();
+    runtime.write('sketch.edit.active', false);
+    runtime.write('sketch.edit.diagnostic', null);
+    runtime.write('sketch.trim.firstId', null);
+    runtime.write('sketch.trim.firstPoint', null);
+    runtime.hideTransient('sketch-edit-preview');
+    _clearSketchBlendEndpoints();
+    previewPoints = const [];
+    if (hideSurfacePreview) {
+      runtime.hideTransient('surface-preview');
+      runtime.write('sketch.surfacePreview.active', false);
+      surfacePlan = null;
+      _surfacePreviewEntityIds = null;
+    }
   }
 
   /// Sketch already derived from [sectionId], if any. Rebuilding a Section must
@@ -6006,7 +6151,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void detachProject() {
+    _restoreSketchPresentationVisibility();
     _configurationEpoch++;
+    _sketchSessionEpoch++;
     _configurationReadyProjectId = null;
     _clearArcRadiusEditPreview();
     clearSketchReconstructionSelection(notify: false);
@@ -6363,9 +6510,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   /// Opens the Sketch workspace for the selected support.
   ///
-  /// [forceNew] is only used by the explicit "New Sketch" affordances; the
-  /// default reuses the Sketch already bound to that support so returning to
-  /// the Sketch module cannot persist a duplicate root.
+  /// [forceNew] is the New Sketch contract: a new documentary identity and an
+  /// independent edit session. The default reuses a Sketch already bound to
+  /// that support (implicit re-entry, not Explorer Edit).
   Future<void> openSketch({bool forceNew = false}) async {
     clearSketchReconstructionSelection(notify: false);
     _sketchReconstructionSuggestions = const [];
@@ -9545,7 +9692,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final start = (entity.parameters['startAngle'] as num).toDouble();
       final end = (entity.parameters['endAngle'] as num).toDouble();
       final sweep = end - start;
-      if (!radius.isFinite || radius <= 0 || !sweep.isFinite || sweep.abs() <= 1e-9 || sweep.abs() > 2 * math.pi + 1e-6) {
+      if (!radius.isFinite ||
+          radius <= 0 ||
+          !sweep.isFinite ||
+          sweep.abs() <= 1e-9 ||
+          sweep.abs() > 2 * math.pi + 1e-6) {
         throw StateError('A proposta G1 degeneraria o arco ${entity.id}.');
       }
       return {
@@ -9618,7 +9769,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final currentSelection = selectedSketchEntityIds.toSet();
     if (currentSelection.length !=
             _sketchContinuityRepairPreviewSelectionIds.length ||
-        !currentSelection.containsAll(_sketchContinuityRepairPreviewSelectionIds)) {
+        !currentSelection.containsAll(
+          _sketchContinuityRepairPreviewSelectionIds,
+        )) {
       throw StateError(
         'A seleção CAD mudou desde o preview G1; gere um novo preview.',
       );
@@ -9646,7 +9799,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
       final proposed = update.proposedEntity;
       if (proposed.id != entity.id || proposed.type != entity.type) {
-        throw StateError('A proposta G1 perdeu a identidade de ${update.entityId}.');
+        throw StateError(
+          'A proposta G1 perdeu a identidade de ${update.entityId}.',
+        );
       }
       if (entity is SketchLine && proposed is SketchLine) {
         final oldStart = SketchVector.fromJson(entity.parameters['start']);
@@ -9655,7 +9810,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         final newEnd = SketchVector.fromJson(proposed.parameters['end']);
         if ((oldStart.z - newStart.z).abs() > 1e-9 ||
             (oldEnd.z - newEnd.z).abs() > 1e-9) {
-          throw StateError('A proposta G1 sairia do plano da linha ${entity.id}.');
+          throw StateError(
+            'A proposta G1 sairia do plano da linha ${entity.id}.',
+          );
         }
       }
       if (entity is SketchArc && proposed is SketchArc) {
@@ -9682,7 +9839,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     if (updateIds.length != alternative.affectedEntityIds.toSet().length ||
         !updateIds.containsAll(alternative.affectedEntityIds)) {
-      throw StateError('A alternativa G1 possui entidades afetadas inconsistentes.');
+      throw StateError(
+        'A alternativa G1 possui entidades afetadas inconsistentes.',
+      );
     }
     return (plan: plan, alternative: alternative);
   }
@@ -9989,10 +10148,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                 selectedJoin.second.name,
               );
         if (after == null ||
-            after.gapMillimeters > validated.plan.connectionToleranceMillimeters ||
+            after.gapMillimeters >
+                validated.plan.connectionToleranceMillimeters ||
             !after.measuredG1 ||
             after.tangentAngleRadians == null ||
-            after.tangentAngleRadians! > validated.plan.tangencyToleranceRadians) {
+            after.tangentAngleRadians! >
+                validated.plan.tangencyToleranceRadians) {
           throw StateError(
             'A correção G1 não atingiu as tolerâncias C0/G1 do planner.',
           );
@@ -10929,9 +11090,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final visual = runtime.scene.find(id);
       final entityVisible = entity != null && entity.visible;
       final visualUsable =
-          visual != null &&
-          visual.visible &&
-          !cadSceneEntityIsPickOnly(visual);
+          visual != null && visual.visible && !cadSceneEntityIsPickOnly(visual);
       if (!entityVisible && !visualUsable) continue;
       var copied = visualUsable
           ? _segmentsFromGeometry(visual.geometry)
@@ -11806,10 +11965,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     return null;
   }
 
-  String _sketchEntityIdFromReference(
-    String reference, {
-    bool robust = true,
-  }) {
+  String _sketchEntityIdFromReference(String reference, {bool robust = true}) {
     final separator = robust
         ? reference.lastIndexOf(':')
         : reference.indexOf(':');
@@ -17324,6 +17480,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
 
     Sketch? createdSketch;
+    String? finishedSketchId;
     register(
       id: 'reverse.sketch.open',
       execute: (parameters) async {
@@ -17335,15 +17492,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         // source may have been removed or replaced after it was selected.
         final plane = _resolveSketchSupport(planeId);
         runtime.write('sketch.selectedPlane', plane);
-        // Re-entering the Sketch module for a support that already owns a
-        // Sketch must reopen that root. Persisting another Sketch here is what
-        // produced the duplicate "Sketch 00N" roots in the tree.
-        if (parameters['forceNew'] != true) {
+        final forceNew = parameters['forceNew'] == true;
+        _captureSketchPresentationVisibility();
+        _beginSketchEditSession();
+        _clearSketchEditTransients(hideSurfacePreview: true);
+        activeTool = SketchToolType.line;
+        // Implicit re-entry (not New Sketch) still reuses the support's root.
+        // New Sketch must never inherit that identity.
+        if (!forceNew) {
           final existing = _sketchForSupport(planeId);
           if (existing != null) {
             createdSketch = null;
             sketchApi!.openSketch(existing.id);
             activeSketch = existing;
+            _restoreSketchSupportPlane(existing);
             stage = SketchSurfaceStage.sketchActive;
             await _synchronizeSketchScene();
             runtime.select({planeId, existing.id});
@@ -17967,42 +18129,65 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.sketch.finish',
       execute: (_) async {
+        final sketch = activeSketch ?? (throw StateError('Open Sketch first.'));
+        finishedSketchId = sketch.id;
+        _beginSketchEditSession();
+        _clearSketchEditTransients(hideSurfacePreview: true);
         runtime.hideTransient('sketch-line-preview');
         await persist();
         sketchApi!.closeSketch();
         stage = SketchSurfaceStage.sketchFinished;
+        activeSketch = sketch;
         // Publish the committed, closed-Sketch state before returning control
         // to the workspace. synchronizeChanges awaits the SceneGraph update.
         await _synchronizeSketchScene();
         await runtime.transitionFeature(
-          activeSketch!.id,
+          sketch.id,
           FeatureLifecycleState.closed,
           command: 'feature.close',
         );
-        runtime.select({activeSketch!.id});
-        return activeSketch!.id;
+        runtime.select({sketch.id});
+        return sketch.id;
       },
       undo: (_) async {
-        sketchApi!.openSketch(activeSketch!.id);
+        final id =
+            finishedSketchId ??
+            activeSketch?.id ??
+            (throw StateError('No Sketch to reopen.'));
+        _captureSketchPresentationVisibility();
+        _beginSketchEditSession();
+        sketchApi!.openSketch(id);
+        final restored =
+            sketchApi!.sketches.where((item) => item.id == id).firstOrNull ??
+            activeSketch ??
+            (throw StateError('Unknown Sketch: $id'));
+        activeSketch = restored;
+        _restoreSketchSupportPlane(restored);
         stage = SketchSurfaceStage.sketchActive;
         await _synchronizeSketchScene();
         await runtime.transitionFeature(
-          activeSketch!.id,
+          id,
           FeatureLifecycleState.editing,
           command: 'feature.close.undo',
         );
-        return activeSketch!.id;
+        return id;
       },
       redo: (_) async {
+        final id =
+            finishedSketchId ??
+            activeSketch?.id ??
+            (throw StateError('No Sketch to close.'));
+        _beginSketchEditSession();
+        _clearSketchEditTransients(hideSurfacePreview: true);
         sketchApi!.closeSketch();
         stage = SketchSurfaceStage.sketchFinished;
         await _synchronizeSketchScene();
         await runtime.transitionFeature(
-          activeSketch!.id,
+          id,
           FeatureLifecycleState.closed,
           command: 'feature.close.redo',
         );
-        return activeSketch!.id;
+        return id;
       },
     );
 
@@ -18606,11 +18791,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> _synchronizeSketchScene() async {
     final document = runtime.document;
     if (document == null) return;
+    final session = _sketchSessionEpoch;
     // Undo/Redo restores deserialized Sketch instances. Rebind the Workspace
     // to the canonical engine instance before publishing SceneGraph or Health.
-    final cachedActive = runtime.read<Sketch>('sketch.active');
-    final canonicalActiveId =
-        sketchApi?.engine.activeSketchId ?? cachedActive?.id;
+    // After Exit the engine has no active identity; do not fall back to the
+    // cached finished Sketch or the next New Sketch inherits that session.
+    final canonicalActiveId = sketchApi?.engine.activeSketchId;
     if (canonicalActiveId != null) {
       final canonicalActive = sketchApi?.sketches
           .where((item) => item.id == canonicalActiveId)
@@ -18878,7 +19064,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await refreshDependentProfessionalSewBodies();
     await refreshDependentProfessionalExtrudes();
     await refreshDependentProfessionalRevolves();
+    if (session != _sketchSessionEpoch) return;
     await _refreshSketchSurfacePreview();
+    if (session != _sketchSessionEpoch) return;
+    if (sketchEditSessionActive) {
+      _applySketchPresentationIsolation();
+    } else {
+      _restoreSketchPresentationVisibility();
+    }
     _publishRegionFitComparisonOverlays(allSketches, document);
     _publishOriginalSectionReferenceOverlay();
     runtime.select(
