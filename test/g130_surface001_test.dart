@@ -86,6 +86,7 @@ void main() {
 
       await controller.previewPlanarSurface();
       expect(controller.error, isNull);
+      expect(controller.surfaceCadCreationAvailable, isTrue);
       expect(cad.runtime.scene.find('surface-preview'), isNotNull);
       await controller.confirmSurface();
 

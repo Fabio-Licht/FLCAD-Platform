@@ -42,6 +42,8 @@ dependencies:
   path: ^1.9.1
   crypto: ^3.0.7
 
+  dart_earcut: 1.2.0
+
   ffi: ^2.1.4
   file_picker: ^12.0.0
 

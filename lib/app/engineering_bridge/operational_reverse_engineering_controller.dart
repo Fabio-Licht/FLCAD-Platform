@@ -55,6 +55,7 @@ import '../../core/sketch_editor/api/sketch_editor_api.dart';
 import '../../core/sketch_editor/integration/editor_factory.dart';
 import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
+import '../../core/sketch_editor/regions/sketch_region_classifier.dart';
 import '../../core/sketch_editor/models/editor_models.dart';
 import '../../core/sketch_editor/snapping/editor_snapping.dart';
 import '../../core/sketch_editor/snapping/sketch_coordinate_magnet.dart';
@@ -3416,6 +3417,85 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         .toList(growable: false);
   }
 
+  /// Resolves the complete transient region selected for a surface preview.
+  ///
+  /// Sketch Health intentionally keeps one active component for its existing
+  /// preflight semantics. Preview presentation, however, may need the
+  /// contained holes/islands of that component. We classify all eligible
+  /// presentation loops, select the active or explicitly selected root(s),
+  /// and then pass only those roots and descendants to Earcut.
+  List<SketchEntity> _surfacePreviewEntities(
+    Sketch sketch,
+    SketchHealthReport health,
+  ) {
+    final entities = sketch.entityIds
+        .map((id) => sketchApi?.entity(id))
+        .whereType<SketchEntity>()
+        .toList(growable: false);
+    final complete = _sketchSurfacePreviewBuilder.buildProfile(
+      entities: entities,
+      coordinates: sketch.coordinates,
+    );
+    final targetIds = selectedSketchEntityIds.isNotEmpty
+        ? selectedSketchEntityIds
+        : health.activeProfileEntityIds;
+    final matched = complete.regions
+        .where((region) => region.entityIds.any(targetIds.contains))
+        .toList(growable: false);
+    if (matched.isEmpty) {
+      throw StateError('No closed Sketch region is selected for preview.');
+    }
+
+    final byId = {for (final region in complete.regions) region.id: region};
+    final roots = <String>{};
+    for (final region in matched) {
+      var current = region;
+      final visited = <String>{};
+      while (current.parentLoopId != null) {
+        final parentId = current.parentLoopId!;
+        if (!visited.add(current.id)) {
+          throw StateError('Sketch region containment is ambiguous.');
+        }
+        final parent = byId[parentId];
+        if (parent == null) {
+          throw StateError('Sketch region containment is incomplete.');
+        }
+        current = parent;
+      }
+      roots.add(current.id);
+    }
+
+    bool belongsToRoot(SketchRegionLoop region, String rootId) {
+      var current = region;
+      final visited = <String>{};
+      while (true) {
+        if (current.id == rootId) return true;
+        if (!visited.add(current.id)) return false;
+        final parentId = current.parentLoopId;
+        if (parentId == null) return false;
+        final parent = byId[parentId];
+        if (parent == null) return false;
+        current = parent;
+      }
+    }
+
+    final selectedLoopIds = {
+      for (final region in complete.regions)
+        if (roots.any((root) => belongsToRoot(region, root))) region.id,
+    };
+    final eligibleEntityIds = {
+      for (final region in complete.regions)
+        if (selectedLoopIds.contains(region.id)) ...region.entityIds,
+    };
+    final result = entities
+        .where((entity) => eligibleEntityIds.contains(entity.id))
+        .toList(growable: false);
+    if (result.isEmpty) {
+      throw StateError('The selected Sketch region has no drawable entities.');
+    }
+    return result;
+  }
+
   ({double x, double y, double dx, double dy, double length, double angle})?
   get lineHud {
     final start = previewPoints.lastOrNull;
@@ -3581,8 +3661,30 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       const ProfessionalSurfaceOperationsAdapter();
   SurfaceOperationKernelAPI? _surfaceOperationKernel;
   SurfacePlan? _lastConfirmedSurfacePlan;
+  Set<String>? _surfacePreviewEntityIds;
   bool get surfacePreviewActive =>
       runtime.read<bool>('sketch.surfacePreview.active') ?? false;
+
+  /// Whether the currently displayed preview can be materialized by the
+  /// single-wire CAD adapter. The UI consumes this decision; it does not
+  /// repeat region classification or infer support from Sketch Health.
+  bool get surfaceCadCreationAvailable {
+    final plan = surfacePlan;
+    return surfacePreviewActive && plan != null && plan.valid;
+  }
+
+  String get surfaceCadCreationBlockReason {
+    final plan = surfacePlan;
+    if (!surfacePreviewActive || plan == null) {
+      return 'Preview the surface first.';
+    }
+    if (plan.boundaryReport.regions != 1) {
+      return 'Create Surface supports one closed loop only; holes and multiple regions are unavailable.';
+    }
+    if (plan.diagnostics.isNotEmpty) return plan.diagnostics.first;
+    return 'Create Surface is unavailable for this preview.';
+  }
+
   bool get surfaceOffsetPreviewActive =>
       runtime.read<String>('surface.offset.source') != null;
   final ViewportPickingController _viewportPicking =
@@ -17923,7 +18025,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
         }
         final health = sketchHealth;
-        final profileEntities = _surfaceProfileEntities(health);
+        final profileEntities = _surfacePreviewEntities(sketch, health);
         final profile = _sketchSurfacePreviewBuilder.buildProfile(
           entities: profileEntities,
           coordinates: sketch.coordinates,
@@ -17933,6 +18035,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             'Planar Surface requires at least one closed profile.',
           );
         }
+        _surfacePreviewEntityIds = profileEntities.map((e) => e.id).toSet();
         runtime.showTransient(
           _sketchSurfacePreviewBuilder.build(
             entities: profileEntities,
@@ -17954,6 +18057,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         runtime.hideTransient('surface-preview');
         runtime.write('sketch.surfacePreview.active', false);
         surfacePlan = null;
+        _surfacePreviewEntityIds = null;
         stage = SketchSurfaceStage.sketchFinished;
         return 'preview removed';
       },
@@ -17964,7 +18068,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       execute: (_) async {
         final plan =
             surfacePlan ?? (throw StateError('Preview the surface first.'));
-        if (!surfacePreviewActive || !plan.valid || !sketchReadyForSurface) {
+        if (!surfacePreviewActive || !sketchReadyForSurface) {
+          throw StateError('Approve a valid Surface Preview first.');
+        }
+        if (plan.boundaryReport.regions != 1) {
+          throw StateError(
+            'Create Surface currently supports one closed loop only; '
+            'holes and multiple Sketch regions must remain in Preview.',
+          );
+        }
+        if (!plan.valid) {
           throw StateError('Approve a valid Surface Preview first.');
         }
         final sketch = activeSketch ?? (throw StateError('No active Sketch.'));
@@ -17972,10 +18085,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           (item) => item.kind == SurfaceKind.plane,
         );
         final featureId = _planarSurfaceId(sketch.id);
+        final previewEntityIds = _surfacePreviewEntityIds;
+        final sourceEntities = previewEntityIds == null
+            ? _surfacePreviewEntities(sketch, sketchHealth)
+            : sketch.entityIds
+                  .map((id) => sketchApi?.entity(id))
+                  .whereType<SketchEntity>()
+                  .where((entity) => previewEntityIds.contains(entity.id))
+                  .toList(growable: false);
         activeSurface = await _planarSurface.build(
           featureId: featureId,
           sketch: sketch,
-          entities: _surfaceProfileEntities(sketchHealth),
+          entities: sourceEntities,
           health: sketchHealth,
           candidate: candidate,
           generation: surfaceGenerationApi!,
@@ -17986,6 +18107,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         runtime.hideTransient('surface-preview');
         runtime.write('sketch.surfacePreview.active', false);
         surfacePlan = null;
+        _surfacePreviewEntityIds = null;
         await _upsertSurface(activeSurface!, command: 'surface.confirm');
         stage = SketchSurfaceStage.surfaceGenerated;
         return activeSurface!.surfaceId;
@@ -18011,7 +18133,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         final sketch = activeSketch;
         if (sketch != null && sketchReadyForSurface) {
           final health = sketchHealth;
-          final profileEntities = _surfaceProfileEntities(health);
+          final profileEntities = _surfacePreviewEntities(sketch, health);
+          _surfacePreviewEntityIds = profileEntities.map((e) => e.id).toSet();
           sketch.metadata['surfacePreviewEntityVersions'] =
               _sketchEntityVersions(sketch);
           await sketchApi?.persist();
@@ -18037,6 +18160,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         runtime.hideTransient('surface-preview');
         runtime.write('sketch.surfacePreview.active', false);
         surfacePlan = null;
+        _surfacePreviewEntityIds = null;
         await _upsertSurface(activeSurface!, command: 'surface.redo');
         stage = SketchSurfaceStage.surfaceGenerated;
         return activeSurface!.surfaceId;
@@ -19719,19 +19843,30 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       boundaryReport: BoundaryReport(
         loops: profile.loops.length,
         openEdges: 0,
-        regions: profile.loops.length,
+        regions: profile.regions.length,
         crossings: 0,
-        islands: 0,
-        holes: 0,
+        islands: profile.regions
+            .where((region) => region.role == SketchRegionRole.island)
+            .length,
+        holes: profile.regions
+            .where((region) => region.role == SketchRegionRole.hole)
+            .length,
         quality: 1,
       ),
       createdAt: DateTime.now().toUtc(),
-      valid: true,
-      diagnostics: const [],
+      valid: profile.regions.length == 1,
+      diagnostics: profile.regions.length == 1
+          ? const []
+          : const [
+              'Preview includes multiple Sketch regions; CAD creation supports one loop only.',
+            ],
     );
   }
 
   Future<void> _refreshSketchSurfacePreview() async {
+    // Exit closes the engine session. Refreshing from the cached finished
+    // Sketch would set stage back to surfacePreview and keep editing it.
+    if (sketchApi?.engine.activeSketchId == null) return;
     final sketch = activeSketch;
     final stored = sketch?.metadata['surfacePreviewEntityVersions'];
     if (sketch == null || stored is! Map) {
@@ -19739,6 +19874,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         runtime.hideTransient('surface-preview');
         runtime.write('sketch.surfacePreview.active', false);
         surfacePlan = null;
+        _surfacePreviewEntityIds = null;
       }
       return;
     }
@@ -19754,12 +19890,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.hideTransient('surface-preview');
       runtime.write('sketch.surfacePreview.active', false);
       surfacePlan = null;
+      _surfacePreviewEntityIds = null;
       if (stage == SketchSurfaceStage.surfacePreview) {
         stage = SketchSurfaceStage.sketchActive;
       }
       return;
     }
-    final profileEntities = _surfaceProfileEntities(health);
+    final profileEntities = _surfacePreviewEntities(sketch, health);
+    _surfacePreviewEntityIds = profileEntities.map((e) => e.id).toSet();
     final profile = _sketchSurfacePreviewBuilder.buildProfile(
       entities: profileEntities,
       coordinates: sketch.coordinates,

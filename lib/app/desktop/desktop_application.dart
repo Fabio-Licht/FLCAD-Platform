@@ -5742,7 +5742,7 @@ class _OfficialEngineeringWorkspaceState
           });
         }
       } else {
-        _beginDirectSketchSupportSelection();
+        _beginDirectSketchSupportSelection(forceNew: true);
       }
     }
     if (item != 'Sketch' && mounted) {
@@ -12004,7 +12004,9 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
           title: const Text('Planar Surface'),
           subtitle: Text(
             controller.surfacePreviewActive
-                ? 'Preview approved · ready to create'
+                ? controller.surfaceCadCreationAvailable
+                      ? 'Preview approved · ready to create'
+                      : controller.surfaceCadCreationBlockReason
                 : health.readyForSurface
                 ? 'Profile Ready'
                 : 'Sketch Health must be Ready',

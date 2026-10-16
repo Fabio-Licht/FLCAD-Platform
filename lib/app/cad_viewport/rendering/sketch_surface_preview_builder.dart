@@ -1,5 +1,8 @@
 import 'dart:math' as math;
 
+import 'package:dart_earcut/dart_earcut.dart';
+
+import '../../../core/sketch_editor/regions/sketch_region_classifier.dart';
 import '../../../core/sketch_engine/entities/sketch_entities.dart';
 import '../../../core/sketch_engine/models/sketch_models.dart';
 import '../scene/cad_scene_graph.dart';
@@ -33,20 +36,50 @@ class SketchSurfacePreviewBuilder {
     required Iterable<SketchEntity> entities,
     required SketchCoordinateSystem coordinates,
   }) {
-    final loops = _loops(entities.where((e) => e.visible && !e.construction));
-    if (loops.isEmpty) throw StateError('No closed profile is available.');
+    final sampled = _sampledLoops(
+      entities.where((e) => e.visible && !e.construction && !e.reference),
+    );
+    if (sampled.isEmpty) throw StateError('No closed profile is available.');
+    final classification = const SketchRegionClassifier().classify([
+      for (final loop in sampled)
+        SketchRegionLoopInput(
+          id: loop.id,
+          entityIds: loop.entityIds,
+          points: loop.points,
+          samplingSufficient: loop.points.length >= 3,
+        ),
+    ]);
+    if (!classification.conclusive) {
+      final details = classification.diagnostics
+          .map((diagnostic) => diagnostic.message)
+          .join('; ');
+      throw StateError('Sketch region classification failed: $details');
+    }
+    if (classification.loops.isEmpty) {
+      throw StateError('No closed profile is available.');
+    }
     final nodes = <double>[];
     final triangles = <int>[];
-    for (final loop in loops) {
-      final clean = _clean(loop);
-      if (clean.length < 3) continue;
+    for (final loop in classification.loops) {
+      if (loop.role != SketchRegionRole.outer &&
+          loop.role != SketchRegionRole.island) {
+        continue;
+      }
+      final holes = classification.loops
+          .where(
+            (candidate) =>
+                candidate.role == SketchRegionRole.hole &&
+                candidate.parentLoopId == loop.id,
+          )
+          .toList(growable: false);
+      final regionPoints = [loop.points, for (final hole in holes) hole.points];
       final base = nodes.length ~/ 3;
-      for (final point in clean) {
+      for (final point in regionPoints.expand((points) => points)) {
         final global = coordinates.localToGlobal(point);
         nodes.addAll([global.x, global.y, global.z]);
       }
-      for (final triangle in _triangulate(clean)) {
-        triangles.addAll(triangle.map((index) => base + index));
+      for (final index in _triangulateRegion(loop.points, holes)) {
+        triangles.add(base + index);
       }
     }
     if (triangles.isEmpty) throw StateError('The profile cannot be previewed.');
@@ -54,33 +87,47 @@ class SketchSurfacePreviewBuilder {
       nodes: List.unmodifiable(nodes),
       triangles: List.unmodifiable(triangles),
       loops: List<List<SketchVector>>.unmodifiable([
-        for (final loop in loops)
+        for (final loop in classification.loops)
           List<SketchVector>.unmodifiable(
-            _clean(loop).map(coordinates.localToGlobal),
+            loop.points.map(coordinates.localToGlobal),
           ),
       ]),
+      regions: classification.loops,
     );
   }
 
-  List<List<SketchVector>> _loops(Iterable<SketchEntity> source) {
-    final loops = <List<SketchVector>>[];
-    final edges = <List<SketchVector>>[];
+  List<_SampledLoop> _sampledLoops(Iterable<SketchEntity> source) {
+    final loops = <_SampledLoop>[];
+    final edges = <_SampledEdge>[];
     for (final entity in source) {
       if (entity is SketchCircle) {
-        loops.add(_sample(entity));
+        loops.add(
+          _SampledLoop(
+            id: entity.id,
+            entityIds: [entity.id],
+            points: _sample(entity),
+          ),
+        );
       } else if (entity is SketchLine || entity is SketchArc) {
-        edges.add(_sample(entity));
+        edges.add(_SampledEdge(id: entity.id, points: _sample(entity)));
       } else if (entity is SketchSpline) {
         final raw =
             (entity.parameters['sampledPoints'] ?? entity.parameters['points'])
                 as List?;
         if (raw != null && raw.length >= 2) {
-          edges.add(raw.map(SketchVector.fromJson).toList(growable: false));
+          edges.add(
+            _SampledEdge(
+              id: entity.id,
+              points: raw.map(SketchVector.fromJson).toList(growable: false),
+            ),
+          );
         }
       }
     }
     while (edges.isNotEmpty) {
-      final loop = List<SketchVector>.of(edges.removeAt(0));
+      final first = edges.removeAt(0);
+      final loop = List<SketchVector>.of(first.points);
+      final entityIds = <String>[first.id];
       var progressed = true;
       while (!_near(loop.first, loop.last) && progressed) {
         progressed = false;
@@ -94,11 +141,20 @@ class SketchSurfacePreviewBuilder {
             continue;
           }
           edges.removeAt(i);
+          entityIds.add(edge.id);
           progressed = true;
           break;
         }
       }
-      if (_near(loop.first, loop.last)) loops.add(loop);
+      if (_near(loop.first, loop.last)) {
+        loops.add(
+          _SampledLoop(
+            id: 'loop:${entityIds.join('|')}',
+            entityIds: entityIds,
+            points: loop,
+          ),
+        );
+      }
     }
     return loops;
   }
@@ -128,52 +184,55 @@ class SketchSurfacePreviewBuilder {
     ];
   }
 
-  List<SketchVector> _clean(List<SketchVector> loop) {
-    final result = <SketchVector>[];
-    for (final point in loop) {
-      if (result.isEmpty || !_near(result.last, point)) result.add(point);
+  List<int> _triangulateRegion(
+    List<SketchVector> outer,
+    List<SketchRegionLoop> holes,
+  ) {
+    final points = [...outer, for (final hole in holes) ...hole.points];
+    final indices = Earcut.triangulateFromPointsAndHolePoints(
+      outline: outer.map((point) => math.Point<double>(point.x, point.y)),
+      holes: [
+        for (final hole in holes)
+          hole.points.map((point) => math.Point<double>(point.x, point.y)),
+      ],
+    );
+    if (indices.isEmpty || indices.length % 3 != 0) {
+      throw StateError('Earcut returned no valid triangle index groups.');
     }
-    if (result.length > 1 && _near(result.first, result.last)) {
-      result.removeLast();
-    }
-    return result;
-  }
-
-  List<List<int>> _triangulate(List<SketchVector> polygon) {
-    final result = <List<int>>[];
-    final indices = List<int>.generate(polygon.length, (i) => i);
-    final ccw = _area(polygon) > 0;
-    var guard = polygon.length * polygon.length;
-    while (indices.length > 3 && guard-- > 0) {
-      var clipped = false;
-      for (var i = 0; i < indices.length; i++) {
-        final a = indices[(i - 1 + indices.length) % indices.length];
-        final b = indices[i];
-        final c = indices[(i + 1) % indices.length];
-        if (_cross(polygon[a], polygon[b], polygon[c]) * (ccw ? 1 : -1) <=
-            tolerance) {
-          continue;
-        }
-        if (indices.any(
-          (p) =>
-              p != a &&
-              p != b &&
-              p != c &&
-              _inside(polygon[p], polygon[a], polygon[b], polygon[c]),
-        )) {
-          continue;
-        }
-        result.add(ccw ? [a, b, c] : [c, b, a]);
-        indices.removeAt(i);
-        clipped = true;
-        break;
+    for (final index in indices) {
+      if (index < 0 || index >= points.length) {
+        throw StateError('Earcut returned an out-of-range triangle index.');
       }
-      if (!clipped) break;
     }
-    if (indices.length == 3) {
-      result.add(ccw ? indices : indices.reversed.toList());
+    final expected =
+        _area(outer).abs() -
+        holes.fold(0.0, (sum, hole) => sum + _area(hole.points).abs());
+    var actual = 0.0;
+    for (var i = 0; i < indices.length; i += 3) {
+      final a = points[indices[i]],
+          b = points[indices[i + 1]],
+          c = points[indices[i + 2]];
+      final triangleArea = _cross(a, b, c).abs() / 2;
+      if (triangleArea <= tolerance * tolerance) {
+        throw StateError('Earcut returned a degenerate triangle.');
+      }
+      final centroid = SketchVector(
+        (a.x + b.x + c.x) / 3,
+        (a.y + b.y + c.y) / 3,
+      );
+      if (holes.any((hole) => _insidePolygon(centroid, hole.points))) {
+        throw StateError('Earcut filled a classified hole.');
+      }
+      actual += triangleArea;
     }
-    return result;
+    final areaTolerance = math.max(
+      tolerance * tolerance,
+      expected.abs() * 1e-6,
+    );
+    if ((actual - expected).abs() > areaTolerance) {
+      throw StateError('Earcut area validation failed.');
+    }
+    return indices;
   }
 
   double _area(List<SketchVector> p) {
@@ -188,10 +247,16 @@ class SketchSurfacePreviewBuilder {
   double _cross(SketchVector a, SketchVector b, SketchVector c) =>
       (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 
-  bool _inside(SketchVector p, SketchVector a, SketchVector b, SketchVector c) {
-    final x = _cross(a, b, p), y = _cross(b, c, p), z = _cross(c, a, p);
-    return (x >= -tolerance && y >= -tolerance && z >= -tolerance) ||
-        (x <= tolerance && y <= tolerance && z <= tolerance);
+  bool _insidePolygon(SketchVector point, List<SketchVector> polygon) {
+    var inside = false;
+    for (var i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      final a = polygon[i], b = polygon[j];
+      if ((a.y > point.y) != (b.y > point.y)) {
+        final x = (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x;
+        if (point.x < x) inside = !inside;
+      }
+    }
+    return inside;
   }
 
   bool _near(SketchVector a, SketchVector b) =>
@@ -203,9 +268,41 @@ class SketchSurfaceProfile {
     required this.nodes,
     required this.triangles,
     required this.loops,
+    required this.regions,
   });
 
   final List<double> nodes;
   final List<int> triangles;
   final List<List<SketchVector>> loops;
+
+  /// Transient classification metadata used by the operation controller to
+  /// keep the selected outer loop together with its holes and islands.
+  ///
+  /// This is presentation metadata only; it is never persisted or passed to
+  /// the CAD kernel.
+  final List<SketchRegionLoop> regions;
+}
+
+class _SampledLoop {
+  const _SampledLoop({
+    required this.id,
+    required this.entityIds,
+    required this.points,
+  });
+
+  final String id;
+  final List<String> entityIds;
+  final List<SketchVector> points;
+}
+
+class _SampledEdge {
+  const _SampledEdge({required this.id, required this.points});
+
+  final String id;
+  final List<SketchVector> points;
+
+  SketchVector get first => points.first;
+  SketchVector get last => points.last;
+  Iterable<SketchVector> skip(int count) => points.skip(count);
+  Iterable<SketchVector> get reversed => points.reversed;
 }

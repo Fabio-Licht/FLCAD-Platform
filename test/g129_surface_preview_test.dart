@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flcad_mobile/app/cad_viewport/rendering/sketch_surface_preview_builder.dart';
 import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
 import 'package:flcad_mobile/core/sketch_editor/health/sketch_health_analyzer.dart';
+import 'package:flcad_mobile/core/sketch_editor/regions/sketch_region_classifier.dart';
 import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 
@@ -67,6 +68,50 @@ void main() {
     expect(profile.loops, hasLength(1));
     expect(profile.triangles, hasLength(6));
   });
+
+  test(
+    'preserves a contained hole as region metadata and empty preview area',
+    () {
+      final profile = builder.buildProfile(
+        entities: [
+          SketchLine(const SketchVector(0, 0), const SketchVector(10, 0)),
+          SketchLine(const SketchVector(10, 0), const SketchVector(10, 10)),
+          SketchLine(const SketchVector(10, 10), const SketchVector(0, 10)),
+          SketchLine(const SketchVector(0, 10), const SketchVector(0, 0)),
+          SketchCircle(const SketchVector(5, 5), 2),
+        ],
+        coordinates: const SketchCoordinateSystem(),
+      );
+
+      expect(profile.regions, hasLength(2));
+      expect(
+        profile.regions.where((region) => region.role == SketchRegionRole.hole),
+        hasLength(1),
+      );
+      expect(profile.triangles, isNotEmpty);
+      final hole = profile.regions.singleWhere(
+        (region) => region.role == SketchRegionRole.hole,
+      );
+      final points = [
+        for (var i = 0; i < profile.nodes.length; i += 3)
+          SketchVector(profile.nodes[i], profile.nodes[i + 1]),
+      ];
+      for (var i = 0; i < profile.triangles.length; i += 3) {
+        final a = points[profile.triangles[i]],
+            b = points[profile.triangles[i + 1]],
+            c = points[profile.triangles[i + 2]];
+        final centroid = SketchVector(
+          (a.x + b.x + c.x) / 3,
+          (a.y + b.y + c.y) / 3,
+        );
+        final distanceSquared =
+            (centroid.x - 5) * (centroid.x - 5) +
+            (centroid.y - 5) * (centroid.y - 5);
+        expect(distanceSquared, greaterThanOrEqualTo(4 - 1e-6));
+      }
+      expect(hole.parentLoopId, isNotNull);
+    },
+  );
 
   test(
     'surface profile does not reuse a stale closed loop as the active profile',
