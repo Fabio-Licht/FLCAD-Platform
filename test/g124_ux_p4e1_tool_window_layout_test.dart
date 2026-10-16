@@ -30,4 +30,12 @@ void main() {
     );
     expect(size, const Size(520, 544));
   });
+
+  test('content growth does not exceed the available viewport', () {
+    final size = ToolWindowLayout.constrainSize(
+      requested: const Size(320, 720),
+      viewport: const Size(640, 480),
+    );
+    expect(size, const Size(320, 464));
+  });
 }

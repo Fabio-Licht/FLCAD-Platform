@@ -6,6 +6,22 @@ import 'dart:ui' show Offset, Size;
 /// The overlay lives inside the central viewport Stack, so these helpers do
 /// not know about or modify the detached PanelWindowHost layout.
 abstract final class ToolWindowLayout {
+  static Size constrainSize({
+    required Size requested,
+    required Size viewport,
+    Size minimum = const Size(260, 240),
+    double margin = 16,
+  }) {
+    final maxWidth = math.max(0.0, viewport.width - margin);
+    final maxHeight = math.max(0.0, viewport.height - margin);
+    final minWidth = math.min(minimum.width, maxWidth);
+    final minHeight = math.min(minimum.height, maxHeight);
+    return Size(
+      requested.width.clamp(minWidth, maxWidth).toDouble(),
+      requested.height.clamp(minHeight, maxHeight).toDouble(),
+    );
+  }
+
   static Offset initialPosition({
     required Size viewport,
     required Size window,
