@@ -33,6 +33,10 @@ migrate_working_dir/
 /build/
 /coverage/
 
+# Real validation fixtures and generated GUI captures
+/test_assets/real_meshes/*.stl
+/test_assets/screenshots/**/*.png
+
 # Symbolication related
 app.*.symbols
 
