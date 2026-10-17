@@ -134,6 +134,7 @@ class CadViewportPick {
     required this.hit,
     this.subentityKind,
     this.presentationSubId,
+    this.ray,
   });
   final String entityId;
   final MeshHit hit;
@@ -142,6 +143,30 @@ class CadViewportPick {
   /// Transient renderer-local ID. It must be resolved against native B-Rep
   /// before any durable command is created.
   final int? presentationSubId;
+
+  /// Transient world-space camera ray for technical consumers. It is never
+  /// persisted and is absent for picks that did not originate at the viewport.
+  final MeshRay? ray;
+}
+
+MeshRay cameraRayForViewportPosition({
+  required Offset position,
+  required CadCameraController camera,
+}) {
+  final rowMajor = camera.inverseViewProjectionMatrix.values;
+  final columnMajor = [
+    for (var column = 0; column < 4; column++)
+      for (var row = 0; row < 4; row++) rowMajor[row * 4 + column],
+  ];
+  return const CameraPicking().ray(
+    screenX: position.dx,
+    screenY: position.dy,
+    camera: CameraPickingContext(
+      viewportWidth: camera.viewportWidth,
+      viewportHeight: camera.viewportHeight,
+      inverseViewProjection: columnMajor,
+    ),
+  );
 }
 
 class ViewportPickingController {
@@ -198,6 +223,10 @@ class ViewportPickingController {
     bool includePickOnlyProfiles = true,
   }) {
     CadViewportPick? nearest;
+    final screenRay = cameraRayForViewportPosition(
+      position: position,
+      camera: camera,
+    );
     for (final entity in scene.entities.where(
       (item) =>
           item.visible &&
@@ -259,6 +288,7 @@ class ViewportPickingController {
           (nearest == null || hit.distance < nearest.hit.distance)) {
         nearest = CadViewportPick(
           entityId: entity.id,
+          ray: screenRay,
           hit: StlDisplayLod.simplified(entity.geometry)
               ? MeshHit(
                   triangleIndex: -1,
@@ -278,6 +308,7 @@ class ViewportPickingController {
           scene,
           eligibleEntityIds: eligibleEntityIds,
           includePickOnlyProfiles: includePickOnlyProfiles,
+          ray: screenRay,
         ) ??
         nearest;
   }
@@ -288,6 +319,7 @@ class ViewportPickingController {
     CadSceneGraph scene, {
     Set<String>? eligibleEntityIds,
     bool includePickOnlyProfiles = true,
+    required MeshRay ray,
   }) {
     CadViewportPick? best;
     var bestPriority = 1 << 30;
@@ -348,6 +380,7 @@ class ViewportPickingController {
       bestDistance = screenDistance;
       best = CadViewportPick(
         entityId: entity.id,
+        ray: ray,
         hit: MeshHit(
           triangleIndex: -1,
           point: worldPoint,

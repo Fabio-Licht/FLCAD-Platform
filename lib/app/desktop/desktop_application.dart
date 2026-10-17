@@ -6589,9 +6589,20 @@ class _OfficialEngineeringWorkspaceState
                                               'Perfil do Extrude selecionado na área de trabalho.',
                                             );
                                           }
-                                          if (picked?.mesh != null) {
+                                          final managedStlRecognitionPick =
+                                              module == 'Recognition' &&
+                                              picked?.data['managedStlAssets']
+                                                  is Map &&
+                                              widget.cad.runtime.scene
+                                                      .find(pick.entityId)
+                                                      ?.geometry['presentationLod']
+                                                  is Map;
+                                          if (managedStlRecognitionPick ||
+                                              picked?.mesh != null) {
                                             await operational.recognizePick(
                                               pick: pick,
+                                              allowTechnicalStl:
+                                                  managedStlRecognitionPick,
                                             );
                                           } else {
                                             operational.activePick = pick;

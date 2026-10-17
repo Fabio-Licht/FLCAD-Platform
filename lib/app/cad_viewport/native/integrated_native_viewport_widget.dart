@@ -294,6 +294,10 @@ class _IntegratedCadViewportWidgetState
     if (point.length >= 3 && point.take(3).every((value) => value.isFinite)) {
       pick = CadViewportPick(
         entityId: resolved.entity.ownerId,
+        ray: cameraRayForViewportPosition(
+          position: position,
+          camera: widget.camera,
+        ),
         subentityKind: switch (result.kind) {
           NativePickKind.face => CadViewportSubentityKind.face,
           NativePickKind.edge => CadViewportSubentityKind.edge,
@@ -540,6 +544,7 @@ class _IntegratedCadViewportWidgetState
           : CadViewportPick(
               entityId: pick.entityId,
               hit: pick.hit,
+              ray: pick.ray,
               subentityKind: CadViewportSubentityKind.face,
               presentationSubId: face.presentationSubId,
             ),

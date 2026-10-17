@@ -85,6 +85,7 @@ import '../../core/surface_intelligence/integration/surface_factory.dart';
 import '../../core/surface_intelligence/models/surface_models.dart';
 import '../../core/surface_operations/integration/surface_operations_factory.dart';
 import '../cad_viewport/selection/viewport_picking_controller.dart';
+import 'selection/technical_stl_pick_resolver.dart';
 import '../cad_viewport/camera/cad_camera_controller.dart';
 import '../cad_viewport/rendering/reference_scene_adapter.dart';
 import '../cad_viewport/rendering/sketch_scene_adapter.dart';
@@ -344,6 +345,131 @@ class ArcRadiusEditPreview {
 
 enum SketchRegionFitOutput { line, spline }
 
+Map<String, dynamic> runRegionGrowingInIsolate(Map<String, dynamic> payload) {
+  final nodes = (payload['nodes'] as List)
+      .map((value) => (value as num).toDouble())
+      .toList();
+  final triangles = (payload['triangles'] as List)
+      .map((value) => (value as num).toInt())
+      .toList();
+  final settings = region_recognition.SurfaceRecognitionSettings(
+    normalAngleDegrees: (payload['normalAngleDegrees'] as num).toDouble(),
+    curvatureDelta: (payload['curvatureDelta'] as num).toDouble(),
+    minimumTriangles: (payload['minimumTriangles'] as num).toInt(),
+    planar: payload['planar'] as bool,
+    planarToleranceMm: (payload['planarToleranceMm'] as num).toDouble(),
+    seedTriangle: (payload['seedTriangle'] as num?)?.toInt(),
+    seedNeighborhoodTriangles: (payload['seedNeighborhoodTriangles'] as num)
+        .toInt(),
+  );
+  final result = const ProfessionalRegionGrowing().segment(
+    region_recognition.MeshSurfaceData.fromKernel(
+      KernelMeshGeometry(nodes: nodes, triangles: triangles),
+    ),
+    payload['fingerprint'] as String,
+    settings: settings,
+  );
+  return {
+    'regions': result.regions
+        .map(
+          (region) => <String, dynamic>{
+            'id': region.id,
+            'color': region.color,
+            'triangleIndices': region.triangleIndices,
+            'vertexIndices': region.vertexIndices,
+            'area': region.area,
+            'normal': [
+              region.averageNormal.x,
+              region.averageNormal.y,
+              region.averageNormal.z,
+            ],
+            'bounds': [
+              region.bounds.minX,
+              region.bounds.minY,
+              region.bounds.minZ,
+              region.bounds.maxX,
+              region.bounds.maxY,
+              region.bounds.maxZ,
+            ],
+            'meanCurvature': region.meanCurvature,
+            'confidence': region.confidence,
+            'health': region.health.index,
+          },
+        )
+        .toList(),
+    'graph': result.graph.edges.map(
+      (id, neighbors) => MapEntry(id, neighbors.toList()..sort()),
+    ),
+    'diagnostics': result.diagnostics,
+  };
+}
+
+RegionGrowingResult _restoreRegionGrowingResult(
+  Map<String, dynamic> payload,
+) {
+  final regions = (payload['regions'] as List).map((raw) {
+    final value = Map<String, dynamic>.from(raw as Map);
+    final normal = (value['normal'] as List)
+        .map((item) => (item as num).toDouble())
+        .toList();
+    final bounds = (value['bounds'] as List)
+        .map((item) => (item as num).toDouble())
+        .toList();
+    return region_recognition.SurfaceRegion(
+      id: value['id'] as String,
+      color: value['color'] as String,
+      triangleIndices: (value['triangleIndices'] as List)
+          .map((item) => (item as num).toInt())
+          .toList(),
+      vertexIndices: (value['vertexIndices'] as List)
+          .map((item) => (item as num).toInt())
+          .toList(),
+      area: (value['area'] as num).toDouble(),
+      averageNormal: Vector3(normal[0], normal[1], normal[2]),
+      bounds: KernelBounds(
+        bounds[0],
+        bounds[1],
+        bounds[2],
+        bounds[3],
+        bounds[4],
+        bounds[5],
+      ),
+      meanCurvature: (value['meanCurvature'] as num).toDouble(),
+      confidence: (value['confidence'] as num).toDouble(),
+      health: region_recognition
+          .RecognitionHealth
+          .values[(value['health'] as num).toInt()],
+    );
+  }).toList();
+  final graph = <String, Set<String>>{};
+  final rawGraph = Map<String, dynamic>.from(payload['graph'] as Map);
+  for (final entry in rawGraph.entries) {
+    graph[entry.key] = (entry.value as List).cast<String>().toSet();
+  }
+  return RegionGrowingResult(
+    regions,
+    region_recognition.RegionGraph(graph),
+    diagnostics: Map<String, Object?>.from(payload['diagnostics'] as Map),
+  );
+}
+
+Map<String, dynamic> _regionGrowingPayload({
+  required KernelMeshGeometry geometry,
+  required String fingerprint,
+  required region_recognition.SurfaceRecognitionSettings settings,
+}) => {
+  'nodes': geometry.nodes,
+  'triangles': geometry.triangles,
+  'fingerprint': fingerprint,
+  'normalAngleDegrees': settings.normalAngleDegrees,
+  'curvatureDelta': settings.curvatureDelta,
+  'minimumTriangles': settings.minimumTriangles,
+  'planar': settings.planar,
+  'planarToleranceMm': settings.planarToleranceMm,
+  'seedTriangle': settings.seedTriangle,
+  'seedNeighborhoodTriangles': settings.seedNeighborhoodTriangles,
+};
+
 class OperationalReverseEngineeringController extends ChangeNotifier {
   OperationalReverseEngineeringController({
     required ProfessionalRecognitionApi recognition,
@@ -354,7 +480,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SmartRegionsApi? smartRegionsApi,
   }) : recognition = RecognitionBridge(recognition),
        _referenceApi = referenceApi ?? ReferenceApi(),
-       _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi() {
+       _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi(),
+       _technicalStlPickResolver = TechnicalStlPickResolver(runtime) {
     // All desktop Save entry points (menu, Ctrl+S and the Sketch panel) go
     // through DesktopCommandCoordinator.  Register the editor/constraint
     // persistence as its pre-save phase so it is serialized with the CAD and
@@ -413,6 +540,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   final DesktopCommandCoordinator commands;
   final CadRuntime runtime;
+  final TechnicalStlPickResolver _technicalStlPickResolver;
+  int _recognitionRequestGeneration = 0;
   GeometrySelectionManager get geometrySelection => runtime.geometrySelection;
   final MeshRegionBuilder regionBuilder;
   ProfessionalRecognitionReport? get report =>
@@ -422,6 +551,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String? get recognitionFilter => runtime.read('recognition.filter');
   set recognitionFilter(String? value) =>
       runtime.write('recognition.filter', value);
+  static const defaultPlanarToleranceMm = .5;
+  double get planarToleranceMm =>
+      (runtime.read<num>('recognition.planarToleranceMm')?.toDouble() ??
+              defaultPlanarToleranceMm)
+          .clamp(.01, 1000.0)
+          .toDouble();
+  set planarToleranceMm(double value) {
+    if (!value.isFinite || value <= 0) return;
+    runtime.write('recognition.planarToleranceMm', value.clamp(.01, 1000.0));
+    notifyListeners();
+  }
+
   Map<String, RecognitionDecision> get decisions => runtime.readOrCreate(
     'recognition.decisions',
     () => <String, RecognitionDecision>{},
@@ -6202,64 +6343,197 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> recognizePick({required CadViewportPick pick}) async {
-    if (runtime.scene.find(pick.entityId)?.geometry['presentationLod'] is Map) {
+  Future<void> recognizePick({
+    required CadViewportPick pick,
+    bool allowTechnicalStl = false,
+  }) async {
+    final sceneEntity = runtime.scene.find(pick.entityId);
+    final isManagedStl =
+        sceneEntity?.geometry['presentationLod'] is Map &&
+        runtime.document?.entities[pick.entityId]?.data['managedStlAssets']
+            is Map;
+    if (isManagedStl && !allowTechnicalStl) {
       throw StateError(
         'Visualização simplificada: medição e região exigem a malha completa.',
       );
     }
-    final document =
-        runtime.activeImport ??
-        (throw StateError('CadRuntime has no active imported geometry.'));
-    final geometry =
-        runtime.activeMeshGeometry ??
-        (throw StateError('CadRuntime has no active display mesh.'));
+    final requestGeneration = ++_recognitionRequestGeneration;
+    // A new pick starts a new recognition transaction. Invalidate the old
+    // transient result before loading the managed original mesh.
+    runtime.hideTransient('surface-assistant-preview');
+    runtime.write('recognition.activeResult', null);
+    runtime.write('surfaceAssistant.suggestion', null);
+    runtime.write(
+      'surfaceAssistant.decision',
+      SurfaceAssistantDecision.pending,
+    );
     activePick = pick;
     recognitionFilter = null;
     busy = true;
     error = null;
     notifyListeners();
     try {
-      final surfaceData = region_recognition.MeshSurfaceData.fromKernel(
-        geometry,
+      final projectIdAtStart = runtime.document?.projectId;
+      TechnicalStlHit? technicalHit;
+      if (isManagedStl) {
+        final ray = pick.ray;
+        if (ray == null) {
+          throw StateError('Reconhecimento exige um raio de câmera válido.');
+        }
+        technicalHit = await _technicalStlPickResolver.resolve(
+          entityId: pick.entityId,
+          worldRay: ray,
+        );
+        if (technicalHit == null) {
+          throw StateError(
+            'Nenhuma interseção válida foi encontrada na malha STL original.',
+          );
+        }
+        if (runtime.document?.projectId != projectIdAtStart ||
+            runtime.document?.entities[pick.entityId]?.data['managedStlAssets']
+                is! Map) {
+          return;
+        }
+      }
+      if (requestGeneration != _recognitionRequestGeneration) return;
+      final document = technicalHit == null
+          ? runtime.activeImport ??
+                (throw StateError(
+                  'CadRuntime has no active imported geometry.',
+                ))
+          : null;
+      final geometry =
+          technicalHit?.geometry ??
+          runtime.activeMeshGeometry ??
+          (throw StateError('CadRuntime has no active display mesh.'));
+      final meshId = technicalHit?.entityId ?? document!.id;
+      final meshFingerprint =
+          technicalHit?.geometryRevision ?? document!.mesh!.fingerprint;
+      final seedTriangle =
+          technicalHit?.triangleIndex ?? pick.hit.triangleIndex;
+      if (seedTriangle < 0) {
+        throw StateError('O ponto selecionado não possui triângulo original.');
+      }
+      final effectivePick = technicalHit == null
+          ? pick
+          : CadViewportPick(
+              entityId: pick.entityId,
+              hit: MeshHit(
+                triangleIndex: technicalHit.triangleIndex,
+                point: technicalHit.point,
+                distance: technicalHit.distance,
+              ),
+              ray: pick.ray,
+              subentityKind: pick.subentityKind,
+              presentationSubId: pick.presentationSubId,
+            );
+      activePick = effectivePick;
+      final fingerprint = meshFingerprint;
+      final segmented = _restoreRegionGrowingResult(
+        await Isolate.run(
+          () => runRegionGrowingInIsolate(
+            _regionGrowingPayload(
+              geometry: geometry,
+              fingerprint: fingerprint,
+              settings: const region_recognition.SurfaceRecognitionSettings(),
+            ),
+          ),
+        ),
       );
-      final fingerprint = document.mesh!.fingerprint;
-      final segmented = await Isolate.run(
-        () =>
-            const ProfessionalRegionGrowing().segment(surfaceData, fingerprint),
-      );
-      final surfaceRegion = segmented.regions
-          .where(
-            (region) => region.triangleIndices.contains(pick.hit.triangleIndex),
-          )
+      if (requestGeneration != _recognitionRequestGeneration ||
+          runtime.document?.projectId != projectIdAtStart) {
+        return;
+      }
+      var surfaceRegion = segmented.regions
+          .where((region) => region.triangleIndices.contains(seedTriangle))
           .firstOrNull;
       if (surfaceRegion == null) {
         throw StateError(
           'Region Growing produced no homogeneous region for triangle '
-          '${pick.hit.triangleIndex}.',
+          '$seedTriangle.',
         );
       }
-      final selection = BridgeSelection(
-        id: surfaceRegion.id,
-        entityId: pick.entityId,
+      BridgeContext contextForRegion(
+        region_recognition.SurfaceRegion candidate,
+      ) {
+        final selection = BridgeSelection(
+          id: candidate.id,
+          entityId: effectivePick.entityId,
+          kind: BridgeSelectionKind.meshRegion,
+          geometry: geometry,
+          triangleIndices: candidate.triangleIndices.toSet(),
+        );
+        final region = regionBuilder.build(
+          meshId: meshId,
+          selection: selection,
+        );
+        return BridgeContext(
+          projectId:
+              projectIdAtStart ??
+              (document?.projectId ??
+                  (throw StateError('CadRuntime has no active project.'))),
+          meshId: meshId,
+          meshFingerprint: meshFingerprint,
+          userConfirmed: false,
+          region: region,
+        );
+      }
+
+      var context = contextForRegion(surfaceRegion);
+      report = await recognition.recognize(context);
+      final winner = report?.primitives.firstOrNull?.recognition.winner;
+      final tolerance = planarToleranceMm;
+      final invalidPlane =
+          winner?.type.name == 'plane' &&
+          (winner!.statistics.rms > tolerance ||
+              winner.statistics.maximum > tolerance);
+      String? planarClassification;
+      if (isManagedStl && invalidPlane) {
+        final planar = _restoreRegionGrowingResult(
+          await Isolate.run(
+            () => runRegionGrowingInIsolate(
+              _regionGrowingPayload(
+                geometry: geometry,
+                fingerprint: meshFingerprint,
+                settings: region_recognition.SurfaceRecognitionSettings(
+                  planar: true,
+                  planarToleranceMm: tolerance,
+                  seedTriangle: seedTriangle,
+                ),
+              ),
+            ),
+          ),
+        );
+        runtime.write('recognition.planarDiagnostics', planar.diagnostics);
+        planarClassification =
+            planar.diagnostics['planarClassification'] as String?;
+        final planarRegion = planar.regions
+            .where((region) => region.triangleIndices.contains(seedTriangle))
+            .firstOrNull;
+        if (planarRegion != null) {
+          surfaceRegion = planarRegion;
+          context = contextForRegion(planarRegion);
+          report = await recognition.recognize(context);
+        }
+      } else {
+        runtime.write('recognition.planarDiagnostics', segmented.diagnostics);
+      }
+      final dimensional = _dimensionalParameters(
+        report,
+        tolerance,
+        planarClassification: planarClassification,
+      );
+      context = context.copyWith(
+        attributes: {'recognitionResultParameters': dimensional},
+      );
+      await _publishRecognitionResult(context);
+      activeSelection = BridgeSelection(
+        id: context.region!.id,
+        entityId: effectivePick.entityId,
         kind: BridgeSelectionKind.meshRegion,
         geometry: geometry,
-        triangleIndices: surfaceRegion.triangleIndices.toSet(),
+        triangleIndices: context.region!.triangleIndices.toSet(),
       );
-      final region = regionBuilder.build(
-        meshId: document.id,
-        selection: selection,
-      );
-      final context = BridgeContext(
-        projectId: document.projectId,
-        meshId: document.id,
-        meshFingerprint: document.mesh!.fingerprint,
-        userConfirmed: false,
-        region: region,
-      );
-      report = await recognition.recognize(context);
-      await _publishRecognitionResult(context);
-      activeSelection = selection;
       activeContext = context;
       _showRecognitionRegion(geometry, surfaceRegion);
       decisions
@@ -6273,13 +6547,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           ),
         );
       await commands.dispatch('selection.set', {
-        'ids': [selection.id],
+        'ids': [context.region!.id],
       });
     } catch (value) {
       error = value.toString().replaceFirst('Bad state: ', '');
     } finally {
-      busy = false;
-      notifyListeners();
+      if (requestGeneration == _recognitionRequestGeneration) {
+        busy = false;
+        notifyListeners();
+      }
     }
   }
 
@@ -6312,6 +6588,59 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         transparent: true,
       ),
     );
+  }
+
+  Map<String, dynamic> _dimensionalParameters(
+    ProfessionalRecognitionReport? current,
+    double tolerance,
+    {String? planarClassification}
+  ) {
+    final winner = current?.primitives.firstOrNull?.recognition.winner;
+    if (winner == null || winner.type.name != 'plane') {
+      return {
+        'dimensionalStatus': 'not-applicable',
+        'dimensionalApproved': true,
+        'dimensionalToleranceMm': tolerance,
+      };
+    }
+    final dimensionalApproved =
+        winner.statistics.rms <= tolerance &&
+        winner.statistics.maximum <= tolerance;
+    final classification = planarClassification;
+    final referenceApproved =
+        dimensionalApproved &&
+        (classification == null ||
+            classification == 'localReference' ||
+            classification == 'planarCadCandidate');
+    final cadSurfaceApproved =
+        dimensionalApproved &&
+        (classification == null || classification == 'planarCadCandidate');
+    return {
+      'dimensionalStatus': !dimensionalApproved
+          ? 'rejected'
+          : classification == 'curvedPatch' || classification == 'ambiguous'
+          ? 'diagnostic-only'
+          : 'approved',
+      'dimensionalApproved': dimensionalApproved,
+      'referenceApproved': referenceApproved,
+      'cadSurfaceApproved': cadSurfaceApproved,
+      ...?classification == null
+          ? null
+          : {'planarClassification': classification},
+      'planarClassificationReason': classification == null
+          ? 'Classificação multiescala não aplicada a este tipo de geometria.'
+          : classification == 'curvedPatch'
+          ? 'Deriva multiescala compatível com trecho de superfície curva.'
+          : classification == 'ambiguous'
+          ? 'Evidências multiescala insuficientes ou conflitantes.'
+          : classification == 'localReference'
+          ? 'Ajuste local válido; evidência insuficiente para face CAD.'
+          : 'Estabilidade multiescala compatível com candidato CAD.',
+      'dimensionalToleranceMm': tolerance,
+      'dimensionalReason': dimensionalApproved
+          ? 'RMS e desvio máximo dentro da tolerância configurada.'
+          : 'RMS ou desvio máximo excede a tolerância configurada.',
+    };
   }
 
   List<ProfessionalPrimitive> get hypotheses {
@@ -6355,6 +6684,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.showTransient(_recognitionSurfacePreview.build(result, suggestion));
     runtime.select({recognitionResultId});
     notifyListeners();
+  }
+
+  /// Opens the existing presentation preview for the most recent recognition.
+  /// The preview remains transient; CAD creation still requires the explicit
+  /// confirmation action exposed by the Surface Assistant.
+  void previewActiveRecognition() {
+    final result = activeRecognitionResult;
+    if (result == null) {
+      throw StateError('Run recognition before previewing the fitted surface.');
+    }
+    openSurfaceAssistant(result.id);
   }
 
   void ignoreSurfaceAssistantSuggestion() {
@@ -6434,6 +6774,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ...oldHistory,
         '${DateTime.now().toUtc().toIso8601String()} recognition evaluated',
       ],
+      extraParameters:
+          (context.attributes['recognitionResultParameters'] as Map?)
+              ?.cast<String, dynamic>() ??
+          const {},
     );
     await runtime.mutate(
       command: existing == null
@@ -17221,6 +17565,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             RecognitionDecision.accepted) {
           throw StateError(
             'Accept the planar hypothesis before creating its reference.',
+          );
+        }
+        final recognitionParameters = activeRecognitionResult?.parameters;
+        if (recognitionParameters?['referenceApproved'] == false ||
+            recognitionParameters?['planarClassification'] == 'curvedPatch' ||
+            recognitionParameters?['planarClassification'] == 'ambiguous') {
+          throw StateError(
+            'A estabilidade planar não autoriza uma referência neste resultado.',
           );
         }
         final adaptation = await MeshRegionSmartRegionAdapter(_smartRegionsApi)
