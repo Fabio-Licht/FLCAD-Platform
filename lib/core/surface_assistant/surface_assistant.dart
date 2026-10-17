@@ -78,6 +78,9 @@ class IntelligentSurfaceAssistant {
       alternatives: alternatives,
       canCreate:
           result.type != RecognitionResultType.freeform &&
+          (result.type != RecognitionResultType.plane ||
+              result.parameters['cadSurfaceApproved'] == true) &&
+          result.parameters['dimensionalApproved'] != false &&
           result.confidence >= approvedConfidence,
     );
   }

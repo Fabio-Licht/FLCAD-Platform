@@ -9,9 +9,17 @@ class SurfaceRecognitionSettings {
     this.normalAngleDegrees = 28,
     this.curvatureDelta = .35,
     this.minimumTriangles = 8,
+    this.planar = false,
+    this.planarToleranceMm = .5,
+    this.seedTriangle,
+    this.seedNeighborhoodTriangles = 24,
   });
   final double normalAngleDegrees, curvatureDelta;
   final int minimumTriangles;
+  final bool planar;
+  final double planarToleranceMm;
+  final int? seedTriangle;
+  final int seedNeighborhoodTriangles;
 }
 
 class MeshSurfaceData {

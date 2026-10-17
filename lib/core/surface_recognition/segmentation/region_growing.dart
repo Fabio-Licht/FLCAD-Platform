@@ -2,12 +2,28 @@ import 'dart:math' as math;
 
 import '../../cad_kernel/io/kernel_io_models.dart';
 import '../../geometric_kernel/geometry/vectors.dart';
+import '../../geometric_kernel/services/fitting_engine.dart';
 import '../models/surface_recognition_models.dart';
 
 class RegionGrowingResult {
-  const RegionGrowingResult(this.regions, this.graph);
+  const RegionGrowingResult(
+    this.regions,
+    this.graph, {
+    this.diagnostics = const {},
+  });
   final List<SurfaceRegion> regions;
   final RegionGraph graph;
+  final Map<String, Object?> diagnostics;
+}
+
+/// Runtime-only evidence used to distinguish a locally good plane fit from a
+/// planar CAD candidate. It is carried in diagnostics and does not alter mesh
+/// geometry or the RegionGrowing selection contract.
+enum PlanarClassification {
+  localReference,
+  planarCadCandidate,
+  curvedPatch,
+  ambiguous,
 }
 
 class ProfessionalRegionGrowing {
@@ -39,6 +55,16 @@ class ProfessionalRegionGrowing {
               .reduce((a, b) => a + b) /
           neighbors.length;
     });
+    if (settings.planar && settings.seedTriangle != null) {
+      return _segmentPlanar(
+        mesh,
+        meshFingerprint,
+        normals,
+        areas,
+        adjacency,
+        settings,
+      );
+    }
     final limit = settings.normalAngleDegrees * math.pi / 180;
     final visited = List<bool>.filled(mesh.triangles.length, false);
     final groups = <Set<int>>[];
@@ -114,8 +140,370 @@ class ProfessionalRegionGrowing {
         }
       }
     }
-    return RegionGrowingResult(regions, RegionGraph(graphEdges));
+    return RegionGrowingResult(
+      regions,
+      RegionGraph(graphEdges),
+      diagnostics: {
+        'mode': 'generic',
+        'visitedTriangles': mesh.triangles.length,
+        'selectedTriangles': mesh.triangles.length,
+      },
+    );
   }
+
+  RegionGrowingResult _segmentPlanar(
+    MeshSurfaceData mesh,
+    String meshFingerprint,
+    List<Vector3> normals,
+    List<double> areas,
+    List<Set<int>> adjacency,
+    SurfaceRecognitionSettings settings,
+  ) {
+    final seed = settings.seedTriangle!;
+    if (seed < 0 || seed >= mesh.triangles.length) {
+      return const RegionGrowingResult(
+        [],
+        RegionGraph({}),
+        diagnostics: {'mode': 'planar', 'reason': 'invalid-seed'},
+      );
+    }
+    final local = <int>[], pending = <int>[seed], localSeen = <int>{seed};
+    while (pending.isNotEmpty &&
+        local.length < settings.seedNeighborhoodTriangles) {
+      final current = pending.removeLast();
+      local.add(current);
+      final neighbors = adjacency[current].toList()..sort();
+      for (final next in neighbors) {
+        if (localSeen.length >= settings.seedNeighborhoodTriangles) break;
+        if (localSeen.add(next) &&
+            _orientedAngle(normals[seed], normals[next]) <=
+                settings.normalAngleDegrees * math.pi / 180) {
+          pending.add(next);
+        }
+      }
+    }
+    final localVertices = <int>{};
+    for (final triangle in local) {
+      final value = mesh.triangles[triangle];
+      localVertices.addAll([value.$1, value.$2, value.$3]);
+    }
+    if (localVertices.length < 3) {
+      return const RegionGrowingResult(
+        [],
+        RegionGraph({}),
+        diagnostics: {
+          'mode': 'planar',
+          'reason': 'insufficient-seed-neighborhood',
+        },
+      );
+    }
+    final plane = const FittingEngine()
+        .fitPlane(localVertices.map((id) => _vertex(mesh, id)).toList())
+        .geometry;
+    final tolerance = settings.planarToleranceMm;
+    if (!tolerance.isFinite || tolerance <= 0) {
+      return const RegionGrowingResult(
+        [],
+        RegionGraph({}),
+        diagnostics: {'mode': 'planar', 'reason': 'invalid-tolerance'},
+      );
+    }
+    final accepted = <int>{seed}, queue = <int>[seed], visited = <int>{seed};
+    var rejectedByDistance = 0, rejectedByNormal = 0;
+    while (queue.isNotEmpty) {
+      final current = queue.removeLast();
+      final neighbors = adjacency[current].toList()..sort();
+      for (final next in neighbors) {
+        if (!visited.add(next)) continue;
+        if (_orientedAngle(normals[current], normals[next]) >
+            settings.normalAngleDegrees * math.pi / 180) {
+          rejectedByNormal++;
+          continue;
+        }
+        final value = mesh.triangles[next];
+        final points = [
+          _vertex(mesh, value.$1),
+          _vertex(mesh, value.$2),
+          _vertex(mesh, value.$3),
+        ];
+        if (points.any(
+          (point) => plane.signedDistance(point).abs() > tolerance,
+        )) {
+          rejectedByDistance++;
+          continue;
+        }
+        accepted.add(next);
+        queue.add(next);
+      }
+    }
+    if (accepted.length < settings.minimumTriangles) {
+      return RegionGrowingResult(
+        [],
+        const RegionGraph({}),
+        diagnostics: {
+          'mode': 'planar',
+          'reason': 'insufficient-region',
+          'visitedTriangles': visited.length,
+          'selectedTriangles': accepted.length,
+          'rejectedByDistance': rejectedByDistance,
+          'rejectedByNormal': rejectedByNormal,
+        },
+      );
+    }
+    final triangles = accepted.toList()..sort();
+    final vertices = <int>{};
+    var area = 0.0;
+    var normal = Vector3.zero;
+    var meanCurvature = 0.0;
+    for (final index in triangles) {
+      final value = mesh.triangles[index];
+      vertices.addAll([value.$1, value.$2, value.$3]);
+      area += areas[index];
+      normal = normal + normals[index] * areas[index];
+    }
+    final points = vertices.map((id) => _vertex(mesh, id)).toList();
+    final bounds = _bounds(points);
+    final id = 'region:$meshFingerprint:planar:$seed';
+    final region = SurfaceRegion(
+      id: id,
+      color: _color(seed),
+      triangleIndices: triangles,
+      vertexIndices: vertices.toList()..sort(),
+      area: area,
+      averageNormal: normal.normalized,
+      bounds: bounds,
+      meanCurvature: meanCurvature,
+      confidence: math.min(1, .55 + math.log(triangles.length + 1) / 15),
+      health: RecognitionHealth.good,
+    );
+    final stability = _planarStability(
+      mesh: mesh,
+      seed: seed,
+      accepted: accepted,
+      normals: normals,
+      adjacency: adjacency,
+      tolerance: tolerance,
+      normalLimit: settings.normalAngleDegrees * math.pi / 180,
+      seedNeighborhood: settings.seedNeighborhoodTriangles,
+    );
+    return RegionGrowingResult(
+      [region],
+      RegionGraph({id: <String>{}}),
+      diagnostics: {
+        'mode': 'planar',
+        'seedTriangle': seed,
+        'visitedTriangles': visited.length,
+        'selectedTriangles': triangles.length,
+        'rejectedByDistance': rejectedByDistance,
+        'rejectedByNormal': rejectedByNormal,
+        'toleranceMm': tolerance,
+        ...stability,
+      },
+    );
+  }
+
+  Map<String, Object?> _planarStability({
+    required MeshSurfaceData mesh,
+    required int seed,
+    required Set<int> accepted,
+    required List<Vector3> normals,
+    required List<Set<int>> adjacency,
+    required double tolerance,
+    required double normalLimit,
+    required int seedNeighborhood,
+  }) {
+    final targets = <int>{
+      math.max(3, seedNeighborhood),
+      math.max(6, seedNeighborhood * 2),
+      math.max(12, seedNeighborhood * 4),
+      math.max(24, seedNeighborhood * 8),
+      accepted.length,
+    }.toList()..sort();
+    final maximum = math.min(
+      mesh.triangles.length,
+      math.max(targets.last, accepted.length * 2),
+    );
+    final visited = <int>{seed}, queue = <int>[seed];
+    final samples = <Map<String, Object?>>[];
+    final interiorSamples = <Map<String, Object?>>[];
+    var targetIndex = 0;
+    while (queue.isNotEmpty && visited.length <= maximum) {
+      final current = queue.removeAt(0);
+      final neighbors = adjacency[current].toList()..sort();
+      for (final next in neighbors) {
+        if (visited.length >= maximum) break;
+        if (visited.add(next)) queue.add(next);
+      }
+      while (targetIndex < targets.length &&
+          visited.length >= targets[targetIndex]) {
+        final ids = visited.take(targets[targetIndex]).toSet();
+        samples.add(
+          _scaleSample(mesh, ids, normals, normals[seed], tolerance),
+        );
+        final interiorIds = ids.intersection(accepted);
+        if (interiorIds.isNotEmpty) {
+          interiorSamples.add(
+            _scaleSample(mesh, interiorIds, normals, normals[seed], tolerance),
+          );
+        }
+        targetIndex++;
+      }
+    }
+    if (samples.isEmpty) {
+      return const {
+        'planarClassification': 'ambiguous',
+        'planarStability': <Object?>[],
+        'planarStabilityReason': 'insufficient-multiscale-samples',
+      };
+    }
+    final first = interiorSamples.isEmpty ? samples.first : interiorSamples.first;
+    final stabilitySamples =
+        interiorSamples.isEmpty ? samples : interiorSamples;
+    final stable = stabilitySamples.where((sample) {
+      final rms = (sample['rms'] as num).toDouble();
+      final maximum = (sample['maximum'] as num).toDouble();
+      final drift = (sample['normalDriftRadians'] as num).toDouble();
+      return rms <= tolerance && maximum <= tolerance && drift <= normalLimit;
+    }).length;
+    final hasStrongInstability = stabilitySamples.any((sample) {
+      final rms = (sample['rms'] as num).toDouble();
+      final maximum = (sample['maximum'] as num).toDouble();
+      final drift = (sample['normalDriftRadians'] as num).toDouble();
+      return rms > tolerance || maximum > tolerance || drift > normalLimit;
+    });
+    final finalScale = stabilitySamples.last;
+    final finalScaleUnstable =
+        (finalScale['rms'] as num).toDouble() > tolerance ||
+        (finalScale['maximum'] as num).toDouble() > tolerance ||
+        (finalScale['normalDriftRadians'] as num).toDouble() > normalLimit;
+    final localValid = (first['rms'] as num).toDouble() <= tolerance &&
+        (first['maximum'] as num).toDouble() <= tolerance;
+    final boundary = _planarBoundaryEvidence(
+      accepted: accepted,
+      normals: normals,
+      adjacency: adjacency,
+      normalLimit: normalLimit,
+    );
+    final externalExpansionUnstable =
+        (samples.last['triangleCount'] as int) !=
+            (stabilitySamples.last['triangleCount'] as int) &&
+        ((samples.last['rms'] as num).toDouble() > tolerance ||
+            (samples.last['maximum'] as num).toDouble() > tolerance ||
+            (samples.last['normalDriftRadians'] as num).toDouble() >
+                normalLimit);
+    final coherentMechanicalBoundary =
+        (boundary['planarBoundaryTransitionEdges'] as int) >= 3 &&
+            (boundary['planarBoundaryTransitionEdges'] as int) * 2 >=
+                (boundary['planarBoundaryEdges'] as int);
+    final largeEnoughForCad =
+        accepted.length >= math.max(24, seedNeighborhood * 4);
+    final classification = !localValid
+        ? PlanarClassification.ambiguous
+        : externalExpansionUnstable && !coherentMechanicalBoundary
+        ? PlanarClassification.curvedPatch
+        : finalScaleUnstable &&
+                largeEnoughForCad &&
+                !coherentMechanicalBoundary
+        ? PlanarClassification.curvedPatch
+        : externalExpansionUnstable &&
+                coherentMechanicalBoundary &&
+                !largeEnoughForCad
+        ? PlanarClassification.localReference
+        : hasStrongInstability && stable <= 1
+        ? PlanarClassification.curvedPatch
+        : stable >= 3 && !hasStrongInstability
+        ? PlanarClassification.planarCadCandidate
+        : PlanarClassification.localReference;
+    return {
+      'planarClassification': classification.name,
+      'planarStableScales': stable,
+      'planarScaleCount': samples.length,
+      'planarInteriorStableScales': stable,
+      'planarInteriorScaleCount': stabilitySamples.length,
+      'planarStability': samples,
+      'planarInteriorStability': stabilitySamples,
+      ...boundary,
+      'planarExternalExpansionUnstable': externalExpansionUnstable,
+      'planarStabilityReason': hasStrongInstability
+          ? 'instability-in-normal-or-residual-across-scales'
+          : externalExpansionUnstable && coherentMechanicalBoundary
+          ? 'stable-interior-with-coherent-mechanical-boundary'
+          : 'local-fit-stable-at-observed-scales',
+    };
+  }
+
+  Map<String, Object> _planarBoundaryEvidence({
+    required Set<int> accepted,
+    required List<Vector3> normals,
+    required List<Set<int>> adjacency,
+    required double normalLimit,
+  }) {
+    var boundaryEdges = 0;
+    var boundaryTransitionEdges = 0;
+    final externalTriangles = <int>{};
+    for (final triangle in accepted) {
+      for (final neighbor in adjacency[triangle]) {
+        if (accepted.contains(neighbor)) continue;
+        final pair = triangle < neighbor
+            ? (triangle, neighbor)
+            : (neighbor, triangle);
+        if (!externalTriangles.add(pair.$2)) continue;
+        boundaryEdges++;
+        if (_orientedAngle(normals[triangle], normals[neighbor]) > normalLimit) {
+          boundaryTransitionEdges++;
+        }
+      }
+    }
+    return {
+      'planarBoundaryEdges': boundaryEdges,
+      'planarBoundaryTransitionEdges': boundaryTransitionEdges,
+      'planarExternalTriangles': externalTriangles.length,
+    };
+  }
+
+  Map<String, Object?> _scaleSample(
+    MeshSurfaceData mesh,
+    Set<int> triangles,
+    List<Vector3> normals,
+    Vector3 referenceNormal,
+    double tolerance,
+  ) {
+    final vertices = <int>{};
+    var weightedNormal = Vector3.zero;
+    var area = 0.0;
+    for (final index in triangles) {
+      final triangle = mesh.triangles[index];
+      vertices.addAll([triangle.$1, triangle.$2, triangle.$3]);
+      final a = _vertex(mesh, triangle.$1);
+      final b = _vertex(mesh, triangle.$2);
+      final c = _vertex(mesh, triangle.$3);
+      final triangleArea = (b - a).cross(c - a).length * .5;
+      area += triangleArea;
+      weightedNormal = weightedNormal + normals[index] * triangleArea;
+    }
+    final points = vertices.map((id) => _vertex(mesh, id)).toList();
+    final fit = const FittingEngine().fitPlane(points);
+    final drift = referenceNormal.length <= 1e-12 ||
+            weightedNormal.length <= 1e-12
+        ? math.pi
+        : _orientedAngle(referenceNormal, weightedNormal.normalized);
+    return {
+      'triangleCount': triangles.length,
+      'area': area,
+      'rms': fit.rmsError,
+      'maximum': fit.maxError,
+      'normalDriftRadians': drift,
+      'withinTolerance': fit.rmsError <= tolerance && fit.maxError <= tolerance,
+    };
+  }
+
+  Vector3 _vertex(MeshSurfaceData mesh, int index) {
+    if (index < 0 || index >= mesh.vertices.length) return Vector3.zero;
+    return mesh.vertices[index];
+  }
+
+  double _orientedAngle(Vector3 a, Vector3 b) =>
+      math.acos(a.dot(b).clamp(-1.0, 1.0));
 
   List<Set<int>> _triangleAdjacency(List<(int, int, int)> triangles) {
     final edgeOwners = <(int, int), List<int>>{};

@@ -125,14 +125,86 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
                     Text('Tipo: ${result.type.name}'),
+                    if (result.parameters['planarClassification']
+                        case final String classification)
+                      Text(
+                        'Classificação: ${switch (classification) {
+                          'localReference' => 'Referência local',
+                          'planarCadCandidate' => 'Candidato a superfície planar CAD',
+                          'curvedPatch' => 'Trecho de superfície curva',
+                          _ => 'Ambígua',
+                        }}',
+                      ),
+                    if (result.parameters['planarClassificationReason']
+                        case final String reason)
+                      Text(reason),
                     Text(
                       'Confiança: ${(result.confidence * 100).toStringAsFixed(1)}%',
                     ),
                     Text('Qualidade: ${result.quality}'),
+                    if (result.parameters['rmsDeviation'] case final num rms)
+                      Text('RMS: ${rms.toStringAsFixed(3)} mm'),
+                    if (result.parameters['maximumDeviation']
+                        case final num maximum)
+                      Text('Desvio máximo: ${maximum.toStringAsFixed(3)} mm'),
+                    if (result.parameters['dimensionalToleranceMm']
+                        case final num tolerance) ...[
+                      Text('TolerÃ¢ncia: ${tolerance.toStringAsFixed(3)} mm'),
+                      TextFormField(
+                        initialValue: tolerance.toString(),
+                        keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true,
+                        ),
+                        decoration: const InputDecoration(
+                          labelText: 'TolerÃ¢ncia planar (mm)',
+                          isDense: true,
+                        ),
+                        onFieldSubmitted: (value) {
+                          final parsed = double.tryParse(
+                            value.replaceAll(',', '.'),
+                          );
+                          if (parsed != null) {
+                            controller.planarToleranceMm = parsed;
+                          }
+                        },
+                      ),
+                    ],
+                    if (result.parameters['dimensionalStatus']
+                        case final String status)
+                      Text(
+                        'Qualidade dimensional: ${switch (status) {
+                          'approved' => 'Aprovada',
+                          'rejected' => 'Reprovada',
+                          _ => 'NÃ£o aplicÃ¡vel',
+                        }}',
+                        style: TextStyle(
+                          color: status == 'rejected'
+                              ? Theme.of(context).colorScheme.error
+                              : null,
+                        ),
+                      ),
+                    if (result.parameters['dimensionalReason']
+                        case final String reason)
+                      Text(reason),
                     for (final parameter in result.parameters.entries)
-                      Text('${parameter.key}: ${parameter.value}'),
+                      if (parameter.key != 'rmsDeviation' &&
+                          parameter.key != 'maximumDeviation' &&
+                          !parameter.key.startsWith('dimensional'))
+                      if (parameter.key != 'planarClassification' &&
+                          parameter.key != 'planarClassificationReason' &&
+                          parameter.key != 'referenceApproved' &&
+                          parameter.key != 'cadSurfaceApproved')
+                        Text('${parameter.key}: ${parameter.value}'),
                     const SizedBox(height: 4),
                     Text('Sugestão: ${result.suggestion}'),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      onPressed: controller.busy
+                          ? null
+                          : controller.previewActiveRecognition,
+                      icon: const Icon(Icons.visibility_outlined, size: 16),
+                      label: const Text('Pré-visualizar ajuste'),
+                    ),
                     if (controller.activeSurfaceAssistantSuggestion
                         case final assistant?) ...[
                       const SizedBox(height: 6),
@@ -162,7 +234,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           OutlinedButton(
                             onPressed:
                                 controller.ignoreSurfaceAssistantSuggestion,
-                            child: const Text('Ignorar'),
+                            child: const Text('Cancelar'),
                           ),
                         ],
                       ),

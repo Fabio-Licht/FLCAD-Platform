@@ -69,6 +69,7 @@ class RecognitionResultAdapter {
     required double area,
     ProfessionalPrimitive? primitive,
     List<String> history = const [],
+    Map<String, dynamic> extraParameters = const {},
   }) {
     if (primitive == null ||
         primitive.recognition.dna.confidence < minimumPrimitiveConfidence) {
@@ -78,7 +79,11 @@ class RecognitionResultAdapter {
         meshId: meshId,
         regionId: regionId,
         confidence: primitive?.recognition.dna.confidence ?? .5,
-        parameters: {'area': area, 'pointCount': points.length},
+        parameters: {
+          'area': area,
+          'pointCount': points.length,
+          ...extraParameters,
+        },
         quality: 'No validated analytic primitive',
         suggestion: 'Reconstruction by Surface',
         createdAt: DateTime.now(),
@@ -97,7 +102,9 @@ class RecognitionResultAdapter {
     };
     final parameters = Map<String, dynamic>.from(candidate.parameters)
       ..['area'] = area
-      ..['maximumDeviation'] = candidate.statistics.maximum;
+      ..['rmsDeviation'] = candidate.statistics.rms
+      ..['maximumDeviation'] = candidate.statistics.maximum
+      ..addAll(extraParameters);
     if (type == RecognitionResultType.cylinder) {
       final radius = (parameters['radius'] as num).toDouble();
       parameters['diameter'] = radius * 2;
