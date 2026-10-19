@@ -6729,6 +6729,96 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.read<SurfaceAssistantDecision>('surfaceAssistant.decision') ??
       SurfaceAssistantDecision.pending;
 
+  /// Authorization shared by the Recognition panel and the reference command.
+  bool get canCreatePlaneReference {
+    final result = activeRecognitionResult;
+    final plane = report?.primitives
+        .where((item) => item.recognition.winner.type.name == 'plane')
+        .firstOrNull;
+    if (result == null || activeContext?.region == null || plane == null) {
+      return false;
+    }
+    final parameters = result.parameters;
+    return parameters['referenceApproved'] != false &&
+        parameters['dimensionalApproved'] != false &&
+        parameters['planarClassification'] != 'curvedPatch' &&
+        parameters['planarClassification'] != 'ambiguous';
+  }
+
+  String? get planeReferenceBlockReason {
+    if (canCreatePlaneReference) return null;
+    final result = activeRecognitionResult;
+    if (result == null) {
+      return 'Execute o reconhecimento antes de criar a referência.';
+    }
+    if (activeContext?.region == null) {
+      return 'Selecione uma região antes de criar a referência.';
+    }
+    final plane = report?.primitives
+        .where((item) => item.recognition.winner.type.name == 'plane')
+        .firstOrNull;
+    if (plane == null) {
+      return 'Nenhuma hipótese planar foi reconhecida.';
+    }
+    final parameters = result.parameters;
+    if (parameters['dimensionalApproved'] == false) {
+      return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
+    }
+    return switch (parameters['planarClassification']) {
+      'curvedPatch' =>
+        'Trecho de superfície curva: somente diagnóstico; criação CAD bloqueada.',
+      'ambiguous' =>
+        'Classificação ambígua: somente diagnóstico; criação CAD bloqueada.',
+      _ => 'A estabilidade planar não autoriza uma referência neste resultado.',
+    };
+  }
+
+  /// Authorization shared by the Recognition panel and the Surface Assistant.
+  bool get canCreateSurfaceFromAssistant => surfaceCreationBlockReason == null;
+
+  String? get surfaceCreationBlockReason {
+    final recognition = activeRecognitionResult;
+    final suggestion = activeSurfaceAssistantSuggestion;
+    if (recognition == null) {
+      return 'Execute o reconhecimento antes de criar a superfície.';
+    }
+    if (suggestion == null) {
+      return 'Abra a pré-visualização antes de criar a superfície.';
+    }
+    return _surfaceCreationBlockReason(recognition, suggestion);
+  }
+
+  String? _surfaceCreationBlockReason(
+    RecognitionResult recognition,
+    SurfaceAssistantSuggestion suggestion,
+  ) {
+    if (recognition.type == RecognitionResultType.freeform) {
+      return 'Reconhecimento livre: apenas consultivo; escolha uma reconstrução supervisionada.';
+    }
+    final parameters = recognition.parameters;
+    if (parameters['dimensionalApproved'] == false) {
+      return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
+    }
+    if (recognition.type == RecognitionResultType.plane) {
+      final classification = parameters['planarClassification'];
+      if (classification == 'curvedPatch') {
+        return 'Trecho de superfície curva: somente diagnóstico; criação CAD bloqueada.';
+      }
+      if (classification == 'ambiguous') {
+        return 'Classificação ambígua: somente diagnóstico; criação CAD bloqueada.';
+      }
+      if (parameters['cadSurfaceApproved'] == false) {
+        return classification == 'localReference'
+            ? 'Referência local: autoriza a referência, mas não a superfície CAD.'
+            : 'Superfície CAD não autorizada para este resultado.';
+      }
+    }
+    if (suggestion.confidence < .65) {
+      return 'Confiança abaixo do limite aprovado (65%).';
+    }
+    return null;
+  }
+
   void openSurfaceAssistant(String recognitionResultId) {
     final entity = runtime.document?.entities[recognitionResultId];
     final raw = entity?.data['recognitionResult'];
@@ -6775,12 +6865,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (recognition == null || suggestion == null) {
       throw StateError('Open a Recognition Result before confirming.');
     }
-    if (!suggestion.canCreate) {
-      throw StateError(
-        recognition.type == RecognitionResultType.freeform
-            ? 'Freeform is advisory in G-136; choose a future supervised tool.'
-            : 'Recognition confidence is below the approved limit.',
-      );
+    final blockReason = _surfaceCreationBlockReason(recognition, suggestion);
+    if (blockReason != null) {
+      throw StateError(blockReason);
     }
     busy = true;
     error = null;

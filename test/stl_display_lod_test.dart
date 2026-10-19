@@ -100,7 +100,9 @@ void main() {
       await tester.pump();
       expect(find.textContaining('1956958 → 1 triângulos'), findsOneWidget);
       expect(
-        find.textContaining('medição/região indisponíveis'),
+        find.textContaining(
+          'Medição convencional e seleção de região indisponíveis.',
+        ),
         findsOneWidget,
       );
       scene.remove('stl');
@@ -109,6 +111,44 @@ void main() {
       await tester.pumpWidget(const SizedBox.shrink());
     },
   );
+  testWidgets('recognition workspace keeps technical STL recognition available', (
+    tester,
+  ) async {
+    final scene = CadSceneGraph();
+    final camera = CadCameraController();
+    addTearDown(scene.dispose);
+    addTearDown(camera.dispose);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: ProfessionalCadViewportWidget(
+          scene: scene,
+          camera: camera,
+          renderMeshes: false,
+          enablePicking: false,
+          technicalRecognitionAvailable: true,
+        ),
+      ),
+    );
+    scene.upsert(
+      CadSceneEntity(
+        id: 'stl',
+        kind: CadSceneEntityKind.mesh,
+        geometry: geometry,
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.textContaining('Medição convencional indisponível.'),
+      findsOneWidget,
+    );
+    expect(
+      find.textContaining(
+        'Reconhecimento técnico disponível na STL original no workspace Reconhecimento.',
+      ),
+      findsOneWidget,
+    );
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   test('LOD rejects contradictory counts and missing normals', () {
     for (final invalid in [
       {...geometry, 'normals': null},

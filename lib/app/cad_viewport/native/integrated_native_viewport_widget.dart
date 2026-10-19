@@ -70,6 +70,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.onPickCapture,
     this.pickCaptureCandidateIds,
     this.onPickCaptureHover,
+    this.technicalRecognitionAvailable = false,
   });
 
   /// The viewport owns and disposes the bridge returned by this factory.
@@ -105,6 +106,7 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final bool Function(CadViewportPick pick)? onPickCapture;
   final Set<String>? pickCaptureCandidateIds;
   final ValueChanged<CadViewportPick?>? onPickCaptureHover;
+  final bool technicalRecognitionAvailable;
 
   @override
   State<IntegratedCadViewportWidget> createState() =>
@@ -995,6 +997,8 @@ class _IntegratedCadViewportWidgetState
                       renderStyle: _renderStyle,
                       onRenderStyleChanged: _setRenderStyle,
                       showRenderControls: false,
+                      technicalRecognitionAvailable:
+                          widget.technicalRecognitionAvailable,
                       renderMeshes:
                           backend == ViewportBackend.flutterCanvas &&
                           !_switching,

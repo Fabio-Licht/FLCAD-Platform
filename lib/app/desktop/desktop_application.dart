@@ -6255,6 +6255,8 @@ class _OfficialEngineeringWorkspaceState
                                     widget.onViewportReady?.call();
                                     _pendingManagedImportFit?.call();
                                   },
+                                  technicalRecognitionAvailable:
+                                      module == 'Recognition',
                                   onPickCapture:
                                       _captureContextualReferencePick,
                                   pickCaptureCandidateIds:

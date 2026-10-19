@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/recognition_engine/recognition_result.dart';
+import '../../../core/surface_assistant/surface_assistant.dart';
 import '../../engineering_bridge/operational_reverse_engineering_controller.dart';
 
 class RecognitionWorkspacePanel extends StatelessWidget {
@@ -124,39 +126,84 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       'Reconhecimento',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
-                    Text('Tipo: ${result.type.name}'),
-                    if (result.parameters['planarClassification']
-                        case final String classification)
-                      Text(
-                        'Classificação: ${switch (classification) {
-                          'localReference' => 'Referência local',
-                          'planarCadCandidate' => 'Candidato a superfície planar CAD',
-                          'curvedPatch' => 'Trecho de superfície curva',
-                          _ => 'Ambígua',
-                        }}',
-                      ),
-                    if (result.parameters['planarClassificationReason']
-                        case final String reason)
-                      Text(reason),
-                    Text(
-                      'Confiança: ${(result.confidence * 100).toStringAsFixed(1)}%',
+                    const SizedBox(height: 6),
+                    _RecognitionMetric(
+                      label: 'Tipo',
+                      value: _recognitionTypeLabel(result.type),
                     ),
-                    Text('Qualidade: ${result.quality}'),
-                    if (result.parameters['rmsDeviation'] case final num rms)
-                      Text('RMS: ${rms.toStringAsFixed(3)} mm'),
-                    if (result.parameters['maximumDeviation']
-                        case final num maximum)
-                      Text('Desvio máximo: ${maximum.toStringAsFixed(3)} mm'),
-                    if (result.parameters['dimensionalToleranceMm']
-                        case final num tolerance) ...[
-                      Text('TolerÃ¢ncia: ${tolerance.toStringAsFixed(3)} mm'),
+                    _RecognitionMetric(
+                      label: 'Classificação geométrica',
+                      value: result.type == RecognitionResultType.plane
+                          ? _classificationLabel(
+                              result.parameters['planarClassification'],
+                            )
+                          : 'Não aplicável a este tipo',
+                    ),
+                    _RecognitionMetric(
+                      label: 'Confiança',
+                      value: '${(result.confidence * 100).toStringAsFixed(1)}%',
+                    ),
+                    _RecognitionMetric(
+                      label: 'RMS',
+                      value: _formatMillimeters(
+                        result.parameters['rmsDeviation'],
+                      ),
+                    ),
+                    _RecognitionMetric(
+                      label: 'Desvio máximo',
+                      value: _formatMillimeters(
+                        result.parameters['maximumDeviation'],
+                      ),
+                    ),
+                    if (result.type == RecognitionResultType.plane)
+                      _RecognitionMetric(
+                        label: 'Tolerância planar',
+                        value: _formatMillimeters(
+                          _recognitionTolerance(controller, result),
+                        ),
+                      ),
+                    _RecognitionMetric(
+                      label: 'Status dimensional',
+                      value: _dimensionalStatusLabel(
+                        result.parameters['dimensionalStatus'],
+                      ),
+                      color:
+                          result.parameters['dimensionalStatus'] == 'rejected'
+                          ? Theme.of(context).colorScheme.error
+                          : result.parameters['dimensionalStatus'] ==
+                                'diagnostic-only'
+                          ? Colors.amber.shade800
+                          : null,
+                    ),
+                    _RecognitionMetric(
+                      label: 'Triângulos',
+                      value: _selectedTriangleCount(controller),
+                    ),
+                    _RecognitionMetric(
+                      label: 'Área selecionada',
+                      value: _selectedArea(controller, result),
+                    ),
+                    if (result.parameters['dimensionalReason']
+                        case final String reason)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 3),
+                        child: Text(
+                          reason,
+                          style: const TextStyle(fontSize: 9.5),
+                        ),
+                      ),
+                    if (result.type == RecognitionResultType.plane) ...[
+                      const SizedBox(height: 6),
                       TextFormField(
-                        initialValue: tolerance.toString(),
+                        initialValue: _recognitionTolerance(
+                          controller,
+                          result,
+                        ).toString(),
                         keyboardType: const TextInputType.numberWithOptions(
                           decimal: true,
                         ),
                         decoration: const InputDecoration(
-                          labelText: 'TolerÃ¢ncia planar (mm)',
+                          labelText: 'Tolerância planar (mm)',
                           isDense: true,
                         ),
                         onFieldSubmitted: (value) {
@@ -169,63 +216,95 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                         },
                       ),
                     ],
-                    if (result.parameters['dimensionalStatus']
-                        case final String status)
-                      Text(
-                        'Qualidade dimensional: ${switch (status) {
-                          'approved' => 'Aprovada',
-                          'rejected' => 'Reprovada',
-                          _ => 'NÃ£o aplicÃ¡vel',
-                        }}',
-                        style: TextStyle(
-                          color: status == 'rejected'
-                              ? Theme.of(context).colorScheme.error
-                              : null,
-                        ),
-                      ),
-                    if (result.parameters['dimensionalReason']
-                        case final String reason)
-                      Text(reason),
-                    for (final parameter in result.parameters.entries)
-                      if (parameter.key != 'rmsDeviation' &&
-                          parameter.key != 'maximumDeviation' &&
-                          !parameter.key.startsWith('dimensional'))
-                      if (parameter.key != 'planarClassification' &&
-                          parameter.key != 'planarClassificationReason' &&
-                          parameter.key != 'referenceApproved' &&
-                          parameter.key != 'cadSurfaceApproved')
-                        Text('${parameter.key}: ${parameter.value}'),
-                    const SizedBox(height: 4),
-                    Text('Sugestão: ${result.suggestion}'),
                     const SizedBox(height: 8),
                     OutlinedButton.icon(
                       onPressed: controller.busy
                           ? null
                           : controller.previewActiveRecognition,
                       icon: const Icon(Icons.visibility_outlined, size: 16),
-                      label: const Text('Pré-visualizar ajuste'),
+                      label: const Text('Pré-visualizar diagnóstico'),
                     ),
+                    if (controller.hypotheses.any(
+                      (item) => item.recognition.winner.type.name == 'plane',
+                    )) ...[
+                      const SizedBox(height: 4),
+                      FilledButton.icon(
+                        onPressed:
+                            controller.busy ||
+                                !controller.canCreatePlaneReference
+                            ? null
+                            : () async {
+                                final plane = controller.hypotheses.firstWhere(
+                                  (item) =>
+                                      item.recognition.winner.type.name ==
+                                      'plane',
+                                );
+                                controller.decide(
+                                  plane.recognition.id,
+                                  RecognitionDecision.accepted,
+                                );
+                                await controller.createRecognizedPlane();
+                              },
+                        icon: const Icon(Icons.verified_outlined, size: 16),
+                        label: const Text('Aceitar plano e criar referência'),
+                      ),
+                      if (controller.planeReferenceBlockReason
+                          case final reason?)
+                        _BlockReason(reason),
+                    ],
+                    if (controller.hypotheses.any(
+                      (item) => item.recognition.winner.type.name != 'plane',
+                    )) ...[
+                      const SizedBox(height: 4),
+                      FilledButton.icon(
+                        onPressed: controller.busy
+                            ? null
+                            : () async {
+                                final primitive = controller.hypotheses
+                                    .firstWhere(
+                                      (item) =>
+                                          item.recognition.winner.type.name !=
+                                          'plane',
+                                    );
+                                controller.decide(
+                                  primitive.recognition.id,
+                                  RecognitionDecision.accepted,
+                                );
+                                await controller.createRecognizedReference();
+                              },
+                        icon: const Icon(Icons.verified_outlined, size: 16),
+                        label: Text(
+                          'Aceitar ${_primitiveTypeLabel(_firstNonPlaneType(controller))} e criar referência',
+                        ),
+                      ),
+                    ],
                     if (controller.activeSurfaceAssistantSuggestion
                         case final assistant?) ...[
-                      const SizedBox(height: 6),
-                      Text('Estratégia: ${assistant.strategy.name}'),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Superfície sugerida: ${_strategyLabel(assistant.strategy)}',
+                        style: const TextStyle(fontSize: 10),
+                      ),
                       if (assistant.alternatives.isNotEmpty)
                         Text(
-                          'Alternativas: ${assistant.alternatives.map((item) => item.name).join(', ')}',
+                          'Alternativas: ${assistant.alternatives.map(_strategyLabel).join(', ')}',
+                          style: const TextStyle(fontSize: 9.5),
                         ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       Row(
                         children: [
                           Expanded(
                             child: FilledButton.icon(
-                              onPressed: assistant.canCreate && !controller.busy
-                                  ? () async {
+                              onPressed:
+                                  controller.busy ||
+                                      !controller.canCreateSurfaceFromAssistant
+                                  ? null
+                                  : () async {
                                       try {
                                         await controller
                                             .confirmSurfaceAssistantSuggestion();
                                       } catch (_) {}
-                                    }
-                                  : null,
+                                    },
                               icon: const Icon(Icons.check, size: 16),
                               label: const Text('Criar superfície'),
                             ),
@@ -238,47 +317,50 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           ),
                         ],
                       ),
-                      if (!assistant.canCreate)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 5),
-                          child: Text(
-                            result.type.name == 'freeform'
-                                ? 'Advisory only in G-136.'
-                                : 'Confiança abaixo do limite aprovado.',
-                            style: TextStyle(
-                              fontSize: 9.5,
-                              color: Theme.of(context).colorScheme.error,
+                      if (controller.surfaceCreationBlockReason
+                          case final reason?)
+                        _BlockReason(reason),
+                    ],
+                    const SizedBox(height: 4),
+                    ExpansionTile(
+                      dense: true,
+                      tilePadding: EdgeInsets.zero,
+                      childrenPadding: EdgeInsets.zero,
+                      title: const Text(
+                        'Detalhes avançados',
+                        style: TextStyle(fontSize: 10.5),
+                      ),
+                      children: [
+                        for (final parameter in _advancedParameters(
+                          result.parameters,
+                        ))
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              '${_parameterLabel(parameter.key)}: ${_formatParameterValue(parameter.value)}',
+                              style: const TextStyle(fontSize: 10),
                             ),
                           ),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Qualidade: ${result.quality}',
+                            style: const TextStyle(fontSize: 10),
+                          ),
                         ),
-                    ],
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: Text(
+                            'Sugestão: ${result.suggestion}',
+                            style: const TextStyle(fontSize: 10),
+                          ),
+                        ),
+                      ],
+                    ),
                     const Text(
                       'Somente conhecimento · nenhuma geometria CAD criada',
                       style: TextStyle(fontSize: 9.5),
                     ),
-                  ],
-                ),
-              ),
-            ),
-          ],
-          if (controller.activeContext?.region case final region?) ...[
-            const SizedBox(height: 8),
-            Card(
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Região de malha reconhecida',
-                      style: Theme.of(context).textTheme.titleSmall,
-                    ),
-                    Text('${region.triangleIndices.length} triângulos'),
-                    Text('Área ${region.area.toStringAsFixed(3)}'),
-                    if (controller.hypotheses.isNotEmpty)
-                      Text(
-                        'Confiança ${(controller.hypotheses.first.recognition.dna.confidence * 100).toStringAsFixed(1)}%',
-                      ),
                   ],
                 ),
               ),
@@ -294,49 +376,6 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               '${controller.hypotheses.length} hipóteses',
               style: Theme.of(context).textTheme.titleSmall,
             ),
-            const SizedBox(height: 8),
-            if (controller.hypotheses.any(
-              (item) => item.recognition.winner.type.name == 'plane',
-            ))
-              FilledButton.icon(
-                onPressed: controller.busy
-                    ? null
-                    : () async {
-                        final plane = controller.hypotheses.firstWhere(
-                          (item) =>
-                              item.recognition.winner.type.name == 'plane',
-                        );
-                        controller.decide(
-                          plane.recognition.id,
-                          RecognitionDecision.accepted,
-                        );
-                        await controller.createRecognizedPlane();
-                      },
-                icon: const Icon(Icons.verified_outlined),
-                label: const Text('Aceitar plano e criar referência'),
-              ),
-            if (controller.hypotheses.any(
-              (item) => item.recognition.winner.type.name != 'plane',
-            ))
-              FilledButton.icon(
-                onPressed: controller.busy
-                    ? null
-                    : () async {
-                        final primitive = controller.hypotheses.firstWhere(
-                          (item) =>
-                              item.recognition.winner.type.name != 'plane',
-                        );
-                        controller.decide(
-                          primitive.recognition.id,
-                          RecognitionDecision.accepted,
-                        );
-                        await controller.createRecognizedReference();
-                      },
-                icon: const Icon(Icons.verified_outlined),
-                label: Text(
-                  'Aceitar ${controller.hypotheses.firstWhere((item) => item.recognition.winner.type.name != 'plane').recognition.winner.type.name} e criar referência',
-                ),
-              ),
             const SizedBox(height: 8),
             for (final primitive in controller.hypotheses)
               Card(
@@ -392,19 +431,6 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                     ),
                   ],
                 ),
-              ),
-            if (controller.hypotheses.any(
-              (item) =>
-                  item.recognition.winner.type.name == 'plane' &&
-                  controller.decisions[item.recognition.id] ==
-                      RecognitionDecision.accepted,
-            ))
-              FilledButton.icon(
-                onPressed: controller.busy
-                    ? null
-                    : controller.createRecognizedPlane,
-                icon: const Icon(Icons.crop_16_9),
-                label: const Text('Criar referência de plano'),
               ),
           ],
           if (controller.canAlign) ...[
@@ -477,4 +503,221 @@ class RecognitionWorkspacePanel extends StatelessWidget {
       );
     },
   );
+}
+
+class _RecognitionMetric extends StatelessWidget {
+  const _RecognitionMetric({
+    required this.label,
+    required this.value,
+    this.color,
+  });
+
+  final String label;
+  final String value;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 1),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: 140,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _BlockReason extends StatelessWidget {
+  const _BlockReason(this.reason);
+
+  final String reason;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.only(top: 4),
+    child: Text(
+      reason,
+      style: TextStyle(
+        fontSize: 9.5,
+        color: Theme.of(context).colorScheme.error,
+      ),
+    ),
+  );
+}
+
+String _recognitionTypeLabel(RecognitionResultType type) => switch (type) {
+  RecognitionResultType.plane => 'Plano',
+  RecognitionResultType.cylinder => 'Cilindro',
+  RecognitionResultType.cone => 'Cone',
+  RecognitionResultType.sphere => 'Esfera',
+  RecognitionResultType.fillet => 'Toro',
+  RecognitionResultType.freeform => 'Livre',
+};
+
+String _primitiveTypeLabel(String name) => switch (name) {
+  'plane' => 'plano',
+  'cylinder' => 'cilindro',
+  'cone' => 'cone',
+  'sphere' => 'esfera',
+  'torus' => 'toro',
+  _ => name,
+};
+
+String _firstNonPlaneType(OperationalReverseEngineeringController controller) {
+  for (final item in controller.hypotheses) {
+    if (item.recognition.winner.type.name != 'plane') {
+      return item.recognition.winner.type.name;
+    }
+  }
+  return '';
+}
+
+String _classificationLabel(Object? classification) => switch (classification) {
+  null => 'Não classificada',
+  'localReference' => 'Referência local',
+  'planarCadCandidate' => 'Candidato a superfície planar CAD',
+  'curvedPatch' => 'Trecho de superfície curva',
+  'ambiguous' => 'Ambígua',
+  _ => '$classification',
+};
+
+String _dimensionalStatusLabel(Object? status) => switch (status) {
+  'approved' => 'Aprovada',
+  'rejected' => 'Reprovada',
+  'diagnostic-only' => 'Somente diagnóstico',
+  'not-applicable' => 'Não aplicável',
+  _ => 'Não aplicável',
+};
+
+String _strategyLabel(SurfaceAssistantStrategy strategy) => switch (strategy) {
+  SurfaceAssistantStrategy.planarSurface => 'superfície planar',
+  SurfaceAssistantStrategy.cylindricalSurface => 'superfície cilíndrica',
+  SurfaceAssistantStrategy.conicalSurface => 'superfície cônica',
+  SurfaceAssistantStrategy.sphericalSurface => 'superfície esférica',
+  SurfaceAssistantStrategy.filletSurface => 'superfície de filete',
+  SurfaceAssistantStrategy.freeSurface => 'superfície livre',
+  SurfaceAssistantStrategy.loft => 'loft',
+  SurfaceAssistantStrategy.sweep => 'varredura',
+  SurfaceAssistantStrategy.networkSurface => 'superfície de rede',
+};
+
+double _recognitionTolerance(
+  OperationalReverseEngineeringController controller,
+  RecognitionResult result,
+) =>
+    (result.parameters['dimensionalToleranceMm'] as num?)?.toDouble() ??
+    controller.planarToleranceMm;
+
+String _selectedTriangleCount(
+  OperationalReverseEngineeringController controller,
+) {
+  final region = controller.activeContext?.region;
+  return region == null ? '—' : '${region.triangleIndices.length}';
+}
+
+String _selectedArea(
+  OperationalReverseEngineeringController controller,
+  RecognitionResult result,
+) {
+  final region = controller.activeContext?.region;
+  final area = region?.area ?? (result.parameters['area'] as num?)?.toDouble();
+  return area == null ? '—' : '${area.toStringAsFixed(3)} mm²';
+}
+
+String _formatMillimeters(Object? value) =>
+    value is num ? '${value.toStringAsFixed(3)} mm' : '—';
+
+List<MapEntry<String, dynamic>> _advancedParameters(
+  Map<String, dynamic> parameters,
+) {
+  const summaryKeys = {
+    'rmsDeviation',
+    'maximumDeviation',
+    'dimensionalToleranceMm',
+    'dimensionalStatus',
+    'dimensionalApproved',
+    'dimensionalReason',
+    'planarClassification',
+    'referenceApproved',
+    'cadSurfaceApproved',
+    'area',
+  };
+  const orderedKeys = [
+    'origin',
+    'normal',
+    'center',
+    'axis',
+    'axisDirection',
+    'radius',
+    'diameter',
+    'length',
+    'angleDegrees',
+    'planarClassificationReason',
+    'pointCount',
+  ];
+  final entries = <MapEntry<String, dynamic>>[];
+  final included = <String>{};
+  for (final key in orderedKeys) {
+    final value = parameters[key];
+    if (value != null) {
+      entries.add(MapEntry(key, value));
+      included.add(key);
+    }
+  }
+  for (final entry in parameters.entries) {
+    if (summaryKeys.contains(entry.key) || included.contains(entry.key)) {
+      continue;
+    }
+    entries.add(entry);
+  }
+  return entries;
+}
+
+String _parameterLabel(String key) => switch (key) {
+  'origin' => 'Origem',
+  'normal' => 'Normal',
+  'center' => 'Centro',
+  'axis' => 'Eixo',
+  'axisDirection' => 'Direção do eixo',
+  'radius' => 'Raio',
+  'diameter' => 'Diâmetro',
+  'length' => 'Comprimento',
+  'angleDegrees' => 'Ângulo',
+  'planarClassificationReason' => 'Motivo da classificação',
+  'pointCount' => 'Pontos',
+  'meanRadius' => 'Raio médio',
+  'minimumRadius' => 'Raio mínimo',
+  'maximumRadius' => 'Raio máximo',
+  'minorRadius' => 'Raio menor',
+  'referenceRadius' => 'Raio de referência',
+  'halfAngle' => 'Meio ângulo',
+  _ => key,
+};
+
+String _formatParameterValue(Object? value) {
+  if (value is num) return value.toStringAsFixed(3);
+  if (value is List) {
+    return '(${value.map((item) => item is num ? item.toStringAsFixed(3) : '$item').join(', ')})';
+  }
+  return '$value';
 }

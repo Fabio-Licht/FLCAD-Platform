@@ -66,6 +66,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
     this.showRenderControls = true,
     this.hideReferenceOverlays = false,
     this.hideExperimentalTransientOverlays = false,
+    this.technicalRecognitionAvailable = false,
     this.onViewportReady,
   });
 
@@ -113,6 +114,7 @@ class ProfessionalCadViewportWidget extends StatefulWidget {
   final bool showRenderControls;
   final bool hideReferenceOverlays;
   final bool hideExperimentalTransientOverlays;
+  final bool technicalRecognitionAvailable;
 
   /// Called after a valid layout has resized the actual interaction camera.
   final VoidCallback? onViewportReady;
@@ -618,7 +620,13 @@ class _ProfessionalCadViewportWidgetState
                                         final lod =
                                             e.geometry['presentationLod']
                                                 as Map;
-                                        return 'Visualização simplificada · ${lod['originalTriangles']} → ${lod['displayTriangles']} triângulos · medição/região indisponíveis';
+                                        final summary =
+                                            'Visualização simplificada · ${lod['originalTriangles']} → ${lod['displayTriangles']} triângulos';
+                                        if (!widget
+                                            .technicalRecognitionAvailable) {
+                                          return '$summary\nMedição convencional e seleção de região indisponíveis.';
+                                        }
+                                        return '$summary\nMedição convencional indisponível.\nReconhecimento técnico disponível na STL original no workspace Reconhecimento.';
                                       })
                                       .join('\n'),
                                   style: Theme.of(context).textTheme.labelSmall,
