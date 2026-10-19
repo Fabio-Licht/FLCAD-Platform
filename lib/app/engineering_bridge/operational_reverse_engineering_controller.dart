@@ -345,34 +345,75 @@ class ArcRadiusEditPreview {
 
 enum SketchRegionFitOutput { line, spline }
 
-Map<String, dynamic> runRegionGrowingInIsolate(Map<String, dynamic> payload) {
-  final nodes = (payload['nodes'] as List)
-      .map((value) => (value as num).toDouble())
-      .toList();
-  final triangles = (payload['triangles'] as List)
-      .map((value) => (value as num).toInt())
-      .toList();
+/// Primitive Region Growing request. Copied on the calling isolate before
+/// [dispatchRegionGrowingIsolate] so the worker never captures controller
+/// state, mesh wrappers, Futures or Flutter objects.
+final class RegionGrowingIsolatePayload {
+  const RegionGrowingIsolatePayload({
+    required this.nodes,
+    required this.triangles,
+    required this.fingerprint,
+    required this.normalAngleDegrees,
+    required this.curvatureDelta,
+    required this.minimumTriangles,
+    required this.planar,
+    required this.planarToleranceMm,
+    this.seedTriangle,
+    required this.seedNeighborhoodTriangles,
+  });
+
+  final List<double> nodes;
+  final List<int> triangles;
+  final String fingerprint;
+  final double normalAngleDegrees;
+  final double curvatureDelta;
+  final int minimumTriangles;
+  final bool planar;
+  final double planarToleranceMm;
+  final int? seedTriangle;
+  final int seedNeighborhoodTriangles;
+}
+
+RegionGrowingIsolatePayload regionGrowingIsolatePayload({
+  required KernelMeshGeometry geometry,
+  required String fingerprint,
+  required region_recognition.SurfaceRecognitionSettings settings,
+}) => RegionGrowingIsolatePayload(
+  nodes: List<double>.from(geometry.nodes, growable: false),
+  triangles: List<int>.from(geometry.triangles, growable: false),
+  fingerprint: fingerprint,
+  normalAngleDegrees: settings.normalAngleDegrees,
+  curvatureDelta: settings.curvatureDelta,
+  minimumTriangles: settings.minimumTriangles,
+  planar: settings.planar,
+  planarToleranceMm: settings.planarToleranceMm,
+  seedTriangle: settings.seedTriangle,
+  seedNeighborhoodTriangles: settings.seedNeighborhoodTriangles,
+);
+
+Map<String, Object?> runRegionGrowingInIsolate(
+  RegionGrowingIsolatePayload payload,
+) {
   final settings = region_recognition.SurfaceRecognitionSettings(
-    normalAngleDegrees: (payload['normalAngleDegrees'] as num).toDouble(),
-    curvatureDelta: (payload['curvatureDelta'] as num).toDouble(),
-    minimumTriangles: (payload['minimumTriangles'] as num).toInt(),
-    planar: payload['planar'] as bool,
-    planarToleranceMm: (payload['planarToleranceMm'] as num).toDouble(),
-    seedTriangle: (payload['seedTriangle'] as num?)?.toInt(),
-    seedNeighborhoodTriangles: (payload['seedNeighborhoodTriangles'] as num)
-        .toInt(),
+    normalAngleDegrees: payload.normalAngleDegrees,
+    curvatureDelta: payload.curvatureDelta,
+    minimumTriangles: payload.minimumTriangles,
+    planar: payload.planar,
+    planarToleranceMm: payload.planarToleranceMm,
+    seedTriangle: payload.seedTriangle,
+    seedNeighborhoodTriangles: payload.seedNeighborhoodTriangles,
   );
   final result = const ProfessionalRegionGrowing().segment(
     region_recognition.MeshSurfaceData.fromKernel(
-      KernelMeshGeometry(nodes: nodes, triangles: triangles),
+      KernelMeshGeometry(nodes: payload.nodes, triangles: payload.triangles),
     ),
-    payload['fingerprint'] as String,
+    payload.fingerprint,
     settings: settings,
   );
   return {
     'regions': result.regions
         .map(
-          (region) => <String, dynamic>{
+          (region) => <String, Object?>{
             'id': region.id,
             'color': region.color,
             'triangleIndices': region.triangleIndices,
@@ -404,9 +445,49 @@ Map<String, dynamic> runRegionGrowingInIsolate(Map<String, dynamic> payload) {
   };
 }
 
-RegionGrowingResult _restoreRegionGrowingResult(
-  Map<String, dynamic> payload,
-) {
+/// Sends only a prebuilt primitive payload. Uses [Isolate.spawn] with a
+/// top-level entry point so Windows AOT never serializes a closure that
+/// captured [OperationalReverseEngineeringController].
+Future<Map<String, Object?>> dispatchRegionGrowingIsolate(
+  RegionGrowingIsolatePayload payload,
+) async {
+  final messages = ReceivePort();
+  final errors = ReceivePort();
+  final isolate = await Isolate.spawn(
+    _regionGrowingIsolateEntry,
+    _RegionGrowingIsolateBox(payload, messages.sendPort),
+    onError: errors.sendPort,
+    errorsAreFatal: true,
+  );
+  try {
+    final event = await Future.any<Object?>([
+      messages.first,
+      errors.first.then((error) {
+        final parts = error as List;
+        throw RemoteError('${parts[0]}', '${parts[1]}');
+      }),
+    ]);
+    if (event is Map<String, Object?>) return event;
+    if (event is Map) return Map<String, Object?>.from(event);
+    throw StateError('Region Growing isolate returned no result.');
+  } finally {
+    messages.close();
+    errors.close();
+    isolate.kill(priority: Isolate.immediate);
+  }
+}
+
+final class _RegionGrowingIsolateBox {
+  const _RegionGrowingIsolateBox(this.payload, this.port);
+  final RegionGrowingIsolatePayload payload;
+  final SendPort port;
+}
+
+void _regionGrowingIsolateEntry(_RegionGrowingIsolateBox box) {
+  box.port.send(runRegionGrowingInIsolate(box.payload));
+}
+
+RegionGrowingResult _restoreRegionGrowingResult(Map<String, Object?> payload) {
   final regions = (payload['regions'] as List).map((raw) {
     final value = Map<String, dynamic>.from(raw as Map);
     final normal = (value['normal'] as List)
@@ -453,23 +534,6 @@ RegionGrowingResult _restoreRegionGrowingResult(
   );
 }
 
-Map<String, dynamic> _regionGrowingPayload({
-  required KernelMeshGeometry geometry,
-  required String fingerprint,
-  required region_recognition.SurfaceRecognitionSettings settings,
-}) => {
-  'nodes': geometry.nodes,
-  'triangles': geometry.triangles,
-  'fingerprint': fingerprint,
-  'normalAngleDegrees': settings.normalAngleDegrees,
-  'curvatureDelta': settings.curvatureDelta,
-  'minimumTriangles': settings.minimumTriangles,
-  'planar': settings.planar,
-  'planarToleranceMm': settings.planarToleranceMm,
-  'seedTriangle': settings.seedTriangle,
-  'seedNeighborhoodTriangles': settings.seedNeighborhoodTriangles,
-};
-
 class OperationalReverseEngineeringController extends ChangeNotifier {
   OperationalReverseEngineeringController({
     required ProfessionalRecognitionApi recognition,
@@ -478,10 +542,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     this.regionBuilder = const MeshRegionBuilder(),
     ReferenceApi? referenceApi,
     SmartRegionsApi? smartRegionsApi,
+    TechnicalStlPickResolver? technicalStlPickResolver,
   }) : recognition = RecognitionBridge(recognition),
        _referenceApi = referenceApi ?? ReferenceApi(),
        _smartRegionsApi = smartRegionsApi ?? SmartRegionsApi(),
-       _technicalStlPickResolver = TechnicalStlPickResolver(runtime) {
+       _technicalStlPickResolver =
+           technicalStlPickResolver ?? TechnicalStlPickResolver(runtime) {
     // All desktop Save entry points (menu, Ctrl+S and the Sketch panel) go
     // through DesktopCommandCoordinator.  Register the editor/constraint
     // persistence as its pre-save phase so it is serialized with the CAD and
@@ -6430,13 +6496,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       activePick = effectivePick;
       final fingerprint = meshFingerprint;
       final segmented = _restoreRegionGrowingResult(
-        await Isolate.run(
-          () => runRegionGrowingInIsolate(
-            _regionGrowingPayload(
-              geometry: geometry,
-              fingerprint: fingerprint,
-              settings: const region_recognition.SurfaceRecognitionSettings(),
-            ),
+        await dispatchRegionGrowingIsolate(
+          regionGrowingIsolatePayload(
+            geometry: geometry,
+            fingerprint: fingerprint,
+            settings: const region_recognition.SurfaceRecognitionSettings(),
           ),
         ),
       );
@@ -6490,16 +6554,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       String? planarClassification;
       if (isManagedStl && invalidPlane) {
         final planar = _restoreRegionGrowingResult(
-          await Isolate.run(
-            () => runRegionGrowingInIsolate(
-              _regionGrowingPayload(
-                geometry: geometry,
-                fingerprint: meshFingerprint,
-                settings: region_recognition.SurfaceRecognitionSettings(
-                  planar: true,
-                  planarToleranceMm: tolerance,
-                  seedTriangle: seedTriangle,
-                ),
+          await dispatchRegionGrowingIsolate(
+            regionGrowingIsolatePayload(
+              geometry: geometry,
+              fingerprint: meshFingerprint,
+              settings: region_recognition.SurfaceRecognitionSettings(
+                planar: true,
+                planarToleranceMm: tolerance,
+                seedTriangle: seedTriangle,
               ),
             ),
           ),
@@ -6592,9 +6654,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Map<String, dynamic> _dimensionalParameters(
     ProfessionalRecognitionReport? current,
-    double tolerance,
-    {String? planarClassification}
-  ) {
+    double tolerance, {
+    String? planarClassification,
+  }) {
     final winner = current?.primitives.firstOrNull?.recognition.winner;
     if (winner == null || winner.type.name != 'plane') {
       return {
