@@ -6656,8 +6656,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     ProfessionalRecognitionReport? current,
     double tolerance, {
     String? planarClassification,
+    ProfessionalPrimitive? primitive,
   }) {
-    final winner = current?.primitives.firstOrNull?.recognition.winner;
+    final winner =
+        (primitive ?? current?.primitives.firstOrNull)?.recognition.winner;
     if (winner == null || winner.type.name != 'plane') {
       return {
         'dimensionalStatus': 'not-applicable',
@@ -6771,6 +6773,71 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'Classificação ambígua: somente diagnóstico; criação CAD bloqueada.',
       _ => 'A estabilidade planar não autoriza uma referência neste resultado.',
     };
+  }
+
+  ProfessionalPrimitive? get _firstNonPlaneHypothesis => hypotheses
+      .where((item) => item.recognition.winner.type.name != 'plane')
+      .firstOrNull;
+
+  bool get canCreateNonPlaneReference {
+    final primitive = _firstNonPlaneHypothesis;
+    if (primitive == null ||
+        activeContext?.region == null ||
+        configuredProjectId == null) {
+      return false;
+    }
+    return _referenceRecipeAvailable(primitive);
+  }
+
+  String? get nonPlaneReferenceBlockReason {
+    if (canCreateNonPlaneReference) return null;
+    final primitive = _firstNonPlaneHypothesis;
+    if (primitive == null) {
+      return 'Nenhuma hipótese não planar foi reconhecida.';
+    }
+    if (activeContext?.region == null) {
+      return 'Selecione uma região antes de criar a referência.';
+    }
+    if (configuredProjectId == null) {
+      return 'Projeto não configurado para criar referências.';
+    }
+    return _referenceRecipeAvailable(primitive)
+        ? null
+        : _referenceRecipeBlockReason(primitive.recognition.winner.type.name);
+  }
+
+  bool _referenceRecipeAvailable(ProfessionalPrimitive primitive) {
+    final winner = primitive.recognition.winner;
+    final parameters = winner.parameters;
+    if (winner.type.name == 'sphere') {
+      final center = parameters['center'];
+      return center is List && center.length == 3;
+    }
+    if ({'cylinder', 'cone', 'torus'}.contains(winner.type.name)) {
+      final origin = parameters['origin'] ?? parameters['center'];
+      final axis = parameters['axis'];
+      return origin is List &&
+          origin.length == 3 &&
+          axis is List &&
+          axis.length == 3;
+    }
+    return false;
+  }
+
+  String _referenceRecipeBlockReason(String type) => switch (type) {
+    'sphere' => 'A esfera reconhecida não possui centro válido.',
+    'cylinder' ||
+    'cone' ||
+    'torus' => 'A primitiva reconhecida não possui eixo válido.',
+    _ => 'O tipo $type não possui referência reconhecida.',
+  };
+
+  String? get automaticRecognitionWinnerType =>
+      report?.primitives.firstOrNull?.recognition.winner.type.name;
+
+  bool get hasRecognitionModeMismatch {
+    final requested = recognitionFilter;
+    return requested != null && requested != automaticRecognitionWinnerType;
   }
 
   /// Authorization shared by the Recognition panel and the Surface Assistant.
@@ -6898,7 +6965,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
-  Future<void> _publishRecognitionResult(BridgeContext context) async {
+  Future<void> _publishRecognitionResult(
+    BridgeContext context, {
+    ProfessionalPrimitive? primitive,
+  }) async {
     final region = context.region!;
     final existing = persistedRecognitionResults.where((entity) {
       final raw = entity.data['recognitionResult'];
@@ -6918,7 +6988,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       regionId: region.id,
       points: region.points,
       area: region.area,
-      primitive: report?.primitives.firstOrNull,
+      primitive: primitive ?? report?.primitives.firstOrNull,
       history: [
         ...oldHistory,
         '${DateTime.now().toUtc().toIso8601String()} recognition evaluated',
@@ -6963,29 +7033,78 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   bool get canDetect => activeContext != null;
 
-  Future<void> detect(String primitiveType) async {
+  Future<void> detectAutomatically() => _detect(null);
+
+  Future<void> detect(String primitiveType) => _detect(primitiveType);
+
+  Future<void> _detect(String? primitiveType) async {
     final context = activeContext;
     if (context == null) {
       throw StateError('Select a mesh region before running detection.');
     }
+    final requestGeneration = ++_recognitionRequestGeneration;
     busy = true;
     error = null;
     recognitionFilter = primitiveType;
+    runtime.hideTransient('surface-assistant-preview');
+    runtime.write('recognition.activeResult', null);
+    runtime.write('surfaceAssistant.suggestion', null);
+    runtime.write(
+      'surfaceAssistant.decision',
+      SurfaceAssistantDecision.pending,
+    );
     notifyListeners();
     try {
-      report = await recognition.recognize(context);
-      await _publishRecognitionResult(context);
-      for (final primitive in hypotheses) {
-        decisions.putIfAbsent(
-          primitive.recognition.id,
-          () => RecognitionDecision.pending,
-        );
+      final recognized = await recognition.recognize(context);
+      if (requestGeneration != _recognitionRequestGeneration) return;
+      report = recognized;
+      final requested = primitiveType == null
+          ? recognized.primitives.firstOrNull
+          : recognized.primitives
+                .where(
+                  (item) => item.recognition.winner.type.name == primitiveType,
+                )
+                .firstOrNull;
+      if (requested == null) {
+        decisions.clear();
+        notifyListeners();
+        return;
       }
-    } catch (value) {
-      error = value.toString().replaceFirst('Bad state: ', '');
-    } finally {
-      busy = false;
+      final diagnostics = runtime.read<Map>('recognition.planarDiagnostics');
+      final planarClassification =
+          diagnostics?['planarClassification'] as String?;
+      final filteredContext = context.copyWith(
+        attributes: {
+          ...context.attributes,
+          'recognitionResultParameters': _dimensionalParameters(
+            recognized,
+            planarToleranceMm,
+            planarClassification: planarClassification,
+            primitive: requested,
+          ),
+        },
+      );
+      await _publishRecognitionResult(filteredContext, primitive: requested);
+      if (requestGeneration != _recognitionRequestGeneration) return;
+      activeContext = filteredContext;
+      decisions
+        ..clear()
+        ..addEntries(
+          hypotheses.map(
+            (primitive) =>
+                MapEntry(primitive.recognition.id, RecognitionDecision.pending),
+          ),
+        );
       notifyListeners();
+    } catch (value) {
+      if (requestGeneration == _recognitionRequestGeneration) {
+        error = value.toString().replaceFirst('Bad state: ', '');
+      }
+    } finally {
+      if (requestGeneration == _recognitionRequestGeneration) {
+        busy = false;
+        notifyListeners();
+      }
     }
   }
 

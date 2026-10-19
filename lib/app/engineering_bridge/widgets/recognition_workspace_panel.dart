@@ -89,11 +89,23 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               ),
             const Divider(),
           ],
-          if (controller.canDetect)
+          if (controller.canDetect) ...[
+            const Text(
+              'Motor: reconhecimento automático multiprimitiva. Os filtros não executam um reconhecimento específico.',
+              style: TextStyle(fontSize: 9.5),
+            ),
+            const SizedBox(height: 4),
             Wrap(
               spacing: 4,
               runSpacing: 4,
               children: [
+                ActionChip(
+                  avatar: const Icon(Icons.auto_awesome, size: 14),
+                  label: const Text('Automático'),
+                  onPressed: controller.busy
+                      ? null
+                      : controller.detectAutomatically,
+                ),
                 for (final type in const [
                   'plane',
                   'cylinder',
@@ -102,14 +114,33 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   'torus',
                 ])
                   ActionChip(
-                    label: Text(
-                      'Detectar ${type[0].toUpperCase()}${type.substring(1)}',
-                    ),
-                    onPressed: () => controller.detect(type),
+                    label: Text('Filtrar ${_typeNameLabel(type)}'),
+                    onPressed: controller.busy
+                        ? null
+                        : () => controller.detect(type),
                   ),
               ],
-            )
-          else
+            ),
+            if (controller.recognitionFilter case final filter?)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  controller.hasRecognitionModeMismatch
+                      ? 'Filtro ${_typeNameLabel(filter)} sem correspondência. '
+                            'Vencedor automático: '
+                            '${_typeNameLabel(controller.automaticRecognitionWinnerType ?? '')}. '
+                            'Ações CAD bloqueadas.'
+                      : 'Filtro ativo: ${_typeNameLabel(filter)}. '
+                            'O resultado exibido corresponde ao vencedor automático.',
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    color: controller.hasRecognitionModeMismatch
+                        ? Theme.of(context).colorScheme.error
+                        : null,
+                  ),
+                ),
+              ),
+          ] else
             const Text(
               'Selecione a malha na viewport para criar uma região homogênea.',
             ),
@@ -257,7 +288,9 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                     )) ...[
                       const SizedBox(height: 4),
                       FilledButton.icon(
-                        onPressed: controller.busy
+                        onPressed:
+                            controller.busy ||
+                                !controller.canCreateNonPlaneReference
                             ? null
                             : () async {
                                 final primitive = controller.hypotheses
@@ -277,6 +310,9 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           'Aceitar ${_primitiveTypeLabel(_firstNonPlaneType(controller))} e criar referência',
                         ),
                       ),
+                      if (controller.nonPlaneReferenceBlockReason
+                          case final reason?)
+                        _BlockReason(reason),
                     ],
                     if (controller.activeSurfaceAssistantSuggestion
                         case final assistant?) ...[
@@ -580,6 +616,16 @@ String _primitiveTypeLabel(String name) => switch (name) {
   'cone' => 'cone',
   'sphere' => 'esfera',
   'torus' => 'toro',
+  _ => name,
+};
+
+String _typeNameLabel(String name) => switch (name) {
+  'plane' => 'Plano',
+  'cylinder' => 'Cilindro',
+  'cone' => 'Cone',
+  'sphere' => 'Esfera',
+  'torus' => 'Toro',
+  '' => 'nenhum',
   _ => name,
 };
 

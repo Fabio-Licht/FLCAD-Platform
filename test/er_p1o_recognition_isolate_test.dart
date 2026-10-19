@@ -7,8 +7,10 @@ import 'package:flcad_mobile/app/cad_viewport/scene/cad_scene_graph.dart';
 import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
+import 'package:flcad_mobile/app/engineering_bridge/contracts/bridge_context.dart';
 import 'package:flcad_mobile/app/engineering_bridge/contracts/bridge_selection.dart';
 import 'package:flcad_mobile/app/engineering_bridge/operational_reverse_engineering_controller.dart';
+import 'package:flcad_mobile/app/engineering_bridge/selection/mesh_region_builder.dart';
 import 'package:flcad_mobile/app/engineering_bridge/selection/technical_stl_pick_resolver.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
@@ -17,6 +19,7 @@ import 'package:flcad_mobile/core/import_export/api/import_export_api.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
 import 'package:flcad_mobile/core/surface_recognition/models/surface_recognition_models.dart';
+import 'package:flcad_mobile/core/surface_recognition/segmentation/region_growing.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -138,6 +141,107 @@ void main() {
     },
     timeout: const Timeout(Duration(minutes: 4)),
   );
+
+  test(
+    'CALOTA requested versus returned recognition mode audit',
+    () async {
+      const path = r'C:\flcad_mobile\test_assets\real_meshes\CALOTA_INOXX.stl';
+      final parsed = _parseStl(File(path));
+      final welded = _weld(parsed.vertices, parsed.triangles);
+      final geometry = KernelMeshGeometry(
+        nodes: welded.vertices,
+        triangles: welded.triangles,
+      );
+      final session = await _RecognitionSession.open(
+        geometry: geometry,
+        entityId: 'calota',
+        managed: false,
+      );
+      addTearDown(session.dispose);
+      final segmented = const ProfessionalRegionGrowing().segment(
+        MeshSurfaceData.fromKernel(geometry),
+        'calota-real-region',
+        settings: const SurfaceRecognitionSettings(
+          planar: true,
+          planarToleranceMm: .5,
+          seedTriangle: 0,
+        ),
+      );
+      final region = segmented.regions
+          .where((candidate) => candidate.triangleIndices.isNotEmpty)
+          .reduce(
+            (first, second) =>
+                first.triangleIndices.length >= second.triangleIndices.length
+                ? first
+                : second,
+          );
+      final selection = BridgeSelection(
+        id: region.id,
+        entityId: 'calota',
+        kind: BridgeSelectionKind.meshRegion,
+        geometry: geometry,
+        triangleIndices: region.triangleIndices.toSet(),
+      );
+      session.controller.activeSelection = selection;
+      session.controller.activeContext = BridgeContext(
+        projectId: 'project',
+        meshId: 'calota',
+        meshFingerprint: 'calota-real-region',
+        userConfirmed: false,
+        region: const MeshRegionBuilder().build(
+          meshId: 'calota',
+          selection: selection,
+        ),
+      );
+      await session.controller.detectAutomatically();
+      expect(
+        session.controller.error,
+        isNull,
+        reason: session.controller.error,
+      );
+      final automaticType =
+          session.controller.activeRecognitionResult?.type.name;
+      final automaticTriangles =
+          session.controller.activeContext?.region?.triangleIndices.length;
+
+      await session.controller.detect('plane');
+      final planeType = session.controller.activeRecognitionResult?.type.name;
+      final planeMatches = !session.controller.hasRecognitionModeMismatch;
+      final planeAuthorized = session.controller.canCreatePlaneReference;
+
+      await session.controller.detect('sphere');
+      final sphereType = session.controller.activeRecognitionResult?.type.name;
+      final sphereMatches = !session.controller.hasRecognitionModeMismatch;
+      final sphereAuthorized = session.controller.canCreateNonPlaneReference;
+      final automaticWinner = session.controller.automaticRecognitionWinnerType;
+
+      final report = StringBuffer()
+        ..writeln('ER-P1Q CALOTA requested versus returned')
+        ..writeln('fixture=$path')
+        ..writeln(
+          'region_source=planar-region-growing welded seed=0 tolerance=0.5',
+        )
+        ..writeln('automatic_requested=automatic')
+        ..writeln('automatic_returned=$automaticType')
+        ..writeln('automatic_triangles=$automaticTriangles')
+        ..writeln('plane_requested=plane')
+        ..writeln('plane_returned=$planeType')
+        ..writeln('plane_matches=$planeMatches')
+        ..writeln('plane_reference_authorized=$planeAuthorized')
+        ..writeln('sphere_requested=sphere')
+        ..writeln('sphere_returned=$sphereType')
+        ..writeln('sphere_matches=$sphereMatches')
+        ..writeln('sphere_reference_authorized=$sphereAuthorized')
+        ..writeln('automatic_winner_for_filters=$automaticWinner')
+        ..writeln('error=${session.controller.error}');
+      final out = File(
+        r'C:\flcad_mobile\test_assets\screenshots\ER-P1Q\er_p1q_real_mode_report.txt',
+      );
+      out.parent.createSync(recursive: true);
+      out.writeAsStringSync(report.toString());
+    },
+    timeout: const Timeout(Duration(minutes: 6)),
+  );
 }
 
 final class _RecognitionSession {
@@ -155,6 +259,7 @@ final class _RecognitionSession {
   static Future<_RecognitionSession> open({
     required KernelMeshGeometry geometry,
     required String entityId,
+    bool managed = true,
   }) async {
     final cad = DesktopCadController(
       kernels: KernelManager(),
@@ -189,39 +294,44 @@ final class _RecognitionSession {
           metadata: const {},
         ),
       ),
+      geometry: managed ? null : geometry,
     );
     final imported = cad.runtime.document!.entities[entityId]!;
-    cad.runtime.debugPutEntity(
-      CadDocumentEntity(
-        id: imported.id,
-        kind: imported.kind,
-        mesh: imported.mesh,
-        placement: imported.placement,
-        data: {
-          ...imported.data,
-          'managedStlAssets': {'displayMeshSha256': 'sha-$entityId'},
-        },
-      ),
-    );
-    cad.runtime.scene.upsert(
-      CadSceneEntity(
-        id: entityId,
-        kind: CadSceneEntityKind.mesh,
-        geometry: {
-          'presentationLod': {'triangles': triangleCount},
-        },
-      ),
-    );
+    if (managed) {
+      cad.runtime.debugPutEntity(
+        CadDocumentEntity(
+          id: imported.id,
+          kind: imported.kind,
+          mesh: imported.mesh,
+          placement: imported.placement,
+          data: {
+            ...imported.data,
+            'managedStlAssets': {'displayMeshSha256': 'sha-$entityId'},
+          },
+        ),
+      );
+      cad.runtime.scene.upsert(
+        CadSceneEntity(
+          id: entityId,
+          kind: CadSceneEntityKind.mesh,
+          geometry: {
+            'presentationLod': {'triangles': triangleCount},
+          },
+        ),
+      );
+    }
     late final _RecognitionSession session;
     final resolver = TechnicalStlPickResolver(
       null,
-      entityProvider: (_) => CadDocumentEntity(
-        id: imported.id,
-        kind: CadDocumentEntityKind.import,
-        data: {
-          'managedStlAssets': {'displayMeshSha256': 'sha-$entityId'},
-        },
-      ),
+      entityProvider: (_) => managed
+          ? CadDocumentEntity(
+              id: imported.id,
+              kind: CadDocumentEntityKind.import,
+              data: {
+                'managedStlAssets': {'displayMeshSha256': 'sha-$entityId'},
+              },
+            )
+          : null,
       geometryLoader: (_) async {
         session.resolverHits++;
         return geometry;
@@ -338,6 +448,29 @@ final class _UnsendableList<E> extends ListBase<E> {
     }
   }
   return _parseBinary(bytes);
+}
+
+({List<double> vertices, List<int> triangles}) _weld(
+  List<double> vertices,
+  List<int> triangles,
+) {
+  final unique = <String, int>{};
+  final weldedVertices = <double>[];
+  final weldedTriangles = <int>[];
+  for (final sourceIndex in triangles) {
+    final offset = sourceIndex * 3;
+    final key = [
+      for (var axis = 0; axis < 3; axis++)
+        (vertices[offset + axis] * 1000000).round(),
+    ].join(':');
+    final index = unique.putIfAbsent(key, () {
+      final next = weldedVertices.length ~/ 3;
+      weldedVertices.addAll(vertices.sublist(offset, offset + 3));
+      return next;
+    });
+    weldedTriangles.add(index);
+  }
+  return (vertices: weldedVertices, triangles: weldedTriangles);
 }
 
 bool _looksBinary(Uint8List bytes) {
