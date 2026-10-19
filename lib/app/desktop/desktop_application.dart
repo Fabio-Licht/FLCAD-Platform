@@ -42,12 +42,14 @@ import '../bootstrap/engineering_bootstrap.dart';
 import '../cad_viewport/camera/cad_camera_controller.dart';
 import '../cad_viewport/camera/cad_managed_import_fit.dart';
 import '../cad_viewport/native/integrated_native_viewport_widget.dart';
+import '../cad_viewport/professional_cad_viewport_widget.dart';
 import '../cad_viewport/scene/cad_scene_graph.dart';
 import '../cad_viewport/scene/cad_scene_bounds.dart';
 import '../cad_viewport/selection/viewport_picking_controller.dart';
 import '../commands/desktop_command_coordinator.dart';
 import '../commands/command_palette.dart';
 import '../engineering_bridge/operational_reverse_engineering_controller.dart';
+import '../engineering_bridge/selection/editable_surface_selection.dart';
 import '../engineering_bridge/selection/geometry_selection_manager.dart';
 import '../engineering_bridge/widgets/recognition_workspace_panel.dart';
 import '../engineering_bridge/widgets/reverse_engineering_studio_panel.dart';
@@ -6143,6 +6145,7 @@ class _OfficialEngineeringWorkspaceState
         widget.cad.runtime.operationalSelection.clear();
         geometrySelection.clear();
         if (choosingSketchSupport) {
+          operational.clearRecognitionSelection();
           setState(() => choosingSketchSupport = false);
           widget.cad.setStatus('Sketch support selection cancelled.');
           return;
@@ -6151,7 +6154,16 @@ class _OfficialEngineeringWorkspaceState
         operational.cancelProfessionalSurface();
         operational.cancelProfessionalExtrude();
         operational.cancelProfessionalRevolve();
-        widget.cad.setStatus('Sketch command cancelled.');
+        if (operational.cancelBrushStroke()) {
+          widget.cad.setStatus('Traço do pincel cancelado.');
+          return;
+        }
+        operational.clearRecognitionSelection();
+        widget.cad.setStatus(
+          cadCommandActive
+              ? 'Operação transitória cancelada.'
+              : 'Seleção e reconhecimento transitórios limpos.',
+        );
       },
       const SingleActivator(LogicalKeyboardKey.enter): () {
         if (operational.professionalRevolvePreview != null &&
@@ -6257,6 +6269,34 @@ class _OfficialEngineeringWorkspaceState
                                   },
                                   technicalRecognitionAvailable:
                                       module == 'Recognition',
+                                  brushActive:
+                                      module == 'Recognition' &&
+                                      operational.brushModeActive,
+                                  brushDiameterMm: operational.brushDiameterMm,
+                                  brushCursorMode: !operational.brushModeActive
+                                      ? null
+                                      : operational.selectionTool ==
+                                            RecognitionSelectionTool.brushAdd
+                                      ? CadBrushCursorMode.add
+                                      : CadBrushCursorMode.remove,
+                                  brushCandidateIds:
+                                      operational.editableSelection == null
+                                      ? null
+                                      : {
+                                          operational
+                                              .editableSelection!
+                                              .entityId,
+                                        },
+                                  onBrushDown: (pick) => unawaited(
+                                    operational.startBrushStroke(pick),
+                                  ),
+                                  onBrushMove: (pick) => unawaited(
+                                    operational.addBrushSample(pick),
+                                  ),
+                                  onBrushUp: () => unawaited(
+                                    operational.finishBrushStroke(),
+                                  ),
+                                  onBrushCancel: operational.cancelBrushStroke,
                                   onPickCapture:
                                       _captureContextualReferencePick,
                                   pickCaptureCandidateIds:
@@ -6591,6 +6631,14 @@ class _OfficialEngineeringWorkspaceState
                                               'Perfil do Extrude selecionado na área de trabalho.',
                                             );
                                           }
+                                          if (module == 'Recognition' &&
+                                              operational.selectionTool !=
+                                                  RecognitionSelectionTool
+                                                      .select) {
+                                            await operational
+                                                .editRecognitionSelection(pick);
+                                            return;
+                                          }
                                           final managedStlRecognitionPick =
                                               module == 'Recognition' &&
                                               picked?.data['managedStlAssets']
@@ -6605,6 +6653,8 @@ class _OfficialEngineeringWorkspaceState
                                               pick: pick,
                                               allowTechnicalStl:
                                                   managedStlRecognitionPick,
+                                              requestedType: operational
+                                                  .requestedRecognitionPrimitive,
                                             );
                                           } else {
                                             operational.activePick = pick;

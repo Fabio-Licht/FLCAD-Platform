@@ -341,6 +341,7 @@ class CadSceneDisplayAdapter {
       'kind': entity.kind.name,
       'visible': entity.visible,
       'selected': entity.selected,
+      if (entity.geometry['selectionPreview'] == true) 'selectionPreview': true,
     };
     if (includeGeometry) {
       final presentationNormals = kFlcadDevShadedDerivedNormals

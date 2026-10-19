@@ -4,7 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' show RootIsolateToken;
+import 'dart:ui' show Color, RootIsolateToken;
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
@@ -18,6 +18,7 @@ import '../../core/cad_document/plane_axis_intersection_point.dart';
 import '../../core/cad_document/alignment_coordinate_system.dart';
 import '../../core/cad_document/dependency_walk.dart';
 import '../../core/cad_document/cad_document_repository.dart';
+import '../cad_viewport/rendering/cad_selection_palette.dart';
 import '../../core/cad_kernel/api/geometry_kernel_api.dart';
 import '../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../core/cad_kernel/models/kernel_models.dart';
@@ -1615,6 +1616,22 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     );
   }
 
+  List<double> _nextImportedMeshColor(CadDocument document) {
+    final existing = <Color>[];
+    for (final entity in document.entities.values.where(
+      (candidate) => candidate.kind == CadDocumentEntityKind.import,
+    )) {
+      final scene = entity.data['sceneGeometry'];
+      final color =
+          colorFromLinearRgb(entity.data['rootLinearRgb']) ??
+          (scene is Map ? colorFromLinearRgb(scene['rootLinearRgb']) : null);
+      if (color != null) existing.add(color);
+    }
+    return linearRgbForColor(
+      chooseImportedMeshColor(existing: existing, offset: existing.length),
+    );
+  }
+
   Future<void> registerImport(
     ImportedCadDocument imported, {
     KernelMeshGeometry? geometry,
@@ -1666,6 +1683,9 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             'triangles': geometry.triangles,
             'bounds': imported.mesh!.bounds.toJson(),
           };
+    if (imported.shape == null && geometry != null) {
+      sceneGeometry['rootLinearRgb'] = _nextImportedMeshColor(current);
+    }
     await mutate(
       command: 'import.${imported.format.name}',
       upsert: [
@@ -2324,6 +2344,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
                 ...identity.toDocumentData(),
                 'collectionId': 'collection:original',
                 'sceneKind': CadSceneEntityKind.mesh.name,
+                'rootLinearRgb': _nextImportedMeshColor(current),
                 'managedStlAssets': assets.toJson(),
               },
             );

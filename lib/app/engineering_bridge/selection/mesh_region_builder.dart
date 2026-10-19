@@ -11,6 +11,7 @@ class MeshRegionBuilder {
   MeshRegion build({
     required String meshId,
     required BridgeSelection selection,
+    bool requireConnected = true,
   }) {
     if (selection.triangleIndices.isEmpty)
       throw StateError('No selected triangles.');
@@ -55,7 +56,7 @@ class MeshRegionBuilder {
         }
       }
     }
-    if (!_connected(selected, connectivity))
+    if (requireConnected && !_connected(selected, connectivity))
       throw StateError(
         'Selected triangles do not form one connected mesh region.',
       );

@@ -18,18 +18,22 @@ final class TechnicalStlHit {
     required this.entityId,
     required this.triangleIndex,
     required this.point,
+    required this.localPoint,
     required this.normal,
+    required this.localNormal,
     required this.distance,
     required this.geometryRevision,
     required this.geometry,
+    required this.worldToLocal,
   });
 
   final String entityId;
   final int triangleIndex;
-  final Vector3 point, normal;
+  final Vector3 point, localPoint, normal, localNormal;
   final double distance;
   final String geometryRevision;
   final KernelMeshGeometry geometry;
+  final Matrix4 worldToLocal;
 }
 
 /// Resolves technical picks against a managed STL's complete mesh.
@@ -158,10 +162,38 @@ final class TechnicalStlPickResolver {
       entityId: entityId,
       triangleIndex: localHit.triangleIndex,
       point: worldPoint,
+      localPoint: localHit.point,
       normal: worldNormal,
+      localNormal: localNormal,
       distance: localHit.distance,
       geometryRevision: entry.geometryRevision,
       geometry: entry.geometry,
+      worldToLocal: inverse,
+    );
+  }
+
+  /// Returns the cached durable mesh and BVH for [entityId]. The resolver
+  /// already owns the original-mesh BVH used for technical picking, so brush
+  /// and future selection tools can reuse it instead of building a duplicate.
+  ({KernelMeshGeometry geometry, MeshBvh bvh, String revision})? cachedMesh(
+    String entityId,
+  ) {
+    final entity = _entityProvider(entityId);
+    final assets = entity?.data['managedStlAssets'];
+    if (entity == null ||
+        entity.kind != CadDocumentEntityKind.import ||
+        assets is! Map ||
+        assets['displayMeshSha256'] is! String) {
+      return null;
+    }
+    final revision = '${assets['displayMeshSha256']}:$entityId';
+    final entry = _cache['$entityId:$revision'];
+    if (entry == null) return null;
+    entry.lastUsed = ++_clock;
+    return (
+      geometry: entry.geometry,
+      bvh: entry.bvh,
+      revision: entry.geometryRevision,
     );
   }
 

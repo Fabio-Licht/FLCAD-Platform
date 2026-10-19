@@ -22,6 +22,7 @@ import '../../core/adaptive_surface/continuity/surface_continuity.dart';
 import '../../core/geometric_kernel/geometry/vectors.dart';
 import '../../core/geometric_kernel/linear_algebra/matrices.dart';
 import '../../core/geometric_kernel/transforms/transform3.dart';
+import '../../core/geometric_recognition/models/recognition_models.dart';
 import '../../core/professional_recognition/api/professional_recognition_api.dart';
 import '../../core/professional_recognition/models/professional_recognition_models.dart';
 import '../../core/professional_loft/professional_loft.dart';
@@ -85,7 +86,11 @@ import '../../core/surface_intelligence/integration/surface_factory.dart';
 import '../../core/surface_intelligence/models/surface_models.dart';
 import '../../core/surface_operations/integration/surface_operations_factory.dart';
 import '../cad_viewport/selection/viewport_picking_controller.dart';
+import '../cad_viewport/rendering/cad_selection_palette.dart';
 import 'selection/technical_stl_pick_resolver.dart';
+import 'selection/mesh_bvh.dart';
+import 'selection/surface_selection_engine.dart';
+import 'selection/surface_selection_policy.dart';
 import '../cad_viewport/camera/cad_camera_controller.dart';
 import '../cad_viewport/rendering/reference_scene_adapter.dart';
 import '../cad_viewport/rendering/sketch_scene_adapter.dart';
@@ -101,6 +106,7 @@ import 'adapters/smart_reference_recipe_mapper.dart';
 import 'contracts/bridge_context.dart';
 import 'contracts/bridge_selection.dart';
 import 'selection/mesh_region_builder.dart';
+import 'selection/editable_surface_selection.dart';
 import 'selection/section_manager.dart';
 import 'selection/section_sketch_connectivity.dart';
 import 'selection/geometry_selection_manager.dart';
@@ -171,6 +177,14 @@ const String sketchG1ContinuityRepairPreviewEndpointsId =
 const String sketchOriginalSectionReferencePrefix = 'sketch-original-section-';
 
 enum RecognitionDecision { pending, accepted, rejected }
+
+typedef _PlanarQualityOutcome = ({
+  BridgeContext context,
+  ProfessionalRecognitionReport report,
+  ProfessionalPrimitive? primitive,
+  region_recognition.SurfaceRegion? surfaceRegion,
+  String? classification,
+});
 
 /// Presentation buckets for reconstruction suggestions.  This is intentionally
 /// a UI concern: the recognition engine keeps emitting the same hypotheses and
@@ -557,6 +571,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'project.beforeSave',
       _beforeSaveCallback,
     );
+    _historyCleanupCallback = () async {
+      if (hasRecognitionSelection) clearRecognitionSelection();
+    };
+    runtime.write<Future<void> Function()>(
+      'history.afterUndo',
+      _historyCleanupCallback,
+    );
+    runtime.write<Future<void> Function()>(
+      'history.afterRedo',
+      _historyCleanupCallback,
+    );
     // Command identity belongs to this session, not to a project: install the
     // operational command set once when the session starts, so reopening or
     // switching projects only reconfigures project data.
@@ -567,6 +592,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   void dispose() {
     if (_disposed) return;
     _disposed = true;
+    _recognitionRequestGeneration++;
+    _brushStrokeGeneration++;
+    _brushStrokeActive = false;
     // Final disposal must not touch SceneGraph: the runtime may already have
     // disposed it. Normal project/session transitions restore visibility via
     // detachProject() and _synchronizeSketchScene() while the scene is live.
@@ -588,6 +616,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           _beforeSaveCallback) {
         runtime.write('project.beforeSave', null);
       }
+      if (runtime.read<Future<void> Function()>('history.afterUndo') ==
+          _historyCleanupCallback) {
+        runtime.write('history.afterUndo', null);
+      }
+      if (runtime.read<Future<void> Function()>('history.afterRedo') ==
+          _historyCleanupCallback) {
+        runtime.write('history.afterRedo', null);
+      }
     } on Object {
       // Widget tests dispose CadRuntime before the controller.
     }
@@ -596,6 +632,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   final RecognitionBridge recognition;
   late final Future<void> Function() _beforeSaveCallback;
+  late final Future<void> Function() _historyCleanupCallback;
 
   void _installBeforeSaveHook() {
     runtime.write<Future<void> Function()>(
@@ -617,6 +654,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   String? get recognitionFilter => runtime.read('recognition.filter');
   set recognitionFilter(String? value) =>
       runtime.write('recognition.filter', value);
+  PrimitiveType? get requestedRecognitionPrimitive =>
+      runtime.read<PrimitiveType>('recognition.requestedPrimitive');
+  set requestedRecognitionPrimitive(PrimitiveType? value) =>
+      runtime.write('recognition.requestedPrimitive', value);
   static const defaultPlanarToleranceMm = .5;
   double get planarToleranceMm =>
       (runtime.read<num>('recognition.planarToleranceMm')?.toDouble() ??
@@ -660,6 +701,55 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// previous session cannot revive tools, previews or selection.
   int _sketchSessionEpoch = 0;
   final Map<String, bool> _sketchPresentationVisibility = {};
+  EditableSurfaceSelection? _editableSelection;
+  Map<String, Object?>? _initialPlanarDiagnostics;
+  int _editedSelectionComponents = 1;
+  int? _editedClassificationRevision;
+  int? _editedClassificationSeed;
+  double? _editedClassificationTolerance;
+  String? _editedClassificationValue;
+  int _editedClassificationCacheHits = 0;
+  int _lastRegionBuildMicros = 0;
+  int _lastRecognitionMicros = 0;
+  int _lastClassificationMicros = 0;
+  int _lastClassificationComputeMicros = 0;
+  int _lastPublishMicros = 0;
+  static const double minBrushDiameterMm = 1;
+  static const double maxBrushDiameterMm = 50;
+  static const double defaultBrushDiameterMm = 12;
+  SelectionVisibilityPolicy _brushVisibility =
+      SelectionVisibilityPolicy.visibleOnly;
+  SelectionConnectivityPolicy _brushConnectivity =
+      SelectionConnectivityPolicy.connectedSurface;
+  double _brushDiameterMm = defaultBrushDiameterMm;
+  bool _brushStrokeActive = false;
+  int _brushStrokeGeneration = 0;
+  Set<int>? _brushStrokeBefore;
+  Set<int>? _brushStrokeWorking;
+  double _brushStrokeBeforeArea = 0;
+  double _brushStrokeWorkingArea = 0;
+  BridgeContext? _brushBeforeContext;
+  BridgeSelection? _brushBeforeSelection;
+  CadViewportPick? _brushBeforePick;
+  Future<void> _brushQueue = Future<void>.value();
+  DateTime _lastBrushPreviewAt = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastBrushNotifyAt = DateTime.fromMillisecondsSinceEpoch(0);
+  int _brushPickMicros = 0;
+  int _brushCollectMicros = 0;
+  int _brushPreviewMicros = 0;
+  int _brushSampleCount = 0;
+  int _brushRequestCount = 0;
+  int? _lastBrushSampleTriangle;
+  Vector3? _lastBrushSamplePoint;
+  String? _selectionDiagnostic;
+  final SurfaceSelectionEngine _selectionEngine = const SurfaceSelectionEngine(
+    maxSpatialCandidates: 32768,
+  );
+  RecognitionSelectionTool _selectionTool = RecognitionSelectionTool.select;
+  final List<SelectionEdit> _selectionUndo = [];
+  final List<SelectionEdit> _selectionRedo = [];
+  int _lastSelectionAdded = 0;
+  int _lastSelectionRemoved = 0;
   bool _disposed = false;
 
   Future<void> _awaitProjectConfiguration() async {
@@ -6390,6 +6480,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.surfacePreview.active', false);
     activeContext = null;
     activeSelection = null;
+    requestedRecognitionPrimitive = null;
+    runtime.write('recognition.planarDiagnostics', null);
     previewPoints = const [];
     selectedSketchEntityIds.clear();
     // Explicit tangency references belong to the sketch being detached.
@@ -6409,9 +6501,211 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool get hasRecognitionSelection =>
+      activeContext != null ||
+      activeSelection != null ||
+      activeRecognitionResult != null ||
+      report != null ||
+      recognitionFilter != null ||
+      requestedRecognitionPrimitive != null ||
+      runtime.read<Map>('recognition.diagnostic') != null ||
+      activeSurfaceAssistantSuggestion != null ||
+      _editableSelection != null;
+
+  void clearRecognitionSelection({bool notify = true}) {
+    _recognitionRequestGeneration++;
+    busy = false;
+    error = null;
+    activePick = null;
+    activeSelection = null;
+    activeContext = null;
+    report = null;
+    recognitionFilter = null;
+    requestedRecognitionPrimitive = null;
+    _editableSelection = null;
+    _initialPlanarDiagnostics = null;
+    _editedSelectionComponents = 1;
+    _editedClassificationRevision = null;
+    _editedClassificationSeed = null;
+    _editedClassificationTolerance = null;
+    _editedClassificationValue = null;
+    _editedClassificationCacheHits = 0;
+    _brushStrokeActive = false;
+    _brushStrokeGeneration++;
+    _brushStrokeBefore = null;
+    _brushStrokeWorking = null;
+    _brushStrokeBeforeArea = 0;
+    _brushStrokeWorkingArea = 0;
+    _brushBeforeContext = null;
+    _brushBeforeSelection = null;
+    _brushBeforePick = null;
+    _lastBrushSampleTriangle = null;
+    _lastBrushSamplePoint = null;
+    _selectionDiagnostic = null;
+    _selectionTool = RecognitionSelectionTool.select;
+    _selectionUndo.clear();
+    _selectionRedo.clear();
+    _lastSelectionAdded = 0;
+    _lastSelectionRemoved = 0;
+    decisions.clear();
+    runtime.hideTransient('recognition-region-preview');
+    runtime.hideTransient('surface-assistant-preview');
+    runtime.write('recognition.activeResult', null);
+    runtime.write('recognition.diagnostic', null);
+    runtime.write('recognition.planarDiagnostics', null);
+    runtime.write('surfaceAssistant.suggestion', null);
+    runtime.write(
+      'surfaceAssistant.decision',
+      SurfaceAssistantDecision.pending,
+    );
+    runtime.operationalSelection.clear();
+    geometrySelection.clear();
+    runtime.select(const <String>{});
+    if (notify) notifyListeners();
+  }
+
+  void setSelectionTool(RecognitionSelectionTool value) {
+    if (_selectionTool == value) return;
+    if (_brushStrokeActive) cancelBrushStroke();
+    _selectionTool = value;
+    error = null;
+    _selectionDiagnostic = null;
+    notifyListeners();
+  }
+
+  SelectionVisibilityPolicy get brushVisibility => _brushVisibility;
+  SelectionConnectivityPolicy get brushConnectivity => _brushConnectivity;
+  double get brushDiameterMm => _brushDiameterMm;
+  bool get brushModeActive => _selectionTool.isBrush;
+  bool get brushStrokeActive => _brushStrokeActive;
+  String? get selectionDiagnostic => _selectionDiagnostic;
+  int get brushPickMicros => _brushPickMicros;
+  int get brushCollectMicros => _brushCollectMicros;
+  int get brushPreviewMicros => _brushPreviewMicros;
+  int get brushSampleCount => _brushSampleCount;
+  int get brushRequestCount => _brushRequestCount;
+  int get editedClassificationCacheHits => _editedClassificationCacheHits;
+  int get lastRegionBuildMicros => _lastRegionBuildMicros;
+  int get lastRecognitionMicros => _lastRecognitionMicros;
+  int get lastClassificationMicros => _lastClassificationMicros;
+  int get lastClassificationComputeMicros => _lastClassificationComputeMicros;
+  int get lastPublishMicros => _lastPublishMicros;
+
+  void setBrushVisibility(SelectionVisibilityPolicy value) {
+    if (_brushVisibility == value) return;
+    if (_brushStrokeActive) cancelBrushStroke();
+    _brushVisibility = value;
+    _selectionDiagnostic = null;
+    notifyListeners();
+  }
+
+  void setBrushConnectivity(SelectionConnectivityPolicy value) {
+    if (_brushConnectivity == value) return;
+    if (_brushStrokeActive) cancelBrushStroke();
+    _brushConnectivity = value;
+    _selectionDiagnostic = null;
+    notifyListeners();
+  }
+
+  void setBrushDiameterMm(double value) {
+    final clamped = value
+        .clamp(minBrushDiameterMm, maxBrushDiameterMm)
+        .toDouble();
+    if ((clamped - _brushDiameterMm).abs() < 1e-9) return;
+    if (_brushStrokeActive) cancelBrushStroke();
+    _brushDiameterMm = clamped;
+    _selectionDiagnostic = null;
+    notifyListeners();
+  }
+
+  Future<_PlanarQualityOutcome> _applyPlanarQuality({
+    required BridgeContext context,
+    required ProfessionalRecognitionReport report,
+    required ProfessionalPrimitive? primitive,
+    required String entityId,
+    required KernelMeshGeometry geometry,
+    required int seedTriangle,
+    required bool isManagedStl,
+    required bool allowRegionReplacement,
+    PrimitiveType? allowedType,
+  }) async {
+    final winner =
+        primitive?.recognition.winner ??
+        report.primitives.firstOrNull?.recognition.winner;
+    final tolerance = planarToleranceMm;
+    final invalidPlane =
+        winner?.type.name == 'plane' &&
+        (winner!.statistics.rms > tolerance ||
+            winner.statistics.maximum > tolerance);
+    if (!allowRegionReplacement || !isManagedStl || !invalidPlane) {
+      return (
+        context: context,
+        report: report,
+        primitive: primitive,
+        surfaceRegion: null,
+        classification: null,
+      );
+    }
+    final planar = _restoreRegionGrowingResult(
+      await dispatchRegionGrowingIsolate(
+        regionGrowingIsolatePayload(
+          geometry: geometry,
+          fingerprint: context.meshFingerprint,
+          settings: region_recognition.SurfaceRecognitionSettings(
+            planar: true,
+            planarToleranceMm: tolerance,
+            seedTriangle: seedTriangle,
+          ),
+        ),
+      ),
+    );
+    runtime.write('recognition.planarDiagnostics', planar.diagnostics);
+    final classification =
+        planar.diagnostics['planarClassification'] as String?;
+    final planarRegion = planar.regions
+        .where((region) => region.triangleIndices.contains(seedTriangle))
+        .firstOrNull;
+    if (planarRegion == null) {
+      return (
+        context: context,
+        report: report,
+        primitive: primitive,
+        surfaceRegion: null,
+        classification: classification,
+      );
+    }
+    final selection = BridgeSelection(
+      id: planarRegion.id,
+      entityId: entityId,
+      kind: BridgeSelectionKind.meshRegion,
+      geometry: geometry,
+      triangleIndices: planarRegion.triangleIndices.toSet(),
+    );
+    final planarContext = BridgeContext(
+      projectId: context.projectId,
+      meshId: context.meshId,
+      meshFingerprint: context.meshFingerprint,
+      userConfirmed: context.userConfirmed,
+      region: regionBuilder.build(meshId: context.meshId, selection: selection),
+      attributes: context.attributes,
+    );
+    final planarReport = await recognition.recognize(
+      planarContext,
+      allowedTypes: allowedType == null ? null : {allowedType},
+    );
+    return (
+      context: planarContext,
+      report: planarReport,
+      primitive: planarReport.primitives.firstOrNull,
+      surfaceRegion: planarRegion,
+      classification: classification,
+    );
+  }
+
   Future<void> recognizePick({
     required CadViewportPick pick,
     bool allowTechnicalStl = false,
+    PrimitiveType? requestedType,
   }) async {
     final sceneEntity = runtime.scene.find(pick.entityId);
     final isManagedStl =
@@ -6423,18 +6717,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'Visualização simplificada: medição e região exigem a malha completa.',
       );
     }
+    clearRecognitionSelection(notify: false);
     final requestGeneration = ++_recognitionRequestGeneration;
     // A new pick starts a new recognition transaction. Invalidate the old
     // transient result before loading the managed original mesh.
-    runtime.hideTransient('surface-assistant-preview');
-    runtime.write('recognition.activeResult', null);
-    runtime.write('surfaceAssistant.suggestion', null);
-    runtime.write(
-      'surfaceAssistant.decision',
-      SurfaceAssistantDecision.pending,
-    );
     activePick = pick;
     recognitionFilter = null;
+    requestedRecognitionPrimitive = requestedType;
     busy = true;
     error = null;
     notifyListeners();
@@ -6544,51 +6833,50 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
 
       var context = contextForRegion(surfaceRegion);
-      report = await recognition.recognize(context);
-      final winner = report?.primitives.firstOrNull?.recognition.winner;
-      final tolerance = planarToleranceMm;
-      final invalidPlane =
-          winner?.type.name == 'plane' &&
-          (winner!.statistics.rms > tolerance ||
-              winner.statistics.maximum > tolerance);
-      String? planarClassification;
-      if (isManagedStl && invalidPlane) {
-        final planar = _restoreRegionGrowingResult(
-          await dispatchRegionGrowingIsolate(
-            regionGrowingIsolatePayload(
-              geometry: geometry,
-              fingerprint: meshFingerprint,
-              settings: region_recognition.SurfaceRecognitionSettings(
-                planar: true,
-                planarToleranceMm: tolerance,
-                seedTriangle: seedTriangle,
-              ),
-            ),
-          ),
-        );
-        runtime.write('recognition.planarDiagnostics', planar.diagnostics);
-        planarClassification =
-            planar.diagnostics['planarClassification'] as String?;
-        final planarRegion = planar.regions
-            .where((region) => region.triangleIndices.contains(seedTriangle))
-            .firstOrNull;
-        if (planarRegion != null) {
-          surfaceRegion = planarRegion;
-          context = contextForRegion(planarRegion);
-          report = await recognition.recognize(context);
-        }
-      } else {
-        runtime.write('recognition.planarDiagnostics', segmented.diagnostics);
+      var recognized = await recognition.recognize(
+        context,
+        allowedTypes: requestedType == null ? null : {requestedType},
+      );
+      runtime.write('recognition.planarDiagnostics', segmented.diagnostics);
+      final quality = await _applyPlanarQuality(
+        context: context,
+        report: recognized,
+        primitive: recognized.primitives.firstOrNull,
+        entityId: effectivePick.entityId,
+        geometry: geometry,
+        seedTriangle: seedTriangle,
+        isManagedStl: isManagedStl,
+        allowRegionReplacement: true,
+        allowedType: requestedType,
+      );
+      context = quality.context;
+      recognized = quality.report;
+      if (quality.surfaceRegion != null) {
+        surfaceRegion = quality.surfaceRegion!;
       }
+      report = recognized;
+      _initializeEditableSelection(
+        context,
+        geometry,
+        effectivePick.entityId,
+        resetHistory: true,
+      );
       final dimensional = _dimensionalParameters(
-        report,
-        tolerance,
-        planarClassification: planarClassification,
+        recognized,
+        planarToleranceMm,
+        planarClassification: quality.classification,
       );
       context = context.copyWith(
-        attributes: {'recognitionResultParameters': dimensional},
+        attributes: {
+          ...context.attributes,
+          'recognitionResultParameters': dimensional,
+        },
       );
-      await _publishRecognitionResult(context);
+      await _publishRecognitionResult(
+        context,
+        requestedType: requestedType,
+        requestGeneration: requestGeneration,
+      );
       activeSelection = BridgeSelection(
         id: context.region!.id,
         entityId: effectivePick.entityId,
@@ -6625,31 +6913,880 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     KernelMeshGeometry geometry,
     region_recognition.SurfaceRegion region,
   ) {
-    final triangles = <int>[];
-    for (final triangle in region.triangleIndices) {
-      final offset = triangle * 3;
-      if (offset + 2 < geometry.triangles.length) {
-        triangles.addAll([
-          geometry.triangles[offset],
-          geometry.triangles[offset + 1],
-          geometry.triangles[offset + 2],
-        ]);
-      }
-    }
     runtime.showTransient(
-      CadSceneEntity(
-        id: 'recognition-region-preview',
-        kind: CadSceneEntityKind.preview,
-        geometry: {
-          'nodes': geometry.nodes,
-          'triangles': triangles,
-          'color': region.color,
-          'triangleCount': region.triangleIndices.length,
-          'area': region.area,
-        },
-        transparent: true,
+      _selectionPreviewEntity(
+        geometry: geometry,
+        entityId: activePick?.entityId,
+        triangles: region.triangleIndices.toSet(),
+        area: region.area,
+        editableSelection: true,
       ),
     );
+  }
+
+  void _initializeEditableSelection(
+    BridgeContext context,
+    KernelMeshGeometry geometry,
+    String entityId, {
+    bool resetHistory = true,
+  }) {
+    final region = context.region;
+    if (region == null || region.triangleIndices.isEmpty) return;
+    if (_editableSelection?.isEdited == true && !resetHistory) return;
+    _editableSelection = EditableSurfaceSelection(
+      projectId: context.projectId,
+      meshId: context.meshId,
+      meshFingerprint: context.meshFingerprint,
+      entityId: entityId,
+      geometry: geometry,
+      initialTriangles: region.triangleIndices.toSet(),
+      area: region.area,
+    );
+    final diagnostics = runtime.read<Map>('recognition.planarDiagnostics');
+    _initialPlanarDiagnostics = diagnostics == null
+        ? null
+        : Map<String, Object?>.from(diagnostics);
+    _editedSelectionComponents = 1;
+    _editedClassificationRevision = null;
+    _editedClassificationSeed = null;
+    _editedClassificationTolerance = null;
+    _editedClassificationValue = null;
+    _editedClassificationCacheHits = 0;
+    _brushStrokeActive = false;
+    _brushStrokeGeneration++;
+    _brushStrokeBefore = null;
+    _brushStrokeWorking = null;
+    _brushStrokeBeforeArea = 0;
+    _brushStrokeWorkingArea = 0;
+    _brushBeforeContext = null;
+    _brushBeforeSelection = null;
+    _brushBeforePick = null;
+    _lastBrushSampleTriangle = null;
+    _lastBrushSamplePoint = null;
+    _selectionDiagnostic = null;
+    _selectionTool = RecognitionSelectionTool.select;
+    if (resetHistory) {
+      _selectionUndo.clear();
+      _selectionRedo.clear();
+      _lastSelectionAdded = 0;
+      _lastSelectionRemoved = 0;
+    }
+  }
+
+  void _showEditableSelection(
+    EditableSurfaceSelection selection,
+    Set<int> triangles,
+    double area,
+  ) {
+    if (triangles.isEmpty) {
+      runtime.hideTransient('recognition-region-preview');
+      return;
+    }
+    runtime.showTransient(
+      _selectionPreviewEntity(
+        geometry: selection.geometry,
+        entityId: selection.entityId,
+        triangles: triangles,
+        area: area,
+        editableSelection: true,
+      ),
+    );
+  }
+
+  CadSceneEntity _selectionPreviewEntity({
+    required KernelMeshGeometry geometry,
+    required String? entityId,
+    required Set<int> triangles,
+    required double area,
+    required bool editableSelection,
+  }) {
+    final placement = entityId == null
+        ? null
+        : runtime.document?.entities[entityId]?.placement?.matrix;
+    Vector3 worldPoint(int vertex) {
+      final offset = vertex * 3;
+      final local = Vector3(
+        geometry.nodes[offset],
+        geometry.nodes[offset + 1],
+        geometry.nodes[offset + 2],
+      );
+      return placement?.transformPoint(local) ?? local;
+    }
+
+    final remap = <int, int>{};
+    final nodes = <double>[];
+    int mappedVertex(int vertex) => remap.putIfAbsent(vertex, () {
+      final point = worldPoint(vertex);
+      nodes.addAll([point.x, point.y, point.z]);
+      return remap.length;
+    });
+    final previewTriangles = <int>[];
+    final edgeCounts = <(int, int), int>{};
+    final edgeEndpoints = <(int, int), (int, int)>{};
+    for (final triangle in triangles) {
+      final offset = triangle * 3;
+      if (offset + 2 >= geometry.triangles.length) continue;
+      final a = geometry.triangles[offset];
+      final b = geometry.triangles[offset + 1];
+      final c = geometry.triangles[offset + 2];
+      previewTriangles.addAll([
+        mappedVertex(a),
+        mappedVertex(b),
+        mappedVertex(c),
+      ]);
+      if (triangles.length <= 60000) {
+        for (final edge in [(a, b), (b, c), (c, a)]) {
+          final key = edge.$1 < edge.$2
+              ? (edge.$1, edge.$2)
+              : (edge.$2, edge.$1);
+          edgeCounts[key] = (edgeCounts[key] ?? 0) + 1;
+          edgeEndpoints[key] = key;
+        }
+      }
+    }
+    final boundary = <List<double>>[];
+    for (final entry in edgeCounts.entries) {
+      if (entry.value != 1) continue;
+      final endpoints = edgeEndpoints[entry.key]!;
+      final first = worldPoint(endpoints.$1);
+      final second = worldPoint(endpoints.$2);
+      boundary.add([first.x, first.y, first.z, second.x, second.y, second.z]);
+    }
+    return CadSceneEntity(
+      id: 'recognition-region-preview',
+      kind: CadSceneEntityKind.preview,
+      geometry: {
+        'nodes': nodes,
+        'triangles': previewTriangles,
+        'rootLinearRgb': kCadSelectionLinearRgb,
+        'color': '#F5F7FA',
+        'selectionPreview': true,
+        'editableSelection': editableSelection,
+        'selectionMode': _selectionTool.isBrush
+            ? (_selectionTool == RecognitionSelectionTool.brushAdd
+                  ? 'add'
+                  : 'remove')
+            : 'select',
+        'triangleCount': triangles.length,
+        'area': area,
+        if (boundary.isNotEmpty) 'topologicalEdges': boundary,
+      },
+      transparent: false,
+    );
+  }
+
+  CadViewportPick _pickForEditableSelection(
+    EditableSurfaceSelection selection,
+    int seedTriangle,
+  ) {
+    final offset = seedTriangle * 3;
+    final vertex = offset < selection.geometry.triangles.length
+        ? selection.geometry.triangles[offset]
+        : 0;
+    final node = vertex * 3;
+    final point = node + 2 < selection.geometry.nodes.length
+        ? Vector3(
+            selection.geometry.nodes[node],
+            selection.geometry.nodes[node + 1],
+            selection.geometry.nodes[node + 2],
+          )
+        : Vector3.zero;
+    return CadViewportPick(
+      entityId: selection.entityId,
+      hit: MeshHit(triangleIndex: seedTriangle, point: point, distance: 0),
+      ray: activePick?.ray,
+    );
+  }
+
+  ({BridgeContext context, BridgeSelection selection, MeshRegion region})
+  _contextForEditableSelection(
+    Set<int> triangles, {
+    bool requireConnected = true,
+  }) {
+    final source = _editableSelection!;
+    final selection = BridgeSelection(
+      id: 'edited:${source.meshId}:${source.revision}',
+      entityId: source.entityId,
+      kind: BridgeSelectionKind.meshRegion,
+      geometry: source.geometry,
+      triangleIndices: triangles,
+    );
+    final region = regionBuilder.build(
+      meshId: source.meshId,
+      selection: selection,
+      requireConnected: requireConnected,
+    );
+    final current = activeContext;
+    final context = current != null && current.meshId == source.meshId
+        ? current.copyWith(region: region)
+        : BridgeContext(
+            projectId: source.projectId,
+            meshId: source.meshId,
+            meshFingerprint: source.meshFingerprint,
+            userConfirmed: false,
+            region: region,
+          );
+    return (context: context, selection: selection, region: region);
+  }
+
+  Future<bool> _runSelectionEdit(Future<bool> Function() operation) async {
+    if (busy) {
+      error = 'Aguarde a operação atual antes de editar a seleção.';
+      notifyListeners();
+      return false;
+    }
+    busy = true;
+    error = null;
+    notifyListeners();
+    var applied = false;
+    try {
+      applied = await operation();
+    } catch (value) {
+      error = value.toString().replaceFirst('Bad state: ', '');
+    } finally {
+      busy = false;
+      notifyListeners();
+    }
+    return applied;
+  }
+
+  void _pushSelectionEdit(Set<int> added, Set<int> removed, String label) {
+    _selectionUndo.add(
+      SelectionEdit(
+        added: Set.unmodifiable(added),
+        removed: Set.unmodifiable(removed),
+        label: label,
+      ),
+    );
+    if (_selectionUndo.length > 64) {
+      _selectionUndo.removeAt(0);
+    }
+    _selectionRedo.clear();
+  }
+
+  Future<bool> _applySelectionEdit({
+    required Set<int> added,
+    required Set<int> removed,
+    required String label,
+    required int seedTriangle,
+    bool record = true,
+    bool allowDisconnected = false,
+  }) async {
+    final source = _editableSelection;
+    if (source == null) {
+      throw StateError('Selecione uma região antes de editar.');
+    }
+    final before = source.currentTriangles;
+    final next = Set<int>.from(before)
+      ..addAll(added)
+      ..removeAll(removed);
+    final actualAdded = next.difference(before);
+    final actualRemoved = before.difference(next);
+    if (actualAdded.isEmpty && actualRemoved.isEmpty) {
+      error = 'A edição não alterou a seleção.';
+      notifyListeners();
+      return false;
+    }
+    if (next.isEmpty) {
+      if (record) {
+        _pushSelectionEdit(actualAdded, actualRemoved, label);
+      }
+      _lastSelectionAdded = actualAdded.length;
+      _lastSelectionRemoved = actualRemoved.length;
+      source.replaceCurrent(const <int>{}, area: 0);
+      _editedSelectionComponents = 0;
+      _editedClassificationRevision = null;
+      _editedClassificationSeed = null;
+      _editedClassificationTolerance = null;
+      _editedClassificationValue = null;
+      _editedClassificationCacheHits = 0;
+      activeContext = null;
+      activeSelection = null;
+      activePick = null;
+      report = null;
+      decisions.clear();
+      runtime.write('recognition.activeResult', null);
+      runtime.write('recognition.diagnostic', null);
+      runtime.write('recognition.planarDiagnostics', null);
+      runtime.write('surfaceAssistant.suggestion', null);
+      runtime.write(
+        'surfaceAssistant.decision',
+        SurfaceAssistantDecision.pending,
+      );
+      runtime.hideTransient('surface-assistant-preview');
+      runtime.hideTransient('recognition-region-preview');
+      _selectionDiagnostic = null;
+      return true;
+    }
+    final regionWatch = Stopwatch()..start();
+    final outcome = () {
+      try {
+        return _contextForEditableSelection(next);
+      } catch (value) {
+        if (!allowDisconnected) rethrow;
+        return _contextForEditableSelection(next, requireConnected: false);
+      }
+    }();
+    regionWatch.stop();
+    _lastRegionBuildMicros = regionWatch.elapsedMicroseconds;
+    if (record) {
+      _pushSelectionEdit(actualAdded, actualRemoved, label);
+    }
+    source.replaceCurrent(next, area: outcome.region.area);
+    _editedSelectionComponents = source.connectedComponentCount(next);
+    _editedClassificationRevision = null;
+    _editedClassificationSeed = null;
+    _editedClassificationTolerance = null;
+    _editedClassificationValue = null;
+    _editedClassificationCacheHits = 0;
+    _lastSelectionAdded = actualAdded.length;
+    _lastSelectionRemoved = actualRemoved.length;
+    activeContext = outcome.context;
+    activeSelection = outcome.selection;
+    final seed = next.contains(seedTriangle) ? seedTriangle : next.first;
+    activePick = _pickForEditableSelection(source, seed);
+    _showEditableSelection(source, next, outcome.region.area);
+    _selectionDiagnostic = null;
+    // The previous multiscale evidence belongs to the old triangle set.
+    // _detect recomputes it from the effective edited region; restoring the
+    // exact automatic set keeps its original evidence.
+    runtime.write(
+      'recognition.planarDiagnostics',
+      source.isEdited ? null : _initialPlanarDiagnostics,
+    );
+    await _detect(null, requestedType: requestedRecognitionPrimitive);
+    return true;
+  }
+
+  void _clearRecognitionForInvalidSelection() {
+    report = null;
+    decisions.clear();
+    runtime.write('recognition.activeResult', null);
+    runtime.write('recognition.diagnostic', null);
+    runtime.write('recognition.planarDiagnostics', null);
+    runtime.write('surfaceAssistant.suggestion', null);
+    runtime.write(
+      'surfaceAssistant.decision',
+      SurfaceAssistantDecision.pending,
+    );
+    runtime.hideTransient('surface-assistant-preview');
+  }
+
+  Future<void> editRecognitionSelection(CadViewportPick pick) async {
+    final source = _editableSelection;
+    if (source == null) {
+      error = 'Selecione uma região antes de usar Adicionar ou Remover.';
+      notifyListeners();
+      return;
+    }
+    final tool = _selectionTool;
+    if (tool == RecognitionSelectionTool.select) {
+      error = 'Ative Adicionar ou Remover antes de clicar na região.';
+      notifyListeners();
+      return;
+    }
+    if (tool.isBrush) {
+      _selectionDiagnostic =
+          'Arraste com o botão esquerdo sobre a malha para pintar.';
+      notifyListeners();
+      return;
+    }
+    await _runSelectionEdit(() async {
+      if (pick.entityId != source.entityId) {
+        throw StateError('O clique pertence a outra malha.');
+      }
+      var triangle = pick.hit.triangleIndex;
+      if (_isManagedStlEntity(pick.entityId)) {
+        final ray = pick.ray;
+        if (ray == null) {
+          throw StateError('O clique não possui um raio técnico válido.');
+        }
+        final hit = await _technicalStlPickResolver.resolve(
+          entityId: pick.entityId,
+          worldRay: ray,
+        );
+        if (hit == null) {
+          throw StateError('Nenhum triângulo original foi encontrado.');
+        }
+        if (hit.entityId != source.entityId) {
+          throw StateError('A malha do clique mudou.');
+        }
+        if (source.meshFingerprint.isNotEmpty &&
+            hit.geometryRevision != source.meshFingerprint) {
+          throw StateError('A malha original mudou; selecione novamente.');
+        }
+        triangle = hit.triangleIndex;
+      }
+      final added = tool.isAdditive ? source.localAdd(triangle) : const <int>{};
+      final removed = tool == RecognitionSelectionTool.remove
+          ? source.localRemove(triangle)
+          : const <int>{};
+      try {
+        return await _applySelectionEdit(
+          added: added,
+          removed: removed,
+          label: tool == RecognitionSelectionTool.add ? 'Adicionar' : 'Remover',
+          seedTriangle: triangle,
+        );
+      } catch (_) {
+        if (tool == RecognitionSelectionTool.remove && removed.length > 1) {
+          return _applySelectionEdit(
+            added: const <int>{},
+            removed: {triangle},
+            label: 'Remover local',
+            seedTriangle: triangle,
+          );
+        }
+        rethrow;
+      }
+    });
+  }
+
+  Future<
+    ({
+      int triangle,
+      Vector3 point,
+      Vector3 camera,
+      MeshRay rayLocal,
+      KernelMeshGeometry geometry,
+      MeshBvh bvh,
+      ViewportSelectionProjection? projection,
+      Matrix4? localToWorld,
+    })?
+  >
+  _resolveBrushSample(CadViewportPick pick) async {
+    final source = _editableSelection;
+    if (source == null || pick.entityId != source.entityId) return null;
+    if (_isManagedStlEntity(pick.entityId)) {
+      final ray = pick.ray;
+      if (ray == null) return null;
+      final hit = await _technicalStlPickResolver.resolve(
+        entityId: pick.entityId,
+        worldRay: ray,
+      );
+      if (hit == null || hit.entityId != source.entityId) return null;
+      if (source.meshFingerprint.isNotEmpty &&
+          hit.geometryRevision != source.meshFingerprint) {
+        _selectionDiagnostic =
+            'A malha original mudou; selecione novamente a região.';
+        notifyListeners();
+        return null;
+      }
+      final cached = _technicalStlPickResolver.cachedMesh(pick.entityId);
+      final bvh = cached?.bvh ?? MeshBvh(hit.geometry);
+      final worldToLocal = hit.worldToLocal;
+      return (
+        triangle: hit.triangleIndex,
+        point: hit.localPoint,
+        camera: worldToLocal.transformPoint(ray.origin),
+        rayLocal: _localRay(ray, worldToLocal),
+        geometry: hit.geometry,
+        bvh: bvh,
+        projection: pick.projection,
+        localToWorld: worldToLocal.inverse(),
+      );
+    }
+    final triangle = pick.hit.triangleIndex;
+    if (triangle < 0 || triangle >= source.geometry.triangles.length ~/ 3) {
+      return null;
+    }
+    final camera =
+        pick.ray?.origin ??
+        (pick.hit.point +
+            triangleNormal(source.geometry, triangle) *
+                math.max(_brushDiameterMm, 1.0));
+    final rayLocal =
+        pick.ray ?? MeshRay(camera, (pick.hit.point - camera).normalized);
+    return (
+      triangle: triangle,
+      point: pick.hit.point,
+      camera: camera,
+      rayLocal: rayLocal,
+      geometry: source.geometry,
+      bvh: source.bvh,
+      projection: pick.projection,
+      localToWorld: null,
+    );
+  }
+
+  MeshRay _localRay(MeshRay ray, Matrix4 worldToLocal) {
+    final origin = worldToLocal.transformPoint(ray.origin);
+    final target = worldToLocal.transformPoint(ray.origin + ray.direction);
+    final direction = target - origin;
+    return MeshRay(
+      origin,
+      direction.length <= 1e-12 ? ray.direction : direction.normalized,
+    );
+  }
+
+  Future<void> startBrushStroke(CadViewportPick pick) async {
+    final source = _editableSelection;
+    if (source == null || !brushModeActive || _brushStrokeActive) return;
+    _recognitionRequestGeneration++;
+    busy = false;
+    error = null;
+    _selectionDiagnostic = null;
+    _brushStrokeActive = true;
+    _brushStrokeGeneration++;
+    final generation = _brushStrokeGeneration;
+    _brushStrokeBefore = Set<int>.from(source.currentTriangles);
+    _brushStrokeWorking = Set<int>.from(source.currentTriangles);
+    _brushStrokeBeforeArea = source.area;
+    _brushStrokeWorkingArea = source.area;
+    _brushBeforeContext = activeContext;
+    _brushBeforeSelection = activeSelection;
+    _brushBeforePick = activePick;
+    _lastBrushSampleTriangle = null;
+    _lastBrushSamplePoint = null;
+    _lastBrushPreviewAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _lastBrushNotifyAt = DateTime.fromMillisecondsSinceEpoch(0);
+    _brushPickMicros = 0;
+    _brushCollectMicros = 0;
+    _brushPreviewMicros = 0;
+    _brushSampleCount = 0;
+    _brushRequestCount = 0;
+    _lastSelectionAdded = 0;
+    _lastSelectionRemoved = 0;
+    _clearRecognitionForInvalidSelection();
+    notifyListeners();
+    _brushRequestCount++;
+    _enqueueBrushSample(pick, generation);
+    await _brushQueue;
+  }
+
+  Future<void> addBrushSample(CadViewportPick pick) async {
+    if (!_brushStrokeActive) return;
+    _brushRequestCount++;
+    _enqueueBrushSample(pick, _brushStrokeGeneration);
+    await _brushQueue;
+  }
+
+  void _enqueueBrushSample(CadViewportPick pick, int generation) {
+    _brushQueue = _brushQueue.then((_) async {
+      try {
+        if (!_brushStrokeActive || generation != _brushStrokeGeneration) {
+          return;
+        }
+        final pickWatch = Stopwatch()..start();
+        final sample = await _resolveBrushSample(pick);
+        pickWatch.stop();
+        if (sample == null ||
+            !_brushStrokeActive ||
+            generation != _brushStrokeGeneration) {
+          return;
+        }
+        final source = _editableSelection;
+        if (source == null) return;
+        final radius = _brushDiameterMm * .5;
+        if (radius <= 0) return;
+        final lastPoint = _lastBrushSamplePoint;
+        if (_lastBrushSampleTriangle == sample.triangle &&
+            lastPoint != null &&
+            (sample.point - lastPoint).length < radius * .15) {
+          return;
+        }
+        _lastBrushSampleTriangle = sample.triangle;
+        _lastBrushSamplePoint = sample.point;
+        final collectWatch = Stopwatch()..start();
+        final projection = sample.projection;
+        final projectedTool =
+            _brushVisibility == SelectionVisibilityPolicy.throughMesh &&
+                projection != null &&
+                projection.radiusPx > 0
+            ? ProjectedBrushTool(
+                ray: sample.rayLocal,
+                referencePoint: sample.point,
+                radiusMm: radius,
+                orthographic: projection.orthographic,
+                viewProjection: projection.viewProjection,
+                localToWorld: sample.localToWorld,
+                viewportWidth: projection.viewportWidth,
+                viewportHeight: projection.viewportHeight,
+                centerScreen: projection.centerScreen,
+                radiusPx: projection.radiusPx,
+              )
+            : null;
+        final result = _selectionEngine.collect(
+          geometry: sample.geometry,
+          bvh: sample.bvh,
+          tool:
+              projectedTool ??
+              SphereSelectionTool(center: sample.point, radius: radius),
+          seedTriangle: sample.triangle,
+          cameraOrigin: sample.camera,
+          visibility: _brushVisibility,
+          connectivity: _brushConnectivity,
+          neighborsOf: source.neighborsOf,
+        );
+        collectWatch.stop();
+        _brushPickMicros += pickWatch.elapsedMicroseconds;
+        _brushCollectMicros += collectWatch.elapsedMicroseconds;
+        _brushSampleCount++;
+        final working = _brushStrokeWorking;
+        if (working == null) return;
+        if (_selectionTool == RecognitionSelectionTool.brushAdd) {
+          final added = result.triangles.difference(working);
+          if (added.isEmpty) return;
+          working.addAll(added);
+          for (final triangle in added) {
+            _brushStrokeWorkingArea += source.areaOfTriangle(triangle);
+          }
+        } else if (_selectionTool == RecognitionSelectionTool.brushRemove) {
+          final removed = result.triangles.intersection(working);
+          if (removed.isEmpty) return;
+          working.removeAll(removed);
+          for (final triangle in removed) {
+            _brushStrokeWorkingArea -= source.areaOfTriangle(triangle);
+          }
+        } else {
+          return;
+        }
+        _brushStrokeWorkingArea = math.max(0.0, _brushStrokeWorkingArea);
+        _lastSelectionAdded = working
+            .difference(_brushStrokeBefore ?? const <int>{})
+            .length;
+        _lastSelectionRemoved = (_brushStrokeBefore ?? const <int>{})
+            .difference(working)
+            .length;
+        _selectionDiagnostic = null;
+        final previewWatch = Stopwatch()..start();
+        _maybeShowBrushPreview(source);
+        previewWatch.stop();
+        _brushPreviewMicros += previewWatch.elapsedMicroseconds;
+        final now = DateTime.now();
+        if (now.difference(_lastBrushNotifyAt).inMilliseconds >= 33) {
+          _lastBrushNotifyAt = now;
+          notifyListeners();
+        }
+      } catch (value) {
+        _selectionDiagnostic = value.toString().replaceFirst('Bad state: ', '');
+        notifyListeners();
+      }
+    });
+  }
+
+  void _maybeShowBrushPreview(EditableSurfaceSelection source) {
+    final now = DateTime.now();
+    if (now.difference(_lastBrushPreviewAt).inMilliseconds < 33) return;
+    _lastBrushPreviewAt = now;
+    final working = _brushStrokeWorking;
+    if (working == null) return;
+    _showEditableSelection(source, working, _brushStrokeWorkingArea);
+  }
+
+  Future<void> finishBrushStroke() async {
+    if (!_brushStrokeActive) return;
+    final generation = _brushStrokeGeneration;
+    await _brushQueue;
+    if (!_brushStrokeActive || generation != _brushStrokeGeneration) return;
+    final source = _editableSelection;
+    final before = _brushStrokeBefore;
+    final working = _brushStrokeWorking;
+    final workingArea = _brushStrokeWorkingArea;
+    final label = _selectionTool == RecognitionSelectionTool.brushAdd
+        ? 'Pincel +'
+        : 'Pincel −';
+    _brushStrokeActive = false;
+    _brushStrokeGeneration++;
+    _brushStrokeBefore = null;
+    _brushStrokeWorking = null;
+    _brushStrokeBeforeArea = 0;
+    _brushStrokeWorkingArea = 0;
+    _brushBeforeContext = null;
+    _brushBeforeSelection = null;
+    _brushBeforePick = null;
+    _lastBrushSampleTriangle = null;
+    _lastBrushSamplePoint = null;
+    if (source == null || before == null || working == null) {
+      notifyListeners();
+      return;
+    }
+    _showEditableSelection(source, working, workingArea);
+    final added = working.difference(before);
+    final removed = before.difference(working);
+    if (added.isEmpty && removed.isEmpty) {
+      notifyListeners();
+      return;
+    }
+    final seed = working.isNotEmpty
+        ? working.first
+        : before.isNotEmpty
+        ? before.first
+        : 0;
+    await _runSelectionEdit(
+      () => _applySelectionEdit(
+        added: added,
+        removed: removed,
+        label: label,
+        seedTriangle: seed,
+        allowDisconnected: true,
+      ),
+    );
+    notifyListeners();
+  }
+
+  bool cancelBrushStroke() {
+    if (!_brushStrokeActive) return false;
+    final source = _editableSelection;
+    final before = _brushStrokeBefore;
+    final beforeContext = _brushBeforeContext;
+    final beforeSelection = _brushBeforeSelection;
+    final beforePick = _brushBeforePick;
+    final beforeArea = _brushStrokeBeforeArea;
+    _brushStrokeActive = false;
+    _brushStrokeGeneration++;
+    _brushStrokeBefore = null;
+    _brushStrokeWorking = null;
+    _brushStrokeBeforeArea = 0;
+    _brushStrokeWorkingArea = 0;
+    _brushBeforeContext = null;
+    _brushBeforeSelection = null;
+    _brushBeforePick = null;
+    _lastBrushSampleTriangle = null;
+    _lastBrushSamplePoint = null;
+    _lastSelectionAdded = 0;
+    _lastSelectionRemoved = 0;
+    _selectionDiagnostic = null;
+    if (source != null && before != null) {
+      source.replaceCurrent(before, area: beforeArea);
+      activeContext = beforeContext;
+      activeSelection = beforeSelection;
+      activePick = beforePick;
+      if (before.isEmpty) {
+        _clearRecognitionForInvalidSelection();
+        runtime.hideTransient('recognition-region-preview');
+      } else {
+        _showEditableSelection(source, before, beforeArea);
+        if (beforeContext != null) {
+          runtime.write(
+            'recognition.planarDiagnostics',
+            _initialPlanarDiagnostics,
+          );
+          unawaited(
+            _detect(null, requestedType: requestedRecognitionPrimitive),
+          );
+        } else {
+          _clearRecognitionForInvalidSelection();
+        }
+      }
+    }
+    notifyListeners();
+    return true;
+  }
+
+  Future<void> expandRecognitionSelection() async {
+    final source = _editableSelection;
+    if (source == null || source.isEmpty) {
+      error = 'A seleção está vazia.';
+      notifyListeners();
+      return;
+    }
+    await _runSelectionEdit(() async {
+      final added = source.expandRing();
+      if (added.isEmpty) {
+        throw StateError('Não há triângulos adjacentes para expandir.');
+      }
+      return _applySelectionEdit(
+        added: added,
+        removed: const <int>{},
+        label: 'Expandir',
+        seedTriangle: source.currentTriangles.first,
+      );
+    });
+  }
+
+  Future<void> contractRecognitionSelection() async {
+    final source = _editableSelection;
+    if (source == null || source.isEmpty) {
+      error = 'A seleção está vazia.';
+      notifyListeners();
+      return;
+    }
+    await _runSelectionEdit(() async {
+      final removed = source.contractRing();
+      if (removed.isEmpty) {
+        throw StateError('Não há anel de fronteira para contrair.');
+      }
+      return _applySelectionEdit(
+        added: const <int>{},
+        removed: removed,
+        label: 'Contrair',
+        seedTriangle: source.currentTriangles.first,
+      );
+    });
+  }
+
+  Future<void> restoreAutomaticRecognitionSelection() async {
+    final source = _editableSelection;
+    if (source == null) {
+      error = 'Selecione uma região antes de restaurar.';
+      notifyListeners();
+      return;
+    }
+    await _runSelectionEdit(() async {
+      final added = source.initialTriangles.difference(source.currentTriangles);
+      final removed = source.currentTriangles.difference(
+        source.initialTriangles,
+      );
+      if (added.isEmpty && removed.isEmpty) {
+        throw StateError('A seleção já é a região automática inicial.');
+      }
+      final seed = source.initialTriangles.isEmpty
+          ? 0
+          : source.initialTriangles.first;
+      return _applySelectionEdit(
+        added: added,
+        removed: removed,
+        label: 'Restaurar região automática',
+        seedTriangle: seed,
+      );
+    });
+  }
+
+  Future<void> undoRecognitionSelection() async {
+    if (_selectionUndo.isEmpty) return;
+    final edit = _selectionUndo.removeLast();
+    final seed = edit.removed.isNotEmpty
+        ? edit.removed.first
+        : (_editableSelection?.currentTriangles.first ?? 0);
+    final applied = await _runSelectionEdit(
+      () => _applySelectionEdit(
+        added: edit.removed,
+        removed: edit.added,
+        label: 'Desfazer ${edit.label}',
+        seedTriangle: seed,
+        record: false,
+        allowDisconnected: edit.label.startsWith('Pincel'),
+      ),
+    );
+    if (applied) {
+      _selectionRedo.add(edit);
+    } else {
+      _selectionUndo.add(edit);
+    }
+  }
+
+  Future<void> redoRecognitionSelection() async {
+    if (_selectionRedo.isEmpty) return;
+    final edit = _selectionRedo.removeLast();
+    final seed = edit.added.isNotEmpty
+        ? edit.added.first
+        : (_editableSelection?.currentTriangles.first ?? 0);
+    final applied = await _runSelectionEdit(
+      () => _applySelectionEdit(
+        added: edit.added,
+        removed: edit.removed,
+        label: 'Refazer ${edit.label}',
+        seedTriangle: seed,
+        record: false,
+        allowDisconnected: edit.label.startsWith('Pincel'),
+      ),
+    );
+    if (applied) {
+      _selectionUndo.add(edit);
+    } else {
+      _selectionRedo.add(edit);
+    }
   }
 
   Map<String, dynamic> _dimensionalParameters(
@@ -6657,6 +7794,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     double tolerance, {
     String? planarClassification,
     ProfessionalPrimitive? primitive,
+    int selectionComponents = 1,
   }) {
     final winner =
         (primitive ?? current?.primitives.firstOrNull)?.recognition.winner;
@@ -6665,6 +7803,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'dimensionalStatus': 'not-applicable',
         'dimensionalApproved': true,
         'dimensionalToleranceMm': tolerance,
+        'selectionComponentCount': selectionComponents,
       };
     }
     final dimensionalApproved =
@@ -6688,13 +7827,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       'dimensionalApproved': dimensionalApproved,
       'referenceApproved': referenceApproved,
       'cadSurfaceApproved': cadSurfaceApproved,
+      'selectionComponentCount': selectionComponents,
       ...?classification == null
           ? null
           : {'planarClassification': classification},
       'planarClassificationReason': classification == null
-          ? 'Classificação multiescala não aplicada a este tipo de geometria.'
+          ? winner.type.name == 'plane'
+                ? 'Classificação multiescala não disponível para esta região.'
+                : 'Classificação multiescala não aplicada a este tipo de geometria.'
           : classification == 'curvedPatch'
           ? 'Deriva multiescala compatível com trecho de superfície curva.'
+          : selectionComponents > 1
+          ? 'Seleção com $selectionComponents componentes desconectados; '
+                'ajuste único não confiável.'
           : classification == 'ambiguous'
           ? 'Evidências multiescala insuficientes ou conflitantes.'
           : classification == 'localReference'
@@ -6725,6 +7870,42 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   RecognitionResult? get activeRecognitionResult =>
       runtime.read<RecognitionResult>('recognition.activeResult');
+  Map<String, dynamic>? get recognitionDiagnostic {
+    final value = runtime.read<Map>('recognition.diagnostic');
+    return value == null ? null : Map<String, dynamic>.from(value);
+  }
+
+  bool get isActiveRecognitionDiagnosticOnly =>
+      activeRecognitionResult?.parameters['diagnosticOnly'] == true;
+  EditableSurfaceSelection? get editableSelection => _editableSelection;
+  RecognitionSelectionTool get selectionTool => _selectionTool;
+  bool get hasEditableSelection => _editableSelection != null;
+  bool get selectionIsEmpty => _brushStrokeActive
+      ? (_brushStrokeWorking?.isEmpty ?? true)
+      : (_editableSelection?.isEmpty ?? true);
+  bool get selectionIsEdited => _brushStrokeActive
+      ? !_sameSelectionSets(
+          _brushStrokeWorking,
+          _editableSelection?.initialTriangles,
+        )
+      : (_editableSelection?.isEdited ?? false);
+  int get selectionTriangleCount => _brushStrokeActive
+      ? (_brushStrokeWorking?.length ?? 0)
+      : (_editableSelection?.triangleCount ?? 0);
+  double get selectionArea => _brushStrokeActive
+      ? _brushStrokeWorkingArea
+      : (_editableSelection?.area ?? 0);
+  int get selectionRevision => _editableSelection?.revision ?? 0;
+  int get lastSelectionAdded => _lastSelectionAdded;
+  int get lastSelectionRemoved => _lastSelectionRemoved;
+  bool get canUndoSelectionEdit => _selectionUndo.isNotEmpty;
+  bool get canRedoSelectionEdit => _selectionRedo.isNotEmpty;
+
+  bool _sameSelectionSets(Set<int>? first, Set<int>? second) =>
+      first != null &&
+      second != null &&
+      first.length == second.length &&
+      first.containsAll(second);
   SurfaceAssistantSuggestion? get activeSurfaceAssistantSuggestion =>
       runtime.read<SurfaceAssistantSuggestion>('surfaceAssistant.suggestion');
   SurfaceAssistantDecision get surfaceAssistantDecision =>
@@ -6741,7 +7922,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       return false;
     }
     final parameters = result.parameters;
-    return parameters['referenceApproved'] != false &&
+    return parameters['diagnosticOnly'] != true &&
+        parameters['referenceApproved'] != false &&
         parameters['dimensionalApproved'] != false &&
         parameters['planarClassification'] != 'curvedPatch' &&
         parameters['planarClassification'] != 'ambiguous';
@@ -6763,6 +7945,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       return 'Nenhuma hipótese planar foi reconhecida.';
     }
     final parameters = result.parameters;
+    if (parameters['diagnosticOnly'] == true) {
+      return parameters['diagnosticReason'] as String? ??
+          'Resultado somente diagnóstico; ajuste não aprovado para CAD.';
+    }
     if (parameters['dimensionalApproved'] == false) {
       return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
     }
@@ -6780,6 +7966,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       .firstOrNull;
 
   bool get canCreateNonPlaneReference {
+    if (isActiveRecognitionDiagnosticOnly) return false;
     final primitive = _firstNonPlaneHypothesis;
     if (primitive == null ||
         activeContext?.region == null ||
@@ -6791,6 +7978,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   String? get nonPlaneReferenceBlockReason {
     if (canCreateNonPlaneReference) return null;
+    if (isActiveRecognitionDiagnosticOnly) {
+      return activeRecognitionResult?.parameters['diagnosticReason']
+              as String? ??
+          'Resultado somente diagnóstico; ajuste não aprovado para CAD.';
+    }
     final primitive = _firstNonPlaneHypothesis;
     if (primitive == null) {
       return 'Nenhuma hipótese não planar foi reconhecida.';
@@ -6859,10 +8051,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     RecognitionResult recognition,
     SurfaceAssistantSuggestion suggestion,
   ) {
+    final parameters = recognition.parameters;
+    if (parameters['diagnosticOnly'] == true) {
+      return parameters['diagnosticReason'] as String? ??
+          'Resultado somente diagnóstico; ajuste não aprovado para CAD.';
+    }
     if (recognition.type == RecognitionResultType.freeform) {
       return 'Reconhecimento livre: apenas consultivo; escolha uma reconstrução supervisionada.';
     }
-    final parameters = recognition.parameters;
     if (parameters['dimensionalApproved'] == false) {
       return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
     }
@@ -6927,6 +8123,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> confirmSurfaceAssistantSuggestion() async {
+    await _run('reverse.surface.assistant.confirm', <String, Object?>{});
+    if (error != null) throw StateError(error!);
+  }
+
+  Future<GeneratedSurface> _confirmSurfaceAssistantSuggestionValue() async {
     final recognition = activeRecognitionResult;
     final suggestion = activeSurfaceAssistantSuggestion;
     if (recognition == null || suggestion == null) {
@@ -6936,39 +8137,32 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (blockReason != null) {
       throw StateError(blockReason);
     }
-    busy = true;
-    error = null;
-    notifyListeners();
-    try {
-      final surface = await _recognitionSurfaceAdapter.confirm(
-        featureId: _nextSurfaceId(),
-        recognition: recognition,
-        suggestion: suggestion,
-        generation: surfaceGenerationApi!,
-      );
-      activeSurface = surface;
-      await _upsertSurface(surface, command: 'surface-assistant.confirm');
-      runtime.hideTransient('surface-assistant-preview');
-      runtime.write(
-        'surfaceAssistant.decision',
-        SurfaceAssistantDecision.confirmed,
-      );
-      runtime.write('surfaceAssistant.suggestion', null);
-      stage = SketchSurfaceStage.surfaceGenerated;
-      runtime.select({surface.surfaceId});
-    } catch (value) {
-      error = value.toString().replaceFirst('Bad state: ', '');
-      rethrow;
-    } finally {
-      busy = false;
-      notifyListeners();
-    }
+    final surface = await _recognitionSurfaceAdapter.confirm(
+      featureId: _nextSurfaceId(),
+      recognition: recognition,
+      suggestion: suggestion,
+      generation: surfaceGenerationApi!,
+    );
+    activeSurface = surface;
+    await _upsertSurface(surface, command: 'surface-assistant.confirm');
+    runtime.hideTransient('surface-assistant-preview');
+    runtime.write(
+      'surfaceAssistant.decision',
+      SurfaceAssistantDecision.confirmed,
+    );
+    runtime.write('surfaceAssistant.suggestion', null);
+    stage = SketchSurfaceStage.surfaceGenerated;
+    runtime.select({surface.surfaceId});
+    return surface;
   }
 
   Future<void> _publishRecognitionResult(
     BridgeContext context, {
     ProfessionalPrimitive? primitive,
+    PrimitiveType? requestedType,
+    required int requestGeneration,
   }) async {
+    if (requestGeneration != _recognitionRequestGeneration) return;
     final region = context.region!;
     final existing = persistedRecognitionResults.where((entity) {
       final raw = entity.data['recognitionResult'];
@@ -6982,22 +8176,86 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             ),
           ).history
         : const <String>[];
-    final result = _recognitionResults.build(
+    final baseParameters =
+        (context.attributes['recognitionResultParameters'] as Map?)
+            ?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+    final selectedPrimitive = primitive ?? report?.primitives.firstOrNull;
+    if (requestedType != null && selectedPrimitive == null) {
+      final reason = 'Nenhum ajuste ${requestedType.name} foi produzido.';
+      runtime.write('recognition.diagnostic', {
+        'requestedPrimitiveType': requestedType.name,
+        'recognitionMode': 'directed',
+        'primitiveType': null,
+        'reason': reason,
+        ...baseParameters,
+      });
+      runtime.write('recognition.activeResult', null);
+      runtime.write('surfaceAssistant.suggestion', null);
+      runtime.write(
+        'surfaceAssistant.decision',
+        SurfaceAssistantDecision.pending,
+      );
+      runtime.hideTransient('surface-assistant-preview');
+      return;
+    }
+    final normalResult = _recognitionResults.build(
       id: id,
       meshId: context.meshId,
       regionId: region.id,
       points: region.points,
       area: region.area,
-      primitive: primitive ?? report?.primitives.firstOrNull,
+      primitive: selectedPrimitive,
       history: [
         ...oldHistory,
         '${DateTime.now().toUtc().toIso8601String()} recognition evaluated',
       ],
-      extraParameters:
-          (context.attributes['recognitionResultParameters'] as Map?)
-              ?.cast<String, dynamic>() ??
-          const {},
+      extraParameters: {
+        ...baseParameters,
+        if (requestedType != null) 'recognitionMode': 'directed',
+        if (requestedType != null) 'requestedPrimitiveType': requestedType.name,
+      },
     );
+    final selectedType = selectedPrimitive?.recognition.winner.type;
+    final selectedMatches =
+        requestedType == null ||
+        (selectedType != null &&
+            (requestedType == PrimitiveType.torus
+                ? selectedType == PrimitiveType.torus
+                : selectedType == requestedType));
+    final confidenceApproved =
+        normalResult.confidence >=
+        _recognitionResults.minimumPrimitiveConfidence;
+    final diagnosticOnly =
+        requestedType != null && (!selectedMatches || !confidenceApproved);
+    final diagnosticReason = !selectedMatches
+        ? 'O resultado obtido não corresponde ao tipo solicitado.'
+        : 'Confiança abaixo do limite aprovado '
+              '(${(_recognitionResults.minimumPrimitiveConfidence * 100).toStringAsFixed(0)}%).';
+    final result = diagnosticOnly
+        ? _recognitionResults.build(
+            id: id,
+            meshId: context.meshId,
+            regionId: region.id,
+            points: region.points,
+            area: region.area,
+            primitive: selectedPrimitive,
+            minimumPrimitiveConfidence: 0,
+            history: [
+              ...oldHistory,
+              '${DateTime.now().toUtc().toIso8601String()} '
+                  'directed recognition diagnostic',
+            ],
+            extraParameters: {
+              ...baseParameters,
+              'recognitionMode': 'directed',
+              'requestedPrimitiveType': requestedType.name,
+              'diagnosticOnly': true,
+              'diagnosticReason': diagnosticReason,
+            },
+          )
+        : normalResult;
+    if (requestGeneration != _recognitionRequestGeneration) return;
     await runtime.mutate(
       command: existing == null
           ? 'recognition-result.create'
@@ -7019,7 +8277,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ),
       ],
     );
+    // A selection change, Esc or a newer request may have occurred while the
+    // result was being persisted. Never publish stale transient state.
+    if (requestGeneration != _recognitionRequestGeneration) return;
+    runtime.write(
+      'recognition.diagnostic',
+      diagnosticOnly
+          ? {
+              'requestedPrimitiveType': requestedType.name,
+              'recognitionMode': 'directed',
+              'primitiveType': result.type.name,
+              'rmsDeviation': result.parameters['rmsDeviation'],
+              'maximumDeviation': result.parameters['maximumDeviation'],
+              'confidence': result.confidence,
+              'reason': diagnosticReason,
+              ...baseParameters,
+            }
+          : null,
+    );
     runtime.write('recognition.activeResult', result);
+    if (diagnosticOnly) {
+      runtime.write('surfaceAssistant.suggestion', null);
+      runtime.write(
+        'surfaceAssistant.decision',
+        SurfaceAssistantDecision.pending,
+      );
+      runtime.hideTransient('surface-assistant-preview');
+    }
   }
 
   String _nextRecognitionResultId() {
@@ -7033,21 +8317,120 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   bool get canDetect => activeContext != null;
 
-  Future<void> detectAutomatically() => _detect(null);
+  bool get canRecognizeDirectedPlane =>
+      activeContext?.region != null &&
+      activePick?.hit.triangleIndex != null &&
+      activeSelection?.geometry != null;
 
-  Future<void> detect(String primitiveType) => _detect(primitiveType);
+  String? get directedPlaneBlockReason {
+    if (activeContext?.region == null) {
+      return 'Selecione uma região para reconhecer o plano.';
+    }
+    if (activePick?.hit.triangleIndex == null) {
+      return 'Selecione novamente a região na viewport para restaurar o triângulo original.';
+    }
+    if (activeSelection?.geometry == null) {
+      return 'A geometria original da seleção não está disponível.';
+    }
+    return null;
+  }
 
-  Future<void> _detect(String? primitiveType) async {
+  bool _isManagedStlEntity(String? entityId) =>
+      entityId != null &&
+      runtime.scene.find(entityId)?.geometry['presentationLod'] is Map &&
+      runtime.document?.entities[entityId]?.data['managedStlAssets'] is Map;
+
+  Future<void> detectAutomatically() => _detect(null, requestedType: null);
+
+  Future<void> detect(String primitiveType) =>
+      _detect(primitiveType, requestedType: null);
+
+  Future<void> recognizeDirected(PrimitiveType primitiveType) {
+    if (primitiveType != PrimitiveType.plane) {
+      throw UnsupportedError(
+        'Directed recognition is currently implemented for planes only.',
+      );
+    }
+    return _detect(null, requestedType: primitiveType);
+  }
+
+  String _classifyEditedPlanarRegion(
+    EditableSurfaceSelection source,
+    MeshRegion region,
+    int? seedTriangle,
+  ) {
+    if (region.triangleIndices.isEmpty) return 'ambiguous';
+    final seed =
+        seedTriangle != null && region.triangleIndices.contains(seedTriangle)
+        ? seedTriangle
+        : region.triangleIndices.first;
+    if (_editedClassificationRevision == source.revision &&
+        _editedClassificationSeed == seed &&
+        _editedClassificationTolerance == planarToleranceMm &&
+        _editedClassificationValue != null) {
+      _editedClassificationCacheHits++;
+      _lastClassificationMicros = 0;
+      return _editedClassificationValue!;
+    }
+    final classificationWatch = Stopwatch()..start();
+    try {
+      final diagnostics = const ProfessionalRegionGrowing()
+          .classifyPlanarRegion(
+            source.surfaceData,
+            accepted: region.triangleIndices.toSet(),
+            seedTriangle: seed,
+            planarToleranceMm: planarToleranceMm,
+            normals: source.surfaceNormals,
+            adjacency: source.surfaceAdjacency,
+          );
+      final value =
+          diagnostics['planarClassification'] as String? ?? 'ambiguous';
+      _editedClassificationRevision = source.revision;
+      _editedClassificationSeed = seed;
+      _editedClassificationTolerance = planarToleranceMm;
+      _editedClassificationValue = value;
+      classificationWatch.stop();
+      _lastClassificationMicros = classificationWatch.elapsedMicroseconds;
+      _lastClassificationComputeMicros =
+          classificationWatch.elapsedMicroseconds;
+      return value;
+    } catch (_) {
+      _editedClassificationRevision = source.revision;
+      _editedClassificationSeed = seed;
+      _editedClassificationTolerance = planarToleranceMm;
+      _editedClassificationValue = 'ambiguous';
+      classificationWatch.stop();
+      _lastClassificationMicros = classificationWatch.elapsedMicroseconds;
+      _lastClassificationComputeMicros =
+          classificationWatch.elapsedMicroseconds;
+      return 'ambiguous';
+    }
+  }
+
+  Future<void> _detect(
+    String? primitiveType, {
+    PrimitiveType? requestedType,
+  }) async {
+    if (_disposed) return;
     final context = activeContext;
     if (context == null) {
       throw StateError('Select a mesh region before running detection.');
+    }
+    if (requestedType != null && !canRecognizeDirectedPlane) {
+      throw StateError(
+        directedPlaneBlockReason ?? 'Directed recognition is unavailable.',
+      );
     }
     final requestGeneration = ++_recognitionRequestGeneration;
     busy = true;
     error = null;
     recognitionFilter = primitiveType;
+    requestedRecognitionPrimitive = requestedType;
+    report = null;
+    decisions.clear();
     runtime.hideTransient('surface-assistant-preview');
     runtime.write('recognition.activeResult', null);
+    runtime.write('recognition.diagnostic', null);
     runtime.write('surfaceAssistant.suggestion', null);
     runtime.write(
       'surfaceAssistant.decision',
@@ -7055,38 +8438,134 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     notifyListeners();
     try {
-      final recognized = await recognition.recognize(context);
+      final recognitionWatch = Stopwatch()..start();
+      final recognized = await recognition.recognize(
+        context,
+        allowedTypes: requestedType == null ? null : {requestedType},
+      );
+      recognitionWatch.stop();
+      _lastRecognitionMicros = recognitionWatch.elapsedMicroseconds;
       if (requestGeneration != _recognitionRequestGeneration) return;
       report = recognized;
       final requested = primitiveType == null
-          ? recognized.primitives.firstOrNull
+          ? (requestedType == null
+                ? recognized.primitives.firstOrNull
+                : recognized.primitives
+                      .where(
+                        (item) => item.recognition.winner.type == requestedType,
+                      )
+                      .firstOrNull)
           : recognized.primitives
                 .where(
                   (item) => item.recognition.winner.type.name == primitiveType,
                 )
                 .firstOrNull;
-      if (requested == null) {
+      if (requested == null && requestedType == null) {
         decisions.clear();
         notifyListeners();
         return;
       }
-      final diagnostics = runtime.read<Map>('recognition.planarDiagnostics');
-      final planarClassification =
+      var resolvedContext = context;
+      var resolvedReport = recognized;
+      var resolvedPrimitive = requested;
+      var replacedSurfaceRegion = false;
+      final editedSelection = _editableSelection?.isEdited ?? false;
+      final diagnostics = editedSelection
+          ? null
+          : runtime.read<Map>('recognition.planarDiagnostics');
+      var planarClassification =
           diagnostics?['planarClassification'] as String?;
-      final filteredContext = context.copyWith(
+      if (requestedType == PrimitiveType.plane) {
+        final entityId = activePick?.entityId;
+        final geometry = activeSelection?.geometry;
+        final seedTriangle = activePick?.hit.triangleIndex;
+        if (entityId != null &&
+            geometry != null &&
+            seedTriangle != null &&
+            seedTriangle >= 0) {
+          final quality = await _applyPlanarQuality(
+            context: resolvedContext,
+            report: resolvedReport,
+            primitive: resolvedPrimitive,
+            entityId: entityId,
+            geometry: geometry,
+            seedTriangle: seedTriangle,
+            isManagedStl: _isManagedStlEntity(entityId),
+            allowRegionReplacement: !editedSelection,
+            allowedType: requestedType,
+          );
+          resolvedContext = quality.context;
+          resolvedReport = quality.report;
+          resolvedPrimitive = quality.primitive;
+          replacedSurfaceRegion = quality.surfaceRegion != null;
+          planarClassification = quality.classification ?? planarClassification;
+        }
+      }
+      if (editedSelection &&
+          resolvedPrimitive?.recognition.winner.type.name == 'plane') {
+        if (_editedSelectionComponents > 1) {
+          planarClassification = 'ambiguous';
+        } else {
+          final region = resolvedContext.region;
+          planarClassification = region == null
+              ? 'ambiguous'
+              : _classifyEditedPlanarRegion(
+                  _editableSelection!,
+                  region,
+                  activePick?.hit.triangleIndex,
+                );
+        }
+      }
+      final filteredContext = resolvedContext.copyWith(
         attributes: {
-          ...context.attributes,
+          ...resolvedContext.attributes,
           'recognitionResultParameters': _dimensionalParameters(
-            recognized,
+            resolvedReport,
             planarToleranceMm,
             planarClassification: planarClassification,
-            primitive: requested,
+            primitive: resolvedPrimitive,
+            selectionComponents: editedSelection
+                ? _editedSelectionComponents
+                : 1,
           ),
         },
       );
-      await _publishRecognitionResult(filteredContext, primitive: requested);
+      final selectionGeometry = activeSelection?.geometry;
+      final selectionEntityId = activePick?.entityId;
+      if (selectionGeometry != null &&
+          selectionEntityId != null &&
+          (_editableSelection == null ||
+              (!_editableSelection!.isEdited && replacedSurfaceRegion))) {
+        _initializeEditableSelection(
+          filteredContext,
+          selectionGeometry,
+          selectionEntityId,
+          resetHistory: true,
+        );
+      }
+      final publishWatch = Stopwatch()..start();
+      await _publishRecognitionResult(
+        filteredContext,
+        primitive: resolvedPrimitive,
+        requestedType: requestedType,
+        requestGeneration: requestGeneration,
+      );
+      publishWatch.stop();
+      _lastPublishMicros = publishWatch.elapsedMicroseconds;
       if (requestGeneration != _recognitionRequestGeneration) return;
       activeContext = filteredContext;
+      if (requestedType == PrimitiveType.plane) {
+        final selection = activeSelection;
+        if (selection != null) {
+          activeSelection = BridgeSelection(
+            id: filteredContext.region!.id,
+            entityId: selection.entityId,
+            kind: BridgeSelectionKind.meshRegion,
+            geometry: selection.geometry,
+            triangleIndices: filteredContext.region!.triangleIndices.toSet(),
+          );
+        }
+      }
       decisions
         ..clear()
         ..addEntries(
@@ -12857,6 +14336,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   bool canCreateRecognizedSurface(SurfaceKind kind) {
+    if (isActiveRecognitionDiagnosticOnly) return false;
     final primitive = (report?.primitives ?? const <ProfessionalPrimitive>[])
         .where((item) => item.recognition.winner.type.name == kind.name)
         .firstOrNull;
@@ -12871,6 +14351,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> createRecognizedSurface(SurfaceKind kind) async {
+    await _run('reverse.surface.recognized.create', {'kind': kind.name});
+    if (error != null) throw StateError(error!);
+  }
+
+  Future<GeneratedSurface> _createRecognizedSurfaceValue(
+    SurfaceKind kind,
+  ) async {
+    if (isActiveRecognitionDiagnosticOnly) {
+      throw StateError(
+        activeRecognitionResult?.parameters['diagnosticReason'] as String? ??
+            'Resultado somente diagnóstico; ajuste não aprovado para CAD.',
+      );
+    }
     final primitive = (report?.primitives ?? const <ProfessionalPrimitive>[])
         .where((item) => item.recognition.winner.type.name == kind.name)
         .firstOrNull;
@@ -12902,72 +14395,100 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       predictedContinuity: SurfaceContinuityLevel.g0,
       justification: recognition.explanation.why,
     );
-    busy = true;
-    error = null;
-    notifyListeners();
-    try {
-      final result = switch (kind) {
-        SurfaceKind.cylinder => await api.cylinder.fromCandidate(
-          candidate,
-          axisOrigin: (parameters['origin'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          axisDirection: (parameters['axis'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          radius: (parameters['radius'] as num).toDouble(),
-        ),
-        SurfaceKind.sphere => await api.sphere.fromCandidate(
-          candidate,
-          center: (parameters['center'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          radius: (parameters['radius'] as num).toDouble(),
-        ),
-        SurfaceKind.cone => await api.cone.fromCandidate(
-          candidate,
-          apex: (parameters['origin'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          axisDirection: (parameters['axis'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          semiAngle: (parameters['halfAngle'] as num).toDouble(),
-        ),
-        SurfaceKind.torus => await api.torus.fromCandidate(
-          candidate,
-          center: (parameters['center'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          axisDirection: (parameters['axis'] as List)
-              .cast<num>()
-              .map((value) => value.toDouble())
-              .toList(),
-          majorRadius: (parameters['majorRadius'] as num).toDouble(),
-          minorRadius: (parameters['minorRadius'] as num).toDouble(),
-        ),
-        _ => throw StateError('${kind.name} is not mapped by Recognition.'),
-      };
-      if (!result.success) {
-        throw StateError(
-          result.diagnostics.map((item) => item.message).join('; '),
-        );
-      }
-      activeSurface = result.surface;
-      await _upsertSurface(activeSurface!, command: 'surface.recognition');
-      stage = SketchSurfaceStage.surfaceGenerated;
-    } catch (value) {
-      error = value.toString().replaceFirst('Bad state: ', '');
-    } finally {
-      busy = false;
-      notifyListeners();
+    final result = switch (kind) {
+      SurfaceKind.cylinder => await api.cylinder.fromCandidate(
+        candidate,
+        axisOrigin: (parameters['origin'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        axisDirection: (parameters['axis'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        radius: (parameters['radius'] as num).toDouble(),
+      ),
+      SurfaceKind.sphere => await api.sphere.fromCandidate(
+        candidate,
+        center: (parameters['center'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        radius: (parameters['radius'] as num).toDouble(),
+      ),
+      SurfaceKind.cone => await api.cone.fromCandidate(
+        candidate,
+        apex: (parameters['origin'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        axisDirection: (parameters['axis'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        semiAngle: (parameters['halfAngle'] as num).toDouble(),
+      ),
+      SurfaceKind.torus => await api.torus.fromCandidate(
+        candidate,
+        center: (parameters['center'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        axisDirection: (parameters['axis'] as List)
+            .cast<num>()
+            .map((value) => value.toDouble())
+            .toList(),
+        majorRadius: (parameters['majorRadius'] as num).toDouble(),
+        minorRadius: (parameters['minorRadius'] as num).toDouble(),
+      ),
+      _ => throw StateError('${kind.name} is not mapped by Recognition.'),
+    };
+    if (!result.success) {
+      throw StateError(
+        result.diagnostics.map((item) => item.message).join('; '),
+      );
     }
+    final surface = result.surface!;
+    final recognitionResultId = activeRecognitionResult?.id;
+    final evidenceIds = [...surface.evidenceIds];
+    final surfaceParameters = <String, dynamic>{
+      ...surface.parameters,
+      'recognitionConfidence': confidence,
+      'displayMode': SurfaceDisplayMode.shadedWithEdges.name,
+      'topology': const SurfaceTopology(
+        loops: [],
+        edges: [],
+        vertices: [],
+        area: 0,
+        perimeter: 0,
+      ).toJson(),
+      'health': const {'recognitionDriven': true},
+    };
+    if (recognitionResultId != null) {
+      evidenceIds.add(recognitionResultId);
+      surfaceParameters['sourceRecognitionId'] = recognitionResultId;
+    }
+    final recognizedSurface = GeneratedSurface(
+      surfaceId: surface.surfaceId,
+      projectId: surface.projectId,
+      kind: surface.kind,
+      origin: 'recognition',
+      regionIds: surface.regionIds,
+      evidenceIds: evidenceIds,
+      featureId: surface.featureId,
+      handle: surface.handle,
+      revision: surface.revision,
+      timestamp: surface.timestamp,
+      parameters: surfaceParameters,
+      continuity: surface.continuity,
+      valid: surface.valid,
+      confidence: surface.confidence,
+      diagnostics: surface.diagnostics,
+    );
+    activeSurface = recognizedSurface;
+    await _upsertSurface(recognizedSurface, command: 'surface.recognition');
+    stage = SketchSurfaceStage.surfaceGenerated;
+    return recognizedSurface;
   }
 
   CadDocumentEntity? get selectedExtrudeSource {
@@ -17342,6 +18863,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> undo() async {
     await commands.undo();
+    if (hasRecognitionSelection) {
+      clearRecognitionSelection(notify: false);
+    }
     await _synchronizeSketchScene();
     _reconcileSketchEntitySelection();
     // Rebuild the recognition queue from the restored Sketch state. This
@@ -17370,6 +18894,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> redo() async {
     await commands.redo();
+    if (hasRecognitionSelection) {
+      clearRecognitionSelection(notify: false);
+    }
     await _synchronizeSketchScene();
     _reconcileSketchEntitySelection();
     notifyListeners();
@@ -17836,6 +19363,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
         }
         final recognitionParameters = activeRecognitionResult?.parameters;
+        if (recognitionParameters?['diagnosticOnly'] == true) {
+          throw StateError(
+            recognitionParameters?['diagnosticReason'] as String? ??
+                'Resultado somente diagnóstico; referência bloqueada.',
+          );
+        }
         if (recognitionParameters?['referenceApproved'] == false ||
             recognitionParameters?['planarClassification'] == 'curvedPatch' ||
             recognitionParameters?['planarClassification'] == 'ambiguous') {
@@ -17935,6 +19468,13 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     register(
       id: 'reverse.reference.recognized',
       execute: (_) async {
+        if (activeRecognitionResult?.parameters['diagnosticOnly'] == true) {
+          throw StateError(
+            activeRecognitionResult?.parameters['diagnosticReason']
+                    as String? ??
+                'Resultado somente diagnóstico; referência bloqueada.',
+          );
+        }
         final primitive = hypotheses
             .where(
               (item) =>
@@ -18975,6 +20515,132 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         await _upsertSurface(activeSurface!, command: 'surface.redo');
         stage = SketchSurfaceStage.surfaceGenerated;
         return activeSurface!.surfaceId;
+      },
+    );
+    register(
+      id: 'reverse.surface.assistant.confirm',
+      execute: (parameters) async {
+        final previousStage = stage.name;
+        final previousActiveSurfaceId = activeSurface?.surfaceId;
+        final surface = await _confirmSurfaceAssistantSuggestionValue();
+        parameters['created'] = surface.toJson();
+        parameters['previousStage'] = previousStage;
+        parameters['previousActiveSurfaceId'] = previousActiveSurfaceId;
+        return surface.surfaceId;
+      },
+      undo: (parameters) async {
+        final created = GeneratedSurface.fromJson(
+          (parameters['created']! as Map).cast<String, dynamic>(),
+        );
+        final generation = surfaceGenerationApi!;
+        await generation.engine.delete(created.surfaceId);
+        final children =
+            runtime.document?.entities.values
+                .where(
+                  (entity) =>
+                      entity.data['parentSurfaceId'] == created.surfaceId,
+                )
+                .map((entity) => entity.id)
+                .toList() ??
+            const <String>[];
+        await runtime.mutate(
+          command: 'surface-assistant.undo',
+          remove: [created.surfaceId, ...children],
+        );
+        final previousId = parameters['previousActiveSurfaceId'] as String?;
+        activeSurface = previousId == null
+            ? generation.engine.registry.surfaces.lastOrNull
+            : generation.engine.registry.surfaces
+                  .where((surface) => surface.surfaceId == previousId)
+                  .firstOrNull;
+        if (runtime.selection.contains(created.surfaceId)) {
+          runtime.select(const <String>{});
+        }
+        stage = SketchSurfaceStage.values.byName(
+          parameters['previousStage'] as String? ??
+              SketchSurfaceStage.idle.name,
+        );
+        runtime.write(
+          'surfaceAssistant.decision',
+          SurfaceAssistantDecision.pending,
+        );
+        runtime.write('surfaceAssistant.suggestion', null);
+        runtime.hideTransient('surface-assistant-preview');
+        return created.surfaceId;
+      },
+      redo: (parameters) async {
+        final created = GeneratedSurface.fromJson(
+          (parameters['created']! as Map).cast<String, dynamic>(),
+        );
+        await surfaceGenerationApi!.engine.restore(created);
+        activeSurface = created;
+        await _upsertSurface(created, command: 'surface-assistant.redo');
+        stage = SketchSurfaceStage.surfaceGenerated;
+        runtime.select({created.surfaceId});
+        runtime.write(
+          'surfaceAssistant.decision',
+          SurfaceAssistantDecision.confirmed,
+        );
+        runtime.write('surfaceAssistant.suggestion', null);
+        return created.surfaceId;
+      },
+    );
+    register(
+      id: 'reverse.surface.recognized.create',
+      execute: (parameters) async {
+        final previousStage = stage.name;
+        final previousActiveSurfaceId = activeSurface?.surfaceId;
+        final kind = SurfaceKind.values.byName(parameters['kind']! as String);
+        final surface = await _createRecognizedSurfaceValue(kind);
+        parameters['created'] = surface.toJson();
+        parameters['previousStage'] = previousStage;
+        parameters['previousActiveSurfaceId'] = previousActiveSurfaceId;
+        return surface.surfaceId;
+      },
+      undo: (parameters) async {
+        final created = GeneratedSurface.fromJson(
+          (parameters['created']! as Map).cast<String, dynamic>(),
+        );
+        final generation = surfaceGenerationApi!;
+        await generation.engine.delete(created.surfaceId);
+        final children =
+            runtime.document?.entities.values
+                .where(
+                  (entity) =>
+                      entity.data['parentSurfaceId'] == created.surfaceId,
+                )
+                .map((entity) => entity.id)
+                .toList() ??
+            const <String>[];
+        await runtime.mutate(
+          command: 'surface.recognition.undo',
+          remove: [created.surfaceId, ...children],
+        );
+        final previousId = parameters['previousActiveSurfaceId'] as String?;
+        activeSurface = previousId == null
+            ? generation.engine.registry.surfaces.lastOrNull
+            : generation.engine.registry.surfaces
+                  .where((surface) => surface.surfaceId == previousId)
+                  .firstOrNull;
+        if (runtime.selection.contains(created.surfaceId)) {
+          runtime.select(const <String>{});
+        }
+        stage = SketchSurfaceStage.values.byName(
+          parameters['previousStage'] as String? ??
+              SketchSurfaceStage.idle.name,
+        );
+        return created.surfaceId;
+      },
+      redo: (parameters) async {
+        final created = GeneratedSurface.fromJson(
+          (parameters['created']! as Map).cast<String, dynamic>(),
+        );
+        await surfaceGenerationApi!.engine.restore(created);
+        activeSurface = created;
+        await _upsertSurface(created, command: 'surface.recognition.redo');
+        stage = SketchSurfaceStage.surfaceGenerated;
+        runtime.select({created.surfaceId});
+        return created.surfaceId;
       },
     );
     register(

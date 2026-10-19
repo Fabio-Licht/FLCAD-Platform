@@ -3,6 +3,7 @@ import 'dart:collection';
 
 import '../../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../../core/geometric_kernel/geometry/vectors.dart';
+import '../../../core/geometric_kernel/linear_algebra/matrices.dart';
 import '../../engineering_bridge/contracts/bridge_selection.dart';
 import '../../engineering_bridge/selection/camera_picking.dart';
 import '../../engineering_bridge/selection/mesh_bvh.dart';
@@ -135,6 +136,7 @@ class CadViewportPick {
     this.subentityKind,
     this.presentationSubId,
     this.ray,
+    this.projection,
   });
   final String entityId;
   final MeshHit hit;
@@ -147,6 +149,37 @@ class CadViewportPick {
   /// Transient world-space camera ray for technical consumers. It is never
   /// persisted and is absent for picks that did not originate at the viewport.
   final MeshRay? ray;
+
+  /// Transient camera projection used by projected brush volumes.
+  final ViewportSelectionProjection? projection;
+
+  CadViewportPick withProjection(ViewportSelectionProjection value) =>
+      CadViewportPick(
+        entityId: entityId,
+        hit: hit,
+        subentityKind: subentityKind,
+        presentationSubId: presentationSubId,
+        ray: ray,
+        projection: value,
+      );
+}
+
+final class ViewportSelectionProjection {
+  const ViewportSelectionProjection({
+    required this.viewProjection,
+    required this.viewportWidth,
+    required this.viewportHeight,
+    required this.centerScreen,
+    required this.radiusPx,
+    required this.orthographic,
+  });
+
+  final Matrix4 viewProjection;
+  final double viewportWidth;
+  final double viewportHeight;
+  final Offset centerScreen;
+  final double radiusPx;
+  final bool orthographic;
 }
 
 MeshRay cameraRayForViewportPosition({

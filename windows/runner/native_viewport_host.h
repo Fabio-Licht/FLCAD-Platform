@@ -74,6 +74,7 @@ private:
     Microsoft::WRL::ComPtr<ID3D11Buffer> point_buffer;
     bool visible = true;
     bool selected = false;
+    bool selection_preview = false;
     float root_srgb[3]{.30f, .50f, .68f};
   };
   struct ManagedFaceHighlight {

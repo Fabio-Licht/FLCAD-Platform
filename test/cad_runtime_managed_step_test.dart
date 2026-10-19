@@ -8,6 +8,7 @@ import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
 import 'package:flcad_mobile/app/runtime/cad_asset_fs_native.dart';
 import 'package:flcad_mobile/app/cad_viewport/native/native_viewport_bridge.dart';
 import 'package:flcad_mobile/app/cad_viewport/rendering/cad_root_color.dart';
+import 'package:flcad_mobile/app/cad_viewport/rendering/cad_selection_palette.dart';
 import 'package:flcad_mobile/app/cad_viewport/selection/viewport_picking_controller.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_document/cad_document_repository.dart';
@@ -1042,9 +1043,13 @@ void main() {
       runtime.scene.find(brep.id)!.geometry.containsKey('rootLinearRgb'),
       isFalse,
     );
+    final stlColor = colorFromLinearRgb(
+      runtime.scene.find(stl.id)!.geometry['rootLinearRgb'],
+    );
+    expect(stlColor, isNotNull);
     expect(
-      runtime.scene.find(stl.id)!.geometry.containsKey('rootLinearRgb'),
-      isFalse,
+      contrastRatio(stlColor!, kCadSelectionColor),
+      greaterThanOrEqualTo(kMinimumSelectionContrast),
     );
     expect(await inventory(Directory(p.join(project.path, 'CAD'))), before);
     expect(

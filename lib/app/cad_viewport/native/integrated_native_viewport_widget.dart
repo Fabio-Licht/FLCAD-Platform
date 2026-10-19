@@ -71,6 +71,14 @@ class IntegratedCadViewportWidget extends StatefulWidget {
     this.pickCaptureCandidateIds,
     this.onPickCaptureHover,
     this.technicalRecognitionAvailable = false,
+    this.brushActive = false,
+    this.brushCandidateIds,
+    this.brushDiameterMm = 12,
+    this.brushCursorMode,
+    this.onBrushDown,
+    this.onBrushMove,
+    this.onBrushUp,
+    this.onBrushCancel,
   });
 
   /// The viewport owns and disposes the bridge returned by this factory.
@@ -107,6 +115,14 @@ class IntegratedCadViewportWidget extends StatefulWidget {
   final Set<String>? pickCaptureCandidateIds;
   final ValueChanged<CadViewportPick?>? onPickCaptureHover;
   final bool technicalRecognitionAvailable;
+  final bool brushActive;
+  final Set<String>? brushCandidateIds;
+  final double brushDiameterMm;
+  final CadBrushCursorMode? brushCursorMode;
+  final ValueChanged<CadViewportPick>? onBrushDown;
+  final ValueChanged<CadViewportPick>? onBrushMove;
+  final VoidCallback? onBrushUp;
+  final VoidCallback? onBrushCancel;
 
   @override
   State<IntegratedCadViewportWidget> createState() =>
@@ -984,6 +1000,14 @@ class _IntegratedCadViewportWidgetState
                       managedFaceHover: _managedFaceHover,
                       managedFaceSelection: _managedFaceSelection,
                       onNormalTap: useNative ? _pickNativeTap : null,
+                      brushActive: widget.brushActive,
+                      brushCandidateIds: widget.brushCandidateIds,
+                      brushDiameterMm: widget.brushDiameterMm,
+                      brushCursorMode: widget.brushCursorMode,
+                      onBrushDown: widget.onBrushDown,
+                      onBrushMove: widget.onBrushMove,
+                      onBrushUp: widget.onBrushUp,
+                      onBrushCancel: widget.onBrushCancel,
                       onSketchSupportPick: widget.onSketchSupportPick,
                       onSketchEntityPick: widget.onSketchEntityPick,
                       onSketchEntityDoublePick: widget.onSketchEntityDoublePick,

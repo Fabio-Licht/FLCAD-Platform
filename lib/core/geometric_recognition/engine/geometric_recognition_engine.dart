@@ -49,11 +49,13 @@ class GeometricRecognitionEngine {
 
   Future<PrimitiveRecognitionResult> recognize(
     RecognitionContext context, {
+    Set<PrimitiveType>? allowedTypes,
     void Function(double progress)? onProgress,
     bool rebuild = false,
   }) async {
+    final requestKey = _requestKey(allowedTypes);
     if (!rebuild) {
-      final cached = cache.read(context);
+      final cached = cache.read(context, requestKey: requestKey);
       if (cached != null) return cached;
     }
     onProgress?.call(.05);
@@ -61,6 +63,8 @@ class GeometricRecognitionEngine {
     final recognizers = plugins.recognizers
         .where(
           (recognizer) =>
+              (allowedTypes == null ||
+                  allowedTypes.contains(recognizer.type)) &&
               seed.suggestedTypes.contains(recognizer.type) &&
               recognizer.detect(context),
         )
@@ -163,7 +167,7 @@ class GeometricRecognitionEngine {
           ),
           createdAt: now,
         );
-    cache.write(context, result);
+    cache.write(context, result, requestKey: requestKey);
     graph.add(result);
     await repository.save(result);
     if (winner.type != PrimitiveType.unknown) {
@@ -237,4 +241,11 @@ class GeometricRecognitionEngine {
   ) =>
       '${context.observation.meshFingerprint}:${context.observation.regionFingerprint}:'
       '${candidate.type.name}:${candidate.parameters}';
+
+  String _requestKey(Set<PrimitiveType>? allowedTypes) {
+    if (allowedTypes == null) return 'automatic';
+    if (allowedTypes.isEmpty) return 'none';
+    final names = allowedTypes.map((type) => type.name).toList()..sort();
+    return 'types:${names.join(',')}';
+  }
 }

@@ -151,6 +151,67 @@ class ProfessionalRegionGrowing {
     );
   }
 
+  /// Reuses the existing multiscale planar criteria for an explicit accepted
+  /// triangle set. It does not grow or replace the accepted selection; the
+  /// full mesh is used only as geometric context for adjacency and stability
+  /// samples beyond the boundary.
+  Map<String, Object?> classifyPlanarRegion(
+    MeshSurfaceData mesh, {
+    required Set<int> accepted,
+    required int seedTriangle,
+    required double planarToleranceMm,
+    double normalAngleDegrees = 28,
+    int seedNeighborhoodTriangles = 24,
+    List<Vector3>? normals,
+    List<Set<int>>? adjacency,
+  }) {
+    if (accepted.isEmpty ||
+        seedTriangle < 0 ||
+        seedTriangle >= mesh.triangles.length) {
+      return const {
+        'planarClassification': 'ambiguous',
+        'planarStabilityReason': 'invalid-or-empty-accepted-region',
+      };
+    }
+    final prepared = normals != null && adjacency != null
+        ? (normals: normals, adjacency: adjacency)
+        : _preparePlanarEvidence(mesh);
+    if (prepared.normals.length != mesh.triangles.length ||
+        prepared.adjacency.length != mesh.triangles.length) {
+      throw ArgumentError('Planar evidence does not match the original mesh.');
+    }
+    final stability = _planarStability(
+      mesh: mesh,
+      seed: seedTriangle,
+      accepted: accepted,
+      normals: prepared.normals,
+      adjacency: prepared.adjacency,
+      tolerance: planarToleranceMm,
+      normalLimit: normalAngleDegrees * math.pi / 180,
+      seedNeighborhood: seedNeighborhoodTriangles,
+    );
+    return {
+      'mode': 'planar-classification',
+      'seedTriangle': seedTriangle,
+      'selectedTriangles': accepted.length,
+      'toleranceMm': planarToleranceMm,
+      ...stability,
+    };
+  }
+
+  ({List<Vector3> normals, List<Set<int>> adjacency}) _preparePlanarEvidence(
+    MeshSurfaceData mesh,
+  ) {
+    final normals = <Vector3>[];
+    for (final triangle in mesh.triangles) {
+      final a = mesh.vertices[triangle.$1];
+      final b = mesh.vertices[triangle.$2];
+      final c = mesh.vertices[triangle.$3];
+      normals.add((b - a).cross(c - a).normalized);
+    }
+    return (normals: normals, adjacency: _triangleAdjacency(mesh.triangles));
+  }
+
   RegionGrowingResult _segmentPlanar(
     MeshSurfaceData mesh,
     String meshFingerprint,

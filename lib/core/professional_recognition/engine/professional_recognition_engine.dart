@@ -39,8 +39,9 @@ class ProfessionalRecognitionEngine {
     ..register(const TorusProfessionalRecognizer());
 
   Future<ProfessionalRecognitionReport> recognize(
-    List<RecognitionContext> regions,
-  ) async {
+    List<RecognitionContext> regions, {
+    Set<PrimitiveType>? allowedTypes,
+  }) async {
     final watch = Stopwatch()..start(),
         primitives = <ProfessionalPrimitive>[],
         pending = <String>[];
@@ -55,7 +56,11 @@ class ProfessionalRecognitionEngine {
             )) {
           continue;
         }
-        final result = await urf.recognize(context, rebuild: pass > 1);
+        final result = await urf.recognize(
+          context,
+          allowedTypes: allowedTypes,
+          rebuild: pass > 1,
+        );
         if (result.winner.type == PrimitiveType.unknown) {
           if (pass == 4) pending.add(context.observation.regionId);
           continue;

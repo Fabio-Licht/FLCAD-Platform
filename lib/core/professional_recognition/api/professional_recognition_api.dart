@@ -8,8 +8,10 @@ class ProfessionalRecognitionApi {
   final ProfessionalRecognitionEngine engine;
   ProfessionalRecognitionReport? _last;
   Future<ProfessionalRecognitionReport> recognize(
-    List<RecognitionContext> regions,
-  ) async => _last = await engine.recognize(regions);
+    List<RecognitionContext> regions, {
+    Set<PrimitiveType>? allowedTypes,
+  }) async =>
+      _last = await engine.recognize(regions, allowedTypes: allowedTypes);
   ProfessionalRecognitionReport get last =>
       _last ?? (throw StateError('Professional recognition has not run'));
   String exportReport() =>

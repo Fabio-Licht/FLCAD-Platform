@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/geometric_recognition/models/recognition_models.dart';
 import '../../../core/recognition_engine/recognition_result.dart';
 import '../../../core/surface_assistant/surface_assistant.dart';
 import '../../engineering_bridge/operational_reverse_engineering_controller.dart';
+import '../selection/editable_surface_selection.dart';
+import '../selection/surface_selection_policy.dart';
 
 class RecognitionWorkspacePanel extends StatelessWidget {
   const RecognitionWorkspacePanel({
@@ -91,7 +94,8 @@ class RecognitionWorkspacePanel extends StatelessWidget {
           ],
           if (controller.canDetect) ...[
             const Text(
-              'Motor: reconhecimento automático multiprimitiva. Os filtros não executam um reconhecimento específico.',
+              'Automático executa o motor multiprimitiva. Reconhecer Plano executa somente o PlaneRecognizer. '
+              'Os demais chips filtram o resultado automático.',
               style: TextStyle(fontSize: 9.5),
             ),
             const SizedBox(height: 4),
@@ -106,8 +110,15 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       ? null
                       : controller.detectAutomatically,
                 ),
+                ActionChip(
+                  avatar: const Icon(Icons.crop_16_9, size: 14),
+                  label: const Text('Reconhecer Plano'),
+                  onPressed:
+                      controller.busy || !controller.canRecognizeDirectedPlane
+                      ? null
+                      : () => controller.recognizeDirected(PrimitiveType.plane),
+                ),
                 for (final type in const [
-                  'plane',
                   'cylinder',
                   'cone',
                   'sphere',
@@ -121,6 +132,21 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   ),
               ],
             ),
+            if (controller.requestedRecognitionPrimitive != null)
+              if (controller.directedPlaneBlockReason case final reason?)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: _BlockReason(reason),
+                ),
+            if (controller.requestedRecognitionPrimitive case final requested?)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Modo dirigido: ${_typeNameLabel(requested.name)}. '
+                  'Tipo obtido: ${_obtainedRecognitionTypeLabel(controller)}.',
+                  style: const TextStyle(fontSize: 9.5),
+                ),
+              ),
             if (controller.recognitionFilter case final filter?)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -140,10 +166,286 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   ),
                 ),
               ),
-          ] else
+          ] else if (!controller.hasEditableSelection)
             const Text(
               'Selecione a malha na viewport para criar uma região homogênea.',
             ),
+          if (controller.hasEditableSelection) ...[
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Edição da região',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    const SizedBox(height: 5),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        ChoiceChip(
+                          label: const Text('Selecionar'),
+                          selected:
+                              controller.selectionTool ==
+                              RecognitionSelectionTool.select,
+                          onSelected: (_) => controller.setSelectionTool(
+                            RecognitionSelectionTool.select,
+                          ),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Adicionar (clique)'),
+                          selected:
+                              controller.selectionTool ==
+                              RecognitionSelectionTool.add,
+                          onSelected: controller.selectionIsEmpty
+                              ? null
+                              : (_) => controller.setSelectionTool(
+                                  RecognitionSelectionTool.add,
+                                ),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Remover (clique)'),
+                          selected:
+                              controller.selectionTool ==
+                              RecognitionSelectionTool.remove,
+                          onSelected: controller.selectionIsEmpty
+                              ? null
+                              : (_) => controller.setSelectionTool(
+                                  RecognitionSelectionTool.remove,
+                                ),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Pincel +'),
+                          selected:
+                              controller.selectionTool ==
+                              RecognitionSelectionTool.brushAdd,
+                          onSelected: (_) => controller.setSelectionTool(
+                            RecognitionSelectionTool.brushAdd,
+                          ),
+                        ),
+                        ChoiceChip(
+                          label: const Text('Pincel −'),
+                          selected:
+                              controller.selectionTool ==
+                              RecognitionSelectionTool.brushRemove,
+                          onSelected: controller.selectionIsEmpty
+                              ? null
+                              : (_) => controller.setSelectionTool(
+                                  RecognitionSelectionTool.brushRemove,
+                                ),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      'Adicionar/Remover usam clique. Pincel +/− usa arraste '
+                      'com o botão esquerdo.',
+                      style: TextStyle(fontSize: 9.5),
+                    ),
+                    if (controller.brushModeActive) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Alcance do pincel',
+                        style: Theme.of(context).textTheme.labelMedium,
+                      ),
+                      const SizedBox(height: 3),
+                      Wrap(
+                        spacing: 4,
+                        runSpacing: 4,
+                        children: [
+                          ChoiceChip(
+                            label: const Text('Somente visível'),
+                            selected:
+                                controller.brushVisibility ==
+                                SelectionVisibilityPolicy.visibleOnly,
+                            onSelected: (_) => controller.setBrushVisibility(
+                              SelectionVisibilityPolicy.visibleOnly,
+                            ),
+                          ),
+                          ChoiceChip(
+                            label: const Text('Através da malha'),
+                            selected:
+                                controller.brushVisibility ==
+                                SelectionVisibilityPolicy.throughMesh,
+                            onSelected: (_) => controller.setBrushVisibility(
+                              SelectionVisibilityPolicy.throughMesh,
+                            ),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextFormField(
+                              key: ValueKey(
+                                controller.brushDiameterMm.toStringAsFixed(1),
+                              ),
+                              initialValue: controller.brushDiameterMm
+                                  .toStringAsFixed(1),
+                              keyboardType:
+                                  const TextInputType.numberWithOptions(
+                                    decimal: true,
+                                  ),
+                              decoration: const InputDecoration(
+                                labelText: 'Diâmetro do pincel (mm)',
+                                isDense: true,
+                              ),
+                              onFieldSubmitted: (value) {
+                                final parsed = double.tryParse(
+                                  value.replaceAll(',', '.'),
+                                );
+                                if (parsed != null) {
+                                  controller.setBrushDiameterMm(parsed);
+                                }
+                              },
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '${controller.brushDiameterMm.toStringAsFixed(1)} mm',
+                            style: const TextStyle(fontSize: 10),
+                          ),
+                        ],
+                      ),
+                      Slider(
+                        value: controller.brushDiameterMm,
+                        min: OperationalReverseEngineeringController
+                            .minBrushDiameterMm,
+                        max: OperationalReverseEngineeringController
+                            .maxBrushDiameterMm,
+                        divisions: 49,
+                        label:
+                            '${controller.brushDiameterMm.toStringAsFixed(1)} mm',
+                        onChanged: controller.setBrushDiameterMm,
+                      ),
+                      CheckboxListTile(
+                        dense: true,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text(
+                          'Somente superfície conectada',
+                          style: TextStyle(fontSize: 10),
+                        ),
+                        value:
+                            controller.brushConnectivity ==
+                            SelectionConnectivityPolicy.connectedSurface,
+                        onChanged: (value) => controller.setBrushConnectivity(
+                          value == true
+                              ? SelectionConnectivityPolicy.connectedSurface
+                              : SelectionConnectivityPolicy.local,
+                        ),
+                      ),
+                      if (controller.brushVisibility ==
+                              SelectionVisibilityPolicy.throughMesh &&
+                          controller.brushConnectivity ==
+                              SelectionConnectivityPolicy.connectedSurface)
+                        const Text(
+                          'Através da malha + superfície conectada inclui apenas '
+                          'faces ligadas topologicamente à semente. Desative a '
+                          'conectividade para atingir paredes traseiras separadas.',
+                          style: TextStyle(fontSize: 9.5),
+                        ),
+                      const Text(
+                        'Somente visível respeita a oclusão da malha. '
+                        'Através da malha inclui faces ocultas dentro do volume '
+                        'do pincel. O diâmetro é aplicado em milímetros na '
+                        'geometria original, não em pixels.',
+                        style: TextStyle(fontSize: 9.5),
+                      ),
+                      if (controller.brushStrokeActive)
+                        const Text(
+                          'Pintando…',
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                    ],
+                    const SizedBox(height: 4),
+                    Wrap(
+                      spacing: 4,
+                      runSpacing: 4,
+                      children: [
+                        OutlinedButton(
+                          onPressed:
+                              controller.busy || controller.selectionIsEmpty
+                              ? null
+                              : controller.expandRecognitionSelection,
+                          child: const Text('Expandir'),
+                        ),
+                        OutlinedButton(
+                          onPressed:
+                              controller.busy || controller.selectionIsEmpty
+                              ? null
+                              : controller.contractRecognitionSelection,
+                          child: const Text('Contrair'),
+                        ),
+                        OutlinedButton(
+                          onPressed:
+                              controller.busy ||
+                                  !(controller.selectionIsEdited ||
+                                      controller.selectionIsEmpty)
+                              ? null
+                              : controller.restoreAutomaticRecognitionSelection,
+                          child: const Text('Restaurar automática'),
+                        ),
+                        OutlinedButton(
+                          onPressed:
+                              controller.busy ||
+                                  !controller.canUndoSelectionEdit
+                              ? null
+                              : controller.undoRecognitionSelection,
+                          child: const Text('Desfazer seleção'),
+                        ),
+                        OutlinedButton(
+                          onPressed:
+                              controller.busy ||
+                                  !controller.canRedoSelectionEdit
+                              ? null
+                              : controller.redoRecognitionSelection,
+                          child: const Text('Refazer seleção'),
+                        ),
+                        TextButton(
+                          onPressed: controller.clearRecognitionSelection,
+                          child: const Text('Limpar seleção'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      'Triângulos selecionados: '
+                      '${controller.selectionTriangleCount} · '
+                      'Área: ${controller.selectionArea.toStringAsFixed(3)} mm²',
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                    if (controller.selectionIsEdited)
+                      Text(
+                        'Região editada · revisão ${controller.selectionRevision}',
+                        style: const TextStyle(fontSize: 9.5),
+                      ),
+                    if (controller.lastSelectionAdded > 0)
+                      Text(
+                        'Adicionados: ${controller.lastSelectionAdded} triângulos',
+                        style: const TextStyle(fontSize: 9.5),
+                      ),
+                    if (controller.lastSelectionRemoved > 0)
+                      Text(
+                        'Removidos: ${controller.lastSelectionRemoved} triângulos',
+                        style: const TextStyle(fontSize: 9.5),
+                      ),
+                    if (controller.selectionIsEmpty)
+                      const _BlockReason(
+                        'Seleção vazia. Restaure a região automática ou limpe a seleção.',
+                      ),
+                    if (controller.selectionDiagnostic case final reason?)
+                      _BlockReason(reason),
+                  ],
+                ),
+              ),
+            ),
+          ],
           if (controller.activeRecognitionResult case final result?) ...[
             const SizedBox(height: 8),
             Card(
@@ -157,7 +459,24 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       'Reconhecimento',
                       style: Theme.of(context).textTheme.titleSmall,
                     ),
+                    if (controller.isActiveRecognitionDiagnosticOnly)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 2),
+                        child: Text(
+                          'Diagnóstico · criação CAD bloqueada',
+                          style: TextStyle(
+                            fontSize: 9.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
                     const SizedBox(height: 6),
+                    if (controller.requestedRecognitionPrimitive
+                        case final requested?)
+                      _RecognitionMetric(
+                        label: 'Tipo solicitado',
+                        value: _typeNameLabel(requested.name),
+                      ),
                     _RecognitionMetric(
                       label: 'Tipo',
                       value: _recognitionTypeLabel(result.type),
@@ -214,6 +533,15 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       label: 'Área selecionada',
                       value: _selectedArea(controller, result),
                     ),
+                    if (result.parameters['selectionComponentCount'] is num &&
+                        (result.parameters['selectionComponentCount'] as num) >
+                            1)
+                      _RecognitionMetric(
+                        label: 'Componentes desconectados',
+                        value:
+                            '${result.parameters['selectionComponentCount']}',
+                        color: Colors.amber.shade800,
+                      ),
                     if (result.parameters['dimensionalReason']
                         case final String reason)
                       Padding(
@@ -223,6 +551,20 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           style: const TextStyle(fontSize: 9.5),
                         ),
                       ),
+                    if (result.type == RecognitionResultType.plane)
+                      if (result.parameters['planarClassificationReason']
+                          case final String classificationReason)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 3),
+                          child: Text(
+                            classificationReason,
+                            style: const TextStyle(fontSize: 9.5),
+                          ),
+                        ),
+                    if (controller.isActiveRecognitionDiagnosticOnly)
+                      if (result.parameters['diagnosticReason']
+                          case final String reason)
+                        _BlockReason(reason),
                     if (result.type == RecognitionResultType.plane) ...[
                       const SizedBox(height: 6),
                       TextFormField(
@@ -395,6 +737,45 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                     ),
                     const Text(
                       'Somente conhecimento · nenhuma geometria CAD criada',
+                      style: TextStyle(fontSize: 9.5),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          if (controller.activeRecognitionResult == null &&
+              controller.recognitionDiagnostic != null) ...[
+            const SizedBox(height: 8),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Diagnóstico de reconhecimento dirigido',
+                      style: Theme.of(context).textTheme.titleSmall,
+                    ),
+                    Text(
+                      'Tipo solicitado: '
+                      '${_typeNameLabel(controller.recognitionDiagnostic!['requestedPrimitiveType']?.toString() ?? '')}',
+                    ),
+                    Text(
+                      'Tipo obtido: '
+                      '${_obtainedRecognitionTypeLabel(controller)}',
+                    ),
+                    if (controller.recognitionDiagnostic!['rmsDeviation']
+                        case final num rms)
+                      Text('RMS: ${_formatMillimeters(rms)}'),
+                    if (controller.recognitionDiagnostic!['maximumDeviation']
+                        case final num maximum)
+                      Text('Desvio máximo: ${_formatMillimeters(maximum)}'),
+                    if (controller.recognitionDiagnostic!['reason']
+                        case final String reason)
+                      _BlockReason(reason),
+                    const Text(
+                      'Sem ajuste suficiente para Preview ou criação CAD.',
                       style: TextStyle(fontSize: 9.5),
                     ),
                   ],
@@ -628,6 +1009,17 @@ String _typeNameLabel(String name) => switch (name) {
   '' => 'nenhum',
   _ => name,
 };
+
+String _obtainedRecognitionTypeLabel(
+  OperationalReverseEngineeringController controller,
+) {
+  final active = controller.activeRecognitionResult;
+  if (active != null) return _recognitionTypeLabel(active.type);
+  final diagnosticType = controller.recognitionDiagnostic?['primitiveType'];
+  if (diagnosticType is String) return _typeNameLabel(diagnosticType);
+  final winner = controller.report?.primitives.firstOrNull?.recognition.winner;
+  return winner == null ? 'nenhum' : _typeNameLabel(winner.type.name);
+}
 
 String _firstNonPlaneType(OperationalReverseEngineeringController controller) {
   for (final item in controller.hypotheses) {

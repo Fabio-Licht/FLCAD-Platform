@@ -1369,7 +1369,11 @@ extension _CadTransactions on CadRuntime {
     return CadSceneEntity(
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
-      geometry: projectManagedPlacement(sceneGeometry, entity.placement),
+      geometry: {
+        ...projectManagedPlacement(sceneGeometry, entity.placement),
+        if (entity.data['rootLinearRgb'] is List)
+          'rootLinearRgb': entity.data['rootLinearRgb'],
+      },
       visible:
           entity.data['deleted'] != true &&
           (entity.data['sceneVisible'] as bool? ?? true) &&

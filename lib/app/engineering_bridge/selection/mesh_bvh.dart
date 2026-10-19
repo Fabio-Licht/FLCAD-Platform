@@ -55,6 +55,78 @@ class MeshBvh {
     return result;
   }
 
+  /// Bounded spatial query for a spherical tool (brush dab or future
+  /// volumetric gesture). Returns triangle indices whose AABB intersects the
+  /// sphere; callers still apply an exact distance test to the tool geometry.
+  Set<int> querySphere({required Vector3 center, required double radius}) {
+    if (radius <= 0) return const <int>{};
+    final result = <int>{};
+    void visit(MeshBvhNode node) {
+      if (!_sphereIntersectsBounds(node.bounds, center, radius)) return;
+      if (node.triangles != null) {
+        result.addAll(node.triangles!);
+      } else {
+        visit(node.left!);
+        visit(node.right!);
+      }
+    }
+
+    visit(root);
+    return result;
+  }
+
+  /// Bounded box query used by the through-mesh projected brush volume.
+  Set<int> queryBox({required Vector3 min, required Vector3 max}) {
+    final result = <int>{};
+    void visit(MeshBvhNode node) {
+      if (!_boxIntersectsBounds(node.bounds, min, max)) return;
+      if (node.triangles != null) {
+        result.addAll(node.triangles!);
+      } else {
+        visit(node.left!);
+        visit(node.right!);
+      }
+    }
+
+    visit(root);
+    return result;
+  }
+
+  static bool _boxIntersectsBounds(
+    MeshBvhBounds bounds,
+    Vector3 min,
+    Vector3 max,
+  ) =>
+      !(max.x < bounds.min.x ||
+          min.x > bounds.max.x ||
+          max.y < bounds.min.y ||
+          min.y > bounds.max.y ||
+          max.z < bounds.min.z ||
+          min.z > bounds.max.z);
+
+  static bool _sphereIntersectsBounds(
+    MeshBvhBounds bounds,
+    Vector3 center,
+    double radius,
+  ) {
+    final dx = center.x < bounds.min.x
+        ? bounds.min.x - center.x
+        : center.x > bounds.max.x
+        ? center.x - bounds.max.x
+        : 0.0;
+    final dy = center.y < bounds.min.y
+        ? bounds.min.y - center.y
+        : center.y > bounds.max.y
+        ? center.y - bounds.max.y
+        : 0.0;
+    final dz = center.z < bounds.min.z
+        ? bounds.min.z - center.z
+        : center.z > bounds.max.z
+        ? center.z - bounds.max.z
+        : 0.0;
+    return dx * dx + dy * dy + dz * dz <= radius * radius;
+  }
+
   static bool _planeIntersectsBounds(
     MeshBvhBounds bounds,
     Vector3 origin,

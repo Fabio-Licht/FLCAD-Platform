@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:flcad_mobile/core/engineering_decision/api/decision_api.dart';
 import 'package:flcad_mobile/core/engineering_decision/engine/engineering_decision_engine.dart';
@@ -13,6 +14,7 @@ import 'package:flcad_mobile/core/geometric_recognition/models/recognition_model
 import 'package:flcad_mobile/core/geometric_recognition/pipeline/recognition_pipeline.dart';
 import 'package:flcad_mobile/core/geometric_recognition/plugins/recognition_plugin.dart';
 import 'package:flcad_mobile/core/geometric_recognition/recognizers/supported_recognizers.dart';
+import 'package:flcad_mobile/core/geometric_recognition/recognizers/universal_recognizer.dart';
 import 'package:flcad_mobile/core/geometric_recognition/runtime/recognition_runtime.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -222,6 +224,138 @@ void main() {
       expect(names, contains(name));
     }
   });
+
+  test('cache distinguishes automatic and directed request keys', () {
+    final cache = RecognitionCache();
+    expect(
+      cache.key(planeContext()),
+      isNot(cache.key(planeContext(), requestKey: 'types:plane')),
+    );
+  });
+
+  test('allowedTypes filters recognizers before execution', () async {
+    final port = ReceivePort(), messages = <Object?>[];
+    final subscription = port.listen(messages.add);
+    final plane = _CountingRecognizer(
+          PrimitiveType.plane,
+          score: .9,
+          port: port.sendPort,
+        ),
+        sphere = _CountingRecognizer(
+          PrimitiveType.sphere,
+          score: .99,
+          port: port.sendPort,
+        );
+    final plugins = RecognitionPluginRegistry()
+      ..register(plane)
+      ..register(sphere);
+    final result = await GeometricRecognitionEngine(
+      plugins: plugins,
+    ).recognize(planeContext(), allowedTypes: {PrimitiveType.plane});
+
+    expect(result.winner.type, PrimitiveType.plane);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await subscription.cancel();
+    port.close();
+    expect(messages, ['test.plane']);
+    expect(sphere.id, isNotEmpty);
+  });
+
+  test('directed request does not reuse an automatic cached result', () async {
+    final port = ReceivePort(), messages = <Object?>[];
+    final subscription = port.listen(messages.add);
+    final plane = _CountingRecognizer(
+          PrimitiveType.plane,
+          score: .9,
+          port: port.sendPort,
+        ),
+        sphere = _CountingRecognizer(
+          PrimitiveType.sphere,
+          score: .99,
+          port: port.sendPort,
+        );
+    final engine = GeometricRecognitionEngine(
+      plugins: RecognitionPluginRegistry()
+        ..register(plane)
+        ..register(sphere),
+    );
+    final automatic = await engine.recognize(planeContext());
+    expect(automatic.winner.type, PrimitiveType.sphere);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect(messages, containsAll(['test.plane', 'test.sphere']));
+    messages.clear();
+
+    final directed = await engine.recognize(
+      planeContext(),
+      allowedTypes: {PrimitiveType.plane},
+    );
+    expect(directed.winner.type, PrimitiveType.plane);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    await subscription.cancel();
+    port.close();
+    expect(messages, ['test.plane']);
+    expect(sphere.id, isNotEmpty);
+  });
+
+  test(
+    'directed plane uses PlaneRecognizer on ideal and noisy regions',
+    () async {
+      for (final noise in [0.0, .001]) {
+        final context = RecognitionContext(
+          observation: RecognitionObservation(
+            projectId: 'p',
+            meshId: 'directed-plane',
+            regionId: 'plane-noise-$noise',
+            points: [
+              Vector3(0, 0, 2 + noise),
+              Vector3(1, 0, 2 - noise),
+              Vector3(1, 1, 2 + noise),
+              Vector3(0, 1, 2 - noise),
+              Vector3(.5, .5, 2 + noise),
+            ],
+            meshFingerprint: 'directed-plane-mesh',
+            regionFingerprint: 'plane-noise-$noise',
+          ),
+        );
+        final result = await GeometricRecognitionEngine().recognize(
+          context,
+          allowedTypes: {PrimitiveType.plane},
+          rebuild: true,
+        );
+        expect(result.winner.type, PrimitiveType.plane);
+        expect(result.alternatives, isEmpty);
+        expect(result.winner.statistics.rms, lessThan(.01));
+      }
+    },
+  );
+
+  test('directed plane on a sphere does not become a sphere result', () async {
+    final context = RecognitionContext(
+      observation: RecognitionObservation(
+        projectId: 'p',
+        meshId: 'sphere-directed-plane',
+        regionId: 'sphere-directed-plane',
+        points: const [
+          Vector3(1, 0, 0),
+          Vector3(-1, 0, 0),
+          Vector3(0, 1, 0),
+          Vector3(0, -1, 0),
+          Vector3(0, 0, 1),
+          Vector3(0, 0, -1),
+          Vector3(.707106, .707106, 0),
+        ],
+        meshFingerprint: 'sphere-directed-plane-mesh',
+        regionFingerprint: 'sphere-directed-plane',
+      ),
+    );
+    final result = await GeometricRecognitionEngine().recognize(
+      context,
+      allowedTypes: {PrimitiveType.plane},
+      rebuild: true,
+    );
+    expect(result.winner.type, PrimitiveType.plane);
+    expect(result.winner.statistics.rms, greaterThan(.1));
+  });
 }
 
 class _Stage implements RecognitionPipelineStage<int, int> {
@@ -229,4 +363,80 @@ class _Stage implements RecognitionPipelineStage<int, int> {
   String get name => 'test';
   @override
   Future<int> execute(RecognitionContext context, int input) async => input + 1;
+}
+
+final class _CountingRecognizer implements UniversalRecognizer {
+  _CountingRecognizer(this.type, {required this.score, this.port});
+
+  @override
+  final PrimitiveType type;
+  final double score;
+  final SendPort? port;
+
+  @override
+  String get id => 'test.${type.name}';
+
+  @override
+  bool detect(RecognitionContext context) => true;
+
+  @override
+  RecognitionCandidate evaluate(RecognitionContext context) {
+    port?.send(id);
+    final parameters = type == PrimitiveType.plane
+        ? <String, dynamic>{
+            'origin': [0, 0, 0],
+            'normal': [0, 0, 1],
+          }
+        : <String, dynamic>{
+            'center': [0, 0, 0],
+            'radius': 1.0,
+          };
+    return RecognitionCandidate(
+      id: '$id:${context.observation.regionFingerprint}',
+      type: type,
+      regionId: context.observation.regionId,
+      parameters: parameters,
+      statistics: FitStatistics(
+        rms: 0,
+        maximum: 0,
+        mean: 0,
+        coverage: 1,
+        stability: 1,
+        score: score,
+      ),
+      evidence: const [],
+      origin: id,
+    );
+  }
+
+  @override
+  RecognitionCandidate refine(
+    RecognitionContext context,
+    RecognitionCandidate candidate,
+  ) => candidate;
+
+  @override
+  bool validate(RecognitionContext context, RecognitionCandidate candidate) =>
+      true;
+
+  @override
+  RecognitionExplanation explain(
+    RecognitionContext context,
+    RecognitionCandidate candidate,
+    List<RecognitionCandidate> alternatives,
+  ) => RecognitionExplanation(
+    why: 'test',
+    evidence: const [],
+    regions: [context.observation.regionId],
+    parameters: candidate.parameters,
+    losingCandidates: const [],
+    score: score,
+    confidence: score,
+  );
+
+  @override
+  double confidence(
+    RecognitionContext context,
+    RecognitionCandidate candidate,
+  ) => score;
 }

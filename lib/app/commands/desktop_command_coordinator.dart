@@ -130,10 +130,7 @@ class DesktopCommandCoordinator {
     _assertSaveContext(project, expectedProjectId: expectedProjectId);
   }
 
-  void _assertSaveContext(
-    Project project, {
-    String? expectedProjectId,
-  }) {
+  void _assertSaveContext(Project project, {String? expectedProjectId}) {
     if (expectedProjectId != null && project.id != expectedProjectId) {
       throw StateError('The project changed while Save was waiting.');
     }
@@ -185,6 +182,7 @@ class DesktopCommandCoordinator {
   Future<void> undo() async {
     try {
       await cad.runtime.undoCommand();
+      await _afterHistory('history.afterUndo');
     } catch (error) {
       cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
     }
@@ -193,9 +191,15 @@ class DesktopCommandCoordinator {
   Future<void> redo() async {
     try {
       await cad.runtime.redoCommand();
+      await _afterHistory('history.afterRedo');
     } catch (error) {
       cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
     }
+  }
+
+  Future<void> _afterHistory(String key) async {
+    final callback = cad.runtime.read<Future<void> Function()>(key);
+    if (callback != null) await callback();
   }
 
   void _register() {

@@ -70,9 +70,11 @@ class RecognitionResultAdapter {
     ProfessionalPrimitive? primitive,
     List<String> history = const [],
     Map<String, dynamic> extraParameters = const {},
+    double? minimumPrimitiveConfidence,
   }) {
-    if (primitive == null ||
-        primitive.recognition.dna.confidence < minimumPrimitiveConfidence) {
+    final threshold =
+        minimumPrimitiveConfidence ?? this.minimumPrimitiveConfidence;
+    if (primitive == null || primitive.recognition.dna.confidence < threshold) {
       return RecognitionResult(
         id: id,
         type: RecognitionResultType.freeform,

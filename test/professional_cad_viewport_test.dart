@@ -19,6 +19,7 @@ import 'package:flcad_mobile/core/cad_kernel/api/geometry_kernel_api.dart';
 import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
+import 'package:flcad_mobile/core/geometric_recognition/models/recognition_models.dart';
 import 'package:flcad_mobile/core/import_export/api/import_export_api.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
 import 'package:flcad_mobile/core/reference_engine/models/reference_entity.dart';
@@ -1316,9 +1317,15 @@ void main() {
         entityId: 'mesh-1',
         hit: MeshHit(triangleIndex: 0, point: Vector3.zero, distance: 5),
       ),
+      requestedType: PrimitiveType.plane,
     );
     expect(controller.error, isNull);
     expect(controller.hypotheses, isNotEmpty);
+    expect(controller.requestedRecognitionPrimitive, PrimitiveType.plane);
+    expect(
+      controller.activeRecognitionResult?.parameters['recognitionMode'],
+      'directed',
+    );
     final id = controller.hypotheses.first.recognition.id;
     controller.decide(id, RecognitionDecision.accepted);
     expect(controller.decisions[id], RecognitionDecision.accepted);

@@ -433,6 +433,9 @@ void NativeViewportHost::ApplySnapshot(const flutter::EncodableMap& snapshot, bo
     }
     entity.visible = Find(*map,"visible") ? std::get<bool>(*Find(*map,"visible")) : true;
     entity.selected = Find(*map,"selected") ? std::get<bool>(*Find(*map,"selected")) : false;
+    entity.selection_preview =
+        Find(*map, "selectionPreview") &&
+        std::get<bool>(*Find(*map, "selectionPreview"));
     std::vector<XMFLOAT3> positions; positions.reserve(nodes->size()/3);
     for(size_t i=0;i+2<nodes->size();i+=3) positions.push_back({
       static_cast<float>(Number((*nodes)[i])),static_cast<float>(Number((*nodes)[i+1])),
@@ -771,6 +774,8 @@ void NativeViewportHost::Render() {
   for (auto &[id, e] : entities_) {
     if (!e.visible || !e.vertex_buffer || !e.index_buffer)
       continue;
+    if (e.selection_preview)
+      continue;
     if (render_style_ == 2)
       continue;
     std::copy(std::begin(e.root_srgb), std::end(e.root_srgb), constants.color);
@@ -883,6 +888,58 @@ void NativeViewportHost::Render() {
     context_->RSSetState(rasterizer_.Get());
     context_->OMSetBlendState(nullptr,nullptr,UINT_MAX);
   }
+  // Recognition/brush selection is a transient overlay. It is drawn after
+  // opaque geometry with depth-write disabled, so coplanar triangles do not
+  // z-fight and the ice-white fill is not darkened by mesh lighting.
+  for (auto &[id, e] : entities_) {
+    if (!e.selection_preview || !e.visible || !e.vertex_buffer ||
+        !e.index_buffer)
+      continue;
+    constants.color[0] = .9608f;
+    constants.color[1] = .9686f;
+    constants.color[2] = .9804f;
+    constants.color[3] = 1.f;
+    constants.lighting[0] = 0;
+    constants.pick[0] = render_style_;
+    constants.pick[1] = constants.pick[2] = constants.pick[3] = 0;
+    std::fill(std::begin(constants.managed_face),
+              std::end(constants.managed_face), 0);
+    context_->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
+    context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(), 0);
+    context_->OMSetBlendState(nullptr, nullptr, UINT_MAX);
+    context_->IASetInputLayout(input_layout_.Get());
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->IASetVertexBuffers(0, 1, e.vertex_buffer.GetAddressOf(), &stride,
+                                 &offset);
+    context_->IASetIndexBuffer(e.index_buffer.Get(), DXGI_FORMAT_R32_UINT, 0);
+    context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
+    context_->PSSetShader(pixel_shader_.Get(), nullptr, 0);
+    context_->DrawIndexed(static_cast<UINT>(e.indices.size()), 0, 0);
+    if (e.display_edge_buffer && !e.display_edges.empty()) {
+      context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+      context_->PSSetShader(line_shader_.Get(), nullptr, 0);
+      context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(), 0);
+      context_->IASetVertexBuffers(0, 1, e.display_edge_buffer.GetAddressOf(),
+                                   &stride, &offset);
+      context_->RSSetState(edge_rasterizer_.Get());
+      constants.color[0] = .04f;
+      constants.color[1] = .06f;
+      constants.color[2] = .08f;
+      constants.color[3] = 1.f;
+      context_->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0,
+                                  0);
+      context_->Draw(static_cast<UINT>(e.display_edges.size()), 0);
+      context_->RSSetState(cad_edge_rasterizer_.Get());
+      constants.color[0] = 1.f;
+      constants.color[1] = .749f;
+      constants.color[2] = .271f;
+      context_->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0,
+                                  0);
+      context_->Draw(static_cast<UINT>(e.display_edges.size()), 0);
+    }
+  }
+  context_->RSSetState(rasterizer_.Get());
+  context_->OMSetBlendState(nullptr,nullptr,UINT_MAX);
   if (render_style_ != 2) {
   std::fill(std::begin(constants.managed_face), std::end(constants.managed_face), 0);
   if(operational_selection_index_buffer_&&operational_selection_index_count_>0){auto found=entities_.find(operational_selection_entity_id_);if(found!=entities_.end()&&found->second.vertex_buffer){constants.color[0]=.92f;constants.color[1]=.38f;constants.color[2]=.04f;constants.pick[1]=0;constants.pick[2]=0;context_->UpdateSubresource(constants_.Get(),0,nullptr,&constants,0,0);context_->OMSetDepthStencilState(pick_overlay_depth_state_.Get(),0);context_->IASetInputLayout(input_layout_.Get());context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->IASetVertexBuffers(0,1,found->second.vertex_buffer.GetAddressOf(),&stride,&offset);context_->IASetIndexBuffer(operational_selection_index_buffer_.Get(),DXGI_FORMAT_R32_UINT,0);context_->VSSetShader(vertex_shader_.Get(),nullptr,0);context_->PSSetShader(pixel_shader_.Get(),nullptr,0);context_->DrawIndexed(operational_selection_index_count_,0,0);}}

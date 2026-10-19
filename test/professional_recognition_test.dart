@@ -92,6 +92,27 @@ void main() {
     },
   );
 
+  test('professional engine honors allowedTypes', () async {
+    final report = await ProfessionalRecognitionEngine().recognize(
+      [
+        contextFor('directed-sphere', [
+          Vector3(1, 0, 0),
+          Vector3(-1, 0, 0),
+          Vector3(0, 1, 0),
+          Vector3(0, -1, 0),
+          Vector3(0, 0, 1),
+          Vector3(0, 0, -1),
+          Vector3(.707106, .707106, 0),
+        ]),
+      ],
+      allowedTypes: {PrimitiveType.plane},
+    );
+    expect(
+      report.primitives.single.recognition.winner.type,
+      PrimitiveType.plane,
+    );
+  });
+
   test(
     'topology detects coaxial primitives and composition proposes counterbore',
     () async {

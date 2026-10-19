@@ -32,6 +32,8 @@ class RecognitionBridge {
     );
   }
 
-  Future<ProfessionalRecognitionReport> recognize(BridgeContext context) =>
-      api.recognize([contextFor(context)]);
+  Future<ProfessionalRecognitionReport> recognize(
+    BridgeContext context, {
+    Set<PrimitiveType>? allowedTypes,
+  }) => api.recognize([contextFor(context)], allowedTypes: allowedTypes);
 }
