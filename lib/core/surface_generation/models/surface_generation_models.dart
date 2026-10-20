@@ -62,6 +62,24 @@ class GeneratedSurface {
   final bool valid;
   final double confidence;
   final List<GeometryDiagnostic> diagnostics;
+  GeneratedSurface copyWith({Map<String, dynamic>? parameters}) =>
+      GeneratedSurface(
+        surfaceId: surfaceId,
+        projectId: projectId,
+        kind: kind,
+        origin: origin,
+        regionIds: regionIds,
+        evidenceIds: evidenceIds,
+        featureId: featureId,
+        handle: handle,
+        revision: revision,
+        timestamp: timestamp,
+        parameters: parameters ?? this.parameters,
+        continuity: continuity,
+        valid: valid,
+        confidence: confidence,
+        diagnostics: diagnostics,
+      );
   Map<String, dynamic> toJson() => {
     'surfaceId': surfaceId,
     'projectId': projectId,

@@ -69,9 +69,21 @@ class KernelLoopData {
 }
 
 class KernelSurfaceTopology {
-  const KernelSurfaceTopology({required this.boundaries, required this.loops});
+  const KernelSurfaceTopology({
+    required this.boundaries,
+    required this.loops,
+    this.area = 0,
+    this.perimeter = 0,
+    this.faceCount = 0,
+    this.edgeCount = 0,
+    this.vertexCount = 0,
+    this.valid = false,
+  });
   final List<KernelBoundaryData> boundaries;
   final List<KernelLoopData> loops;
+  final double area, perimeter;
+  final int faceCount, edgeCount, vertexCount;
+  final bool valid;
 }
 
 class KernelSurfaceIntersection {

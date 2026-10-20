@@ -550,7 +550,7 @@ void main() {
             ),
           )
           .onPressed,
-      isNull,
+      isNotNull,
     );
     expect(
       tester

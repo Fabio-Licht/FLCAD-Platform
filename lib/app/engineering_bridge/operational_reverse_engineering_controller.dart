@@ -501,9 +501,22 @@ void _regionGrowingIsolateEntry(_RegionGrowingIsolateBox box) {
   box.port.send(runRegionGrowingInIsolate(box.payload));
 }
 
-RegionGrowingResult _restoreRegionGrowingResult(Map<String, Object?> payload) {
-  final regions = (payload['regions'] as List).map((raw) {
-    final value = Map<String, dynamic>.from(raw as Map);
+/// Restores the isolate contract without turning optional diagnostics into a
+/// required Map cast. Regions and adjacency remain required structural data.
+RegionGrowingResult restoreRegionGrowingResult(Map<String, Object?> payload) {
+  final rawRegions = payload['regions'];
+  if (rawRegions is! List) {
+    throw StateError(
+      'Region Growing isolate returned no regions list for the selected mesh.',
+    );
+  }
+  final regions = rawRegions.map((raw) {
+    if (raw is! Map) {
+      throw StateError(
+        'Region Growing isolate returned a region with invalid map data.',
+      );
+    }
+    final value = Map<String, dynamic>.from(raw);
     final normal = (value['normal'] as List)
         .map((item) => (item as num).toDouble())
         .toList();
@@ -537,15 +550,49 @@ RegionGrowingResult _restoreRegionGrowingResult(Map<String, Object?> payload) {
     );
   }).toList();
   final graph = <String, Set<String>>{};
-  final rawGraph = Map<String, dynamic>.from(payload['graph'] as Map);
-  for (final entry in rawGraph.entries) {
-    graph[entry.key] = (entry.value as List).cast<String>().toSet();
+  final rawGraphValue = payload['graph'];
+  if (rawGraphValue is! Map) {
+    throw StateError(
+      'Region Growing isolate returned no graph map for the selected mesh.',
+    );
   }
+  final rawGraph = Map<String, dynamic>.from(rawGraphValue);
+  for (final entry in rawGraph.entries) {
+    final neighbors = entry.value;
+    if (neighbors is! List) {
+      throw StateError(
+        'Region Growing isolate returned invalid adjacency for ${entry.key}.',
+      );
+    }
+    graph[entry.key] = neighbors.cast<String>().toSet();
+  }
+  final rawDiagnostics = payload['diagnostics'];
   return RegionGrowingResult(
     regions,
     region_recognition.RegionGraph(graph),
-    diagnostics: Map<String, Object?>.from(payload['diagnostics'] as Map),
+    diagnostics: rawDiagnostics is Map
+        ? Map<String, Object?>.from(rawDiagnostics)
+        : const <String, Object?>{},
   );
+}
+
+class _RecognitionManualApproval {
+  const _RecognitionManualApproval({
+    required this.resultId,
+    required this.meshId,
+    required this.regionId,
+    required this.meshFingerprint,
+    required this.selectionRevision,
+    required this.selectionFingerprint,
+    required this.recognitionMode,
+    required this.approvalType,
+  });
+
+  final String resultId, meshId, regionId, meshFingerprint;
+  final int selectionRevision;
+  final String selectionFingerprint;
+  final String? recognitionMode;
+  final String approvalType;
 }
 
 class OperationalReverseEngineeringController extends ChangeNotifier {
@@ -3481,6 +3528,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       const RecognitionSurfacePreviewBuilder();
   final RecognitionSurfaceAssistantAdapter _recognitionSurfaceAdapter =
       const RecognitionSurfaceAssistantAdapter();
+  _RecognitionManualApproval? _recognitionManualApproval;
   final ReverseEngineeringStudioEngine _reverseEngineeringStudio =
       const ReverseEngineeringStudioEngine();
   final SurfaceReconstructionManager _reconstructionManager =
@@ -6646,7 +6694,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         classification: null,
       );
     }
-    final planar = _restoreRegionGrowingResult(
+    final planar = restoreRegionGrowingResult(
       await dispatchRegionGrowingIsolate(
         regionGrowingIsolatePayload(
           geometry: geometry,
@@ -6784,7 +6832,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             );
       activePick = effectivePick;
       final fingerprint = meshFingerprint;
-      final segmented = _restoreRegionGrowingResult(
+      final segmented = restoreRegionGrowingResult(
         await dispatchRegionGrowingIsolate(
           regionGrowingIsolatePayload(
             geometry: geometry,
@@ -7913,6 +7961,128 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       SurfaceAssistantDecision.pending;
 
   /// Authorization shared by the Recognition panel and the reference command.
+  String _activeSelectionFingerprint() {
+    final region = activeContext?.region;
+    if (region == null) return '';
+    final triangles = region.triangleIndices.toList()..sort();
+    return '${region.id}:${triangles.join(',')}';
+  }
+
+  bool _isFiniteVector(dynamic value, {required bool nonZero}) {
+    if (value is! List ||
+        value.length != 3 ||
+        value.any((item) => item is! num)) {
+      return false;
+    }
+    final values = value.cast<num>().map((item) => item.toDouble()).toList();
+    if (values.any((item) => !item.isFinite)) return false;
+    if (!nonZero) return true;
+    return values.any((item) => item.abs() > 1e-12);
+  }
+
+  bool get hasValidPlanarFitting {
+    final result = activeRecognitionResult;
+    final plane = report?.primitives
+        .where((item) => item.recognition.winner.type.name == 'plane')
+        .firstOrNull;
+    if (result == null ||
+        result.type != RecognitionResultType.plane ||
+        plane == null ||
+        activeContext?.region == null) {
+      return false;
+    }
+    final parameters = plane.recognition.winner.parameters;
+    final points =
+        (result.parameters['pointCount'] as num?)?.toInt() ??
+        activeContext!.region!.points.length;
+    final resultGeometryValid =
+        (!result.parameters.containsKey('origin') ||
+            _isFiniteVector(result.parameters['origin'], nonZero: false)) &&
+        (!result.parameters.containsKey('normal') ||
+            _isFiniteVector(result.parameters['normal'], nonZero: true));
+    return points >= 3 &&
+        resultGeometryValid &&
+        _isFiniteVector(parameters['origin'], nonZero: false) &&
+        _isFiniteVector(parameters['normal'], nonZero: true);
+  }
+
+  bool get hasPlanarWarning =>
+      hasValidPlanarFitting &&
+      (activeRecognitionResult?.parameters['dimensionalApproved'] == false ||
+          {'curvedPatch', 'localReference', 'ambiguous'}.contains(
+            activeRecognitionResult?.parameters['planarClassification'],
+          ) ||
+          (activeRecognitionResult?.confidence ?? 1) <
+              _recognitionResults.minimumPrimitiveConfidence);
+
+  bool get canRequestManualPlaneReference => hasPlanarWarning;
+
+  bool get canRequestManualPlaneReferenceAction => hasPlanarWarning;
+
+  bool get canRequestManualSurfaceAction =>
+      hasPlanarWarning && activeSurfaceAssistantSuggestion != null;
+
+  bool _manualApprovalIsValid(String type) {
+    final approval = _recognitionManualApproval;
+    final result = activeRecognitionResult;
+    final context = activeContext;
+    final region = context?.region;
+    return approval != null &&
+        approval.approvalType == type &&
+        result != null &&
+        region != null &&
+        approval.resultId == result.id &&
+        approval.meshId == context!.meshId &&
+        approval.regionId == region.id &&
+        approval.meshFingerprint == context.meshFingerprint &&
+        approval.selectionRevision == selectionRevision &&
+        approval.selectionFingerprint == _activeSelectionFingerprint() &&
+        approval.recognitionMode == recognitionFilter;
+  }
+
+  bool get _planeReferenceAutomaticallyApproved =>
+      activeRecognitionResult?.parameters['diagnosticOnly'] != true &&
+      activeRecognitionResult?.parameters['referenceApproved'] != false &&
+      activeRecognitionResult?.parameters['dimensionalApproved'] != false &&
+      !{
+        'curvedPatch',
+        'ambiguous',
+      }.contains(activeRecognitionResult?.parameters['planarClassification']);
+
+  void prepareManualRecognitionApproval(String type) {
+    if (!hasValidPlanarFitting) {
+      throw StateError(
+        'O ajuste planar não possui origem, normal ou pontos válidos.',
+      );
+    }
+    if (type == 'surface' &&
+        ((activeContext?.region?.triangleIndices.length ?? 0) < 1 ||
+            ((activeRecognitionResult?.parameters['selectionComponentCount']
+                        as num?) ??
+                    1) >
+                1)) {
+      throw StateError('A superfície requer um domínio CAD selecionado.');
+    }
+    final result = activeRecognitionResult!;
+    final context = activeContext!;
+    _recognitionManualApproval = _RecognitionManualApproval(
+      resultId: result.id,
+      meshId: context.meshId,
+      regionId: context.region!.id,
+      meshFingerprint: context.meshFingerprint,
+      selectionRevision: selectionRevision,
+      selectionFingerprint: _activeSelectionFingerprint(),
+      recognitionMode: recognitionFilter,
+      approvalType: type,
+    );
+    notifyListeners();
+  }
+
+  void cancelManualRecognitionApproval() {
+    _recognitionManualApproval = null;
+    notifyListeners();
+  }
+
   bool get canCreatePlaneReference {
     final result = activeRecognitionResult;
     final plane = report?.primitives
@@ -7921,12 +8091,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (result == null || activeContext?.region == null || plane == null) {
       return false;
     }
-    final parameters = result.parameters;
-    return parameters['diagnosticOnly'] != true &&
-        parameters['referenceApproved'] != false &&
-        parameters['dimensionalApproved'] != false &&
-        parameters['planarClassification'] != 'curvedPatch' &&
-        parameters['planarClassification'] != 'ambiguous';
+    return _planeReferenceAutomaticallyApproved ||
+        _manualApprovalIsValid('reference');
   }
 
   String? get planeReferenceBlockReason {
@@ -7945,11 +8111,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       return 'Nenhuma hipótese planar foi reconhecida.';
     }
     final parameters = result.parameters;
-    if (parameters['diagnosticOnly'] == true) {
+    if (parameters['diagnosticOnly'] == true && !hasValidPlanarFitting) {
       return parameters['diagnosticReason'] as String? ??
           'Resultado somente diagnóstico; ajuste não aprovado para CAD.';
     }
-    if (parameters['dimensionalApproved'] == false) {
+    final manualReference = _manualApprovalIsValid('reference');
+    if (parameters['diagnosticOnly'] == true && !manualReference) {
+      return parameters['diagnosticReason'] as String? ??
+          'Resultado somente diagnÃ³stico; confirme a criaÃ§Ã£o manual.';
+    }
+    if (parameters['dimensionalApproved'] == false && !manualReference) {
       return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
     }
     return switch (parameters['planarClassification']) {
@@ -8035,6 +8206,42 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// Authorization shared by the Recognition panel and the Surface Assistant.
   bool get canCreateSurfaceFromAssistant => surfaceCreationBlockReason == null;
 
+  bool get hasValidPlanarSurfaceDomain {
+    final region = activeContext?.region;
+    if (region == null ||
+        region.triangleIndices.isEmpty ||
+        region.points.length < 3) {
+      return false;
+    }
+    if (!region.area.isFinite || region.area <= 1e-12) return false;
+    final components =
+        (activeRecognitionResult?.parameters['selectionComponentCount'] as num?)
+            ?.toInt() ??
+        1;
+    return components == 1;
+  }
+
+  bool get canOpenSurfaceCreation =>
+      activeRecognitionResult?.type == RecognitionResultType.plane &&
+      hasValidPlanarSurfaceDomain &&
+      hasValidPlanarFitting;
+
+  String? get surfaceCreationEntryBlockReason {
+    if (activeRecognitionResult == null) {
+      return 'Execute o reconhecimento antes de criar a superfÃ­cie.';
+    }
+    if (activeRecognitionResult!.type != RecognitionResultType.plane) {
+      return 'A criaÃ§Ã£o planar requer um reconhecimento de plano.';
+    }
+    if (!hasValidPlanarSurfaceDomain) {
+      return 'Defina uma regiÃ£o planar conectada com pontos, Ã¡rea e domÃ­nio CAD vÃ¡lidos.';
+    }
+    if (!hasValidPlanarFitting) {
+      return 'O ajuste planar nÃ£o possui parÃ¢metros geomÃ©tricos vÃ¡lidos.';
+    }
+    return null;
+  }
+
   String? get surfaceCreationBlockReason {
     final recognition = activeRecognitionResult;
     final suggestion = activeSurfaceAssistantSuggestion;
@@ -8052,31 +8259,35 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SurfaceAssistantSuggestion suggestion,
   ) {
     final parameters = recognition.parameters;
-    if (parameters['diagnosticOnly'] == true) {
+    final manualSurface = _manualApprovalIsValid('surface');
+    if (((parameters['selectionComponentCount'] as num?) ?? 1) > 1) {
+      return 'SeleÃ§Ã£o desconectada: a geraÃ§Ã£o de superfÃ­cie exige um domÃ­nio conectado.';
+    }
+    if (parameters['diagnosticOnly'] == true && !hasValidPlanarFitting) {
       return parameters['diagnosticReason'] as String? ??
           'Resultado somente diagnóstico; ajuste não aprovado para CAD.';
     }
     if (recognition.type == RecognitionResultType.freeform) {
       return 'Reconhecimento livre: apenas consultivo; escolha uma reconstrução supervisionada.';
     }
-    if (parameters['dimensionalApproved'] == false) {
+    if (parameters['dimensionalApproved'] == false && !manualSurface) {
       return 'Resultado dimensional reprovado: RMS ou desvio máximo excede a tolerância.';
     }
     if (recognition.type == RecognitionResultType.plane) {
       final classification = parameters['planarClassification'];
-      if (classification == 'curvedPatch') {
+      if (classification == 'curvedPatch' && !manualSurface) {
         return 'Trecho de superfície curva: somente diagnóstico; criação CAD bloqueada.';
       }
-      if (classification == 'ambiguous') {
+      if (classification == 'ambiguous' && !manualSurface) {
         return 'Classificação ambígua: somente diagnóstico; criação CAD bloqueada.';
       }
-      if (parameters['cadSurfaceApproved'] == false) {
+      if (parameters['cadSurfaceApproved'] == false && !manualSurface) {
         return classification == 'localReference'
             ? 'Referência local: autoriza a referência, mas não a superfície CAD.'
             : 'Superfície CAD não autorizada para este resultado.';
       }
     }
-    if (suggestion.confidence < .65) {
+    if (suggestion.confidence < .65 && !manualSurface) {
       return 'Confiança abaixo do limite aprovado (65%).';
     }
     return null;
@@ -8142,9 +8353,38 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       recognition: recognition,
       suggestion: suggestion,
       generation: surfaceGenerationApi!,
+      allowManualApproval: _manualApprovalIsValid('surface'),
     );
-    activeSurface = surface;
-    await _upsertSurface(surface, command: 'surface-assistant.confirm');
+    final manualApproval = _manualApprovalIsValid('surface');
+    final provenance = <String, dynamic>{
+      'recognitionMode':
+          recognition.parameters['recognitionMode'] ?? 'automatic',
+      'requestedPrimitiveType':
+          recognition.parameters['requestedPrimitiveType'] ??
+          recognition.type.name,
+      'creationApproval': manualApproval ? 'manual' : 'automatic',
+      'rms': recognition.parameters['rmsDeviation'],
+      'maximumDeviation': recognition.parameters['maximumDeviation'],
+      'tolerance': recognition.parameters['dimensionalToleranceMm'],
+      'confidence': recognition.confidence,
+      'classification': recognition.parameters['planarClassification'],
+      'selectionRevision': selectionRevision,
+      'selectionFingerprint': _activeSelectionFingerprint(),
+      'fittingOrigin':
+          recognition.parameters['fittingOrigin'] ??
+          'ProfessionalRecognitionApi',
+      'confirmationAt': manualApproval
+          ? DateTime.now().toUtc().toIso8601String()
+          : null,
+    };
+    final persistedSurface = surface.copyWith(
+      parameters: {...surface.parameters, ...provenance},
+    );
+    activeSurface = persistedSurface;
+    await _upsertSurface(
+      persistedSurface,
+      command: 'surface-assistant.confirm',
+    );
     runtime.hideTransient('surface-assistant-preview');
     runtime.write(
       'surfaceAssistant.decision',
@@ -8152,8 +8392,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     runtime.write('surfaceAssistant.suggestion', null);
     stage = SketchSurfaceStage.surfaceGenerated;
-    runtime.select({surface.surfaceId});
-    return surface;
+    runtime.select({persistedSurface.surfaceId});
+    _recognitionManualApproval = null;
+    return persistedSurface;
   }
 
   Future<void> _publishRecognitionResult(
@@ -19363,18 +19604,35 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
         }
         final recognitionParameters = activeRecognitionResult?.parameters;
-        if (recognitionParameters?['diagnosticOnly'] == true) {
+        final manualApproval = _manualApprovalIsValid('reference');
+        if (recognitionParameters?['diagnosticOnly'] == true &&
+            !hasValidPlanarFitting) {
           throw StateError(
             recognitionParameters?['diagnosticReason'] as String? ??
                 'Resultado somente diagnóstico; referência bloqueada.',
           );
         }
-        if (recognitionParameters?['referenceApproved'] == false ||
-            recognitionParameters?['planarClassification'] == 'curvedPatch' ||
-            recognitionParameters?['planarClassification'] == 'ambiguous') {
+        if (!manualApproval &&
+            (recognitionParameters?['referenceApproved'] == false ||
+                recognitionParameters?['planarClassification'] ==
+                    'curvedPatch' ||
+                recognitionParameters?['planarClassification'] ==
+                    'ambiguous')) {
           throw StateError(
             'A estabilidade planar não autoriza uma referência neste resultado.',
           );
+        }
+        final winnerParameters = primitive.recognition.winner.parameters;
+        final resultParameters =
+            activeRecognitionResult?.parameters ?? const <String, dynamic>{};
+        if (!hasValidPlanarFitting ||
+            !_isFiniteVector(winnerParameters['origin'], nonZero: false) ||
+            !_isFiniteVector(winnerParameters['normal'], nonZero: true) ||
+            (resultParameters.containsKey('origin') &&
+                !_isFiniteVector(resultParameters['origin'], nonZero: false)) ||
+            (resultParameters.containsKey('normal') &&
+                !_isFiniteVector(resultParameters['normal'], nonZero: true))) {
+          throw StateError('O ajuste planar não possui geometria válida.');
         }
         final adaptation = await MeshRegionSmartRegionAdapter(_smartRegionsApi)
             .adapt(
@@ -19435,11 +19693,38 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               meshes: {adaptation.mesh.id: adaptation.mesh},
               regions: {adaptation.region.id: adaptation.region},
             );
+        referenceCommandValue = referenceCommandValue!.copyWith(
+          metadata: {
+            ...referenceCommandValue!.metadata,
+            'recognitionMode':
+                activeRecognitionResult?.parameters['recognitionMode'] ??
+                'automatic',
+            'requestedPrimitiveType':
+                activeRecognitionResult?.parameters['requestedPrimitiveType'] ??
+                'plane',
+            'creationApproval': manualApproval ? 'manual' : 'automatic',
+            'rms': activeRecognitionResult?.parameters['rmsDeviation'],
+            'maximumDeviation':
+                activeRecognitionResult?.parameters['maximumDeviation'],
+            'tolerance':
+                activeRecognitionResult?.parameters['dimensionalToleranceMm'],
+            'confidence': activeRecognitionResult?.confidence,
+            'classification':
+                activeRecognitionResult?.parameters['planarClassification'],
+            'selectionRevision': selectionRevision,
+            'selectionFingerprint': _activeSelectionFingerprint(),
+            'fittingOrigin': primitive.recognition.winner.origin,
+            'confirmationAt': manualApproval
+                ? DateTime.now().toUtc().toIso8601String()
+                : null,
+          },
+        );
         activeReference = referenceCommandValue;
         await _upsertReference(
           referenceCommandValue!,
           command: 'reference.recognition',
         );
+        _recognitionManualApproval = null;
         stage = SketchSurfaceStage.referenceReady;
         return referenceCommandValue!.id;
       },

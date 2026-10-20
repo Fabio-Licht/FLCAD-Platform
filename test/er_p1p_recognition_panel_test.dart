@@ -19,7 +19,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  testWidgets('curvedPatch keeps CAD creation disabled with a visible reason', (
+  testWidgets('curvedPatch offers explicit manual CAD confirmation', (
     tester,
   ) async {
     final harness = await _PanelHarness.create(
@@ -36,7 +36,7 @@ void main() {
     await harness.pump(tester);
 
     expect(harness.controller.canCreatePlaneReference, isFalse);
-    expect(planeReferenceButton(tester).onPressed, isNull);
+    expect(planeReferenceButton(tester).onPressed, isNotNull);
     expect(find.textContaining('Trecho de superfície curva'), findsWidgets);
     expect(tester.widget<OutlinedButton>(previewFinder()).onPressed, isNotNull);
 
@@ -47,7 +47,8 @@ void main() {
 
     expect(harness.controller.activeSurfaceAssistantSuggestion, isNotNull);
     expect(harness.controller.canCreateSurfaceFromAssistant, isFalse);
-    expect(surfaceCreationButton(tester).onPressed, isNull);
+    expect(surfaceCreationButton(tester).onPressed, isNotNull);
+    expect(harness.controller.canRequestManualSurfaceAction, isTrue);
     expect(
       harness.controller.surfaceCreationBlockReason,
       contains('somente diagnóstico'),
@@ -79,7 +80,8 @@ void main() {
 
       expect(harness.controller.activeSurfaceAssistantSuggestion, isNotNull);
       expect(harness.controller.canCreateSurfaceFromAssistant, isFalse);
-      expect(surfaceCreationButton(tester).onPressed, isNull);
+      expect(surfaceCreationButton(tester).onPressed, isNotNull);
+      expect(harness.controller.canRequestManualSurfaceAction, isTrue);
       expect(
         find.textContaining('autoriza a referência, mas não a superfície CAD'),
         findsOneWidget,
@@ -122,7 +124,50 @@ void main() {
     expect(surfaceCreationButton(tester).onPressed, isNotNull);
   });
 
-  testWidgets('rejected dimensional result blocks every creation action', (
+  testWidgets('planar recognition exposes surface action before preview', (
+    tester,
+  ) async {
+    final harness = await _PanelHarness.create(
+      tester,
+      parameters: _planeParameters(
+        classification: 'planarCadCandidate',
+        referenceApproved: true,
+        cadSurfaceApproved: true,
+      ),
+    );
+    addTearDown(harness.dispose);
+
+    await harness.pump(tester);
+    expect(find.textContaining('Criar superf'), findsOneWidget);
+    expect(harness.controller.canOpenSurfaceCreation, isTrue);
+    expect(harness.controller.activeSurfaceAssistantSuggestion, isNull);
+    return;
+  });
+
+  testWidgets('surface action explains when the CAD domain is missing', (
+    tester,
+  ) async {
+    final harness = await _PanelHarness.create(
+      tester,
+      parameters: _planeParameters(
+        classification: 'planarCadCandidate',
+        referenceApproved: true,
+        cadSurfaceApproved: true,
+      ),
+    );
+    addTearDown(harness.dispose);
+
+    harness.controller.activeContext = null;
+    await harness.pump(tester);
+    expect(find.textContaining('Criar superf'), findsOneWidget);
+    expect(harness.controller.canOpenSurfaceCreation, isFalse);
+    expect(
+      find.textContaining('Defina uma regiÃ£o planar conectada'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('rejected dimensional result requires manual confirmation', (
     tester,
   ) async {
     final harness = await _PanelHarness.create(
@@ -143,7 +188,7 @@ void main() {
     await harness.pump(tester);
 
     expect(harness.controller.canCreatePlaneReference, isFalse);
-    expect(planeReferenceButton(tester).onPressed, isNull);
+    expect(planeReferenceButton(tester).onPressed, isNotNull);
     expect(
       find.textContaining('Resultado dimensional reprovado'),
       findsOneWidget,
@@ -155,10 +200,62 @@ void main() {
     await tester.pump();
 
     expect(harness.controller.canCreateSurfaceFromAssistant, isFalse);
-    expect(surfaceCreationButton(tester).onPressed, isNull);
+    expect(surfaceCreationButton(tester).onPressed, isNotNull);
+    expect(harness.controller.canRequestManualSurfaceAction, isTrue);
     expect(
       harness.controller.surfaceCreationBlockReason,
       contains('Resultado dimensional reprovado'),
+    );
+  });
+
+  testWidgets('manual approval expires when the mesh context changes', (
+    tester,
+  ) async {
+    final harness = await _PanelHarness.create(
+      tester,
+      parameters: _planeParameters(
+        classification: 'curvedPatch',
+        referenceApproved: false,
+        cadSurfaceApproved: false,
+      ),
+    );
+    addTearDown(harness.dispose);
+
+    harness.controller.prepareManualRecognitionApproval('reference');
+    expect(harness.controller.canCreatePlaneReference, isTrue);
+
+    harness.controller.activeContext = BridgeContext(
+      projectId: 'project',
+      meshId: 'Mesh002',
+      meshFingerprint: 'different-fingerprint',
+      userConfirmed: false,
+      region: harness.controller.activeContext!.region,
+    );
+    expect(harness.controller.canCreatePlaneReference, isFalse);
+  });
+
+  testWidgets('non-finite fitting parameters cannot be manually approved', (
+    tester,
+  ) async {
+    final harness = await _PanelHarness.create(
+      tester,
+      parameters: _planeParameters(
+        classification: 'curvedPatch',
+        referenceApproved: false,
+        cadSurfaceApproved: false,
+      ),
+    );
+    addTearDown(harness.dispose);
+
+    harness.controller.activeRecognitionResult!.parameters['normal'] = <double>[
+      double.nan,
+      0,
+      0,
+    ];
+    expect(harness.controller.hasValidPlanarFitting, isFalse);
+    expect(
+      () => harness.controller.prepareManualRecognitionApproval('reference'),
+      throwsStateError,
     );
   });
 }

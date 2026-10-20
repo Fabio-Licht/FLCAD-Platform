@@ -1217,9 +1217,26 @@ int flcad_occ_surface_topology(const char *id, char *out, size_t os, char *e,
     const TopoDS_Shape s = get(id);
     if (s.ShapeType() != TopAbs_FACE)
       return fail("Surface topology requires a TopoDS_Face", e, es);
+    BRepCheck_Analyzer analyzer(s, Standard_True);
+    GProp_GProps surface_props;
+    BRepGProp::SurfaceProperties(s, surface_props);
+    TopTools_IndexedMapOfShape edges, vertices;
+    TopExp::MapShapes(s, TopAbs_EDGE, edges);
+    TopExp::MapShapes(s, TopAbs_VERTEX, vertices);
+    double perimeter = 0;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+      GProp_GProps edge_value;
+      BRepGProp::LinearProperties(edges(i), edge_value);
+      perimeter += edge_value.Mass();
+    }
     std::ostringstream json;
     json.exceptions(std::ios::badbit | std::ios::failbit);
-    json << "{\"boundaries\":[";
+    json << "{\"area\":" << surface_props.Mass()
+         << ",\"perimeter\":" << perimeter
+         << ",\"faceCount\":1,\"edgeCount\":" << edges.Extent()
+         << ",\"vertexCount\":" << vertices.Extent()
+         << ",\"valid\":" << (analyzer.IsValid() ? "true" : "false")
+         << ",\"boundaries\":[";
     bool first = true;
     int boundary = 0;
     std::vector<std::vector<int>> loops;

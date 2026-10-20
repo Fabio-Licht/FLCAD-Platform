@@ -2552,15 +2552,25 @@ class _CadScenePainter extends CustomPainter {
     }
     switch (entity.kind) {
       case CadSceneEntityKind.point:
+        // Surface topology vertices publish `origin`; reference points publish
+        // `position`. A throw here aborts the whole frame and hides every
+        // entity painted after this one (managed STL is ordered last).
+        final pointPosition =
+            entity.geometry['position'] ?? entity.geometry['origin'];
+        if (pointPosition is! List || pointPosition.length < 3) break;
+        final surfaceVertex = entity.geometry['displayColor'] == 'surfaceVertex';
         canvas.drawCircle(
-          project(vector(entity.geometry['position'])),
+          project(vector(pointPosition)),
           entity.selected
               ? 7
-              : (entity.geometry['markerRadius'] as num?)?.toDouble() ?? 5,
+              : (entity.geometry['markerRadius'] as num?)?.toDouble() ??
+                    (surfaceVertex ? 3 : 5),
           Paint()
             ..color = switch (entity.geometry['displayColor']) {
               'endpointSnap' => const Color(0xff62d98b),
               'capturedOrigin' => const Color(0xffffd54f),
+              'surfaceVertex' =>
+                highlighted ? const Color(0xff38d6ff) : const Color(0xffcfd8e3),
               _ => colors.tertiary,
             },
         );
@@ -2861,6 +2871,7 @@ class _CadScenePainter extends CustomPainter {
             'assistantSuggestion' => const Color(0xff4de1d2),
             'sectionBlue' => const Color(0xff4cb9e8),
             'drivingDimension' => const Color(0xff65c7ff),
+            'surfaceEdge' => const Color(0xffcfd8e3),
             _ => const Color(0xff55b8df),
           };
           canvas.drawPoints(

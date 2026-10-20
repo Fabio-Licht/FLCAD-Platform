@@ -22,6 +22,23 @@ const bool _viewportDiagnosticsEnabled =
 
 enum ViewportBackend { flutterCanvas, nativeGpu }
 
+/// Surface topology children (`Edge###` curves and `Vertex###` points) are
+/// published by the Surfaces workspace next to their parent BRep face. The
+/// face itself carries the OCCT display mesh and topological edges that the
+/// native renderer presents and picks; the children are analytic boundary
+/// presentation (polyline points / vertex origin) owned by that face. They
+/// have no triangle payload by design and are painted by Flutter above the
+/// native texture, exactly like Reference Curves.
+bool isSurfaceTopologyPresentation(CadSceneEntity entity) =>
+    entity.geometry['parentSurfaceId'] is String &&
+    switch (entity.kind) {
+      CadSceneEntityKind.curve => entity.geometry['points'] is List,
+      CadSceneEntityKind.point =>
+        entity.geometry['origin'] is List ||
+            entity.geometry['position'] is List,
+      _ => false,
+    };
+
 /// Viewport chrome/reference presentation stays in Flutter above the native
 /// texture. It is not CAD geometry and therefore cannot affect backend
 /// eligibility or be published to the triangle renderer.
@@ -31,7 +48,9 @@ bool isNativeViewportOverlay(CadSceneEntity entity) => switch (entity.kind) {
   CadSceneEntityKind.plane ||
   CadSceneEntityKind.coordinateSystem => true,
   CadSceneEntityKind.point =>
-    entity.geometry['type'] == 'point' || entity.id.contains(':world:'),
+    entity.geometry['type'] == 'point' ||
+        entity.id.contains(':world:') ||
+        isSurfaceTopologyPresentation(entity),
   CadSceneEntityKind.sketch => true,
   // Reference Curves/Sections are analytic overlays rendered by Flutter over
   // the native CAD texture.  They have no triangle payload; treating them as
@@ -41,7 +60,8 @@ bool isNativeViewportOverlay(CadSceneEntity entity) => switch (entity.kind) {
         (entity.geometry['displayColor'] as String?)?.startsWith(
               'referenceCurve',
             ) ==
-            true,
+            true ||
+        isSurfaceTopologyPresentation(entity),
   CadSceneEntityKind.preview =>
     entity.geometry['nodes'] == null &&
         (entity.geometry['points'] is List ||

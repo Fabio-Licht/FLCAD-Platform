@@ -556,13 +556,12 @@ class OpenCascadeKernelAdapter
   );
 
   @override
-  Future<Map<String, dynamic>?> inspectBrepPresentation(
-    ShapeHandle handle,
-  ) => _legacyOperation(() async {
-    final bridge = _nativeBridge;
-    if (bridge is! OpenCascadeFFI) return null;
-    return bridge.inspectDisplayGeometry(_resolve(handle));
-  });
+  Future<Map<String, dynamic>?> inspectBrepPresentation(ShapeHandle handle) =>
+      _legacyOperation(() async {
+        final bridge = _nativeBridge;
+        if (bridge is! OpenCascadeFFI) return null;
+        return bridge.inspectDisplayGeometry(_resolve(handle));
+      });
   @override
   Future<ShapeHandle> create(
     String operation,
@@ -642,6 +641,12 @@ class OpenCascadeKernelAdapter
                 boundaryIndices: (item['boundaries'] as List).cast<int>(),
               ),
           ],
+          area: (value['area'] as num?)?.toDouble() ?? 0,
+          perimeter: (value['perimeter'] as num?)?.toDouble() ?? 0,
+          faceCount: (value['faceCount'] as num?)?.toInt() ?? 0,
+          edgeCount: (value['edgeCount'] as num?)?.toInt() ?? 0,
+          vertexCount: (value['vertexCount'] as num?)?.toInt() ?? 0,
+          valid: value['valid'] == true,
         );
       });
 

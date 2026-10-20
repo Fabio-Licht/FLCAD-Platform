@@ -5,6 +5,8 @@ import '../../../core/adaptive_surface/models/surface_geometry.dart';
 import '../../../core/feature_lifecycle/feature_update_solver.dart';
 import '../../../core/parametric_solver/parametric_solver.dart';
 import '../../../core/recognition_engine/recognition_result.dart';
+import '../../../core/cad_kernel/api/geometry_kernel_api.dart';
+import '../../../core/cad_kernel/io/kernel_io_models.dart';
 import '../../../core/surface_assistant/surface_assistant.dart';
 import '../../../core/surface_generation/api/surface_generation_api.dart';
 import '../../../core/surface_generation/models/surface_generation_models.dart';
@@ -23,6 +25,7 @@ class RecognitionSurfaceAssistantAdapter {
     required RecognitionResult recognition,
     required SurfaceAssistantSuggestion suggestion,
     required SurfaceGenerationApi generation,
+    bool allowManualApproval = false,
   }) => updates.update<Future<GeneratedSurface>>(
     request: ParametricSolveRequest(
       first: '${recognition.id}:knowledge',
@@ -43,7 +46,7 @@ class RecognitionSurfaceAssistantAdapter {
       anchors: {'${recognition.id}:knowledge'},
     ),
     apply: (_) async {
-      if (!suggestion.canCreate) {
+      if (!suggestion.canCreate && !allowManualApproval) {
         throw StateError('This suggestion is not approved for CAD creation.');
       }
       final parameters = recognition.parameters;
@@ -118,6 +121,10 @@ class RecognitionSurfaceAssistantAdapter {
         throw StateError(result.diagnostics.map((e) => e.message).join('; '));
       }
       final surface = result.surface!;
+      final topology = await _inspectNativeTopology(
+        generation.engine.kernel,
+        surface,
+      );
       return GeneratedSurface(
         surfaceId: surface.surfaceId,
         projectId: surface.projectId,
@@ -135,13 +142,7 @@ class RecognitionSurfaceAssistantAdapter {
           'recognitionConfidence': recognition.confidence,
           'assistantStrategy': suggestion.strategy.name,
           'displayMode': SurfaceDisplayMode.shadedWithEdges.name,
-          'topology': const SurfaceTopology(
-            loops: [],
-            edges: [],
-            vertices: [],
-            area: 0,
-            perimeter: 0,
-          ).toJson(),
+          'topology': topology.toJson(),
           'health': const {'recognitionDriven': true},
         },
         continuity: surface.continuity,
@@ -168,5 +169,83 @@ class RecognitionSurfaceAssistantAdapter {
   double _planeExtent(Map<String, dynamic> parameters) {
     final area = _number(parameters['area'], fallback: 4);
     return math.sqrt(area <= 0 ? 1 : area) / 2;
+  }
+
+  Future<SurfaceTopology> _inspectNativeTopology(
+    GeometryKernelAPI kernel,
+    GeneratedSurface surface,
+  ) async {
+    if (kernel is! SurfaceTopologyKernelAPI) {
+      return const SurfaceTopology(
+        loops: [],
+        edges: [],
+        vertices: [],
+        area: 0,
+        perimeter: 0,
+      );
+    }
+    final topologyKernel = kernel as SurfaceTopologyKernelAPI;
+    final native = await topologyKernel.inspectSurfaceTopology(surface.handle);
+    if (!native.valid || native.faceCount != 1 || native.edgeCount == 0) {
+      throw StateError('OCCT did not produce a valid bounded planar face.');
+    }
+    Map<String, dynamic>? display;
+    if (kernel is BrepPresentationGeometryKernelAPI) {
+      display = await kernel.inspectBrepPresentation(surface.handle);
+    }
+    final rawEdges = (display?['topologicalEdges'] as List?) ?? const [];
+    final edges = <SurfaceEdge>[];
+    final vertices = <SurfaceVertex>[];
+    final vertexIds = <String, String>{};
+    String vertexFor(List<double> point) {
+      final key = point.map((value) => value.toStringAsPrecision(15)).join(',');
+      return vertexIds.putIfAbsent(key, () {
+        final id = 'Vertex${(vertexIds.length + 1).toString().padLeft(3, '0')}';
+        vertices.add(SurfaceVertex(id: id, sourceKeys: [key], position: point));
+        return id;
+      });
+    }
+
+    for (var index = 0; index < native.edgeCount; index++) {
+      final raw = index < rawEdges.length ? rawEdges[index] : null;
+      final values = raw is List ? raw.cast<num>().toList() : const <num>[];
+      final points = <List<double>>[];
+      for (var offset = 0; offset + 2 < values.length; offset += 3) {
+        points.add([
+          values[offset].toDouble(),
+          values[offset + 1].toDouble(),
+          values[offset + 2].toDouble(),
+        ]);
+      }
+      final endpointIds = points.length >= 2
+          ? [vertexFor(points.first), vertexFor(points.last)]
+          : const <String>[];
+      edges.add(
+        SurfaceEdge(
+          id: 'Edge${(index + 1).toString().padLeft(3, '0')}',
+          sourceEntityId: surface.surfaceId,
+          vertexIds: endpointIds,
+          points: points,
+        ),
+      );
+    }
+    final loops = [
+      for (final loop in native.loops)
+        SurfaceLoop(
+          id: 'Loop${(loop.index + 1).toString().padLeft(3, '0')}',
+          outer: loop.index == 0,
+          edgeIds: [
+            for (final boundary in loop.boundaryIndices)
+              if (boundary >= 0 && boundary < edges.length) edges[boundary].id,
+          ],
+        ),
+    ];
+    return SurfaceTopology(
+      loops: loops,
+      edges: edges,
+      vertices: vertices,
+      area: native.area,
+      perimeter: native.perimeter,
+    );
   }
 }

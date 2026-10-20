@@ -597,6 +597,24 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       icon: const Icon(Icons.visibility_outlined, size: 16),
                       label: const Text('Pré-visualizar diagnóstico'),
                     ),
+                    if (result.type == RecognitionResultType.plane &&
+                        controller.activeSurfaceAssistantSuggestion ==
+                            null) ...[
+                      const SizedBox(height: 4),
+                      FilledButton.icon(
+                        onPressed:
+                            controller.busy ||
+                                !controller.canOpenSurfaceCreation
+                            ? null
+                            : controller.previewActiveRecognition,
+                        icon: const Icon(Icons.layers_outlined, size: 16),
+                        label: const Text('Criar superfÃ­cie'),
+                      ),
+                      if (!controller.canOpenSurfaceCreation)
+                        if (controller.surfaceCreationEntryBlockReason
+                            case final reason?)
+                          _BlockReason(reason),
+                    ],
                     if (controller.hypotheses.any(
                       (item) => item.recognition.winner.type.name == 'plane',
                     )) ...[
@@ -604,7 +622,9 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       FilledButton.icon(
                         onPressed:
                             controller.busy ||
-                                !controller.canCreatePlaneReference
+                                (!controller.canCreatePlaneReference &&
+                                    !controller
+                                        .canRequestManualPlaneReferenceAction)
                             ? null
                             : () async {
                                 final plane = controller.hypotheses.firstWhere(
@@ -612,6 +632,49 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                                       item.recognition.winner.type.name ==
                                       'plane',
                                 );
+                                if (controller
+                                        .canRequestManualPlaneReferenceAction &&
+                                    !controller.canCreatePlaneReference) {
+                                  final confirmed =
+                                      await showDialog<bool>(
+                                        context: context,
+                                        builder: (dialogContext) => AlertDialog(
+                                          title: const Text(
+                                            'Confirmar criação manual',
+                                          ),
+                                          content: Text(
+                                            'A região excede os critérios recomendados para ajuste planar.\n\n'
+                                            'RMS: ${_formatMillimeters(plane.recognition.winner.statistics.rms)}\n'
+                                            'Máximo: ${_formatMillimeters(plane.recognition.winner.statistics.maximum)}\n'
+                                            'Tolerância: ${_formatMillimeters(controller.planarToleranceMm)}\n'
+                                            'Confiança: ${(plane.recognition.dna.confidence * 100).toStringAsFixed(1)}%\n'
+                                            'Classificação: ${_classificationLabel(controller.activeRecognitionResult?.parameters['planarClassification'])}\n\n'
+                                            'A geometria será criada por decisão manual, mantendo os desvios registrados.',
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () => Navigator.pop(
+                                                dialogContext,
+                                                false,
+                                              ),
+                                              child: const Text('Cancelar'),
+                                            ),
+                                            FilledButton(
+                                              onPressed: () => Navigator.pop(
+                                                dialogContext,
+                                                true,
+                                              ),
+                                              child: const Text('Confirmar'),
+                                            ),
+                                          ],
+                                        ),
+                                      ) ??
+                                      false;
+                                  if (!confirmed) return;
+                                  controller.prepareManualRecognitionApproval(
+                                    'reference',
+                                  );
+                                }
                                 controller.decide(
                                   plane.recognition.id,
                                   RecognitionDecision.accepted,
@@ -675,10 +738,59 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                             child: FilledButton.icon(
                               onPressed:
                                   controller.busy ||
-                                      !controller.canCreateSurfaceFromAssistant
+                                      (!controller
+                                              .canCreateSurfaceFromAssistant &&
+                                          !controller
+                                              .canRequestManualSurfaceAction)
                                   ? null
                                   : () async {
                                       try {
+                                        if (controller
+                                                .canRequestManualSurfaceAction &&
+                                            !controller
+                                                .canCreateSurfaceFromAssistant) {
+                                          final confirmed =
+                                              await showDialog<bool>(
+                                                context: context,
+                                                builder: (dialogContext) =>
+                                                    AlertDialog(
+                                                      title: const Text(
+                                                        'Confirmar criação manual',
+                                                      ),
+                                                      content: const Text(
+                                                        'A região excede os critérios recomendados para superfície planar. Você pode criar a geometria por decisão explícita, mantendo os desvios registrados.',
+                                                      ),
+                                                      actions: [
+                                                        TextButton(
+                                                          onPressed: () =>
+                                                              Navigator.pop(
+                                                                dialogContext,
+                                                                false,
+                                                              ),
+                                                          child: const Text(
+                                                            'Cancelar',
+                                                          ),
+                                                        ),
+                                                        FilledButton(
+                                                          onPressed: () =>
+                                                              Navigator.pop(
+                                                                dialogContext,
+                                                                true,
+                                                              ),
+                                                          child: const Text(
+                                                            'Confirmar',
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                              ) ??
+                                              false;
+                                          if (!confirmed) return;
+                                          controller
+                                              .prepareManualRecognitionApproval(
+                                                'surface',
+                                              );
+                                        }
                                         await controller
                                             .confirmSurfaceAssistantSuggestion();
                                       } catch (_) {}
