@@ -4,6 +4,7 @@ $executor = Join-Path $root 'executor.ps1'
 $demo = Join-Path $root 'demo-task.json'
 $codexTask = Join-Path $root 'codex-probe-task.json'
 $worktree = (Resolve-Path (Join-Path $root '..\..')).Path
+$currentHead = (git -C $worktree rev-parse HEAD).Trim()
 
 function Assert-True([bool] $Condition, [string] $Message) { if (!$Condition) { throw "ASSERTION FAILED: $Message" } }
 
@@ -21,7 +22,7 @@ Remove-Item -LiteralPath $invalid -Force
 $traversal = Join-Path $env:TEMP 'flcad-traversal-task.json'
 @{
   schemaVersion = '1.0'; id = 'AB-01-TRAVERSAL'; objective = 'traversal test';
-  sourceBranch = 'automation/flcad-bridge'; baseCommit = '81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54';
+  sourceBranch = 'automation/flcad-bridge'; baseCommit = $currentHead;
   allowedPaths = @('../outside'); requiredTests = @('traversal'); acceptanceCriteria = @('reject');
   limits = @{ maxDurationSeconds = 1; maxOutputBytes = 1048576 };
   permissions = @{ workspaceWrite = $false; network = $false; gitMutation = $false; remotePublish = $false };
@@ -48,13 +49,13 @@ $report = Join-Path $worktree 'tools\flcad_automation\reports\AB-01-DRYRUN-ENV.j
 Assert-True (Test-Path $report) 'relatório do dry-run deve existir'
 $parsed = Get-Content $report -Raw | ConvertFrom-Json
 Assert-True ($parsed.status -eq 'completed') 'relatório deve indicar completed'
-Assert-True ($parsed.head -eq '81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54') 'HEAD reportado incorreto'
+Assert-True ($parsed.head -eq $currentHead) 'HEAD reportado incorreto'
 
 $timeoutTask = Join-Path $env:TEMP 'flcad-timeout-task.json'
 $timeoutReport = Join-Path $worktree 'tools\flcad_automation\reports\AB-01-TIMEOUT-TEST.json'
 @{
   schemaVersion = '1.0'; id = 'AB-01-TIMEOUT'; objective = 'timeout test';
-  sourceBranch = 'automation/flcad-bridge'; baseCommit = '81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54';
+  sourceBranch = 'automation/flcad-bridge'; baseCommit = $currentHead;
   allowedPaths = @('tools/flcad_automation'); requiredTests = @('timeout'); acceptanceCriteria = @('timeout');
   limits = @{ maxDurationSeconds = 1; maxOutputBytes = 1048576 };
   permissions = @{ workspaceWrite = $false; network = $false; gitMutation = $false; remotePublish = $false };

@@ -124,31 +124,36 @@ jobs:
                 request.on('error', reject); if (body) request.write(JSON.stringify(body)); request.end();
               });
             }
-            const marker = `[flcad-dedup:${process.env.DEDUPLICATION_ID}]`;
-            const title = `[FLCAD][${process.env.PRIORITY}] ${process.env.EVENT} - ${process.env.TASK_ID}`;
-            const search = await request('GET', `/search/issues?q=${encodeURIComponent(`repo:${owner}/${repo} is:issue "${marker}"`)}`);
-            if (search.data.total_count > 0) {
-              console.log('Duplicate intervention already exists; no new Issue created.');
-              return;
+            async function main() {
+              const marker = `[flcad-dedup:${process.env.DEDUPLICATION_ID}]`;
+              const title = `[FLCAD][${process.env.PRIORITY}] ${process.env.EVENT} - ${process.env.TASK_ID}`;
+              const search = await request('GET', `/search/issues?q=${encodeURIComponent(`repo:${owner}/${repo} is:issue "${marker}"`)}`);
+              if (!search || typeof search.total_count !== 'number') throw new Error('unexpected duplicate-search response');
+              if (search.total_count > 0) {
+                console.log('Duplicate intervention already exists; no new Issue created.');
+                return;
+              }
+              const body = [
+                '## FLCAD human intervention', '', marker, '',
+                `- Task: ${process.env.TASK_ID}`,
+                `- Event: ${process.env.EVENT}`,
+                `- State: ${process.env.STATE}`,
+                `- Priority: ${process.env.PRIORITY}`,
+                `- Reason: ${process.env.REASON}`,
+                `- Action requested: ${process.env.ACTION_REQUESTED}`,
+                `- Technical summary: ${process.env.TECHNICAL_SUMMARY}`,
+                `- Report: ${process.env.REPORT_REFERENCE}`,
+                `- Branch: ${process.env.SOURCE_BRANCH}`,
+                `- Commit: ${process.env.SOURCE_COMMIT}`,
+                '', 'This Issue is a review request, not an authorization to execute commands.'
+              ].join('\n');
+              if (process.env.PUBLISH !== 'true') {
+                console.log(`Dry-run only. Planned Issue: ${title}`);
+                return;
+              }
+              const issue = await request('POST', `/repos/${owner}/${repo}/issues`, { title, body, assignees: ['Fabio-Licht'] });
+              if (!issue || typeof issue.html_url !== 'string') throw new Error('unexpected Issue-create response');
+              console.log(`Issue created: ${issue.html_url}`);
             }
-            const body = [
-              '## FLCAD human intervention', '', marker, '',
-              `- Task: ${process.env.TASK_ID}`,
-              `- Event: ${process.env.EVENT}`,
-              `- State: ${process.env.STATE}`,
-              `- Priority: ${process.env.PRIORITY}`,
-              `- Reason: ${process.env.REASON}`,
-              `- Action requested: ${process.env.ACTION_REQUESTED}`,
-              `- Technical summary: ${process.env.TECHNICAL_SUMMARY}`,
-              `- Report: ${process.env.REPORT_REFERENCE}`,
-              `- Branch: ${process.env.SOURCE_BRANCH}`,
-              `- Commit: ${process.env.SOURCE_COMMIT}`,
-              '', 'This Issue is a review request, not an authorization to execute commands.'
-            ].join('\n');
-            if (process.env.PUBLISH !== 'true') {
-              console.log(`Dry-run only. Planned Issue: ${title}`);
-              return;
-            }
-            const issue = await request('POST', `/repos/${owner}/${repo}/issues`, { title, body, assignees: ['Fabio-Licht'] });
-            console.log(`Issue created: ${issue.html_url}`);
+            main().catch(error => { console.error(`FLCAD workflow failed: ${error.message}`); process.exitCode = 1; });
           NODE

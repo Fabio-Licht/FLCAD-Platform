@@ -3,7 +3,7 @@
   "id": "AB-01-CODEX-PROBE",
   "objective": "Consultar branch, HEAD e ferramentas no worktree usando o Codex CLI em modo somente leitura.",
   "sourceBranch": "automation/flcad-bridge",
-  "baseCommit": "81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54",
+  "baseCommit": "760842c9f83e03cd01b22765f8caab0f90e28d82",
   "allowedPaths": ["tools/flcad_automation"],
   "requiredTests": ["codex-read-only-environment-probe"],
   "acceptanceCriteria": [
