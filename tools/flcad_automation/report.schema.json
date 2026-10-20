@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-automation-report-1.0.json",
+  "title": "FLCAD automation technical report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "lifecycle_status",
+    "branch",
+    "head",
+    "objective",
+    "acceptance_criteria",
+    "execution_status",
+    "tests",
+    "duration_ms",
+    "files_changed",
+    "limitations",
+    "evidence",
+    "next_step"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$" },
+    "lifecycle_status": { "enum": ["local", "prepared-for-publication", "published", "awaiting-review", "approved", "rejected"] },
+    "branch": { "type": "string", "minLength": 1 },
+    "head": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+    "objective": { "type": "string", "minLength": 1 },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "execution_status": { "enum": ["completed", "failed", "timed-out", "cancelled"] },
+    "tests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failed", "not_run"],
+      "properties": {
+        "passed": { "type": "array", "items": { "type": "string" } },
+        "failed": { "type": "array", "items": { "type": "string" } },
+        "not_run": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "duration_ms": { "type": "number", "minimum": 0 },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "limitations": { "type": "array", "items": { "type": "string" } },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "label", "sha256"],
+        "properties": {
+          "kind": { "type": "string" },
+          "label": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+        }
+      }
+    },
+    "next_step": { "type": "string", "minLength": 1 },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "write_permission"],
+      "properties": {
+        "status": { "enum": ["local", "prepared-for-publication", "published"] },
+        "write_permission": { "enum": ["verified", "not-verified", "not-configured"] }
+      }
+    },
+    "source_report_sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+  }
+}

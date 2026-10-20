@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "id": "AB-01-DRYRUN-ENV",
+  "objective": "Reportar o ambiente local do executor supervisionado sem modificar o FLCAD.",
+  "sourceBranch": "automation/flcad-bridge",
+  "baseCommit": "81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54",
+  "allowedPaths": ["tools/flcad_automation"],
+  "requiredTests": ["environment-probe"],
+  "acceptanceCriteria": [
+    "A branch e o HEAD do worktree são registrados.",
+    "Ferramentas disponíveis são registradas.",
+    "Nenhum arquivo do código do FLCAD é alterado."
+  ],
+  "limits": {
+    "maxDurationSeconds": 60,
+    "maxOutputBytes": 1048576
+  },
+  "permissions": {
+    "workspaceWrite": false,
+    "network": false,
+    "gitMutation": false,
+    "remotePublish": false
+  },
+  "state": "approved",
+  "reportPath": "tools/flcad_automation/reports/AB-01-DRYRUN-ENV.json",
+  "action": "environment"
+}

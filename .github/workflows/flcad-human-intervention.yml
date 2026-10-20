@@ -1,0 +1,154 @@
+name: FLCAD human intervention
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Stable task identifier
+        required: true
+        type: string
+      event:
+        description: USER_TEST_REQUIRED, USER_APPROVAL_REQUIRED or AGENT_BLOCKED
+        required: true
+        type: string
+      state:
+        description: WAITING_FOR_USER or BLOCKED
+        required: true
+        type: string
+      reason:
+        description: Why an operator is needed
+        required: true
+        type: string
+      priority:
+        description: P0, P1, P2 or P3
+        required: true
+        type: string
+      action_requested:
+        description: Explicit action requested from the operator
+        required: true
+        type: string
+      technical_summary:
+        description: Short sanitized technical context
+        required: true
+        type: string
+      report_reference:
+        description: Sanitized report path or URL
+        required: true
+        type: string
+      branch:
+        description: Source branch
+        required: true
+        type: string
+      commit:
+        description: 40-character source commit
+        required: true
+        type: string
+      deduplication_id:
+        description: Stable event identifier
+        required: true
+        type: string
+      publish:
+        description: Must be explicitly enabled by a reviewed dispatch
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: flcad-human-intervention-${{ inputs.deduplication_id }}
+  cancel-in-progress: false
+
+jobs:
+  prepare-or-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate fixed intervention contract
+        id: validate
+        env:
+          INPUT_JSON: ${{ toJSON(inputs) }}
+          GITHUB_ACTOR: ${{ github.actor }}
+        run: |
+          node <<'NODE'
+            const input = JSON.parse(process.env.INPUT_JSON || '{}');
+            const allowedEvents = new Set(['USER_TEST_REQUIRED', 'USER_APPROVAL_REQUIRED', 'AGENT_BLOCKED']);
+            const states = { USER_TEST_REQUIRED: 'WAITING_FOR_USER', USER_APPROVAL_REQUIRED: 'WAITING_FOR_USER', AGENT_BLOCKED: 'BLOCKED' };
+            const required = ['task_id','event','state','reason','priority','action_requested','technical_summary','report_reference','branch','commit','deduplication_id'];
+            for (const field of required) {
+              if (typeof input[field] !== 'string' || input[field].length === 0 || input[field].length > 4000) throw new Error(`invalid or oversized field: ${field}`);
+            }
+            if (!allowedEvents.has(input.event)) throw new Error('event is not human-intervention allowlisted');
+            if (states[input.event] !== input.state) throw new Error('event/state combination is invalid');
+            if (!/^P[0-3]$/.test(input.priority)) throw new Error('priority is invalid');
+            if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(input.task_id)) throw new Error('task_id is invalid');
+            if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(input.deduplication_id)) throw new Error('deduplication_id is invalid');
+            if (!/^[0-9a-fA-F]{40}$/.test(input.commit)) throw new Error('commit must be a full SHA-1');
+            if (!/^(true|false)$/.test(String(input.publish))) throw new Error('publish must be boolean');
+            if (String(input.publish) === 'true' && process.env.GITHUB_ACTOR !== 'Fabio-Licht') throw new Error('publication requires the authorized operator');
+            if (/(token|password|secret|api[_-]?key|authorization|bearer)\s*[:=]/i.test(JSON.stringify(input))) throw new Error('sensitive-looking content rejected');
+            if (!/^https:\/\//.test(input.report_reference) && !/^[A-Za-z0-9._/-]+$/.test(input.report_reference)) throw new Error('report_reference is not sanitized');
+          NODE
+
+      - name: Check duplicate and publish at most one Issue
+        if: ${{ steps.validate.outcome == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          PUBLISH: ${{ inputs.publish }}
+          TASK_ID: ${{ inputs.task_id }}
+          EVENT: ${{ inputs.event }}
+          STATE: ${{ inputs.state }}
+          REASON: ${{ inputs.reason }}
+          PRIORITY: ${{ inputs.priority }}
+          ACTION_REQUESTED: ${{ inputs.action_requested }}
+          TECHNICAL_SUMMARY: ${{ inputs.technical_summary }}
+          REPORT_REFERENCE: ${{ inputs.report_reference }}
+          SOURCE_BRANCH: ${{ inputs.branch }}
+          SOURCE_COMMIT: ${{ inputs.commit }}
+          DEDUPLICATION_ID: ${{ inputs.deduplication_id }}
+        run: |
+          node <<'NODE'
+            const https = require('https');
+            const [owner, repo] = process.env.REPOSITORY.split('/');
+            function request(method, path, body) {
+              return new Promise((resolve, reject) => {
+                const request = https.request({
+                  hostname: 'api.github.com', path, method,
+                  headers: { 'Accept': 'application/vnd.github+json', 'Authorization': `Bearer ${process.env.GITHUB_TOKEN}`, 'User-Agent': 'FLCAD-Automation-Bridge', 'X-GitHub-Api-Version': '2022-11-28', ...(body ? {'Content-Type': 'application/json'} : {}) }
+                }, response => {
+                  let data = ''; response.setEncoding('utf8'); response.on('data', chunk => data += chunk);
+                  response.on('end', () => { let parsed; try { parsed = data ? JSON.parse(data) : {}; } catch { parsed = {}; } if (response.statusCode < 200 || response.statusCode >= 300) reject(new Error(`GitHub API HTTP ${response.statusCode}: ${parsed.message || 'request failed'}`)); else resolve(parsed); });
+                });
+                request.on('error', reject); if (body) request.write(JSON.stringify(body)); request.end();
+              });
+            }
+            const marker = `[flcad-dedup:${process.env.DEDUPLICATION_ID}]`;
+            const title = `[FLCAD][${process.env.PRIORITY}] ${process.env.EVENT} - ${process.env.TASK_ID}`;
+            const search = await request('GET', `/search/issues?q=${encodeURIComponent(`repo:${owner}/${repo} is:issue "${marker}"`)}`);
+            if (search.data.total_count > 0) {
+              console.log('Duplicate intervention already exists; no new Issue created.');
+              return;
+            }
+            const body = [
+              '## FLCAD human intervention', '', marker, '',
+              `- Task: ${process.env.TASK_ID}`,
+              `- Event: ${process.env.EVENT}`,
+              `- State: ${process.env.STATE}`,
+              `- Priority: ${process.env.PRIORITY}`,
+              `- Reason: ${process.env.REASON}`,
+              `- Action requested: ${process.env.ACTION_REQUESTED}`,
+              `- Technical summary: ${process.env.TECHNICAL_SUMMARY}`,
+              `- Report: ${process.env.REPORT_REFERENCE}`,
+              `- Branch: ${process.env.SOURCE_BRANCH}`,
+              `- Commit: ${process.env.SOURCE_COMMIT}`,
+              '', 'This Issue is a review request, not an authorization to execute commands.'
+            ].join('\n');
+            if (process.env.PUBLISH !== 'true') {
+              console.log(`Dry-run only. Planned Issue: ${title}`);
+              return;
+            }
+            const issue = await request('POST', `/repos/${owner}/${repo}/issues`, { title, body, assignees: ['Fabio-Licht'] });
+            console.log(`Issue created: ${issue.html_url}`);
+          NODE

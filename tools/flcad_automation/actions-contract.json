@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-actions-transport-1.0.json",
+  "title": "FLCAD GitHub Actions human-intervention transport",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "transport", "status", "repository", "workflow", "ref", "inputs", "dispatch_performed", "issue_publication_enabled", "authentication", "requires_explicit_operator_dispatch"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "transport": {"const": "github-actions-workflow-dispatch"},
+    "status": {"enum": ["prepared-for-publication", "published", "rejected"]},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "workflow": {"type": "string", "pattern": "^\\.github/workflows/[A-Za-z0-9_.-]+\\.ya?ml$"},
+    "ref": {"type": "string", "minLength": 1, "maxLength": 255},
+    "inputs": {"type": "object", "additionalProperties": {"type": "string"}},
+    "dispatch_performed": {"const": false},
+    "issue_publication_enabled": {"const": false},
+    "authentication": {"const": "not-used"},
+    "requires_explicit_operator_dispatch": {"const": true}
+  }
+}

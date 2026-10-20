@@ -1,0 +1,5 @@
+reports/*.json
+reports/*.log
+.flcad_automation.lock
+outbox/
+notifications/

@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "id": "AB-01-CODEX-PROBE",
+  "objective": "Consultar branch, HEAD e ferramentas no worktree usando o Codex CLI em modo somente leitura.",
+  "sourceBranch": "automation/flcad-bridge",
+  "baseCommit": "81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54",
+  "allowedPaths": ["tools/flcad_automation"],
+  "requiredTests": ["codex-read-only-environment-probe"],
+  "acceptanceCriteria": [
+    "O Codex CLI termina sem modificar arquivos.",
+    "O relatório registra código de saída e duração."
+  ],
+  "limits": {
+    "maxDurationSeconds": 120,
+    "maxOutputBytes": 2097152
+  },
+  "permissions": {
+    "workspaceWrite": false,
+    "network": false,
+    "gitMutation": false,
+    "remotePublish": false
+  },
+  "state": "approved",
+  "reportPath": "tools/flcad_automation/reports/AB-01-CODEX-PROBE.json",
+  "action": "codex-environment-probe"
+}
