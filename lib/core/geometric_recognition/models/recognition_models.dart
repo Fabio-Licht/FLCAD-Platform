@@ -74,9 +74,42 @@ class FitStatistics {
     required this.stability,
     required this.score,
     this.confidenceInterval,
+    this.angularCoverageDegrees = 0,
+    this.axialLength = 0,
+    this.pointCount = 0,
+    this.inlierCount = 0,
+    this.conditioning = 0,
+    this.axisStability = 0,
+    this.converged = false,
+    this.qualityStatus = 'unknown',
   });
   final double rms, maximum, mean, coverage, stability, score;
   final (double, double)? confidenceInterval;
+
+  /// Additional dimensional diagnostics. They are optional so existing
+  /// primitive recognizers keep the original contract.
+  final double angularCoverageDegrees, axialLength, conditioning, axisStability;
+  final int pointCount, inlierCount;
+  final bool converged;
+  final String qualityStatus;
+
+  FitStatistics copyWith({double? score}) => FitStatistics(
+    rms: rms,
+    maximum: maximum,
+    mean: mean,
+    coverage: coverage,
+    stability: stability,
+    score: score ?? this.score,
+    confidenceInterval: confidenceInterval,
+    angularCoverageDegrees: angularCoverageDegrees,
+    axialLength: axialLength,
+    pointCount: pointCount,
+    inlierCount: inlierCount,
+    conditioning: conditioning,
+    axisStability: axisStability,
+    converged: converged,
+    qualityStatus: qualityStatus,
+  );
 }
 
 class RecognitionCandidate {

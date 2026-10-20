@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 
 import '../../../core/geometric_recognition/models/recognition_models.dart';
+import '../../../core/geometric_kernel/geometry/vectors.dart';
 import '../../../core/recognition_engine/recognition_result.dart';
+import '../../../core/recognition_engine/recognition_parameter_editor.dart';
 import '../../../core/surface_assistant/surface_assistant.dart';
 import '../../engineering_bridge/operational_reverse_engineering_controller.dart';
 import '../selection/editable_surface_selection.dart';
@@ -20,18 +22,32 @@ class RecognitionWorkspacePanel extends StatelessWidget {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: controller,
     builder: (context, _) {
-      if (controller.busy) {
-        return const Center(child: CircularProgressIndicator());
-      }
-      if (controller.error != null) {
-        return Text(
-          controller.error!,
-          style: TextStyle(color: Theme.of(context).colorScheme.error),
-        );
-      }
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (controller.busy) const LinearProgressIndicator(),
+          if (controller.recognitionProgress case final progress?)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                'Reconhecimento: ${_recognitionProgressLabel(progress['stage'])} · ${_formatMilliseconds(progress['elapsedMs'])}',
+                style: const TextStyle(fontSize: 9.5),
+              ),
+            ),
+          if (controller.error != null) _BlockReason(controller.error!),
+          if (controller.recognitionDebugTrace case final trace?)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Text(
+                'Debug reconhecimento: ${trace['stage']}${trace['message'] == null ? '' : ' Â· ${trace['message']}'}',
+                style: TextStyle(
+                  fontSize: 9,
+                  color: trace['stage'] == 'FAILED'
+                      ? Theme.of(context).colorScheme.error
+                      : null,
+                ),
+              ),
+            ),
           if (controller.canAlign) ...[
             Text(
               'Bancada de alinhamento',
@@ -92,7 +108,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               ),
             const Divider(),
           ],
-          if (controller.canDetect) ...[
+          if (controller.canDetect || controller.hasRecognizableMesh) ...[
             const Text(
               'Automático executa o motor multiprimitiva. Reconhecer Plano executa somente o PlaneRecognizer. '
               'Os demais chips filtram o resultado automático.',
@@ -108,15 +124,25 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   label: const Text('Automático'),
                   onPressed: controller.busy
                       ? null
-                      : controller.detectAutomatically,
+                      : () => controller.chooseRecognitionMode(null),
                 ),
                 ActionChip(
                   avatar: const Icon(Icons.crop_16_9, size: 14),
                   label: const Text('Reconhecer Plano'),
-                  onPressed:
-                      controller.busy || !controller.canRecognizeDirectedPlane
+                  onPressed: controller.busy || !controller.hasRecognizableMesh
                       ? null
-                      : () => controller.recognizeDirected(PrimitiveType.plane),
+                      : () => controller.chooseRecognitionMode(
+                          PrimitiveType.plane,
+                        ),
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.circle_outlined, size: 14),
+                  label: const Text('Reconhecer Cilindro'),
+                  onPressed: controller.busy || !controller.hasRecognizableMesh
+                      ? null
+                      : () => controller.chooseRecognitionMode(
+                          PrimitiveType.cylinder,
+                        ),
                 ),
                 for (final type in const [
                   'cylinder',
@@ -133,7 +159,7 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               ],
             ),
             if (controller.requestedRecognitionPrimitive != null)
-              if (controller.directedPlaneBlockReason case final reason?)
+              if (controller.directedRecognitionBlockReason case final reason?)
                 Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: _BlockReason(reason),
@@ -142,8 +168,9 @@ class RecognitionWorkspacePanel extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
-                  'Modo dirigido: ${_typeNameLabel(requested.name)}. '
-                  'Tipo obtido: ${_obtainedRecognitionTypeLabel(controller)}.',
+                  controller.activeContext == null
+                      ? 'Modo Reconhecer ${_typeNameLabel(requested.name)} ativo. Clique na parede ${_typeNameLabel(requested.name)} da STL para iniciar o reconhecimento.'
+                      : 'Modo dirigido: ${_typeNameLabel(requested.name)}. Tipo obtido: ${_obtainedRecognitionTypeLabel(controller)}.',
                   style: const TextStyle(fontSize: 9.5),
                 ),
               ),
@@ -166,7 +193,8 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                   ),
                 ),
               ),
-          ] else if (!controller.hasEditableSelection)
+          ] else if (!controller.hasEditableSelection &&
+              !controller.hasRecognizableMesh)
             const Text(
               'Selecione a malha na viewport para criar uma região homogênea.',
             ),
@@ -481,6 +509,62 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       label: 'Tipo',
                       value: _recognitionTypeLabel(result.type),
                     ),
+                    if (result.type == RecognitionResultType.cylinder) ...[
+                      _RecognitionMetric(
+                        label: 'Origem do eixo',
+                        value: _formatParameterValue(
+                          result.parameters['origin'],
+                        ),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Direção do eixo',
+                        value: _formatParameterValue(result.parameters['axis']),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Raio',
+                        value: _formatMillimeters(result.parameters['radius']),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Diâmetro',
+                        value: _formatMillimeters(
+                          result.parameters['diameter'],
+                        ),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Comprimento axial observado',
+                        value: _formatMillimeters(result.parameters['length']),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Cobertura de inliers',
+                        value: _formatPercent(
+                          result.parameters['inlierCoverage'],
+                        ),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Cobertura angular real',
+                        value:
+                            result.parameters['angularCoverageDegrees'] is num
+                            ? '${(result.parameters['angularCoverageDegrees'] as num).toStringAsFixed(1)}°'
+                            : '—',
+                      ),
+                      _RecognitionMetric(
+                        label: 'Estabilidade do eixo',
+                        value: _formatPercent(
+                          result.parameters['axisStability'],
+                        ),
+                      ),
+                      _RecognitionMetric(
+                        label: 'Condicionamento',
+                        value: result.parameters['conditioning'] is num
+                            ? (result.parameters['conditioning'] as num)
+                                  .toStringAsFixed(3)
+                            : '—',
+                      ),
+                      _RecognitionMetric(
+                        label: 'Pontos',
+                        value: '${result.parameters['pointCount'] ?? '—'}',
+                      ),
+                    ],
                     _RecognitionMetric(
                       label: 'Classificação geométrica',
                       value: result.type == RecognitionResultType.plane
@@ -494,13 +578,17 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       value: '${(result.confidence * 100).toStringAsFixed(1)}%',
                     ),
                     _RecognitionMetric(
-                      label: 'RMS',
+                      label: result.type == RecognitionResultType.cylinder
+                          ? 'RMS radial'
+                          : 'RMS',
                       value: _formatMillimeters(
                         result.parameters['rmsDeviation'],
                       ),
                     ),
                     _RecognitionMetric(
-                      label: 'Desvio máximo',
+                      label: result.type == RecognitionResultType.cylinder
+                          ? 'Desvio máximo radial'
+                          : 'Desvio máximo',
                       value: _formatMillimeters(
                         result.parameters['maximumDeviation'],
                       ),
@@ -525,6 +613,13 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                           ? Colors.amber.shade800
                           : null,
                     ),
+                    if (result.type == RecognitionResultType.cylinder)
+                      _RecognitionMetric(
+                        label: 'Qualidade do ajuste',
+                        value: _cylinderQualityLabel(
+                          result.parameters['qualityStatus'],
+                        ),
+                      ),
                     _RecognitionMetric(
                       label: 'Triângulos',
                       value: _selectedTriangleCount(controller),
@@ -565,6 +660,9 @@ class RecognitionWorkspacePanel extends StatelessWidget {
                       if (result.parameters['diagnosticReason']
                           case final String reason)
                         _BlockReason(reason),
+                    if (result.type == RecognitionResultType.cylinder &&
+                        controller.cylinderParameterEditor != null)
+                      _CylinderParameterEditorCard(controller: controller),
                     if (result.type == RecognitionResultType.plane) ...[
                       const SizedBox(height: 6),
                       TextFormField(
@@ -1034,6 +1132,246 @@ class RecognitionWorkspacePanel extends StatelessWidget {
   );
 }
 
+String _recognitionProgressLabel(dynamic stage) => switch (stage) {
+  'picking' => 'preparando seleção',
+  'selecting-region' => 'selecionando região cilíndrica',
+  'region-selected' => 'região selecionada',
+  'region-visible' => 'seleção publicada',
+  'fitting' => 'ajustando geometria',
+  'calculating-diagnostics' => 'calculando diagnósticos',
+  'publishing-result' => 'publicando resultado',
+  'completed' => 'concluído',
+  'failed' => 'falhou',
+  _ => stage?.toString() ?? 'aguardando',
+};
+
+String _formatMilliseconds(dynamic value) =>
+    value is num ? '${value.toDouble().toStringAsFixed(0)} ms' : '—';
+
+class _CylinderParameterEditorCard extends StatelessWidget {
+  const _CylinderParameterEditorCard({required this.controller});
+
+  final OperationalReverseEngineeringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final editor = controller.cylinderParameterEditor!;
+    final target = editor.target;
+    final measured = editor.measured.parameters;
+    final frames = controller.cylinderEditorFrames;
+    final axisOptions = <String>[
+      'recognized',
+      for (final frame in frames)
+        for (final axis in const ['X', 'Y', 'Z']) '${frame.id}:$axis',
+    ];
+    final selectedAxis = axisOptions.contains(target.axisSource)
+        ? target.axisSource
+        : null;
+    final inverted = target.axis.dot(_editorVector(measured['axis'])) < 0;
+    final error = controller.cylinderParameterEditorError;
+    return Card(
+      color: Theme.of(context).colorScheme.surface,
+      child: Padding(
+        padding: const EdgeInsets.only(top: 8, left: 8, right: 8, bottom: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Editor paramétrico · cilindro',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const Text(
+              'MEDIDO permanece imutável. CORRIGIDO altera somente o preview transitório.',
+              style: TextStyle(fontSize: 9.5),
+            ),
+            const SizedBox(height: 5),
+            Row(
+              children: [
+                Expanded(
+                  child: TextFormField(
+                    key: ValueKey('diameter-${target.diameter}'),
+                    initialValue: target.diameter.toStringAsFixed(6),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Diâmetro corrigido (mm)',
+                      isDense: true,
+                    ),
+                    onChanged: controller.setCylinderDiameterDraft,
+                    onFieldSubmitted:
+                        controller.setCylinderTargetDiameterFromText,
+                    onTapOutside: (_) =>
+                        controller.commitCylinderParameterDrafts(),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: TextFormField(
+                    key: ValueKey('radius-${target.diameter}'),
+                    initialValue: (target.diameter / 2).toStringAsFixed(6),
+                    keyboardType: const TextInputType.numberWithOptions(
+                      decimal: true,
+                    ),
+                    decoration: const InputDecoration(
+                      labelText: 'Raio equivalente (mm)',
+                      isDense: true,
+                    ),
+                    onChanged: controller.setCylinderRadiusDraft,
+                    onFieldSubmitted:
+                        controller.setCylinderTargetRadiusFromText,
+                    onTapOutside: (_) =>
+                        controller.commitCylinderParameterDrafts(),
+                  ),
+                ),
+              ],
+            ),
+            if (error case final value?) _BlockReason(value),
+            const SizedBox(height: 4),
+            DropdownButtonFormField<String>(
+              key: ValueKey('axis-${target.axisSource}'),
+              initialValue: selectedAxis,
+              isExpanded: true,
+              isDense: true,
+              decoration: const InputDecoration(
+                labelText: 'Orientação do eixo',
+                isDense: true,
+              ),
+              items: [
+                const DropdownMenuItem(
+                  value: 'recognized',
+                  child: Text(
+                    'Manter direção reconhecida',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                for (final frame in frames)
+                  for (final axis in const ['X', 'Y', 'Z'])
+                    DropdownMenuItem(
+                      value: '${frame.id}:$axis',
+                      child: Text(
+                        '${frame.label} · eixo $axis',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+              ],
+              onChanged: (value) {
+                if (value != null) controller.setCylinderAxisAlignment(value);
+              },
+            ),
+            const SizedBox(height: 4),
+            TextFormField(
+              key: ValueKey('manual-axis-${target.axis.toJson()}'),
+              initialValue: target.axis.toJson().join(', '),
+              decoration: const InputDecoration(
+                labelText: 'Direção manual (X, Y, Z)',
+                isDense: true,
+              ),
+              onChanged: controller.setCylinderManualAxisDraft,
+              onFieldSubmitted: controller.setCylinderManualAxisFromText,
+              onTapOutside: (_) => controller.commitCylinderParameterDrafts(),
+            ),
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              title: const Text(
+                'Inverter sentido do eixo',
+                style: TextStyle(fontSize: 10),
+              ),
+              value: inverted,
+              onChanged: (value) =>
+                  controller.setCylinderAxisInverted(value == true),
+            ),
+            Text(
+              'Âncora: ponto central reconhecido · origem preservada ao alinhar.',
+              style: TextStyle(
+                fontSize: 9.5,
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 4),
+            TextFormField(
+              key: ValueKey('origin-${target.origin.toJson()}'),
+              initialValue: target.origin.toJson().join(', '),
+              decoration: const InputDecoration(
+                labelText: 'Origem do eixo corrigida (X, Y, Z mm)',
+                isDense: true,
+              ),
+              onChanged: controller.setCylinderOriginDraft,
+              onFieldSubmitted: controller.setCylinderTargetOriginFromText,
+              onTapOutside: (_) => controller.commitCylinderParameterDrafts(),
+            ),
+            if (controller.cylinderParameterEditorDraftPending)
+              const _BlockReason(
+                'EdiÃ§Ã£o pendente: confirme o campo ou use Confirmar parÃ¢metros para aplicar o texto.',
+              ),
+            const SizedBox(height: 5),
+            _RecognitionMetric(
+              label: 'MEDIDO · diâmetro',
+              value: _formatMillimeters(
+                measured['diameter'] ?? measured['radius'],
+              ),
+            ),
+            _RecognitionMetric(
+              label: 'CORRIGIDO · diâmetro',
+              value: _formatMillimeters(target.diameter),
+            ),
+            _RecognitionMetric(
+              label: 'CORRIGIDO · RMS radial',
+              value: _formatMillimeters(editor.metrics.rms),
+            ),
+            _RecognitionMetric(
+              label: 'CORRIGIDO · desvio máximo',
+              value: _formatMillimeters(editor.metrics.maximum),
+            ),
+            _RecognitionMetric(
+              label: 'Diferença dimensional',
+              value: _formatMillimeters(editor.metrics.diameterDelta),
+            ),
+            if (controller.cylinderParameterEditorStale)
+              const _BlockReason(
+                'Seleção ou malha alterada. O preview e a confirmação foram bloqueados.',
+              ),
+            if (editor.state == RecognitionParameterEditorState.confirmed)
+              const Text(
+                'Parâmetros confirmados como estado transitório; nenhuma BRep foi criada.',
+                style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w600),
+              ),
+            const SizedBox(height: 5),
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                OutlinedButton(
+                  onPressed: controller.resetCylinderParameterEditing,
+                  child: const Text('Reset reconhecido'),
+                ),
+                TextButton(
+                  onPressed: controller.cancelCylinderParameterEditing,
+                  child: const Text('Cancelar'),
+                ),
+                FilledButton(
+                  onPressed:
+                      controller.cylinderParameterEditorStale ||
+                          controller.cylinderParameterEditorError != null
+                      ? null
+                      : controller.confirmCylinderParameterEditing,
+                  child: const Text('Confirmar parâmetros'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Vector3 _editorVector(dynamic value) =>
+    value is List && value.length == 3 && value.every((item) => item is num)
+    ? Vector3.fromJson(value)
+    : Vector3.zero;
+
 class _RecognitionMetric extends StatelessWidget {
   const _RecognitionMetric({
     required this.label,
@@ -1159,6 +1497,16 @@ String _dimensionalStatusLabel(Object? status) => switch (status) {
   _ => 'Não aplicável',
 };
 
+String _cylinderQualityLabel(Object? status) => switch (status) {
+  'reliable' => 'Ajuste confiável',
+  'conditioned' => 'Ajuste condicionado',
+  'insufficient-angular-coverage' => 'Cobertura insuficiente',
+  'high-residuals' => 'Resíduos elevados',
+  'ill-conditioned' => 'Mal condicionado',
+  'convergence-failed' => 'Falha de convergência',
+  _ => 'Não avaliado',
+};
+
 String _strategyLabel(SurfaceAssistantStrategy strategy) => switch (strategy) {
   SurfaceAssistantStrategy.planarSurface => 'superfície planar',
   SurfaceAssistantStrategy.cylindricalSurface => 'superfície cilíndrica',
@@ -1197,6 +1545,9 @@ String _selectedArea(
 String _formatMillimeters(Object? value) =>
     value is num ? '${value.toStringAsFixed(3)} mm' : '—';
 
+String _formatPercent(Object? value) =>
+    value is num ? '${(value * 100).toStringAsFixed(1)}%' : '—';
+
 List<MapEntry<String, dynamic>> _advancedParameters(
   Map<String, dynamic> parameters,
 ) {
@@ -1221,6 +1572,12 @@ List<MapEntry<String, dynamic>> _advancedParameters(
     'radius',
     'diameter',
     'length',
+    'angularCoverageDegrees',
+    'inlierCoverage',
+    'inlierCount',
+    'conditioning',
+    'axisStability',
+    'qualityStatus',
     'angleDegrees',
     'planarClassificationReason',
     'pointCount',

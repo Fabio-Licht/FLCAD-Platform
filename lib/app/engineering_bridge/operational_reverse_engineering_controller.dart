@@ -8,6 +8,7 @@ import 'dart:ui' show Offset;
 import 'package:flutter/foundation.dart';
 
 import '../../core/cad_document/cad_document.dart';
+import '../../core/cad_document/alignment_coordinate_system.dart';
 import '../../core/cad_document/managed_cad_reference.dart';
 import '../../core/feature_lifecycle/feature_lifecycle.dart';
 import '../cad_viewport/rendering/sketch_surface_preview_builder.dart';
@@ -36,6 +37,7 @@ import '../../core/professional_extrude/multi_profile_extrude_runtime.dart';
 import '../../core/professional_revolve/professional_revolve.dart';
 import '../../core/professional_continuity/professional_continuity.dart';
 import '../../core/recognition_engine/recognition_result.dart';
+import '../../core/recognition_engine/recognition_parameter_editor.dart';
 import '../../core/reverse_engineering_studio/reverse_engineering_studio.dart';
 import '../../core/surface_assistant/surface_assistant.dart';
 import '../../core/surface_reconstruction_manager/surface_reconstruction_manager.dart';
@@ -107,6 +109,7 @@ import 'contracts/bridge_context.dart';
 import 'contracts/bridge_selection.dart';
 import 'selection/mesh_region_builder.dart';
 import 'selection/editable_surface_selection.dart';
+import 'selection/cylindrical_region_selector.dart';
 import 'selection/section_manager.dart';
 import 'selection/section_sketch_connectivity.dart';
 import 'selection/geometry_selection_manager.dart';
@@ -691,7 +694,44 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   final DesktopCommandCoordinator commands;
   final CadRuntime runtime;
   final TechnicalStlPickResolver _technicalStlPickResolver;
+  RecognitionParameterEditor? _recognitionParameterEditor;
+  String? _recognitionParameterEditorError;
+  String? _cylinderDiameterDraft;
+  String? _cylinderRadiusDraft;
+  String? _cylinderManualAxisDraft;
+  String? _cylinderOriginDraft;
   int _recognitionRequestGeneration = 0;
+
+  void _writeRecognitionTrace(
+    String stage, {
+    Map<String, Object?> details = const <String, Object?>{},
+  }) {
+    if (!kDebugMode) return;
+    runtime.write('recognition.debugTrace', <String, Object?>{
+      'stage': stage,
+      'timestampMicros': DateTime.now().microsecondsSinceEpoch,
+      ...details,
+    });
+  }
+
+  Map<String, dynamic>? get recognitionProgress {
+    final value = runtime.read<Map>('recognition.progress');
+    return value == null ? null : Map<String, dynamic>.from(value);
+  }
+
+  void _setRecognitionProgress(
+    String stage,
+    Stopwatch watch, {
+    Map<String, Object?> details = const <String, Object?>{},
+  }) {
+    runtime.write('recognition.progress', <String, Object?>{
+      'stage': stage,
+      'elapsedMs': watch.elapsedMicroseconds / 1000,
+      'timestampMicros': DateTime.now().microsecondsSinceEpoch,
+      ...details,
+    });
+  }
+
   GeometrySelectionManager get geometrySelection => runtime.geometrySelection;
   final MeshRegionBuilder regionBuilder;
   ProfessionalRecognitionReport? get report =>
@@ -705,6 +745,45 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.read<PrimitiveType>('recognition.requestedPrimitive');
   set requestedRecognitionPrimitive(PrimitiveType? value) =>
       runtime.write('recognition.requestedPrimitive', value);
+
+  /// A directed mode may be armed before the first mesh pick.  Keep this
+  /// separate from [requestedRecognitionPrimitive] because null means the
+  /// automatic mode, not "no mode selected".
+  bool get recognitionModeArmed =>
+      runtime.read<bool>('recognition.modeArmed') ?? false;
+
+  bool get hasRecognizableMesh =>
+      runtime.activeImport?.mesh != null ||
+      runtime.document?.entities.values.any(
+            (entity) =>
+                entity.data['managedStlAssets'] is Map || entity.mesh != null,
+          ) ==
+          true;
+
+  Future<void> chooseRecognitionMode(PrimitiveType? primitiveType) async {
+    if (activeContext != null) {
+      if (primitiveType == null) {
+        await detectAutomatically();
+      } else {
+        await recognizeDirected(primitiveType);
+      }
+      return;
+    }
+    if (primitiveType != null &&
+        !{
+          PrimitiveType.plane,
+          PrimitiveType.cylinder,
+        }.contains(primitiveType)) {
+      throw UnsupportedError('Modo dirigido não suportado.');
+    }
+    requestedRecognitionPrimitive = primitiveType;
+    recognitionFilter = null;
+    error = null;
+    runtime.write('recognition.modeArmed', true);
+    runtime.write('recognition.diagnostic', null);
+    notifyListeners();
+  }
+
   static const defaultPlanarToleranceMm = .5;
   double get planarToleranceMm =>
       (runtime.read<num>('recognition.planarToleranceMm')?.toDouble() ??
@@ -6570,6 +6649,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     report = null;
     recognitionFilter = null;
     requestedRecognitionPrimitive = null;
+    runtime.write('recognition.modeArmed', false);
     _editableSelection = null;
     _initialPlanarDiagnostics = null;
     _editedSelectionComponents = 1;
@@ -6598,8 +6678,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     decisions.clear();
     runtime.hideTransient('recognition-region-preview');
     runtime.hideTransient('surface-assistant-preview');
+    runtime.hideTransient('recognition-measured-cylinder-preview');
+    runtime.hideTransient('recognition-corrected-cylinder-preview');
+    _recognitionParameterEditor = null;
+    _recognitionParameterEditorError = null;
+    _clearCylinderParameterDrafts();
+    runtime.write('recognition.cylinderCorrection', null);
     runtime.write('recognition.activeResult', null);
     runtime.write('recognition.diagnostic', null);
+    runtime.write('recognition.debugTrace', null);
+    runtime.write('recognition.progress', null);
     runtime.write('recognition.planarDiagnostics', null);
     runtime.write('surfaceAssistant.suggestion', null);
     runtime.write(
@@ -6755,9 +6843,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     bool allowTechnicalStl = false,
     PrimitiveType? requestedType,
   }) async {
-    final sceneEntity = runtime.scene.find(pick.entityId);
+    final pipelineWatch = Stopwatch()..start();
+    var lastTraceStage = 'PICK_RECEIVED';
     final isManagedStl =
-        sceneEntity?.geometry['presentationLod'] is Map &&
         runtime.document?.entities[pick.entityId]?.data['managedStlAssets']
             is Map;
     if (isManagedStl && !allowTechnicalStl) {
@@ -6772,8 +6860,26 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     activePick = pick;
     recognitionFilter = null;
     requestedRecognitionPrimitive = requestedType;
+    runtime.write('recognition.modeArmed', true);
+    _writeRecognitionTrace(
+      'PICK_RECEIVED',
+      details: {
+        'entityId': pick.entityId,
+        'presentationSubId': pick.presentationSubId,
+        'requestedType': requestedType?.name,
+        'worldPointFinite':
+            pick.hit.point.x.isFinite &&
+            pick.hit.point.y.isFinite &&
+            pick.hit.point.z.isFinite,
+      },
+    );
     busy = true;
     error = null;
+    _setRecognitionProgress(
+      'picking',
+      pipelineWatch,
+      details: {'requestedType': requestedType?.name},
+    );
     notifyListeners();
     try {
       final projectIdAtStart = runtime.document?.projectId;
@@ -6783,15 +6889,43 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         if (ray == null) {
           throw StateError('Reconhecimento exige um raio de câmera válido.');
         }
+        final bvhWatch = Stopwatch()..start();
         technicalHit = await _technicalStlPickResolver.resolve(
           entityId: pick.entityId,
           worldRay: ray,
         );
+        bvhWatch.stop();
         if (technicalHit == null) {
+          runtime.write('recognition.diagnostic', {
+            'stage': 'technicalStlPickResolver',
+            'entityId': pick.entityId,
+            'message':
+                'Nenhuma interseção válida foi encontrada na malha STL original.',
+          });
           throw StateError(
             'Nenhuma interseção válida foi encontrada na malha STL original.',
           );
         }
+        lastTraceStage = 'BVH_HIT';
+        _writeRecognitionTrace(
+          lastTraceStage,
+          details: {
+            'entityId': pick.entityId,
+            'triangleIndex': technicalHit.triangleIndex,
+            'geometryRevision': technicalHit.geometryRevision,
+            'source': 'managedStlOriginalGeometry',
+            'durationMs': bvhWatch.elapsedMicroseconds / 1000,
+            'triangleCount': technicalHit.geometry.triangles.length ~/ 3,
+          },
+        );
+        _setRecognitionProgress(
+          'picking',
+          pipelineWatch,
+          details: {
+            'substage': 'bvh-hit',
+            'bvhMs': bvhWatch.elapsedMicroseconds / 1000,
+          },
+        );
         if (runtime.document?.projectId != projectIdAtStart ||
             runtime.document?.entities[pick.entityId]?.data['managedStlAssets']
                 is! Map) {
@@ -6817,6 +6951,26 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (seedTriangle < 0) {
         throw StateError('O ponto selecionado não possui triângulo original.');
       }
+      if (technicalHit == null) {
+        lastTraceStage = 'BVH_HIT';
+        _writeRecognitionTrace(
+          lastTraceStage,
+          details: {
+            'entityId': pick.entityId,
+            'triangleIndex': seedTriangle,
+            'source': 'displayGeometry',
+          },
+        );
+      }
+      lastTraceStage = 'CYLINDER_SEED';
+      _writeRecognitionTrace(
+        lastTraceStage,
+        details: {
+          'entityId': pick.entityId,
+          'triangleIndex': seedTriangle,
+          'requestedType': requestedType?.name,
+        },
+      );
       final effectivePick = technicalHit == null
           ? pick
           : CadViewportPick(
@@ -6832,23 +6986,44 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             );
       activePick = effectivePick;
       final fingerprint = meshFingerprint;
-      final segmented = restoreRegionGrowingResult(
-        await dispatchRegionGrowingIsolate(
-          regionGrowingIsolatePayload(
-            geometry: geometry,
-            fingerprint: fingerprint,
-            settings: const region_recognition.SurfaceRecognitionSettings(),
+      final regionGrowingWatch = Stopwatch()..start();
+      RegionGrowingResult? segmented;
+      if (requestedType != PrimitiveType.cylinder) {
+        segmented = restoreRegionGrowingResult(
+          await dispatchRegionGrowingIsolate(
+            regionGrowingIsolatePayload(
+              geometry: geometry,
+              fingerprint: fingerprint,
+              settings: const region_recognition.SurfaceRecognitionSettings(),
+            ),
           ),
-        ),
-      );
+        );
+        regionGrowingWatch.stop();
+        _writeRecognitionTrace(
+          'REGION_GROWING',
+          details: {
+            'durationMs': regionGrowingWatch.elapsedMicroseconds / 1000,
+            'triangleCount': geometry.triangles.length ~/ 3,
+            'regionCount': segmented.regions.length,
+          },
+        );
+      }
       if (requestGeneration != _recognitionRequestGeneration ||
           runtime.document?.projectId != projectIdAtStart) {
         return;
       }
-      var surfaceRegion = segmented.regions
+      var surfaceRegion = segmented?.regions
           .where((region) => region.triangleIndices.contains(seedTriangle))
           .firstOrNull;
-      if (surfaceRegion == null) {
+      if (requestedType != PrimitiveType.cylinder && surfaceRegion == null) {
+        runtime.write('recognition.diagnostic', {
+          'stage': 'regionGrowing',
+          'entityId': effectivePick.entityId,
+          'triangleIndex': seedTriangle,
+          'message':
+              'Region Growing não produziu uma região homogênea para o triângulo selecionado.',
+          ...?segmented?.diagnostics,
+        });
         throw StateError(
           'Region Growing produced no homogeneous region for triangle '
           '$seedTriangle.',
@@ -6864,9 +7039,20 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           geometry: geometry,
           triangleIndices: candidate.triangleIndices.toSet(),
         );
+        final extractionWatch = Stopwatch()..start();
         final region = regionBuilder.build(
           meshId: meshId,
           selection: selection,
+        );
+        extractionWatch.stop();
+        _writeRecognitionTrace(
+          'POINT_EXTRACTION',
+          details: {
+            'durationMs': extractionWatch.elapsedMicroseconds / 1000,
+            'selectedTriangles': region.triangleIndices.length,
+            'sampledPoints': region.points.length,
+            'sampledNormals': region.normals.length,
+          },
         );
         return BridgeContext(
           projectId:
@@ -6880,12 +7066,161 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         );
       }
 
-      var context = contextForRegion(surfaceRegion);
+      BridgeContext context;
+      if (requestedType == PrimitiveType.cylinder) {
+        _setRecognitionProgress('selecting-region', pipelineWatch);
+        final adjacencySource = EditableSurfaceSelection(
+          projectId:
+              projectIdAtStart ??
+              (document?.projectId ??
+                  (throw StateError('CadRuntime has no active project.'))),
+          meshId: meshId,
+          meshFingerprint: meshFingerprint,
+          entityId: effectivePick.entityId,
+          geometry: geometry,
+          initialTriangles: {seedTriangle},
+          area: 0,
+        );
+        late final CylindricalRegionSelectionResult cylindrical;
+        final cylinderSelectionWatch = Stopwatch()..start();
+        try {
+          cylindrical = const CylindricalRegionSelector().select(
+            geometry: geometry,
+            seedTriangle: seedTriangle,
+            neighborsOf: adjacencySource.neighborsOf,
+          );
+        } catch (value) {
+          runtime.write('recognition.diagnostic', {
+            'stage': 'cylindricalRegionSelector',
+            'entityId': effectivePick.entityId,
+            'triangleIndex': seedTriangle,
+            'message': value.toString().replaceFirst('Bad state: ', ''),
+          });
+          rethrow;
+        }
+        cylinderSelectionWatch.stop();
+        _writeRecognitionTrace(
+          'CYLINDER_REGION_RESULT',
+          details: {
+            'durationMs': cylinderSelectionWatch.elapsedMicroseconds / 1000,
+            'inputTriangles': geometry.triangles.length ~/ 3,
+            'selectedTriangles': cylindrical.triangles.length,
+            'transitionTriangles': cylindrical.transitionTriangles.length,
+          },
+        );
+        _setRecognitionProgress(
+          'region-selected',
+          pipelineWatch,
+          details: {
+            'selectedTriangles': cylindrical.triangles.length,
+            'transitionTriangles': cylindrical.transitionTriangles.length,
+            'c2Ms': cylinderSelectionWatch.elapsedMicroseconds / 1000,
+          },
+        );
+        runtime.write('recognition.cylindricalSelection', {
+          ...cylindrical.diagnostics,
+          'transitionTriangles': cylindrical.transitionTriangles.length,
+        });
+        lastTraceStage = 'CYLINDER_REGION_RESULT';
+        _writeRecognitionTrace(
+          lastTraceStage,
+          details: {
+            'entityId': effectivePick.entityId,
+            'seedTriangle': seedTriangle,
+            'selectedTriangles': cylindrical.triangles.length,
+            'transitionTriangles': cylindrical.transitionTriangles.length,
+          },
+        );
+        final selection = BridgeSelection(
+          id: 'cylindrical:$meshId:$seedTriangle',
+          entityId: effectivePick.entityId,
+          kind: BridgeSelectionKind.meshRegion,
+          geometry: geometry,
+          triangleIndices: cylindrical.triangles,
+        );
+        final extractionWatch = Stopwatch()..start();
+        final region = regionBuilder.build(
+          meshId: meshId,
+          selection: selection,
+        );
+        extractionWatch.stop();
+        _writeRecognitionTrace(
+          'POINT_EXTRACTION',
+          details: {
+            'durationMs': extractionWatch.elapsedMicroseconds / 1000,
+            'selectedTriangles': region.triangleIndices.length,
+            'sampledPoints': region.points.length,
+            'sampledNormals': region.normals.length,
+          },
+        );
+        context = BridgeContext(
+          projectId:
+              projectIdAtStart ??
+              (document?.projectId ??
+                  (throw StateError('CadRuntime has no active project.'))),
+          meshId: meshId,
+          meshFingerprint: meshFingerprint,
+          userConfirmed: false,
+          region: region,
+        );
+        _initializeEditableSelection(
+          context,
+          geometry,
+          effectivePick.entityId,
+          resetHistory: true,
+        );
+        _showEditableSelection(
+          _editableSelection!,
+          _editableSelection!.currentTriangles,
+          _editableSelection!.area,
+        );
+        _setRecognitionProgress(
+          'region-visible',
+          pipelineWatch,
+          details: {
+            'selectedTriangles': _editableSelection!.triangleCount,
+            'selectionPublishedMs': pipelineWatch.elapsedMicroseconds / 1000,
+          },
+        );
+        notifyListeners();
+        surfaceRegion = null;
+      } else {
+        context = contextForRegion(surfaceRegion!);
+      }
+      _setRecognitionProgress(
+        'fitting',
+        pipelineWatch,
+        details: {'recognitionPasses': requestedType == null ? 4 : 1},
+      );
+      notifyListeners();
+      final fittingWatch = Stopwatch()..start();
       var recognized = await recognition.recognize(
         context,
         allowedTypes: requestedType == null ? null : {requestedType},
       );
-      runtime.write('recognition.planarDiagnostics', segmented.diagnostics);
+      fittingWatch.stop();
+      _writeRecognitionTrace(
+        'ROBUST_FIT_AND_METRICS',
+        details: {
+          'durationMs': fittingWatch.elapsedMicroseconds / 1000,
+          'inputTriangles': context.region?.triangleIndices.length,
+          'primitiveCount': recognized.primitives.length,
+          'resultType':
+              recognized.primitives.firstOrNull?.recognition.winner.type.name,
+        },
+      );
+      _setRecognitionProgress(
+        'calculating-diagnostics',
+        pipelineWatch,
+        details: {
+          'c3Ms': fittingWatch.elapsedMicroseconds / 1000,
+          'recognitionPasses': requestedType == null ? 4 : 1,
+        },
+      );
+      runtime.write(
+        'recognition.planarDiagnostics',
+        segmented?.diagnostics ?? const <String, Object?>{},
+      );
       final quality = await _applyPlanarQuality(
         context: context,
         report: recognized,
@@ -6894,7 +7229,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         geometry: geometry,
         seedTriangle: seedTriangle,
         isManagedStl: isManagedStl,
-        allowRegionReplacement: true,
+        allowRegionReplacement: requestedType != PrimitiveType.cylinder,
         allowedType: requestedType,
       );
       context = quality.context;
@@ -6903,11 +7238,22 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         surfaceRegion = quality.surfaceRegion!;
       }
       report = recognized;
-      _initializeEditableSelection(
-        context,
-        geometry,
-        effectivePick.entityId,
-        resetHistory: true,
+      if (requestedType != PrimitiveType.cylinder) {
+        _initializeEditableSelection(
+          context,
+          geometry,
+          effectivePick.entityId,
+          resetHistory: true,
+        );
+      }
+      lastTraceStage = 'EDITABLE_SELECTION_PUBLISHED';
+      _writeRecognitionTrace(
+        lastTraceStage,
+        details: {
+          'entityId': effectivePick.entityId,
+          'selectedTriangles': _editableSelection?.triangleCount ?? 0,
+          'selectionRevision': _editableSelection?.revision,
+        },
       );
       final dimensional = _dimensionalParameters(
         recognized,
@@ -6920,10 +7266,28 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'recognitionResultParameters': dimensional,
         },
       );
+      final publishWatch = Stopwatch()..start();
+      _setRecognitionProgress('publishing-result', pipelineWatch);
       await _publishRecognitionResult(
         context,
         requestedType: requestedType,
         requestGeneration: requestGeneration,
+      );
+      publishWatch.stop();
+      _writeRecognitionTrace(
+        'UI_PUBLICATION',
+        details: {
+          'durationMs': publishWatch.elapsedMicroseconds / 1000,
+          'selectedTriangles': context.region?.triangleIndices.length,
+        },
+      );
+      _setRecognitionProgress(
+        'completed',
+        pipelineWatch,
+        details: {
+          'resultPublishedMs': pipelineWatch.elapsedMicroseconds / 1000,
+          'selectedTriangles': context.region?.triangleIndices.length,
+        },
       );
       activeSelection = BridgeSelection(
         id: context.region!.id,
@@ -6933,7 +7297,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         triangleIndices: context.region!.triangleIndices.toSet(),
       );
       activeContext = context;
-      _showRecognitionRegion(geometry, surfaceRegion);
+      if (surfaceRegion != null) {
+        _showRecognitionRegion(geometry, surfaceRegion);
+      } else if (_editableSelection != null &&
+          requestedType != PrimitiveType.cylinder) {
+        _showEditableSelection(
+          _editableSelection!,
+          _editableSelection!.currentTriangles,
+          _editableSelection!.area,
+        );
+      }
       decisions
         ..clear()
         ..addEntries(
@@ -6947,8 +7320,39 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       await commands.dispatch('selection.set', {
         'ids': [context.region!.id],
       });
+      lastTraceStage = 'RECOGNITION_RESULT';
+      _writeRecognitionTrace(
+        lastTraceStage,
+        details: {
+          'entityId': effectivePick.entityId,
+          'regionId': context.region!.id,
+          'resultType':
+              recognized.primitives.firstOrNull?.recognition.winner.type.name,
+          'activeContext': activeContext != null,
+          'editableSelection': _editableSelection != null,
+        },
+      );
     } catch (value) {
       error = value.toString().replaceFirst('Bad state: ', '');
+      _writeRecognitionTrace(
+        'FAILED',
+        details: {
+          'after': lastTraceStage,
+          'entityId': pick.entityId,
+          'requestedType': requestedType?.name,
+          'message': error,
+        },
+      );
+      runtime.write('recognition.diagnostic', {
+        ...?recognitionDiagnostic,
+        'stage': recognitionDiagnostic?['stage'] ?? 'recognitionPick',
+        'message': error,
+      });
+      _setRecognitionProgress(
+        'failed',
+        pipelineWatch,
+        details: {'after': lastTraceStage, 'message': error},
+      );
     } finally {
       if (requestGeneration == _recognitionRequestGeneration) {
         busy = false;
@@ -7918,8 +8322,368 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   RecognitionResult? get activeRecognitionResult =>
       runtime.read<RecognitionResult>('recognition.activeResult');
+
+  RecognitionParameterEditor? get cylinderParameterEditor =>
+      _recognitionParameterEditor?.measured.type == 'cylinder'
+      ? _recognitionParameterEditor
+      : null;
+
+  String? get cylinderParameterEditorError =>
+      _recognitionParameterEditorError ?? _recognitionParameterEditor?.error;
+
+  bool get cylinderParameterEditorStale {
+    final editor = cylinderParameterEditor;
+    final context = activeContext;
+    return editor != null &&
+        (context == null ||
+            editor.measured.meshFingerprint != context.meshFingerprint ||
+            editor.measured.selectionFingerprint !=
+                _activeSelectionFingerprint() ||
+            editor.measured.selectionRevision != selectionRevision);
+  }
+
+  List<RecognitionCoordinateFrame> get cylinderEditorFrames {
+    final frames = <RecognitionCoordinateFrame>[
+      const RecognitionCoordinateFrame(
+        id: 'global',
+        label: 'Global',
+        kind: RecognitionFrameKind.global,
+        origin: Vector3.zero,
+        xAxis: Vector3(1, 0, 0),
+        yAxis: Vector3(0, 1, 0),
+        zAxis: Vector3(0, 0, 1),
+      ),
+    ];
+    for (final entity in runtime.alignmentCoordinateSystemCandidates()) {
+      final raw = entity.data[AlignmentCoordinateSystem.dataKey];
+      if (raw is! Map) continue;
+      try {
+        final system = AlignmentCoordinateSystem.fromJson(
+          Map<String, dynamic>.from(raw),
+        );
+        frames.add(
+          RecognitionCoordinateFrame(
+            id: 'wcs:${entity.id}',
+            label: entity.data['name'] as String? ?? 'WCS',
+            kind: RecognitionFrameKind.wcs,
+            origin: system.origin,
+            xAxis: system.xAxis,
+            yAxis: system.yAxis,
+            zAxis: system.zAxis,
+          ),
+        );
+      } catch (_) {
+        // Invalid/orphaned WCS entities are intentionally not offered.
+      }
+    }
+    return frames;
+  }
+
+  bool get cylinderParameterEditorActive => cylinderParameterEditor != null;
+
+  bool get cylinderParameterEditorDraftPending =>
+      _cylinderDiameterDraft != null ||
+      _cylinderRadiusDraft != null ||
+      _cylinderManualAxisDraft != null ||
+      _cylinderOriginDraft != null;
+
+  void beginCylinderParameterEditing() {
+    final result = activeRecognitionResult;
+    final context = activeContext;
+    final region = context?.region;
+    if (result == null ||
+        result.type != RecognitionResultType.cylinder ||
+        context == null ||
+        region == null) {
+      throw StateError('Nenhum resultado cilíndrico editável está ativo.');
+    }
+    _recognitionParameterEditor = RecognitionParameterEditor(
+      measured: MeasuredGeometry(
+        type: result.type.name,
+        meshId: context.meshId,
+        regionId: region.id,
+        meshFingerprint: context.meshFingerprint,
+        selectionFingerprint: _activeSelectionFingerprint(),
+        selectionRevision: selectionRevision,
+        parameters: Map<String, dynamic>.unmodifiable(
+          Map<String, dynamic>.from(result.parameters),
+        ),
+        points: List<Vector3>.unmodifiable(region.points),
+      ),
+      target: TargetGeometry(
+        diameter: _parameterNumber(
+          result.parameters['diameter'],
+          _parameterNumber(result.parameters['radius'], 0) * 2,
+        ),
+        origin: _parameterVector(result.parameters['origin']),
+        axis: _parameterVector(result.parameters['axis']).normalized,
+        axisSource: 'recognized',
+        anchor: 'recognized-center',
+      ),
+    );
+    runtime.hideTransient('surface-assistant-preview');
+    _recognitionParameterEditorError = null;
+    _clearCylinderParameterDrafts();
+    _publishCylinderParameterEditorState();
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderTargetDiameterFromText(String raw) {
+    _cylinderDiameterDraft = null;
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    final value = double.tryParse(raw.trim().replaceAll(',', '.'));
+    if (value == null) {
+      _recognitionParameterEditorError =
+          'Digite um número finito para o diâmetro.';
+    } else {
+      _recognitionParameterEditorError = null;
+      editor.setDiameter(value);
+    }
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderTargetRadiusFromText(String raw) {
+    _cylinderRadiusDraft = null;
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    final value = double.tryParse(raw.trim().replaceAll(',', '.'));
+    if (value == null) {
+      _recognitionParameterEditorError = 'Digite um número finito para o raio.';
+    } else {
+      _recognitionParameterEditorError = null;
+      editor.setRadius(value);
+    }
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderAxisAlignment(String source) {
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    _recognitionParameterEditorError = null;
+    if (source == 'recognized') {
+      editor.setAxis(
+        _parameterVector(editor.measured.parameters['axis']),
+        source: source,
+      );
+    } else {
+      final parts = source.split(':');
+      final frameId = parts.length > 2
+          ? parts.sublist(0, parts.length - 1).join(':')
+          : 'global';
+      final axisName = parts.isEmpty ? 'Z' : parts.last;
+      final frame = cylinderEditorFrames
+          .where((item) => item.id == frameId)
+          .firstOrNull;
+      if (frame == null) {
+        _recognitionParameterEditorError =
+            'O sistema de coordenadas selecionado não está disponível.';
+      } else {
+        editor.setAxis(frame.direction(axisName), source: source);
+      }
+    }
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderManualAxis(Vector3 axis) {
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    _recognitionParameterEditorError = null;
+    editor.setAxis(axis, source: 'manual');
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderManualAxisFromText(String raw) {
+    _cylinderManualAxisDraft = null;
+    final values = raw
+        .trim()
+        .split(RegExp(r'[,;\s]+'))
+        .map((item) => double.tryParse(item.replaceAll(',', '.')))
+        .toList();
+    if (values.length != 3 ||
+        values.any((item) => item == null || !item.isFinite)) {
+      _recognitionParameterEditorError =
+          'A direção manual requer três coordenadas finitas.';
+      notifyListeners();
+      return;
+    }
+    setCylinderManualAxis(Vector3(values[0]!, values[1]!, values[2]!));
+  }
+
+  void setCylinderAxisInverted(bool inverted) {
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    final axis = editor.target.axis;
+    final measuredAxis = _parameterVector(editor.measured.parameters['axis']);
+    final base = axis.dot(measuredAxis) < 0 ? -axis : axis;
+    editor.setAxis(inverted ? -base : base, source: 'manual');
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderTargetOrigin(Vector3 origin) {
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    editor.setOrigin(origin);
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void setCylinderTargetOriginFromText(String raw) {
+    _cylinderOriginDraft = null;
+    final values = raw
+        .trim()
+        .split(RegExp(r'[,;\s]+'))
+        .map((item) => double.tryParse(item.replaceAll(',', '.')))
+        .toList();
+    if (values.length != 3 ||
+        values.any((item) => item == null || !item.isFinite)) {
+      _recognitionParameterEditorError =
+          'A origem requer três coordenadas finitas: X, Y e Z.';
+      notifyListeners();
+      return;
+    }
+    _recognitionParameterEditorError = null;
+    setCylinderTargetOrigin(Vector3(values[0]!, values[1]!, values[2]!));
+  }
+
+  void resetCylinderParameterEditing() {
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    _recognitionParameterEditorError = null;
+    _clearCylinderParameterDrafts();
+    editor.reset();
+    _publishCylinderParameterEditorState();
+    previewCylinderParameterEditing();
+    notifyListeners();
+  }
+
+  void previewCylinderParameterEditing() {
+    final editor = cylinderParameterEditor;
+    final result = activeRecognitionResult;
+    if (editor == null || result == null || cylinderParameterEditorStale) {
+      return;
+    }
+    final measured = _recognitionSurfacePreview.build(
+      result,
+      activeSurfaceAssistantSuggestion ?? _surfaceAssistant.suggest(result),
+      id: 'recognition-measured-cylinder-preview',
+      displayColor: 'recognitionMeasured',
+    );
+    final targetParameters = Map<String, dynamic>.from(result.parameters)
+      ..['origin'] = editor.target.origin.toJson()
+      ..['axis'] = editor.target.axis.toJson()
+      ..['radius'] = editor.target.diameter / 2
+      ..['diameter'] = editor.target.diameter;
+    final corrected = _recognitionSurfacePreview.build(
+      result,
+      activeSurfaceAssistantSuggestion ?? _surfaceAssistant.suggest(result),
+      id: 'recognition-corrected-cylinder-preview',
+      parameters: targetParameters,
+      displayColor: 'recognitionCorrected',
+    );
+    runtime.showTransient(measured);
+    runtime.showTransient(corrected);
+    editor.state = RecognitionParameterEditorState.previewActive;
+    _publishCylinderParameterEditorState();
+  }
+
+  void confirmCylinderParameterEditing() {
+    _applyCylinderParameterDrafts();
+    final editor = cylinderParameterEditor;
+    if (editor == null) return;
+    if (cylinderParameterEditorStale) {
+      _recognitionParameterEditorError =
+          'A seleção original mudou; reexecute o reconhecimento antes de confirmar.';
+    } else if (editor.error == null &&
+        _recognitionParameterEditorError == null) {
+      editor.confirm();
+      _recognitionParameterEditorError = null;
+    }
+    _publishCylinderParameterEditorState();
+    notifyListeners();
+  }
+
+  void cancelCylinderParameterEditing() {
+    _recognitionParameterEditor?.cancel();
+    _recognitionParameterEditor = null;
+    _recognitionParameterEditorError = null;
+    _clearCylinderParameterDrafts();
+    runtime.hideTransient('recognition-measured-cylinder-preview');
+    runtime.hideTransient('recognition-corrected-cylinder-preview');
+    runtime.write('recognition.cylinderCorrection', null);
+    notifyListeners();
+  }
+
+  void setCylinderDiameterDraft(String raw) {
+    _cylinderDiameterDraft = raw;
+    notifyListeners();
+  }
+
+  void setCylinderRadiusDraft(String raw) {
+    _cylinderRadiusDraft = raw;
+    notifyListeners();
+  }
+
+  void setCylinderManualAxisDraft(String raw) {
+    _cylinderManualAxisDraft = raw;
+    notifyListeners();
+  }
+
+  void setCylinderOriginDraft(String raw) {
+    _cylinderOriginDraft = raw;
+    notifyListeners();
+  }
+
+  void commitCylinderParameterDrafts() => _applyCylinderParameterDrafts();
+
+  void _applyCylinderParameterDrafts() {
+    final diameter = _cylinderDiameterDraft;
+    final radius = _cylinderRadiusDraft;
+    final axis = _cylinderManualAxisDraft;
+    final origin = _cylinderOriginDraft;
+    _clearCylinderParameterDrafts();
+    if (diameter != null) setCylinderTargetDiameterFromText(diameter);
+    if (radius != null) setCylinderTargetRadiusFromText(radius);
+    if (axis != null) setCylinderManualAxisFromText(axis);
+    if (origin != null) setCylinderTargetOriginFromText(origin);
+  }
+
+  void _clearCylinderParameterDrafts() {
+    _cylinderDiameterDraft = null;
+    _cylinderRadiusDraft = null;
+    _cylinderManualAxisDraft = null;
+    _cylinderOriginDraft = null;
+  }
+
+  void _publishCylinderParameterEditorState() {
+    final editor = cylinderParameterEditor;
+    runtime.write(
+      'recognition.cylinderCorrection',
+      editor == null || cylinderParameterEditorStale ? null : editor.proposal,
+    );
+  }
+
+  static double _parameterNumber(dynamic value, double fallback) =>
+      value is num && value.isFinite ? value.toDouble() : fallback;
+
+  static Vector3 _parameterVector(dynamic value) =>
+      value is List && value.length == 3 && value.every((item) => item is num)
+      ? Vector3.fromJson(value)
+      : Vector3.zero;
   Map<String, dynamic>? get recognitionDiagnostic {
     final value = runtime.read<Map>('recognition.diagnostic');
+    return value == null ? null : Map<String, dynamic>.from(value);
+  }
+
+  Map<String, dynamic>? get recognitionDebugTrace {
+    if (!kDebugMode) return null;
+    final value = runtime.read<Map>('recognition.debugTrace');
     return value == null ? null : Map<String, dynamic>.from(value);
   }
 
@@ -8137,7 +8901,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       .firstOrNull;
 
   bool get canCreateNonPlaneReference {
-    if (isActiveRecognitionDiagnosticOnly) return false;
+    if (isActiveRecognitionDiagnosticOnly || _directedCylinderDiagnosticOnly) {
+      return false;
+    }
     final primitive = _firstNonPlaneHypothesis;
     if (primitive == null ||
         activeContext?.region == null ||
@@ -8148,6 +8914,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   String? get nonPlaneReferenceBlockReason {
+    if (_directedCylinderDiagnosticOnly) {
+      return 'Reconhecimento dirigido de cilindro Ã© somente diagnÃ³stico nesta etapa.';
+    }
     if (canCreateNonPlaneReference) return null;
     if (isActiveRecognitionDiagnosticOnly) {
       return activeRecognitionResult?.parameters['diagnosticReason']
@@ -8206,6 +8975,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   /// Authorization shared by the Recognition panel and the Surface Assistant.
   bool get canCreateSurfaceFromAssistant => surfaceCreationBlockReason == null;
 
+  bool get _directedCylinderDiagnosticOnly =>
+      requestedRecognitionPrimitive == PrimitiveType.cylinder;
+
   bool get hasValidPlanarSurfaceDomain {
     final region = activeContext?.region;
     if (region == null ||
@@ -8258,6 +9030,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     RecognitionResult recognition,
     SurfaceAssistantSuggestion suggestion,
   ) {
+    if (_directedCylinderDiagnosticOnly) {
+      return 'Reconhecimento dirigido de cilindro Ã© somente diagnÃ³stico nesta etapa.';
+    }
     final parameters = recognition.parameters;
     final manualSurface = _manualApprovalIsValid('surface');
     if (((parameters['selectionComponentCount'] as num?) ?? 1) > 1) {
@@ -8302,6 +9077,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final result = RecognitionResult.fromJson(Map<String, dynamic>.from(raw));
     final suggestion = _surfaceAssistant.suggest(result);
     runtime.write('recognition.activeResult', result);
+    if (result.type == RecognitionResultType.cylinder) {
+      beginCylinderParameterEditing();
+    }
     runtime.write('surfaceAssistant.suggestion', suggestion);
     runtime.write(
       'surfaceAssistant.decision',
@@ -8537,6 +9315,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           : null,
     );
     runtime.write('recognition.activeResult', result);
+    if (result.type == RecognitionResultType.cylinder) {
+      beginCylinderParameterEditing();
+    }
     if (diagnosticOnly) {
       runtime.write('surfaceAssistant.suggestion', null);
       runtime.write(
@@ -8558,14 +9339,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   bool get canDetect => activeContext != null;
 
-  bool get canRecognizeDirectedPlane =>
+  bool get canRecognizeDirectedPrimitive =>
       activeContext?.region != null &&
       activePick?.hit.triangleIndex != null &&
       activeSelection?.geometry != null;
 
-  String? get directedPlaneBlockReason {
+  bool get canRecognizeDirectedPlane => canRecognizeDirectedPrimitive;
+
+  String? get directedRecognitionBlockReason {
     if (activeContext?.region == null) {
-      return 'Selecione uma região para reconhecer o plano.';
+      return 'Selecione uma região para reconhecimento dirigido.';
     }
     if (activePick?.hit.triangleIndex == null) {
       return 'Selecione novamente a região na viewport para restaurar o triângulo original.';
@@ -8575,6 +9358,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
     return null;
   }
+
+  String? get directedPlaneBlockReason => directedRecognitionBlockReason;
 
   bool _isManagedStlEntity(String? entityId) =>
       entityId != null &&
@@ -8587,9 +9372,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _detect(primitiveType, requestedType: null);
 
   Future<void> recognizeDirected(PrimitiveType primitiveType) {
-    if (primitiveType != PrimitiveType.plane) {
+    if (!{
+      PrimitiveType.plane,
+      PrimitiveType.cylinder,
+    }.contains(primitiveType)) {
       throw UnsupportedError(
-        'Directed recognition is currently implemented for planes only.',
+        'Directed recognition is currently implemented for planes and cylinders.',
       );
     }
     return _detect(null, requestedType: primitiveType);
@@ -8657,9 +9445,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (context == null) {
       throw StateError('Select a mesh region before running detection.');
     }
-    if (requestedType != null && !canRecognizeDirectedPlane) {
+    if (requestedType != null && !canRecognizeDirectedPrimitive) {
       throw StateError(
-        directedPlaneBlockReason ?? 'Directed recognition is unavailable.',
+        directedRecognitionBlockReason ??
+            'Directed recognition is unavailable.',
       );
     }
     final requestGeneration = ++_recognitionRequestGeneration;
@@ -14577,7 +15366,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   bool canCreateRecognizedSurface(SurfaceKind kind) {
-    if (isActiveRecognitionDiagnosticOnly) return false;
+    if (isActiveRecognitionDiagnosticOnly || _directedCylinderDiagnosticOnly) {
+      return false;
+    }
     final primitive = (report?.primitives ?? const <ProfessionalPrimitive>[])
         .where((item) => item.recognition.winner.type.name == kind.name)
         .firstOrNull;
@@ -14599,6 +15390,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<GeneratedSurface> _createRecognizedSurfaceValue(
     SurfaceKind kind,
   ) async {
+    if (_directedCylinderDiagnosticOnly) {
+      throw StateError(
+        'Reconhecimento dirigido de cilindro Ã© somente diagnÃ³stico nesta etapa.',
+      );
+    }
     if (isActiveRecognitionDiagnosticOnly) {
       throw StateError(
         activeRecognitionResult?.parameters['diagnosticReason'] as String? ??
@@ -19758,6 +20554,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             activeRecognitionResult?.parameters['diagnosticReason']
                     as String? ??
                 'Resultado somente diagnóstico; referência bloqueada.',
+          );
+        }
+        if (_directedCylinderDiagnosticOnly) {
+          throw StateError(
+            'Reconhecimento dirigido de cilindro e somente diagnostico nesta etapa.',
           );
         }
         final primitive = hypotheses

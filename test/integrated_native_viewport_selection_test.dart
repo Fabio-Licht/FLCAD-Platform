@@ -239,6 +239,7 @@ class _Fixture {
     ValueChanged<CadViewportPick?>? onSketchSuggestionHover,
     ValueChanged<Offset?>? onSketchSuggestionHoverPosition,
     Set<String>? sketchSuggestionPickCandidateIds,
+    bool technicalRecognitionAvailable = false,
   }) async {
     await tester.binding.setSurfaceSize(const Size(1200, 800));
     await tester.pumpWidget(
@@ -265,6 +266,7 @@ class _Fixture {
           onSketchEntityDoublePick: doublePick,
           onSketchEntityDragStart: dragStart,
           onViewportSelectionCleared: onViewportSelectionCleared,
+          technicalRecognitionAvailable: technicalRecognitionAvailable,
         ),
       ),
     );
@@ -476,6 +478,33 @@ void main() {
     expect(f.selection.calls, 3);
     expect(f.picks, hasLength(3));
   });
+
+  testWidgets(
+    'technical recognition forwards managed LOD picks without a native point',
+    (tester) async {
+      final f = _Fixture();
+      f.scene.upsert(
+        const CadSceneEntity(
+          id: 'b',
+          kind: CadSceneEntityKind.mesh,
+          geometry: {
+            'presentationLod': {'triangleCount': 1},
+          },
+        ),
+      );
+      f.bridge.answer = (_) async => const NativeViewportPick(
+        entityId: 'b',
+        kind: NativePickKind.face,
+        subId: 0,
+        point: [],
+      );
+      await f.mount(tester, technicalRecognitionAvailable: true);
+      await tap(tester);
+      expect(f.picks, hasLength(1));
+      expect(f.picks.single.entityId, 'b');
+      expect(f.picks.single.ray, isNotNull);
+    },
+  );
 
   testWidgets(
     'no hit leaves selection unchanged and invalid point emits no onPick',

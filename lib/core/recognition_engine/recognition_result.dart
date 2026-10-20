@@ -106,11 +106,28 @@ class RecognitionResultAdapter {
       ..['area'] = area
       ..['rmsDeviation'] = candidate.statistics.rms
       ..['maximumDeviation'] = candidate.statistics.maximum
+      ..['inlierCoverage'] = candidate.statistics.coverage
+      ..['inlierCount'] = candidate.statistics.inlierCount
+      ..['pointCount'] = candidate.statistics.pointCount == 0
+          ? points.length
+          : candidate.statistics.pointCount
       ..addAll(extraParameters);
     if (type == RecognitionResultType.cylinder) {
       final radius = (parameters['radius'] as num).toDouble();
       parameters['diameter'] = radius * 2;
-      parameters['length'] = _axialLength(points, parameters['axis']);
+      parameters['length'] = candidate.statistics.axialLength > 0
+          ? candidate.statistics.axialLength
+          : _axialLength(points, parameters['axis']);
+      parameters.addAll({
+        'angularCoverageDegrees': candidate.statistics.angularCoverageDegrees,
+        'conditioning': candidate.statistics.conditioning,
+        'axisStability': candidate.statistics.axisStability,
+        'converged': candidate.statistics.converged,
+        'qualityStatus': candidate.statistics.qualityStatus,
+        'dimensionalStatus': _cylinderDimensionalStatus(
+          candidate.statistics.qualityStatus,
+        ),
+      });
     } else if (type == RecognitionResultType.cone) {
       parameters['angleDegrees'] =
           (parameters['halfAngle'] as num).toDouble() * 180 / 3.141592653589793;
@@ -162,4 +179,10 @@ class RecognitionResultAdapter {
     }
     return maximum;
   }
+
+  String _cylinderDimensionalStatus(String status) => switch (status) {
+    'reliable' => 'approved',
+    'conditioned' => 'diagnostic-only',
+    _ => 'rejected',
+  };
 }

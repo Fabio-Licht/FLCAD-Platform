@@ -308,8 +308,24 @@ class _IntegratedCadViewportWidgetState
         : await operationalResolver.resolve(result, scene);
     if (!_canPublishTap(token, scene) || resolved == null) return;
     final point = result.point;
+    final pointIsValid =
+        point.length >= 3 && point.take(3).every((value) => value.isFinite);
+    // Native D3D may return the entity/ray without a world hit point for a
+    // display-only indexed LOD. Managed STL recognition resolves the ray
+    // against the retained original mesh, so dropping this event here makes
+    // the visible mesh appear unpickable. Keep the transient point finite;
+    // the technical resolver is the authority for the actual intersection.
+    final technicalManagedMesh =
+        widget.technicalRecognitionAvailable &&
+        source.geometry['presentationLod'] is Map;
     CadViewportPick? pick;
-    if (point.length >= 3 && point.take(3).every((value) => value.isFinite)) {
+    if (pointIsValid || technicalManagedMesh) {
+      final transientPoint = pointIsValid
+          ? Vector3(point[0], point[1], point[2])
+          : cameraRayForViewportPosition(
+              position: position,
+              camera: widget.camera,
+            ).origin;
       pick = CadViewportPick(
         entityId: resolved.entity.ownerId,
         ray: cameraRayForViewportPosition(
@@ -325,7 +341,7 @@ class _IntegratedCadViewportWidgetState
         presentationSubId: managedFace?.presentationSubId ?? result.subId,
         hit: MeshHit(
           triangleIndex: -1,
-          point: Vector3(point[0], point[1], point[2]),
+          point: transientPoint,
           distance: 0,
         ),
       );
@@ -341,7 +357,9 @@ class _IntegratedCadViewportWidgetState
     );
     _selectManagedFace(managedFace);
     if (pick != null) {
-      widget.camera.focusOn(Vector3(point[0], point[1], point[2]));
+      if (pointIsValid) {
+        widget.camera.focusOn(Vector3(point[0], point[1], point[2]));
+      }
       widget.onPick?.call(pick);
     }
   }

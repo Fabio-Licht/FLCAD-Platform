@@ -45,7 +45,13 @@ class ProfessionalRecognitionEngine {
     final watch = Stopwatch()..start(),
         primitives = <ProfessionalPrimitive>[],
         pending = <String>[];
-    for (var pass = 1; pass <= 4; pass++) {
+    // A directed recognition request already constrains the recognizer set
+    // and is issued for one selected region. Re-running the same fit through
+    // the four-pass automatic refinement loop only duplicates CPU work. Keep
+    // the four-pass behavior for automatic recognition, where cross-pass
+    // refinement is part of the existing contract.
+    final passCount = allowedTypes == null ? 4 : 1;
+    for (var pass = 1; pass <= passCount; pass++) {
       for (final context in regions) {
         if (pass > 1 &&
             primitives.any(
@@ -62,7 +68,7 @@ class ProfessionalRecognitionEngine {
           rebuild: pass > 1,
         );
         if (result.winner.type == PrimitiveType.unknown) {
-          if (pass == 4) pending.add(context.observation.regionId);
+          if (pass == passCount) pending.add(context.observation.regionId);
           continue;
         }
         final residuals = _residuals(result, context),

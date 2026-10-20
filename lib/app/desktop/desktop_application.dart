@@ -6639,20 +6639,16 @@ class _OfficialEngineeringWorkspaceState
                                                 .editRecognitionSelection(pick);
                                             return;
                                           }
-                                          final managedStlRecognitionPick =
+                                          final managedStlEntity =
                                               module == 'Recognition' &&
                                               picked?.data['managedStlAssets']
-                                                  is Map &&
-                                              widget.cad.runtime.scene
-                                                      .find(pick.entityId)
-                                                      ?.geometry['presentationLod']
                                                   is Map;
-                                          if (managedStlRecognitionPick ||
+                                          if (managedStlEntity ||
                                               picked?.mesh != null) {
                                             await operational.recognizePick(
                                               pick: pick,
                                               allowTechnicalStl:
-                                                  managedStlRecognitionPick,
+                                                  managedStlEntity,
                                               requestedType: operational
                                                   .requestedRecognitionPrimitive,
                                             );

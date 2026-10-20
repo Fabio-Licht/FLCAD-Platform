@@ -10,23 +10,31 @@ class RecognitionSurfacePreviewBuilder {
 
   CadSceneEntity build(
     RecognitionResult result,
-    SurfaceAssistantSuggestion suggestion,
-  ) {
+    SurfaceAssistantSuggestion suggestion, {
+    String? id,
+    Map<String, dynamic>? parameters,
+    String? displayColor,
+  }) {
+    final effectiveParameters = parameters ?? result.parameters;
     final mesh = switch (result.type) {
-      RecognitionResultType.plane => _plane(result.parameters),
-      RecognitionResultType.cylinder => _cylinder(result.parameters),
-      RecognitionResultType.cone => _cone(result.parameters),
-      RecognitionResultType.sphere => _sphere(result.parameters),
-      RecognitionResultType.fillet => _torus(result.parameters),
+      RecognitionResultType.plane => _plane(effectiveParameters),
+      RecognitionResultType.cylinder => _cylinder(effectiveParameters),
+      RecognitionResultType.cone => _cone(effectiveParameters),
+      RecognitionResultType.sphere => _sphere(effectiveParameters),
+      RecognitionResultType.fillet => _torus(effectiveParameters),
       RecognitionResultType.freeform => (const <double>[], const <int>[]),
     };
     return CadSceneEntity(
-      id: 'surface-assistant-preview',
+      id: id ?? 'surface-assistant-preview',
       kind: CadSceneEntityKind.preview,
       transparent: true,
       geometry: {
         'surfaceKind': result.type.name,
-        'displayColor': 'surfaceAssistantPreview',
+        'displayColor': displayColor ?? 'surfaceAssistantPreview',
+        if (displayColor == 'recognitionMeasured')
+          'rootLinearRgb': const [0.12, 0.42, 0.78],
+        if (displayColor == 'recognitionCorrected')
+          'rootLinearRgb': const [0.78, 0.24, 0.06],
         'previewOnly': true,
         'sourceRecognitionId': result.id,
         'strategy': suggestion.strategy.name,

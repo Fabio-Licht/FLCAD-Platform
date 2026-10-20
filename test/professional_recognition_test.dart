@@ -113,6 +113,21 @@ void main() {
     );
   });
 
+  test('allowedTypes cylinder executes only the cylinder recognizer', () async {
+    final report = await ProfessionalRecognitionEngine().recognize(
+      [contextFor('directed-cylinder', cylinder())],
+      allowedTypes: {PrimitiveType.cylinder},
+    );
+    expect(report.primitives, hasLength(1));
+    expect(
+      report.primitives.single.recognition.winner.type,
+      PrimitiveType.cylinder,
+    );
+    expect(report.primitives.single.recognition.alternatives, isEmpty);
+    expect(report.primitives.single.auditTrail, hasLength(4));
+    expect(report.primitives.single.auditTrail.first, contains('pass=1'));
+  });
+
   test(
     'topology detects coaxial primitives and composition proposes counterbore',
     () async {

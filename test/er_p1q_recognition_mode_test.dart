@@ -11,6 +11,7 @@ import 'package:flcad_mobile/app/engineering_bridge/widgets/recognition_workspac
 import 'package:flcad_mobile/core/cad_document/cad_document.dart';
 import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
 import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
+import 'package:flcad_mobile/core/adaptive_surface/models/surface_geometry.dart';
 import 'package:flcad_mobile/core/geometric_kernel/geometry/vectors.dart';
 import 'package:flcad_mobile/core/geometric_recognition/models/recognition_models.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
@@ -124,6 +125,60 @@ void main() {
       expect(harness.controller.canCreatePlaneReference, isTrue);
     },
   );
+
+  test(
+    'directed cylinder restricts allowedTypes and remains diagnostic-only',
+    () async {
+      final api = _FakeRecognitionApi(
+        _report(type: PrimitiveType.cylinder, rms: .02, maximum: .04),
+      );
+      final harness = await _ModeHarness.create(api);
+      addTearDown(harness.dispose);
+
+      await harness.controller.recognizeDirected(PrimitiveType.cylinder);
+
+      expect(api.lastAllowedTypes, {PrimitiveType.cylinder});
+      expect(
+        harness.controller.requestedRecognitionPrimitive,
+        PrimitiveType.cylinder,
+      );
+      expect(harness.controller.activeRecognitionResult?.type.name, 'cylinder');
+      expect(harness.controller.canCreateNonPlaneReference, isFalse);
+      expect(
+        harness.controller.nonPlaneReferenceBlockReason,
+        contains('somente diagnÃ³stico'),
+      );
+      expect(
+        harness.controller.canCreateRecognizedSurface(SurfaceKind.cylinder),
+        isFalse,
+      );
+    },
+  );
+
+  test('degenerate directed cylinder remains CAD-blocked', () async {
+    final api = _FakeRecognitionApi(
+      _report(
+        type: PrimitiveType.cylinder,
+        parameters: const {
+          'origin': [0.0, 0.0, 0.0],
+          'axis': [0.0, 0.0, 0.0],
+          'radius': 0.0,
+          'area': 12.0,
+        },
+      ),
+    );
+    final harness = await _ModeHarness.create(api);
+    addTearDown(harness.dispose);
+
+    await harness.controller.recognizeDirected(PrimitiveType.cylinder);
+
+    expect(harness.controller.activeRecognitionResult, isNotNull);
+    expect(harness.controller.canCreateNonPlaneReference, isFalse);
+    expect(
+      harness.controller.canCreateRecognizedSurface(SurfaceKind.cylinder),
+      isFalse,
+    );
+  });
 
   test(
     'low-confidence directed plane stays diagnostic and blocks CAD',
@@ -418,6 +473,53 @@ void main() {
       isNotNull,
     );
     expect(harness.controller.canCreateNonPlaneReference, isTrue);
+  });
+
+  testWidgets('directed cylinder UI exposes metrics without CAD action', (
+    tester,
+  ) async {
+    final harness = (await tester.runAsync(() async {
+      final value = await _ModeHarness.create(
+        _FakeRecognitionApi(
+          _report(
+            type: PrimitiveType.cylinder,
+            parameters: const {
+              'origin': [0.0, 0.0, 0.0],
+              'axis': [0.0, 0.0, 1.0],
+              'radius': 5.0,
+              'area': 12.0,
+            },
+          ),
+        ),
+      );
+      await value.controller.recognizeDirected(PrimitiveType.cylinder);
+      return value;
+    }))!;
+    addTearDown(harness.dispose);
+    await tester.binding.setSurfaceSize(const Size(420, 1600));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: SizedBox(
+              width: 420,
+              child: RecognitionWorkspacePanel(controller: harness.controller),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Reconhecer Cilindro'), findsOneWidget);
+    expect(find.text('Origem do eixo'), findsOneWidget);
+    expect(find.text('Direção do eixo'), findsOneWidget);
+    expect(find.text('RMS radial'), findsOneWidget);
+    expect(find.text('Desvio máximo radial'), findsOneWidget);
+    expect(find.text('Cobertura de inliers'), findsOneWidget);
+    expect(harness.controller.canCreateNonPlaneReference, isFalse);
   });
 
   testWidgets('filter mismatch is shown and creation stays disabled', (
