@@ -1,0 +1,19 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB09K-CODEX-PROBE",
+    "version":  1,
+    "manifest_scope":  "public",
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "bytes":  4304,
+                      "sha256":  "1e082fe5cfa46e15915b5031226a3ca0e151c6bcb42465a55162946c1db257b1"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "bytes":  453,
+                      "sha256":  "705313836032eef59ad1d991d5121933ab1e11f4e12d0b13f90c420e08eae40b"
+                  }
+              ],
+    "integrity":  "sha256"
+}

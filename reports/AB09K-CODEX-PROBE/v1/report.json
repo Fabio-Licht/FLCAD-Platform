@@ -1,0 +1,82 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB09K-CODEX-PROBE",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "automation/flcad-bridge",
+    "head":  "c05bfe78d36bb4d8fde5a220c15874095b8a0c25",
+    "objective":  "Verificar o Codex CLI em modo somente leitura e registrar ferramentas disponíveis e versões.",
+    "acceptance_criteria":  [
+                                "A sondagem do Codex termina sem modificar arquivos.",
+                                "O relatório registra o código de saída e as ferramentas permitidas."
+                            ],
+    "execution_status":  "completed",
+    "tests":  {
+                  "not_run":  [
+
+                              ],
+                  "failed":  [
+
+                             ],
+                  "passed":  [
+                                 "codex-read-only-environment-probe"
+                             ]
+              },
+    "duration_ms":  57636.41,
+    "files_changed":  [
+
+                      ],
+    "limitations":  [
+                        "AB-01 whitelist permanece ativa; não há execução geral de implementação.",
+                        "Pacote não contém logs brutos, credenciais ou conteúdo privado."
+                    ],
+    "evidence":  [
+                     {
+                         "kind":  "source-report",
+                         "label":  "executor report",
+                         "sha256":  "FBBAB859431FA7D8709EE16073E5F887A3A1544CF6C7C9BAF612D8F3371FA93C"
+                     }
+                 ],
+    "technical_evidence":  [
+                               {
+                                   "kind":  "codex-environment-probe",
+                                   "value":  {
+                                                 "cli_exit_code":  0,
+                                                 "tools":  [
+                                                               {
+                                                                   "name":  "git",
+                                                                   "available":  true,
+                                                                   "version":  "git version 2.55.0.windows.3"
+                                                               },
+                                                               {
+                                                                   "name":  "flutter",
+                                                                   "available":  true,
+                                                                   "version":  null
+                                                               },
+                                                               {
+                                                                   "name":  "dart",
+                                                                   "available":  true,
+                                                                   "version":  "Dart SDK version: 3.12.2 (stable) (Tue Jun 9 01:11:39 2026 -0700) on \"windows_x64\""
+                                                               },
+                                                               {
+                                                                   "name":  "codex",
+                                                                   "available":  true,
+                                                                   "version":  "codex-cli 0.160.1"
+                                                               }
+                                                           ]
+                                             }
+                               }
+                           ],
+    "redactions":  [
+                       "absolute/private paths",
+                       "authentication material",
+                       "CAD payload files",
+                       "raw execution logs"
+                   ],
+    "review_decision":  null,
+    "next_step":  "Revisão humana independente antes de qualquer publicação ou nova tarefa.",
+    "transport":  {
+                      "status":  "prepared-for-publication",
+                      "write_permission":  "not-verified"
+                  },
+    "source_report_sha256":  "FBBAB859431FA7D8709EE16073E5F887A3A1544CF6C7C9BAF612D8F3371FA93C"
+}
