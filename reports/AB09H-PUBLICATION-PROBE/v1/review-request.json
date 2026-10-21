@@ -1,0 +1,17 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB09H-PUBLICATION-PROBE",
+    "report_sha256":  "79eb831d4274d70062fc980225c78f9ddd77d38aac999e06db1ba60db01fb661",
+    "review_status":  "awaiting-review",
+    "reviewer":  "",
+    "tests_decision":  "insufficient",
+    "risk_decision":  "mitigate",
+    "acceptance_decision":  "pending",
+    "findings":  [
+
+                 ],
+    "required_actions":  [
+
+                         ],
+    "reviewed_at":  ""
+}

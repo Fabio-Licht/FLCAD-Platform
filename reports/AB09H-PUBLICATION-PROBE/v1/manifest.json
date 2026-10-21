@@ -1,0 +1,19 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB09H-PUBLICATION-PROBE",
+    "version":  1,
+    "manifest_scope":  "public",
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "bytes":  2711,
+                      "sha256":  "79eb831d4274d70062fc980225c78f9ddd77d38aac999e06db1ba60db01fb661"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "bytes":  459,
+                      "sha256":  "d71ee02decef209983f69681de2c08da7e681874a9297ad8c8a27e5bfd5cbd3a"
+                  }
+              ],
+    "integrity":  "sha256"
+}

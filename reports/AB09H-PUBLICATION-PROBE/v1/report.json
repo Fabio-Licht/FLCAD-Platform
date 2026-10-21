@@ -1,0 +1,64 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB09H-PUBLICATION-PROBE",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "automation/flcad-bridge",
+    "head":  "87b54e24d87b57f7636644f8d16b8f5ded923f11",
+    "objective":  "Read-only diagnostic of the local Bridge publication environment",
+    "acceptance_criteria":  [
+                                "environment report generated",
+                                "no workspace or Git mutation",
+                                "publication fields are sanitized"
+                            ],
+    "execution_status":  "completed",
+    "tests":  {
+                  "not_run":  [
+
+                              ],
+                  "failed":  [
+
+                             ],
+                  "passed":  [
+                                 "read-only environment probe publication policy inspection"
+                             ]
+              },
+    "duration_ms":  31611.53,
+    "files_changed":  [
+
+                      ],
+    "limitations":  [
+                        "AB-01 whitelist permanece ativa; nÃ£o hÃ¡ execuÃ§Ã£o geral de implementaÃ§Ã£o.",
+                        "Pacote nÃ£o contÃ©m logs brutos, credenciais ou conteÃºdo privado."
+                    ],
+    "evidence":  [
+                     {
+                         "kind":  "source-report",
+                         "label":  "executor report",
+                         "sha256":  "4D3FA0E3E853AC75064B3E6350D62A854A348EE7763D6893F6E615EEF2C73C62"
+                     }
+                 ],
+    "technical_evidence":  [
+
+                           ],
+    "redactions":  [
+                       "absolute/private paths",
+                       "authentication material",
+                       "CAD payload files",
+                       "raw execution logs"
+                   ],
+    "review_decision":  {
+                            "decision":  "HUMAN_REVIEW_REQUIRED",
+                            "reviewer_identity":  "contract-validation",
+                            "reviewer_execution_id":  "local-validation",
+                            "criteria_verified":  false,
+                            "findings":  [
+                                             "Report lacks objective fixed-test evidence."
+                                         ]
+                        },
+    "next_step":  "RevisÃ£o humana independente antes de qualquer publicaÃ§Ã£o ou nova tarefa.",
+    "transport":  {
+                      "status":  "prepared-for-publication",
+                      "write_permission":  "not-verified"
+                  },
+    "source_report_sha256":  "4D3FA0E3E853AC75064B3E6350D62A854A348EE7763D6893F6E615EEF2C73C62"
+}
