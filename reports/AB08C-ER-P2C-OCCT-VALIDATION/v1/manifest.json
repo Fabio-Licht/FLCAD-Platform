@@ -1,0 +1,19 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08C-ER-P2C-OCCT-VALIDATION",
+    "version":  1,
+    "manifest_scope":  "public",
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "bytes":  11364,
+                      "sha256":  "b5be9b4a77973f424f72943df694fdf279f2b37712fbacf6d882240307196d68"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "bytes":  464,
+                      "sha256":  "9067c8eac4d56def929656c3f7486d3bd48af7e9877e90ab0629c27ba3772f37"
+                  }
+              ],
+    "integrity":  "sha256"
+}

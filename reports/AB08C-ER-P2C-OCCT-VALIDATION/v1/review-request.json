@@ -1,0 +1,17 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08C-ER-P2C-OCCT-VALIDATION",
+    "report_sha256":  "b5be9b4a77973f424f72943df694fdf279f2b37712fbacf6d882240307196d68",
+    "review_status":  "awaiting-review",
+    "reviewer":  "",
+    "tests_decision":  "insufficient",
+    "risk_decision":  "mitigate",
+    "acceptance_decision":  "pending",
+    "findings":  [
+
+                 ],
+    "required_actions":  [
+
+                         ],
+    "reviewed_at":  ""
+}

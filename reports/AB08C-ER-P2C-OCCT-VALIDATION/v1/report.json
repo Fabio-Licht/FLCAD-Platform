@@ -1,0 +1,186 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08C-ER-P2C-OCCT-VALIDATION",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "feat/plane-axis-intersection-point",
+    "head":  "81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54",
+    "objective":  "Validar dimensionalmente a propagacao dos limites axiais no OCCT 8.0.1",
+    "acceptance_criteria":  [
+                                "valid BRep",
+                                "axial bounds preserved",
+                                "radius preserved",
+                                "axis inversion coherent"
+                            ],
+    "execution_status":  "completed",
+    "tests":  {
+                  "not_run":  [
+
+                              ],
+                  "failed":  [
+
+                             ],
+                  "passed":  [
+                                 "OCCT native harness AB-08B synthetic regression ER-P2C real seed matrix"
+                             ]
+              },
+    "duration_ms":  89796,
+    "files_changed":  [
+                          "lib/core/professional_recognition/engine/professional_recognition_engine.dart",
+                          "lib/core/professional_recognition/recognizers/quadric_recognizers.dart",
+                          "lib/app/engineering_bridge/adapters/recognition_surface_assistant_adapter.dart",
+                          "test/ab08b_engineering_regression_test.dart"
+                      ],
+    "limitations":  [
+                        "AB-01 whitelist permanece ativa; nÃ£o hÃ¡ execuÃ§Ã£o geral de implementaÃ§Ã£o.",
+                        "Pacote nÃ£o contÃ©m logs brutos, credenciais ou conteÃºdo privado."
+                    ],
+    "evidence":  [
+                     {
+                         "kind":  "source-report",
+                         "label":  "executor report",
+                         "sha256":  "506C87FBD56C5B8B7C691DEF5840BDED67D9B5CDBAAE845862ABAD595360FB7B"
+                     }
+                 ],
+    "technical_evidence":  [
+                               {
+                                   "kind":  "diagnostic_type",
+                                   "value":  "AB-08C native OCCT validation"
+                               },
+                               {
+                                   "kind":  "native_brep_validation",
+                                   "value":  "completed in disposable copied-binary environment"
+                               },
+                               {
+                                   "kind":  "changed-files",
+                                   "value":  [
+                                                 "lib/core/professional_recognition/engine/professional_recognition_engine.dart",
+                                                 "lib/core/professional_recognition/recognizers/quadric_recognizers.dart",
+                                                 "lib/app/engineering_bridge/adapters/recognition_surface_assistant_adapter.dart",
+                                                 "test/ab08b_engineering_regression_test.dart"
+                                             ]
+                               },
+                               {
+                                   "kind":  "native-brep-cases",
+                                   "value":  [
+                                                 {
+                                                     "case":  "positive",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  5,
+                                                     "radius":  2,
+                                                     "lower":  0,
+                                                     "upper":  5,
+                                                     "measured_radius_error":  0.004872
+                                                 },
+                                                 {
+                                                     "case":  "inverted-equivalent",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  5,
+                                                     "radius":  2,
+                                                     "lower":  -5,
+                                                     "upper":  0
+                                                 },
+                                                 {
+                                                     "case":  "negative",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  3,
+                                                     "radius":  2,
+                                                     "lower":  -4,
+                                                     "upper":  -1
+                                                 },
+                                                 {
+                                                     "case":  "asymmetric",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  5.5,
+                                                     "radius":  2,
+                                                     "lower":  -1,
+                                                     "upper":  4.5
+                                                 },
+                                                 {
+                                                     "case":  "shifted",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  4,
+                                                     "radius":  3,
+                                                     "lower":  -2.25,
+                                                     "upper":  1.75
+                                                 },
+                                                 {
+                                                     "case":  "inverted",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  5.75,
+                                                     "radius":  2,
+                                                     "lower":  -4.5,
+                                                     "upper":  1.25
+                                                 },
+                                                 {
+                                                     "case":  "diagonal",
+                                                     "valid":  true,
+                                                     "topology":  true,
+                                                     "measured_axial":  6,
+                                                     "radius":  1.5,
+                                                     "lower":  -3.2,
+                                                     "upper":  2.8
+                                                 }
+                                             ]
+                               },
+                               {
+                                   "kind":  "native-exit-codes",
+                                   "value":  {
+                                                 "flcad_occ_native_smoke":  0,
+                                                 "flcad_occ_brep_stream_test":  0,
+                                                 "flcad_occ_brep_stream_smoke":  0,
+                                                 "ab08c_cylinder_harness":  0
+                                             }
+                               },
+                               {
+                                   "kind":  "flutter-results",
+                                   "value":  [
+                                                 {
+                                                     "command":  "flutter test --no-pub --reporter expanded test/ab08b_engineering_regression_test.dart",
+                                                     "exit_code":  0,
+                                                     "durationMs":  3837,
+                                                     "testsPassed":  2
+                                                 },
+                                                 {
+                                                     "command":  "flutter test --no-pub --reporter expanded test/er_p2c_c4_f1_real_seed_matrix_test.dart",
+                                                     "exit_code":  0,
+                                                     "durationMs":  89796,
+                                                     "diameter":  17.9572456775,
+                                                     "rms":  0.1240091475,
+                                                     "c2_ms":  1359.011,
+                                                     "c3_ms":  5031.264,
+                                                     "status":  "convergence-failed"
+                                                 }
+                                             ]
+                               }
+                           ],
+    "redactions":  [
+                       "absolute/private paths",
+                       "authentication material",
+                       "CAD payload files",
+                       "raw execution logs"
+                   ],
+    "review_decision":  {
+                            "decision":  "HUMAN_REVIEW_REQUIRED",
+                            "reviewer_identity":  "codex-independent",
+                            "reviewer_execution_id":  "01a15f75-48ad-78e1-b3de-778c1646a284",
+                            "criteria_verified":  false,
+                            "findings":  [
+                                             "Report task_id, analyzed_commit, exitCode/status, and SHA256 match the required values.",
+                                             "Read-only source and fixture inspection confirms axial bounds are propagated and the fixture hash matches.",
+                                             "Native OCCT cases pass validity/topology checks, but the real seed matrix reports convergence-failed; therefore unrestricted geometric approval is not evidenced.",
+                                             "This is a diagnostic report, which cannot authorize approval or edits."
+                                         ]
+                        },
+    "next_step":  "RevisÃ£o humana independente antes de qualquer publicaÃ§Ã£o ou nova tarefa.",
+    "transport":  {
+                      "status":  "prepared-for-publication",
+                      "write_permission":  "not-verified"
+                  },
+    "source_report_sha256":  "506C87FBD56C5B8B7C691DEF5840BDED67D9B5CDBAAE845862ABAD595360FB7B"
+}
