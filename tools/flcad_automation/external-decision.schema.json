@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-external-decision-1.0.json",
+  "title": "FLCAD external review decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "task_id", "analyzed_commit", "report_version",
+    "report_sha256", "decision", "reviewer_identity",
+    "reviewer_execution_id", "reviewed_at", "criteria_verified",
+    "findings", "decision_id"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$" },
+    "analyzed_commit": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+    "report_version": { "type": "integer", "minimum": 1, "maximum": 9999 },
+    "report_sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "decision": { "enum": ["APPROVED", "CHANGES_REQUESTED", "BLOCKED", "HUMAN_REVIEW_REQUIRED"] },
+    "reviewer_identity": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "reviewer_execution_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "reviewed_at": { "type": "string", "format": "date-time" },
+    "criteria_verified": { "type": "boolean" },
+    "findings": { "type": "array", "maxItems": 50, "items": { "type": "string", "maxLength": 2000 } },
+    "decision_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" }
+  }
+}

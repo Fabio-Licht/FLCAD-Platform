@@ -67,6 +67,6 @@
       "type": "string",
       "pattern": "^(?![A-Za-z]:)(?!/)(?!\\\\)(?!.*(?:^|[/\\])\\.\\.(?:[/\\]|$)).+\\.json$"
     },
-    "action": { "enum": ["environment", "codex-environment-probe"] }
+    "action": { "enum": ["environment", "codex-environment-probe", "flutter-selection-latency", "flutter-real-seed-matrix"] }
   }
 }

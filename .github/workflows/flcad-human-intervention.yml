@@ -35,6 +35,21 @@ on:
         description: Sanitized report path or URL
         required: true
         type: string
+      report_version:
+        description: Bound public report version when present
+        required: false
+        default: ''
+        type: string
+      report_sha256:
+        description: SHA-256 of the bound public report when present
+        required: false
+        default: ''
+        type: string
+      report_url:
+        description: Exact public URL of the bound report when present
+        required: false
+        default: ''
+        type: string
       branch:
         description: Source branch
         required: true
@@ -85,6 +100,14 @@ jobs:
             if (!/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(input.task_id)) throw new Error('task_id is invalid');
             if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(input.deduplication_id)) throw new Error('deduplication_id is invalid');
             if (!/^[0-9a-fA-F]{40}$/.test(input.commit)) throw new Error('commit must be a full SHA-1');
+            const reportFields = ['report_version', 'report_sha256', 'report_url'];
+            const reportBound = reportFields.some(field => String(input[field] || '').length > 0);
+            if (reportBound) {
+              for (const field of reportFields) if (typeof input[field] !== 'string' || input[field].length === 0) throw new Error(`report-bound payload missing: ${field}`);
+              if (!/^[1-9][0-9]{0,3}$/.test(input.report_version)) throw new Error('report_version is invalid');
+              if (!/^[0-9a-fA-F]{64}$/.test(input.report_sha256)) throw new Error('report_sha256 is invalid');
+              if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/blob\/[^/]+(?:\/[^/]+)*\/reports\/[^/]+\/v[1-9][0-9]*\/(report|review-request)\.json$/.test(input.report_url)) throw new Error('report_url is not a sanitized public report URL');
+            }
             if (!/^(true|false)$/.test(String(input.publish))) throw new Error('publish must be boolean');
             if (String(input.publish) === 'true' && process.env.GITHUB_ACTOR !== 'Fabio-Licht') throw new Error('publication requires the authorized operator');
             if (/(token|password|secret|api[_-]?key|authorization|bearer)\s*[:=]/i.test(JSON.stringify(input))) throw new Error('sensitive-looking content rejected');
@@ -105,6 +128,9 @@ jobs:
           ACTION_REQUESTED: ${{ inputs.action_requested }}
           TECHNICAL_SUMMARY: ${{ inputs.technical_summary }}
           REPORT_REFERENCE: ${{ inputs.report_reference }}
+          REPORT_VERSION: ${{ inputs.report_version }}
+          REPORT_SHA256: ${{ inputs.report_sha256 }}
+          REPORT_URL: ${{ inputs.report_url }}
           SOURCE_BRANCH: ${{ inputs.branch }}
           SOURCE_COMMIT: ${{ inputs.commit }}
           DEDUPLICATION_ID: ${{ inputs.deduplication_id }}
@@ -143,6 +169,7 @@ jobs:
                 `- Action requested: ${process.env.ACTION_REQUESTED}`,
                 `- Technical summary: ${process.env.TECHNICAL_SUMMARY}`,
                 `- Report: ${process.env.REPORT_REFERENCE}`,
+                ...(process.env.REPORT_URL ? [`- Report version: ${process.env.REPORT_VERSION}`, `- Report SHA-256: ${process.env.REPORT_SHA256}`, `- Report URL: ${process.env.REPORT_URL}`] : []),
                 `- Branch: ${process.env.SOURCE_BRANCH}`,
                 `- Commit: ${process.env.SOURCE_COMMIT}`,
                 '', 'This Issue is a review request, not an authorization to execute commands.'

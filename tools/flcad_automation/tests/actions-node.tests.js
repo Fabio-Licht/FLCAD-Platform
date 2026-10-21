@@ -23,6 +23,8 @@ const baseEnv = {
     task_id: 'AB03F4-DEMO', event: 'USER_TEST_REQUIRED', state: 'WAITING_FOR_USER',
     reason: 'operator', priority: 'P1', action_requested: 'confirmar',
     technical_summary: 'mock', report_reference: 'reports/demo.json',
+    report_version: '3', report_sha256: 'a'.repeat(64),
+    report_url: 'https://github.com/Fabio-Licht/FLCAD-Platform/blob/automation/reports/reports/AB03F4-DEMO/v3/report.json',
     branch: 'automation/flcad-bridge', commit: 'a'.repeat(40),
     deduplication_id: 'AB03F4-DEMO-USER_TEST_REQUIRED', publish: false
   }),
