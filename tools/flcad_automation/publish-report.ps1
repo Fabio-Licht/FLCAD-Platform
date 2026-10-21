@@ -3,7 +3,8 @@ param(
   [Parameter(Mandatory = $true)] [string] $Package,
   [Parameter(Mandatory = $true)] [string] $Worktree,
   [string] $Branch = 'automation/reports',
-  [ValidateRange(1, 9999)] [int] $Version = 1
+  [ValidateRange(1, 9999)] [int] $Version = 1,
+  [switch] $AllowPreparedOutputs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -25,7 +26,14 @@ $worktreeRoot = (Resolve-Path -LiteralPath $Worktree).Path
 $branchResult = Git-Run @('branch','--show-current') $worktreeRoot
 if ($branchResult.Code -ne 0 -or $branchResult.Text -ne $Branch) { Fail 'branch mismatch' }
 $statusBefore = Git-Run @('status','--porcelain') $worktreeRoot
-if ($statusBefore.Code -ne 0 -or -not [string]::IsNullOrWhiteSpace($statusBefore.Text)) { Fail 'transport worktree must be clean' }
+if ($statusBefore.Code -ne 0) { Fail 'could not inspect transport worktree' }
+if (-not [string]::IsNullOrWhiteSpace($statusBefore.Text)) {
+  if (-not $AllowPreparedOutputs) { Fail 'transport worktree must be clean' }
+  foreach ($line in ($statusBefore.Text -split "`n" | Where-Object { $_.Trim() })) {
+    $trimmed = $line.Trim()
+    if ($trimmed -notmatch '^\?\?\s+reports(?:/.*)?$') { Fail 'dirty worktree contains content outside prepared report outputs' }
+  }
+}
 $remote = Git-Run @('remote','get-url','origin') $worktreeRoot
 if ($remote.Code -ne 0 -or [string]::IsNullOrWhiteSpace($remote.Text)) { Fail 'origin is not configured' }
 

@@ -65,6 +65,9 @@
         "write_permission": { "enum": ["verified", "not-verified", "not-configured"] }
       }
     },
-    "source_report_sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" }
+    "source_report_sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "technical_evidence": { "type": "array", "items": { "type": "object" } },
+    "redactions": { "type": "array", "items": { "type": "string" } },
+    "review_decision": { "type": ["object", "null"] }
   }
 }

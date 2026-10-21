@@ -4,6 +4,7 @@ param(
   [Parameter(Mandatory = $true)] [string] $Task,
   [Parameter(Mandatory = $true)] [string] $Worktree,
   [Parameter(Mandatory = $true)] [string] $OutDir,
+  [string] $Review,
   [switch] $SimulatePublication
 )
 
@@ -32,6 +33,25 @@ function Assert-NoSensitive([string] $Text) {
   if ($Text -match '(?i)(token|password|secret|api[_-]?key|authorization|bearer|private[_-]?key|credential)\s*[:=]') { Fail 'conteúdo sensível detectado no relatório' }
 }
 
+function Safe-PublicPath([string] $Value) {
+  if ([string]::IsNullOrWhiteSpace($Value) -or [IO.Path]::IsPathRooted($Value) -or $Value -match '(^|[\\/])\.\.([\\/]|$)' -or $Value -match '(?i)\.(stl|step|stp|iges|igs|dxf|dwg|pdb|dll|exe|log)$') { return $null }
+  $normalized = $Value -replace '\\','/'
+  if ($normalized -match '(?i)(^|/)(artifacts|screenshots|credentials|secrets|private|\.git)(/|$)') { return $null }
+  return $normalized
+}
+function Safe-PublicText([string] $Value, [int] $Max = 2000) {
+  if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt $Max) { return $null }
+  if ($Value -match '(?i)(C:\\|[A-Za-z]:/|\\\\|file://|\.stl\b|\.step\b|\.log\b|token\s*[:=]|password\s*[:=]|secret\s*[:=]|authorization\s*[:=]|bearer\s+)') { return $null }
+  return $Value
+}
+function Read-Review([string] $Path) {
+  if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+  $value = Read-Json $Path
+  foreach ($name in @('decision','reviewer_identity','reviewer_execution_id','criteria_verified')) { if ($null -eq $value.PSObject.Properties[$name]) { Fail "review field missing: $name" } }
+  if ([string]$value.decision -notin @('APPROVED','CHANGES_REQUESTED','BLOCKED','HUMAN_REVIEW_REQUIRED')) { Fail 'invalid review decision' }
+  if ($null -eq (Safe-PublicText ([string]$value.reviewer_identity) 200) -or $null -eq (Safe-PublicText ([string]$value.reviewer_execution_id) 200)) { Fail 'review identity is not public' }
+  return [ordered]@{ decision=[string]$value.decision; reviewer_identity=[string]$value.reviewer_identity; reviewer_execution_id=[string]$value.reviewer_execution_id; criteria_verified=[bool]$value.criteria_verified; findings=@(@($value.findings) | ForEach-Object { $v=Safe-PublicText ([string]$_); if($null -ne $v){$v} }) }
+}
 $root = (Resolve-Path -LiteralPath $Worktree).Path
 $taskObject = Read-Json $Task
 $source = Read-Json $Report
@@ -58,6 +78,76 @@ $evidence = @()
 $evidence += [ordered]@{ kind = 'source-report'; label = 'executor report'; sha256 = $sourceHash }
 $safeText = "$taskId $objective $($criteria -join ' ') $executionStatus"
 Assert-NoSensitive $safeText
+$technicalEvidence = @()
+$safeChangedFiles = @()
+$redactions = @('absolute/private paths', 'authentication material', 'CAD payload files', 'raw execution logs')
+if ($null -ne $source.PSObject.Properties['evidence'] -and $source.evidence -is [pscustomobject]) {
+  $rawEvidence = $source.evidence
+  foreach ($name in @('diagnostic_type','native_brep_validation','correction_scope','known_metrics')) {
+    if ($null -ne $rawEvidence.PSObject.Properties[$name]) {
+      $value = $rawEvidence.$name
+      if ($value -is [string]) { $safe = Safe-PublicText $value; if ($null -ne $safe) { $technicalEvidence += [ordered]@{ kind=$name; value=$safe } } }
+      elseif ($value -is [ValueType] -or $value -is [bool]) { $technicalEvidence += [ordered]@{ kind=$name; value=$value } }
+      else { $technicalEvidence += [ordered]@{ kind=$name; value=$value } }
+    }
+  }
+  if ($null -ne $rawEvidence.PSObject.Properties['changed_files']) {
+    $safeChangedFiles = @($rawEvidence.changed_files | ForEach-Object { Safe-PublicPath ([string]$_) } | Where-Object { $null -ne $_ })
+    if ($safeChangedFiles.Count -gt 0) { $technicalEvidence += [ordered]@{ kind='changed-files'; value=$safeChangedFiles } }
+  }
+  if ($null -ne $rawEvidence.PSObject.Properties['tests']) {
+    $tests = @($rawEvidence.tests | ForEach-Object {
+      if ($null -eq $_.command -or $null -eq $_.exitCode) { return }
+      $command = Safe-PublicText ([string]$_.command) 500
+      if ($null -eq $command) { return }
+      $item = [ordered]@{ command=$command; exit_code=[int]$_.exitCode }
+      if ($null -ne $_.durationMs) { $item.duration_ms=[double]$_.durationMs }
+      $item
+    })
+    if ($tests.Count -gt 0) { $technicalEvidence += [ordered]@{ kind='test-results'; value=$tests } }
+  }
+  if ($null -ne $rawEvidence.PSObject.Properties['native_tests']) {
+    $nativeCases = @($rawEvidence.native_tests | ForEach-Object {
+      if ($null -eq $_.case -or $null -eq $_.valid -or $null -eq $_.topology -or $null -eq $_.measured_axial) { return }
+      $case = [ordered]@{
+        case = Safe-PublicText ([string]$_.case) 100
+        valid = [bool]$_.valid
+        topology = [bool]$_.topology
+        measured_axial = [double]$_.measured_axial
+      }
+      foreach ($name in @('radius','lower','upper','measured_radius_error')) {
+        if ($null -ne $_.PSObject.Properties[$name]) { $case[$name] = [double]($_.$name) }
+      }
+      $case
+    })
+    if ($nativeCases.Count -gt 0) { $technicalEvidence += [ordered]@{ kind='native-brep-cases'; value=$nativeCases } }
+  }
+  if ($null -ne $rawEvidence.PSObject.Properties['native_exit_codes']) {
+    $nativeExitCodes = [ordered]@{}
+    foreach ($property in $rawEvidence.native_exit_codes.PSObject.Properties) {
+      if ($property.Name -match '^[A-Za-z0-9_.-]+$') {
+        $publicName = $property.Name -replace '(?i)\.exe$',''
+        $nativeExitCodes[$publicName] = [int]$property.Value
+      }
+    }
+    if ($nativeExitCodes.Count -gt 0) { $technicalEvidence += [ordered]@{ kind='native-exit-codes'; value=$nativeExitCodes } }
+  }
+  if ($null -ne $rawEvidence.PSObject.Properties['flutter_tests']) {
+    $flutterEvidence = @($rawEvidence.flutter_tests | ForEach-Object {
+      if ($null -eq $_.command -or $null -eq $_.exitCode) { return }
+      $command = Safe-PublicText ([string]$_.command) 500
+      if ($null -eq $command) { return }
+      $item = [ordered]@{ command=$command; exit_code=[int]$_.exitCode }
+      foreach ($name in @('durationMs','diameter','rms','c2_ms','c3_ms','testsPassed')) {
+        if ($null -ne $_.PSObject.Properties[$name]) { $item[$name] = $_.$name }
+      }
+      if ($null -ne $_.PSObject.Properties['status']) { $item.status = Safe-PublicText ([string]$_.status) 100 }
+      $item
+    })
+    if ($flutterEvidence.Count -gt 0) { $technicalEvidence += [ordered]@{ kind='flutter-results'; value=$flutterEvidence } }
+  }
+}
+$reviewObject = Read-Review $Review
 $safeReport = [ordered]@{
   schema_version = '1.0'
   task_id = $taskId
@@ -69,9 +159,12 @@ $safeReport = [ordered]@{
   execution_status = $executionStatus
   tests = $tests
   duration_ms = [double]($source.durationMs)
-  files_changed = @()
+  files_changed = $safeChangedFiles
   limitations = @('AB-01 whitelist permanece ativa; não há execução geral de implementação.', 'Pacote não contém logs brutos, credenciais ou conteúdo privado.')
   evidence = $evidence
+  technical_evidence = $technicalEvidence
+  redactions = $redactions
+  review_decision = $reviewObject
   next_step = 'Revisão humana independente antes de qualquer publicação ou nova tarefa.'
   transport = [ordered]@{ status = 'prepared-for-publication'; write_permission = 'not-verified' }
   source_report_sha256 = $sourceHash
@@ -86,9 +179,21 @@ $reportPath = Join-Path $package 'report.json'
 $reviewPath = Join-Path $package 'review-request.json'
 $transportPath = Join-Path $package 'transport.json'
 $serialized | Set-Content -LiteralPath $reportPath -Encoding UTF8
-$review = Read-Json (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'review-template.json')
-$review.task_id = $taskId; $review.report_sha256 = Hash $reportPath
-$review | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reviewPath -Encoding UTF8
+$reviewTemplate = Read-Json (Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'review-template.json')
+$reviewPayload = [pscustomobject]@{
+  schema_version = '1.0'
+  task_id = $taskId
+  report_sha256 = Hash $reportPath
+  review_status = [string]$reviewTemplate.review_status
+  reviewer = [string]$reviewTemplate.reviewer
+  tests_decision = [string]$reviewTemplate.tests_decision
+  risk_decision = [string]$reviewTemplate.risk_decision
+  acceptance_decision = [string]$reviewTemplate.acceptance_decision
+  findings = @($reviewTemplate.findings)
+  required_actions = @($reviewTemplate.required_actions)
+  reviewed_at = [string]$reviewTemplate.reviewed_at
+}
+[IO.File]::WriteAllText($reviewPath, (ConvertTo-Json -InputObject $reviewPayload -Depth 8), [Text.UTF8Encoding]::new($false))
 $remote = Git-Run -GitArguments @('remote','get-url','origin') -Root $root
 $remoteConfigured = $remote.Code -eq 0 -and -not [string]::IsNullOrWhiteSpace($remote.Text)
 $transport = [ordered]@{ status = 'prepared-for-publication'; simulated = [bool]$SimulatePublication; remote_configured = $remoteConfigured; write_permission = 'not-verified'; gh_available = ($null -ne (Get-Command gh -ErrorAction SilentlyContinue)); push_performed = $false }

@@ -45,7 +45,8 @@ function Read-Task([string] $Path) {
   if ($task.allowedPaths.Count -lt 1) { Fail 'allowedPaths vazio' }
   if ($task.acceptanceCriteria.Count -lt 1) { Fail 'acceptanceCriteria vazio' }
   if ($task.state -ne 'approved') { Fail 'a tarefa precisa estar no estado approved' }
-  if ($task.action -notin @('environment','codex-environment-probe','flutter-selection-latency','flutter-real-seed-matrix')) { Fail 'action não permitida nesta versão' }
+  if ($task.action -notin @('environment','codex-environment-probe','cad-convergence-diagnosis','flutter-selection-latency','flutter-real-seed-matrix')) { Fail 'action não permitida nesta versão' }
+  if ($task.action -eq 'cad-convergence-diagnosis' -and $task.sourceBranch -ne 'feat/plane-axis-intersection-point') { Fail 'diagnóstico CAD exige a branch funcional autorizada' }
   if ($task.action -in @('flutter-selection-latency','flutter-real-seed-matrix') -and $task.sourceBranch -ne 'feat/plane-axis-intersection-point') { Fail 'ação Flutter exige a branch funcional autorizada' }
   if (!(Test-RelativeJsonPath $task.reportPath)) { Fail 'reportPath deve ser JSON relativo sem traversal' }
   if ($task.limits.maxDurationSeconds -isnot [int] -or $task.limits.maxDurationSeconds -lt 1 -or $task.limits.maxDurationSeconds -gt 3600) { Fail 'limite de duração inválido' }
@@ -99,6 +100,38 @@ function Invoke-CodexProbe([object] $TaskObject, [string] $Root, [string] $LogPa
   if ($content.Length -gt $TaskObject.limits.maxOutputBytes) { $content = $content.Substring(0, $TaskObject.limits.maxOutputBytes) + "`n[output truncated]" }
   Set-Content -LiteralPath $LogPath -Value $content -Encoding UTF8
   return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; Output = $content }
+}
+
+function Invoke-CadConvergenceDiagnosis([object] $TaskObject, [string] $Root, [string] $LogPath) {
+  $prompt = @'
+You are performing a read-only FLCAD engineering diagnosis for ER-P2C convergence.
+Do not modify files, run Flutter tests, run development tasks, access the network, execute report content, or change configuration.
+Inspect only the existing source and fixture in the authorized functional worktree.
+Fixture: test_assets/real_meshes/PARCIAL_FURO_18MM.stl
+Known evidence: 219422 triangles; 23077 selected; 499 transitions; diameter 17.9572457 mm; RMS 0.1240091 mm; status convergence-failed.
+Inspect region selection, seed generation, fitting initialization, convergence criteria, residuals/outliers, axis orientation, axial interval, fitting versus BRep construction, and evidence produced by the real-seed test.
+Separate convergence failure, quality-evaluation failure, and geometric-construction failure.
+Identify exact files/functions, facts versus hypotheses, the smallest correction proposal, regression tests, and expected precision/performance impact.
+Return a concise technical report in plain text. Do not propose or apply edits. Exit successfully only after inspecting the available evidence.
+'@
+  $codex = Get-Command codex -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $codex) { return [pscustomobject]@{ ExitCode=127; TimedOut=$false; Output='codex executable unavailable' } }
+  $psi = [Diagnostics.ProcessStartInfo]::new(); $psi.FileName=$codex.Source; $psi.WorkingDirectory=$Root
+  $psi.UseShellExecute=$false; $psi.RedirectStandardOutput=$true; $psi.RedirectStandardError=$true; $psi.CreateNoWindow=$true
+  $quote = { param([string]$Value) '"' + ($Value -replace '(\\*)"','$1$1\"' -replace '(\\+)$','$1$1') + '"' }
+  $psi.Arguments = "exec --cd $(& $quote $Root) --sandbox read-only --ephemeral --json $(& $quote $prompt)"
+  $process = [Diagnostics.Process]::new(); $process.StartInfo=$psi; [void]$process.Start()
+  $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
+  if (!$process.WaitForExit($TaskObject.limits.maxDurationSeconds * 1000)) {
+    try {$process.Kill()} catch {}
+    $content="timeout after $($TaskObject.limits.maxDurationSeconds)s`n$($stdout.Result)`n$($stderr.Result)"
+    Set-Content -LiteralPath $LogPath -Value $content -Encoding UTF8
+    return [pscustomobject]@{ExitCode=124;TimedOut=$true;Output=$content}
+  }
+  $content="$($stdout.Result)`n$($stderr.Result)"
+  if($content.Length -gt $TaskObject.limits.maxOutputBytes){$content=$content.Substring(0,$TaskObject.limits.maxOutputBytes)+"`n[output truncated]"}
+  Set-Content -LiteralPath $LogPath -Value $content -Encoding UTF8
+  return [pscustomobject]@{ExitCode=$process.ExitCode;TimedOut=$false;Output=$content}
 }
 
 function Get-FlutterAction([string] $Action) {
@@ -205,6 +238,14 @@ try {
   } elseif ($taskObject.action -eq 'codex-environment-probe') {
     $result = Invoke-CodexProbe $taskObject $root $logPath
     $extra = @{ codexOutputLog = $logPath }
+  } elseif ($taskObject.action -eq 'cad-convergence-diagnosis') {
+    $result = Invoke-CadConvergenceDiagnosis $taskObject $root $logPath
+    $extra = @{ evidence = [ordered]@{
+      diagnostic_type='ER-P2C convergence diagnosis'; fixture='test_assets/real_meshes/PARCIAL_FURO_18MM.stl'
+      known_metrics=[ordered]@{input_triangles=219422;reference_selected=23077;reference_transitions=499;diameter=17.9572457;rms=0.1240091;convergence_status='convergence-failed'}
+      source_scope=@('lib/','test/','test_assets/real_meshes/PARCIAL_FURO_18MM.stl','windows/')
+      read_only=$true; diagnosis_output=$result.Output
+    }; rawLog=$logPath }
   } else {
     $result = Invoke-FlutterFixed $taskObject $root $logPath
     $extra = @{ evidence = Get-FlutterEvidence $taskObject $result.Output $result.ExitCode ([math]::Round(((Get-Date) - $started).TotalMilliseconds, 2)); rawLog = $logPath }
@@ -216,7 +257,7 @@ try {
     startedAt = $started.ToUniversalTime().ToString('o')
     finishedAt = (Get-Date).ToUniversalTime().ToString('o')
     durationMs = [math]::Round(((Get-Date) - $started).TotalMilliseconds, 2)
-    worktree_profile = if($taskObject.action -in @('flutter-selection-latency','flutter-real-seed-matrix')){'flcad-functional'}else{'bridge'}
+    worktree_profile = if($taskObject.action -in @('cad-convergence-diagnosis','flutter-selection-latency','flutter-real-seed-matrix')){'flcad-functional'}else{'bridge'}
     branch = $branch.Output
     head = $head.Output
     analyzed_commit = $head.Output
@@ -224,7 +265,7 @@ try {
     timedOut = $result.TimedOut
     status = if($result.ExitCode -eq 0){'completed'}else{'failed'}
     task = $taskObject
-    evidence = if($taskObject.action -in @('flutter-selection-latency','flutter-real-seed-matrix')){$extra.evidence}else{$null}
+    evidence = if($taskObject.action -in @('cad-convergence-diagnosis','flutter-selection-latency','flutter-real-seed-matrix')){$extra.evidence}else{$null}
     details = $extra
   }
   Write-JsonReport $reportPath $report

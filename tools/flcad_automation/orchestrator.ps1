@@ -7,16 +7,24 @@ param(
   [string] $TaskId,
   [string] $Review,
   [string] $Worktree = (Get-Location).Path,
+  [string] $ReportsWorktree = '',
+  [string] $PublicationOutbox = '',
+  [string] $PublicationPolicy = '',
+  [string] $PublicationAuthorizationTicket = '',
   [int] $TimeoutSeconds = 3600,
   [int] $MaxAttempts = 1,
   [int] $IntervalSeconds = 5,
-  [switch] $ContinueAfterReview
+  [switch] $ContinueAfterReview,
+  [switch] $AuthorizePublicationPush
 )
 
 $ErrorActionPreference = 'Stop'
 $script:Version = '0.1.0'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:OrchestratorPath = $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrWhiteSpace($ReportsWorktree)) { $ReportsWorktree = 'C:\flcad_worktrees\flcad-reports' }
+if ([string]::IsNullOrWhiteSpace($PublicationOutbox)) { $PublicationOutbox = Join-Path (Split-Path -Parent $QueuePath) 'publication-outbox' }
+if ([string]::IsNullOrWhiteSpace($PublicationPolicy)) { $PublicationPolicy = Join-Path $scriptDir 'publication-policy.json' }
 
 function Fail([string] $Message) { throw "FLCAD orchestrator rejected: $Message" }
 function Read-Json([string] $Path) {
@@ -35,6 +43,74 @@ function Get-Queue {
   return Read-Json $QueuePath
 }
 function Save-Queue([object] $Queue) { Write-Json $QueuePath $Queue }
+function Get-PublicationQueuePath { return Join-Path (Split-Path -Parent $QueuePath) 'publication-queue.json' }
+function Get-PublicationQueue {
+  $path = Get-PublicationQueuePath
+  if (!(Test-Path -LiteralPath $path -PathType Leaf)) { return [pscustomobject]@{ schema_version='1.0'; entries=@() } }
+  $value = Read-Json $path
+  if ($null -eq $value.entries) { $value.entries=@() }
+  return $value
+}
+function Save-PublicationQueue([object] $Queue) { Write-Json (Get-PublicationQueuePath) $Queue }
+function Get-PublicationEntry([object] $Queue, [string] $TaskId, [string] $ReportSha256) {
+  return ($Queue.entries | Where-Object { $_.task_id -eq $TaskId -and $_.report_sha256 -eq $ReportSha256 } | Select-Object -First 1)
+}
+function Add-PublicationEntry([object] $Queue, [object] $Record, [string] $PackagePath, [string] $ReviewPath) {
+  if (Get-PublicationEntry $Queue $Record.task_id $Record.report_sha256) { return }
+  $Queue.entries += [pscustomobject]@{
+    task_id=$Record.task_id; report_sha256=$Record.report_sha256; analyzed_commit=(Read-Json $Record.task_path).baseCommit
+    package_path=$PackagePath; review_path=$ReviewPath; state='queued'; publication_status='local'; error=$null
+    queued_at=(Get-Date).ToUniversalTime().ToString('o')
+  }
+  Save-PublicationQueue $Queue
+}
+function Prepare-PublicationPackage([object] $Queue, [object] $Record, [object] $TaskObject, [string] $ReviewPath) {
+  $publicationQueue=Get-PublicationQueue
+  if (Get-PublicationEntry $publicationQueue $Record.task_id $Record.report_sha256) { return [pscustomobject]@{status='deduplicated';task_id=$Record.task_id} }
+  New-Item -ItemType Directory -Force -Path $PublicationOutbox | Out-Null
+  $packagePath=Join-Path $PublicationOutbox $TaskObject.id
+  if (Test-Path -LiteralPath $packagePath) {
+    $existingManifest=Join-Path $packagePath 'manifest.json'
+    $existingReport=Join-Path $packagePath 'report.json'
+    if (!(Test-Path -LiteralPath $existingManifest -PathType Leaf) -or !(Test-Path -LiteralPath $existingReport -PathType Leaf)) {
+      $publicationQueue.entries += [pscustomobject]@{task_id=$Record.task_id;report_sha256=$Record.report_sha256;package_path=$packagePath;review_path=$ReviewPath;state='blocked';publication_status='local';error='existing package is incomplete';queued_at=(Get-Date).ToUniversalTime().ToString('o')};Save-PublicationQueue $publicationQueue
+      return [pscustomobject]@{status='blocked';task_id=$Record.task_id;message='existing package is incomplete'}
+    }
+    $existingManifestObject=Read-Json $existingManifest
+    $existingReportHash=Get-ReportHash $existingReport
+    $manifestReport=$existingManifestObject.files|Where-Object{$_.name -eq 'report.json'}|Select-Object -First 1
+    if($existingManifestObject.task_id -ne $TaskObject.id -or $null -eq $manifestReport -or [string]$manifestReport.sha256 -ine $existingReportHash -or $existingReportHash -ine $Record.report_sha256){
+      $publicationQueue.entries += [pscustomobject]@{task_id=$Record.task_id;report_sha256=$Record.report_sha256;package_path=$packagePath;review_path=$ReviewPath;state='blocked';publication_status='local';error='existing package conflicts with current report hash';queued_at=(Get-Date).ToUniversalTime().ToString('o')};Save-PublicationQueue $publicationQueue
+      return [pscustomobject]@{status='blocked';task_id=$Record.task_id;message='existing package hash conflict'}
+    }
+    Add-PublicationEntry $publicationQueue $Record $packagePath $ReviewPath
+    return [pscustomobject]@{status='deduplicated-existing-package';task_id=$Record.task_id}
+  }
+  $powershell=(Get-Command powershell.exe -ErrorAction Stop).Source;$exporter=Join-Path $scriptDir 'export-report.ps1'
+  $exportRun=Invoke-Process $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',$exporter,'-Report',$Record.report_path,'-Task',$Record.task_path,'-Review',$ReviewPath,'-Worktree',(Get-ExecutionWorktree $TaskObject $Worktree),'-OutDir',$PublicationOutbox,'-SimulatePublication') $Worktree 300
+  if($exportRun.ExitCode -ne 0 -or !(Test-Path -LiteralPath (Join-Path $packagePath 'manifest.json'))){
+    $publicationQueue.entries += [pscustomobject]@{task_id=$Record.task_id;report_sha256=$Record.report_sha256;package_path=$packagePath;review_path=$ReviewPath;state='blocked';publication_status='local';error=$exportRun.Output;queued_at=(Get-Date).ToUniversalTime().ToString('o')};Save-PublicationQueue $publicationQueue
+    return [pscustomobject]@{status='blocked';task_id=$Record.task_id;message='report export failed'}
+  }
+  Add-PublicationEntry $publicationQueue $Record $packagePath $ReviewPath
+  return [pscustomobject]@{status='queued';task_id=$Record.task_id;package_path=$packagePath}
+}
+function Invoke-PublicationCycle {
+  $publicationQueue=Get-PublicationQueue
+  $pending=@($publicationQueue.entries|Where-Object{$_.state -eq 'queued'})
+  if($pending.Count -eq 0){return [pscustomobject]@{status='idle';pending=0}}
+  $powershell=(Get-Command powershell.exe -ErrorAction Stop).Source;$publisher=Join-Path $scriptDir 'publish-reports.ps1'
+  $publisherArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',$publisher,'-Command','Prepare','-Outbox',$PublicationOutbox,'-Worktree',$ReportsWorktree,'-Policy',$PublicationPolicy)
+  if($AuthorizePublicationPush){
+    if([string]::IsNullOrWhiteSpace($PublicationAuthorizationTicket)){foreach($entry in $pending){$entry.state='blocked';$entry.error='publication authorization ticket missing'};Save-PublicationQueue $publicationQueue;return [pscustomobject]@{status='blocked';pending=$pending.Count;message='publication authorization ticket missing'}}
+    $publisherArgs += @('-AuthorizePush','-AuthorizationTicket',$PublicationAuthorizationTicket)
+  }
+  $run=Invoke-Process $powershell $publisherArgs $Worktree 300
+  if($run.ExitCode -ne 0){foreach($entry in $pending){$entry.state='blocked';$entry.error=$run.Output};Save-PublicationQueue $publicationQueue;return [pscustomobject]@{status='blocked';pending=$pending.Count;message='publication preparation failed'}}
+  foreach($entry in $pending){$entry.state='prepared';$entry.publication_status='prepared-for-publication';$entry.error=$null}
+  Save-PublicationQueue $publicationQueue
+  return [pscustomobject]@{status='prepared';pending=$pending.Count}
+}
 function Get-TaskRecord([object] $Queue, [string] $Id) {
   return ($Queue.tasks | Where-Object { $_.task_id -eq $Id } | Select-Object -First 1)
 }
@@ -60,7 +136,7 @@ function Get-ReportHash([string] $Path) {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 function Get-ExecutionWorktree([object] $TaskObject, [string] $BridgeWorktree) {
-  if ($TaskObject.action -in @('flutter-selection-latency','flutter-real-seed-matrix')) { return 'C:\flcad_mobile' }
+  if ($TaskObject.action -in @('cad-convergence-diagnosis','flutter-selection-latency','flutter-real-seed-matrix')) { return 'C:\flcad_mobile' }
   return $BridgeWorktree
 }
 function New-FlutterSnapshot([object] $TaskObject) {
@@ -118,6 +194,10 @@ function Invoke-One([object] $Queue, [object] $Record) {
     try { $snapshot=New-FlutterSnapshot $taskObject;$executionWorktree=$snapshot.Root;$reportRootForRun=Join-Path (Split-Path -Parent (Split-Path -Parent $QueuePath)) 'reports';New-Item -ItemType Directory -Force -Path $reportRootForRun|Out-Null }
     catch { $Record.state='blocked';$Record.reason=$_.Exception.Message;Save-Queue $Queue;return $Record }
   }
+  if ($taskObject.action -eq 'cad-convergence-diagnosis') {
+    $reportRootForRun=Join-Path (Split-Path -Parent (Split-Path -Parent $QueuePath)) 'reports'
+    New-Item -ItemType Directory -Force -Path $reportRootForRun|Out-Null
+  }
   $Record.state = 'running'; $Record.attempts = [int]$Record.attempts + 1
   $Record.started_at = (Get-Date).ToUniversalTime().ToString('o'); Save-Queue $Queue
   $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -171,8 +251,9 @@ function Invoke-AutoReview([object] $Queue) {
   $reviewPath=Join-Path $reviewDir "$($task.id).json";$reviewer=Join-Path $scriptDir 'independent-review.ps1';$powershell=(Get-Command powershell.exe -ErrorAction Stop).Source
   $reviewRun=Invoke-Process $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',$reviewer,'-Report',$record.report_path,'-TaskId',$task.id,'-AnalyzedCommit',$task.baseCommit,'-ReportSha256',$record.report_sha256,'-OutFile',$reviewPath,'-TimeoutSeconds','300') $Worktree 360
   if($reviewRun.ExitCode -ne 0 -or !(Test-Path $reviewPath)){Set-Content -LiteralPath (Join-Path $reviewDir "$($task.id)-review-error.log") -Value $reviewRun.Output -Encoding UTF8;return [pscustomobject]@{attempted=$true;message="independent reviewer failed: $($reviewRun.ExitCode)"}}
+  $publication=Prepare-PublicationPackage $Queue $record $task $reviewPath
   $reviewCommand=Invoke-Process $powershell @('-NoProfile','-ExecutionPolicy','Bypass','-File',$script:OrchestratorPath,'-Command','Review','-QueuePath',$QueuePath,'-TaskId',$task.id,'-Review',$reviewPath,'-Worktree',$Worktree,'-ContinueAfterReview') $Worktree 900
-  return [pscustomobject]@{attempted=$true;message=if($reviewCommand.ExitCode -eq 0){'review applied'}else{'review application failed'}}
+  return [pscustomobject]@{attempted=$true;message=if($reviewCommand.ExitCode -eq 0){"review applied; publication $($publication.status)"}else{'review application failed'}}
 }
 
 $Worktree = (Resolve-Path -LiteralPath $Worktree).Path
@@ -262,7 +343,7 @@ switch ($Command) {
       while($true){
         if(Test-Path (Get-ControlPath 'watch.stop')){Write-Heartbeat 'stopped' 'stop requested';break}
         $queue=Get-Queue;if($null -eq $queue.tasks){$queue.tasks=@()}
-        if(Test-Path (Get-ControlPath 'watch.pause')){Write-Heartbeat 'paused' 'pause requested'}else{try{$reviewResult=Invoke-AutoReview $queue;if($reviewResult.attempted){Write-Heartbeat 'running' $reviewResult.message}else{$result=Invoke-QueueOnce $queue;Write-Heartbeat 'running' $result.message}}catch{Write-Heartbeat 'blocked' $_.Exception.Message;break}}
+        if(Test-Path (Get-ControlPath 'watch.pause')){Write-Heartbeat 'paused' 'pause requested'}else{try{$reviewResult=Invoke-AutoReview $queue;if($reviewResult.attempted){Write-Heartbeat 'running' $reviewResult.message}else{$result=Invoke-QueueOnce $queue;Write-Heartbeat 'running' $result.message}}catch{Write-Heartbeat 'blocked' $_.Exception.Message;break};try{$pub=Invoke-PublicationCycle;if($pub.status -eq 'blocked'){Write-Heartbeat 'running' "publication blocked; development queue preserved"}}catch{Write-Heartbeat 'running' "publication cycle unavailable; development queue preserved"}}
         Start-Sleep -Seconds $IntervalSeconds
       }
     } finally {

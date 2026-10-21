@@ -241,3 +241,52 @@ powershell -File tools/flcad_automation/read-external-decision.ps1 `
 O monitor de `automation/reports` permanece somente observador: pode detectar
 relatórios e sinalizar intervenção, mas não publica decisões, não faz dispatch e
 não controla o Watch. A Bridge também não dá ao ChatGPT acesso ao shell local.
+## AB-09C - recurring sanitized publication
+
+`publish-reports.ps1` reuses `publish-report.ps1` for eligible AB-04 local
+packages. The destination is fixed at `automation/reports`; public output is
+limited to `report.json`, `review-request.json`, and `manifest.json`.
+`publication-policy.json` limits package count, size, file allowlist,
+deduplication, and conflicts. The default command only prepares output and
+keeps `push_performed=false`.
+
+Status:
+
+```powershell
+powershell -File tools/flcad_automation/publish-reports.ps1 `
+  -Command Status -Outbox <outbox> -Worktree C:\flcad_worktrees\flcad-reports
+```
+
+Prepare without Git write:
+
+```powershell
+powershell -File tools/flcad_automation/publish-reports.ps1 `
+  -Command Prepare -Outbox <outbox> -Worktree C:\flcad_worktrees\flcad-reports
+```
+
+Recurring push requires both an explicit policy change to `push_enabled=true`
+and the `-AuthorizePush` switch in a supervised run. Without both conditions
+the process stops before changing the worktree. Report content is never
+executed, and external decisions never become implicit authorization.
+## AB-09F - Watch publication handoff
+
+The Watch now keeps a separate `publication-queue.json` beside the
+development queue. After an independent review is produced, including
+`HUMAN_REVIEW_REQUIRED`, it exports a sanitized four-file local package and
+marks the publication entry independently. The publication cycle calls the
+existing `publish-reports.ps1` in Prepare mode; a publication failure does not
+stop or unlock the development queue.
+
+The public worktree is supplied with `-ReportsWorktree`, and the publication
+outbox with `-PublicationOutbox`. Remote push remains disabled by
+`publication-policy.json`; no report or decision grants CAD execution
+authorization. A future supervised Watch run may add
+`-AuthorizePublicationPush`, but it is rejected while `push_enabled=false`.
+
+For a one-time pilot, `issue-publication-authorization.ps1` creates a local
+ticket bound to one task, one package manifest SHA-256, `automation/reports`,
+the expected remote SHA, and an expiry. `publish-reports.ps1` consumes it
+atomically before push and records the candidate commit. If the process is
+interrupted, `recover-publication-authorization.ps1` marks the ticket
+`published` only when the remote confirms that candidate; otherwise it marks
+the ticket `unconfirmed` and it cannot be reused.
