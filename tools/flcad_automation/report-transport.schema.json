@@ -15,6 +15,7 @@
     "files": {"type": "array", "items": {"type": "string", "enum": ["report.json", "review-request.json", "manifest.json"]}},
     "publish_performed": {"const": false},
     "push_performed": {"const": false},
+    "public_manifest_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
     "remote": {"type": "string"}
   }
 }
