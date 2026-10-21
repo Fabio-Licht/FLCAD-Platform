@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-classification-1.0.json",
+  "title": "FLCAD deterministic result classification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "classification", "notification_required", "event", "reason", "action_requested"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"},
+    "classification": {"enum": ["COMPLETED", "WAITING_FOR_USER", "BLOCKED", "READY_FOR_REVIEW"]},
+    "notification_required": {"type": "boolean"},
+    "event": {"enum": ["NONE", "USER_TEST_REQUIRED", "USER_APPROVAL_REQUIRED", "AGENT_BLOCKED"]},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "action_requested": {"type": "string", "minLength": 1, "maxLength": 1000}
+  }
+}

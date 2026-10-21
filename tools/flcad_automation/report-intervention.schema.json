@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-report-intervention-1.0.json",
+  "title": "FLCAD report-bound human intervention",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "report_version", "report_sha256", "report_url", "event", "state", "reason", "priority", "action_requested", "technical_summary", "branch", "commit", "deduplication_id", "execution_mode", "gui_control_authorization", "notification_status"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"},
+    "report_version": {"type": "integer", "minimum": 1},
+    "report_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"},
+    "report_url": {"type": "string", "pattern": "^https://github\\.com/[^/]+/[^/]+/blob/[^/]+(?:/[^/]+)*/reports/[^/]+/v[1-9][0-9]*/(report|review-request)\\.json$"},
+    "event": {"enum": ["USER_TEST_REQUIRED", "USER_APPROVAL_REQUIRED", "AGENT_BLOCKED"]},
+    "state": {"enum": ["WAITING_FOR_USER", "BLOCKED"]},
+    "reason": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "priority": {"enum": ["P0", "P1", "P2", "P3"]},
+    "action_requested": {"type": "string", "minLength": 1, "maxLength": 1000},
+    "technical_summary": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "branch": {"type": "string", "minLength": 1},
+    "commit": {"type": "string", "pattern": "^[0-9a-fA-F]{40}$"},
+    "deduplication_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"},
+    "execution_mode": {"const": "HEADLESS_DEVELOPMENT"},
+    "gui_control_authorization": {"const": "not-granted"},
+    "notification_status": {"enum": ["local", "prepared-for-publication", "deduplicated", "handled"]}
+  }
+}

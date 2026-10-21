@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-result-classification-1.0.json",
+  "title": "FLCAD deterministic result classification input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "execution_status", "criteria_verified", "review_required", "professional_test_required", "approval_required", "critical_decision_required", "blocked", "dependency_unavailable", "gui_authorization_required", "security_failure"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"},
+    "execution_status": {"enum": ["completed", "failed", "timed-out", "cancelled", "running"]},
+    "criteria_verified": {"type": "boolean"},
+    "review_required": {"type": "boolean"},
+    "professional_test_required": {"type": "boolean"},
+    "approval_required": {"type": "boolean"},
+    "critical_decision_required": {"type": "boolean"},
+    "blocked": {"type": "boolean"},
+    "dependency_unavailable": {"type": "boolean"},
+    "gui_authorization_required": {"type": "boolean"},
+    "security_failure": {"type": "boolean"},
+    "action_requested": {"type": "string", "maxLength": 1000},
+    "reason": {"type": "string", "maxLength": 1000}
+  }
+}
