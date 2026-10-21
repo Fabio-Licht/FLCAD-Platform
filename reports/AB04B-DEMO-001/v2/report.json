@@ -1,0 +1,53 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "automation/flcad-bridge",
+    "head":  "d545623bd2c3b3be3c8afc19cab0636ac9c45430",
+    "objective":  "Demonstração pública do transporte seguro de relatórios técnicos e do manifesto verificável; nenhuma execução funcional do FLCAD.",
+    "acceptance_criteria":  [
+                                "Publicar exatamente report.json, review-request.json e manifest.json.",
+                                "Permitir verificação independente dos hashes dos dois documentos públicos."
+                            ],
+    "execution_status":  "completed",
+    "tests":  {
+                  "passed":  [
+                                 "AB-01 executor",
+                                 "AB-02 transporte",
+                                 "AB-03 intervenção",
+                                 "AB-04A transporte",
+                                 "AB-04B-F1 integridade e atomicidade",
+                                 "AB-04B-F2 auditoria e regressões"
+                             ],
+                  "failed":  [
+
+                             ],
+                  "not_run":  [
+                                  "Execução funcional do FLCAD",
+                                  "workflow dispatch",
+                                  "Criação de Issue ou notificação"
+                              ]
+              },
+    "duration_ms":  0,
+    "files_changed":  [
+
+                      ],
+    "limitations":  [
+                        "Demonstração técnica; duration_ms=0 não representa execução funcional.",
+                        "Nenhuma STL, CAD, log, credencial ou caminho local foi incluído.",
+                        "A publicação do relatório não aciona automaticamente esta conversa."
+                    ],
+    "evidence":  [
+                     {
+                         "name":  "publish-report.ps1",
+                         "sha256":  "e1a1521f3fd9048d01d8cc1b38f4b608ef5107bd3be8252bf45eeeef7f8f4e42",
+                         "description":  "Publicador corrigido e versionado na Bridge."
+                     },
+                     {
+                         "name":  "report-transport.tests.ps1",
+                         "sha256":  "eab5e0a7dbeb915fdb4a9cdc27c10da81dfa55cb82017da74c3a733037822296",
+                         "description":  "Testes de manifesto, hashes e atomicidade."
+                     }
+                 ],
+    "next_step":  "Revisão independente do pacote publicado."
+}

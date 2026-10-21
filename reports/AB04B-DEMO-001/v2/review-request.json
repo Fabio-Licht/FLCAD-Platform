@@ -1,0 +1,16 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "report_sha256":  "15cd1f3a425367f6423d0301fbfe02f446b6fb2c33279206b5555f613629b82e",
+    "analyzed_commit":  "d545623bd2c3b3be3c8afc19cab0636ac9c45430",
+    "decision":  "HUMAN_REVIEW_REQUIRED",
+    "reviewer":  "pending-human-review",
+    "findings":  [
+                     "Manifesto público referencia exatamente os dois documentos publicados.",
+                     "transport.json permanece metadado local e não é publicado."
+                 ],
+    "required_actions":  [
+                             "Revisar os três arquivos e o manifesto SHA-256.",
+                             "Registrar decisão independente antes de qualquer evolução."
+                         ]
+}

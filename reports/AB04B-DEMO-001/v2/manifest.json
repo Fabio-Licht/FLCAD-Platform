@@ -1,0 +1,19 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "version":  2,
+    "manifest_scope":  "public",
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "bytes":  2634,
+                      "sha256":  "15cd1f3a425367f6423d0301fbfe02f446b6fb2c33279206b5555f613629b82e"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "bytes":  775,
+                      "sha256":  "8a251b8a7bd40df7b61a3fcd1b12a3aa14f4212c1d7ce73e4c0c2f771a1cd8af"
+                  }
+              ],
+    "integrity":  "sha256"
+}
