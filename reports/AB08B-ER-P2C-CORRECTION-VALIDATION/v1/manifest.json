@@ -1,0 +1,19 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08B-ER-P2C-CORRECTION-VALIDATION",
+    "version":  1,
+    "manifest_scope":  "public",
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "bytes":  7671,
+                      "sha256":  "3615bb3a58629fa553842ac52f29bfc08277c63839263266dd833d4777cecd24"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "bytes":  470,
+                      "sha256":  "29329ae89aba5585375c20122d7eef9cdf7f5408e843cc7e5768327d0a4940f8"
+                  }
+              ],
+    "integrity":  "sha256"
+}

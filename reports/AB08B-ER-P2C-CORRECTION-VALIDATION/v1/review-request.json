@@ -1,0 +1,17 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08B-ER-P2C-CORRECTION-VALIDATION",
+    "report_sha256":  "3615bb3a58629fa553842ac52f29bfc08277c63839263266dd833d4777cecd24",
+    "review_status":  "awaiting-review",
+    "reviewer":  "",
+    "tests_decision":  "insufficient",
+    "risk_decision":  "mitigate",
+    "acceptance_decision":  "pending",
+    "findings":  [
+
+                 ],
+    "required_actions":  [
+
+                         ],
+    "reviewed_at":  ""
+}

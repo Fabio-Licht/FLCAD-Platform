@@ -1,0 +1,131 @@
+{
+    "schema_version":  "1.0",
+    "task_id":  "AB08B-ER-P2C-CORRECTION-VALIDATION",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "feat/plane-axis-intersection-point",
+    "head":  "81e70d832e0c69ac25b6224f1ebcd4cef8fbfe54",
+    "objective":  "Validar correÃ§Ãµes isoladas de resÃ­duos e intervalo axial sem alterar o algoritmo de fitting",
+    "acceptance_criteria":  [
+                                "resÃ­duos reais",
+                                "intervalo axial propagado",
+                                "diagnÃ³stico de convergÃªncia observÃ¡vel"
+                            ],
+    "execution_status":  "completed",
+    "tests":  [
+                  {
+                      "command":  "flutter analyze --no-pub",
+                      "exit_code":  0
+                  },
+                  {
+                      "command":  "flutter test --no-pub --reporter expanded test/ab08b_engineering_regression_test.dart",
+                      "exit_code":  0
+                  },
+                  {
+                      "command":  "flutter test --no-pub --reporter expanded test/er_p2c_c4_f1_real_seed_matrix_test.dart",
+                      "exit_code":  0,
+                      "duration_ms":  86080
+                  },
+                  {
+                      "command":  "git diff --check",
+                      "exit_code":  0
+                  }
+              ],
+    "duration_ms":  86080,
+    "files_changed":  [
+
+                      ],
+    "limitations":  [
+                        "AB-01 whitelist permanece ativa; nÃ£o hÃ¡ execuÃ§Ã£o geral de implementaÃ§Ã£o.",
+                        "Pacote nÃ£o contÃ©m logs brutos, credenciais ou conteÃºdo privado."
+                    ],
+    "evidence":  [
+                     {
+                         "kind":  "source-report",
+                         "label":  "executor report",
+                         "sha256":  "D89BCF5DB2849876B1987069E612BD138AFA1C88DECD0DD36F10BA284FDEA2CA"
+                     }
+                 ],
+    "technical_evidence":  [
+                               {
+                                   "kind":  "diagnostic_type",
+                                   "value":  "AB-08B isolated correction validation"
+                               },
+                               {
+                                   "kind":  "native_brep_validation",
+                                   "value":  "not executed: snapshot did not include native Windows/OCCT build and no environment changes were permitted"
+                               },
+                               {
+                                   "kind":  "correction_scope",
+                                   "value":  {
+                                                 "residuals":  "computed per observation from fitted cylinder",
+                                                 "axial_bounds":  "fitted asymmetric bounds forwarded; fallback only for legacy payloads",
+                                                 "convergence":  "diagnostic fields only; no optimizer or acceptance threshold changes"
+                                             }
+                               },
+                               {
+                                   "kind":  "known_metrics",
+                                   "value":  {
+                                                 "input_triangles":  219422,
+                                                 "reference_selected":  23077,
+                                                 "reference_transitions":  499,
+                                                 "diameter":  17.9572457,
+                                                 "rms":  0.1240091,
+                                                 "convergence_status":  "convergence-failed"
+                                             }
+                               },
+                               {
+                                   "kind":  "changed-files",
+                                   "value":  [
+                                                 "lib/core/professional_recognition/engine/professional_recognition_engine.dart",
+                                                 "lib/core/professional_recognition/recognizers/quadric_recognizers.dart",
+                                                 "lib/app/engineering_bridge/adapters/recognition_surface_assistant_adapter.dart",
+                                                 "test/ab08b_engineering_regression_test.dart"
+                                             ]
+                               },
+                               {
+                                   "kind":  "test-results",
+                                   "value":  [
+                                                 {
+                                                     "command":  "flutter analyze --no-pub",
+                                                     "exit_code":  0
+                                                 },
+                                                 {
+                                                     "command":  "flutter test --no-pub --reporter expanded test/ab08b_engineering_regression_test.dart",
+                                                     "exit_code":  0
+                                                 },
+                                                 {
+                                                     "command":  "flutter test --no-pub --reporter expanded test/er_p2c_c4_f1_real_seed_matrix_test.dart",
+                                                     "exit_code":  0,
+                                                     "duration_ms":  86080
+                                                 },
+                                                 {
+                                                     "command":  "git diff --check",
+                                                     "exit_code":  0
+                                                 }
+                                             ]
+                               }
+                           ],
+    "redactions":  [
+                       "absolute/private paths",
+                       "authentication material",
+                       "CAD payload files",
+                       "raw execution logs"
+                   ],
+    "review_decision":  {
+                            "decision":  "HUMAN_REVIEW_REQUIRED",
+                            "reviewer_identity":  "codex-independent",
+                            "reviewer_execution_id":  "01a15f6e-e544-7d32-9d95-cca22fe780ec",
+                            "criteria_verified":  false,
+                            "findings":  [
+                                             "task_id, analyzed_commit, report_sha256, exitCode=0, and status=completed were verified.",
+                                             "Source and fixture hashes match the report; read-only inspection supports per-observation residuals, asymmetric axial bounds, and diagnostic convergence fields.",
+                                             "The report is diagnostic, records convergence_status=convergence-failed, and states native BREP validation was not executed; therefore it cannot authorize approval."
+                                         ]
+                        },
+    "next_step":  "RevisÃ£o humana independente antes de qualquer publicaÃ§Ã£o ou nova tarefa.",
+    "transport":  {
+                      "status":  "prepared-for-publication",
+                      "write_permission":  "not-verified"
+                  },
+    "source_report_sha256":  "D89BCF5DB2849876B1987069E612BD138AFA1C88DECD0DD36F10BA284FDEA2CA"
+}
