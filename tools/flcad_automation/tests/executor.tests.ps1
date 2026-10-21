@@ -1,12 +1,21 @@
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $executor = Join-Path $root 'executor.ps1'
-$demo = Join-Path $root 'demo-task.json'
 $codexTask = Join-Path $root 'codex-probe-task.json'
 $worktree = (Resolve-Path (Join-Path $root '..\..')).Path
 $currentHead = (git -C $worktree rev-parse HEAD).Trim()
+$demo = Join-Path $env:TEMP ('flcad-ab01-valid-' + [guid]::NewGuid().ToString('N') + '.json')
 
 function Assert-True([bool] $Condition, [string] $Message) { if (!$Condition) { throw "ASSERTION FAILED: $Message" } }
+
+@{
+  schemaVersion = '1.0'; id = 'AB-01-DRYRUN-ENV'; objective = 'dynamic environment test';
+  sourceBranch = 'automation/flcad-bridge'; baseCommit = $currentHead;
+  allowedPaths = @('tools/flcad_automation'); requiredTests = @('environment-probe'); acceptanceCriteria = @('current HEAD is reported');
+  limits = @{ maxDurationSeconds = 60; maxOutputBytes = 1048576 };
+  permissions = @{ workspaceWrite = $false; network = $false; gitMutation = $false; remotePublish = $false };
+  state = 'approved'; reportPath = 'tools/flcad_automation/reports/AB-01-DRYRUN-ENV.json'; action = 'environment'
+} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $demo -Encoding UTF8
 
 & powershell -NoProfile -File $executor -Task $demo -Worktree $worktree -ValidateOnly | Out-Null
 Assert-True ($LASTEXITCODE -eq 0) 'tarefa válida deve passar na validação'
@@ -77,3 +86,4 @@ Assert-True $cancelProcess.HasExited 'cancelamento deve terminar o processo regi
 Remove-Item -LiteralPath $cancelLock -Force -ErrorAction SilentlyContinue
 
 Write-Output 'executor.tests.ps1: PASS'
+Remove-Item -LiteralPath $demo -Force -ErrorAction SilentlyContinue

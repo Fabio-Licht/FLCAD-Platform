@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://flcad.local/schemas/flcad-report-transport-1.0.json",
+  "title": "FLCAD sanitized report Git transport result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "status", "task_id", "version", "branch", "destination", "files", "publish_performed", "push_performed"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["prepared-for-publication", "idempotent", "rejected"]},
+    "task_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$"},
+    "version": {"type": "integer", "minimum": 1, "maximum": 9999},
+    "branch": {"type": "string", "minLength": 1, "maxLength": 255},
+    "destination": {"type": "string", "pattern": "^reports/[A-Za-z0-9][A-Za-z0-9._-]{2,63}/v[1-9][0-9]{0,3}$"},
+    "files": {"type": "array", "items": {"type": "string", "enum": ["report.json", "review-request.json", "manifest.json"]}},
+    "publish_performed": {"const": false},
+    "push_performed": {"const": false},
+    "remote": {"type": "string"}
+  }
+}

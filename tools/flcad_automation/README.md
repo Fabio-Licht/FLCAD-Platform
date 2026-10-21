@@ -83,3 +83,19 @@ integration, while Actions-permissions and branch-protection reads were also
 blocked. Rulesets were readable and empty. These results do not prove future
 `GITHUB_TOKEN` Issue-write capability, which must be confirmed before
 activation.
+## AB-04A — sanitized report transport
+
+`publish-report.ps1` prepares only the sanitized `report.json`,
+`review-request.json` and `manifest.json` under
+`reports/<task_id>/v<version>` in a clean `automation/reports` worktree. It
+does not add, commit or push; a later supervised Git step can publish the
+prepared files. The package is allowlisted, its SHA-256 manifest is verified,
+private paths, CAD/STL/log artifacts and credential-like content are rejected,
+and a same task/version replay is idempotent while a different payload is a
+conflict.
+
+The report branch is separate from `main`. The ChatGPT GitHub connector can
+read the published report files when they exist, but publication does not
+trigger this conversation. Human decisions are represented independently by
+`decision.schema.json` and must cite `task_id`, report SHA-256 and analyzed
+commit. No report content is ever executed.
