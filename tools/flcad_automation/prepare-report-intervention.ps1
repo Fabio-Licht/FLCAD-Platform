@@ -40,7 +40,7 @@ function Acquire-Lock([string]$Path){
         try{$meta=$existing|ConvertFrom-Json}catch{$stream.Dispose();Fail 'residual lock metadata is invalid; human recovery required'}
         if($null -eq $meta.pid -or $null -eq $meta.start_ticks){$stream.Dispose();Fail 'residual lock owner is unknown; human recovery required'}
         try{$owner=Get-Process -Id ([int]$meta.pid) -ErrorAction Stop;$ownerTicks=$owner.StartTime.ToUniversalTime().Ticks}catch{$owner=$null}
-        if($null -ne $owner -and $ownerTicks -eq [int64]$meta.start_ticks){$stream.Dispose();Fail 'lock owner is still active'}
+        if($null -ne $owner -and $ownerTicks -eq [int64]$meta.start_ticks){$stream.Dispose();Start-Sleep -Milliseconds 50;continue}
         $stream.Dispose();Remove-Item -LiteralPath $Path -Force -ErrorAction Stop;continue
       }
       $current=Get-Process -Id $PID;$meta=[ordered]@{pid=$PID;start_ticks=$current.StartTime.ToUniversalTime().Ticks;created_at=(Get-Date).ToUniversalTime().ToString('o')};$bytes=[Text.Encoding]::UTF8.GetBytes(($meta|ConvertTo-Json -Compress));$stream.SetLength(0);$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true);return $stream

@@ -10,6 +10,9 @@ $ErrorActionPreference = 'Stop'
 function Fail([string] $Message) { throw "AB-04B-F1 report transport rejected: $Message" }
 function Read-Json([string] $Path) { try { return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json) } catch { Fail "invalid JSON: $([IO.Path]::GetFileName($Path))" } }
 function Hash([string] $Path) { return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() }
+function Read-Utf8Text([string] $Path) { return [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false)) }
+function Write-Utf8Lf([string] $Path, [string] $Text) { $normalized = $Text -replace "`r`n", "`n" -replace "`r", "`n"; [IO.File]::WriteAllBytes($Path, [Text.UTF8Encoding]::new($false).GetBytes($normalized)) }
+function Write-CanonicalJson([string] $Path, [object] $Object) { Write-Utf8Lf $Path ($Object | ConvertTo-Json -Depth 12) }
 function Assert-Hash([string] $Value, [string] $Name) { if ($Value -notmatch '^[0-9a-fA-F]{64}$') { Fail "$Name is not a valid SHA-256" } }
 function Git-Run([string[]] $Arguments, [string] $Root) { $out = & git -C $Root @Arguments 2>&1; [pscustomobject]@{ Code = $LASTEXITCODE; Text = ($out -join "`n").Trim() } }
 function Assert-SafeId([string] $Value, [string] $Name) { if ($Value -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$') { Fail "$Name is invalid" } }
@@ -51,22 +54,32 @@ Assert-NoPrivate (Get-Content -LiteralPath $reportPath -Raw) 'report.json'; Asse
 $destinationRelative = (Join-Path (Join-Path 'reports' ([string]$report.task_id)) "v$Version") -replace '\\','/'
 $destinationRoot = Join-Path $worktreeRoot $destinationRelative
 $publishFiles = @('report.json','review-request.json','manifest.json')
-$publicManifest = [ordered]@{ schema_version='1.0'; task_id=[string]$report.task_id; version=$Version; manifest_scope='public'; files=@([ordered]@{name='report.json';bytes=(Get-Item -LiteralPath $reportPath).Length;sha256=(Hash $reportPath)},[ordered]@{name='review-request.json';bytes=(Get-Item -LiteralPath $reviewPath).Length;sha256=(Hash $reviewPath)}); integrity='sha256' }
+$canonicalRoot = Join-Path $env:TEMP ('flcad-canonical-report-' + [guid]::NewGuid().ToString('N'))
+$canonicalReportPath = Join-Path $canonicalRoot 'report.json'
+$canonicalReviewPath = Join-Path $canonicalRoot 'review-request.json'
+$publicManifest = $null
 $stageRoot = Join-Path $worktreeRoot ('.flcad-report-stage-' + [guid]::NewGuid().ToString('N'))
 $stageMoved = $false
 try {
+  New-Item -ItemType Directory -Force -Path $canonicalRoot | Out-Null
+  Write-Utf8Lf $canonicalReportPath (Read-Utf8Text $reportPath)
+  $canonicalReportHash = Hash $canonicalReportPath
+  $canonicalReview = Read-Json $reviewPath
+  $canonicalReview.report_sha256 = $canonicalReportHash
+  Write-CanonicalJson $canonicalReviewPath $canonicalReview
+  $publicManifest = [ordered]@{ schema_version='1.0'; task_id=[string]$report.task_id; version=$Version; manifest_scope='public'; files=@([ordered]@{name='report.json';bytes=(Get-Item -LiteralPath $canonicalReportPath).Length;sha256=(Hash $canonicalReportPath)},[ordered]@{name='review-request.json';bytes=(Get-Item -LiteralPath $canonicalReviewPath).Length;sha256=(Hash $canonicalReviewPath)}); integrity='sha256' }
   if (Test-Path -LiteralPath $destinationRoot) {
     if (-not (Test-Path -LiteralPath $destinationRoot -PathType Container)) { Fail 'existing destination is not a directory' }
     $existing = @(Get-ChildItem -LiteralPath $destinationRoot -File -ErrorAction SilentlyContinue)
     if ($existing.Count -ne 3 -or @($existing | Where-Object { $_.Name -notin $publishFiles }).Count -gt 0) { Fail 'existing destination is not exactly the public package' }
     $tempManifest = Join-Path $env:TEMP ('flcad-public-manifest-' + [guid]::NewGuid().ToString('N') + '.json')
-    try { $publicManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tempManifest -Encoding UTF8; foreach ($name in $publishFiles) { $source = if ($name -eq 'manifest.json') { $tempManifest } else { Join-Path $packageRoot $name }; if ((Hash $source) -ne (Hash (Join-Path $destinationRoot $name))) { Fail "version conflict: $name" } } } finally { Remove-Item -LiteralPath $tempManifest -Force -ErrorAction SilentlyContinue }
+    try { Write-CanonicalJson $tempManifest $publicManifest; foreach ($name in $publishFiles) { $source = if ($name -eq 'manifest.json') { $tempManifest } elseif ($name -eq 'report.json') { $canonicalReportPath } else { $canonicalReviewPath }; if ((Hash $source) -ne (Hash (Join-Path $destinationRoot $name))) { Fail "version conflict: $name" } } } finally { Remove-Item -LiteralPath $tempManifest -Force -ErrorAction SilentlyContinue }
     $status = 'idempotent'
   } else {
     New-Item -ItemType Directory -Force -Path $stageRoot | Out-Null
-    Copy-Item -LiteralPath $reportPath -Destination (Join-Path $stageRoot 'report.json')
-    Copy-Item -LiteralPath $reviewPath -Destination (Join-Path $stageRoot 'review-request.json')
-    $stageManifestPath = Join-Path $stageRoot 'manifest.json'; $publicManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $stageManifestPath -Encoding UTF8
+    Copy-Item -LiteralPath $canonicalReportPath -Destination (Join-Path $stageRoot 'report.json')
+    Copy-Item -LiteralPath $canonicalReviewPath -Destination (Join-Path $stageRoot 'review-request.json')
+    $stageManifestPath = Join-Path $stageRoot 'manifest.json'; Write-CanonicalJson $stageManifestPath $publicManifest
     $stageFiles = @(Get-ChildItem -LiteralPath $stageRoot -File)
     if ($stageFiles.Count -ne 3 -or @($stageFiles.Name | Where-Object { $_ -notin $publishFiles }).Count -gt 0) { Fail 'public staging is incomplete' }
     foreach ($entry in $publicManifest.files) { Assert-Hash ([string]$entry.sha256) "public hash $($entry.name)"; if ($entry.sha256 -ne (Hash (Join-Path $stageRoot $entry.name))) { Fail "public hash mismatch: $($entry.name)" } }
@@ -76,5 +89,5 @@ try {
     Move-Item -LiteralPath $stageRoot -Destination $destinationRoot
     $stageMoved = $true; $status = 'prepared-for-publication'
   }
-} finally { if (-not $stageMoved -and (Test-Path -LiteralPath $stageRoot)) { Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue } }
+} finally { if (-not $stageMoved -and (Test-Path -LiteralPath $stageRoot)) { Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue }; if (Test-Path -LiteralPath $canonicalRoot) { Remove-Item -LiteralPath $canonicalRoot -Recurse -Force -ErrorAction SilentlyContinue } }
 [ordered]@{schema_version='1.0';status=$status;task_id=$report.task_id;version=$Version;branch=$Branch;destination=$destinationRelative;files=$publishFiles;public_manifest_sha256=(Hash (Join-Path $destinationRoot 'manifest.json'));publish_performed=$false;push_performed=$false;remote=$remote.Text}|ConvertTo-Json -Depth 8
