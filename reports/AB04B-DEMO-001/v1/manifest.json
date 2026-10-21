@@ -1,0 +1,19 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "version":  1,
+    "files":  [
+                  {
+                      "name":  "report.json",
+                      "sha256":  "f1df60cce6d8990ab86f51ea78dcad44ab84a48cdf8ef6929fb21a0bcd27d72c"
+                  },
+                  {
+                      "name":  "review-request.json",
+                      "sha256":  "dfede4244b85afbb4558620d7759b6f952b8c231593135e7eb2eb54fa88e75fe"
+                  },
+                  {
+                      "name":  "transport.json",
+                      "sha256":  "0c33b2b7633c6af2b11d8de6ef2a9513d77649895672c56add8616668379a4a2"
+                  }
+              ]
+}

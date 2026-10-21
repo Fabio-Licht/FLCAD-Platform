@@ -1,0 +1,16 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "report_sha256":  "f1df60cce6d8990ab86f51ea78dcad44ab84a48cdf8ef6929fb21a0bcd27d72c",
+    "analyzed_commit":  "49cfc51291f69857a8ccba9d72265c91f99356f4",
+    "decision":  "HUMAN_REVIEW_REQUIRED",
+    "reviewer":  "pending-human-review",
+    "findings":  [
+                     "Demonstração sanitizada preparada; não representa execução funcional do FLCAD.",
+                     "Os testes locais de transporte e regressão foram aprovados conforme o relatório."
+                 ],
+    "required_actions":  [
+                             "Revisar o relatório e o manifesto SHA-256.",
+                             "Autorizar separadamente qualquer teste de publicação ou notificação real."
+                         ]
+}

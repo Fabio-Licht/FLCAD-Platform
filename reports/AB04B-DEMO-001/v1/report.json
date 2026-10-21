@@ -1,0 +1,52 @@
+﻿{
+    "schema_version":  "1.0",
+    "task_id":  "AB04B-DEMO-001",
+    "lifecycle_status":  "prepared-for-publication",
+    "branch":  "automation/flcad-bridge",
+    "head":  "49cfc51291f69857a8ccba9d72265c91f99356f4",
+    "objective":  "Demonstração pública do transporte seguro de relatórios técnicos; nenhuma execução funcional do FLCAD.",
+    "acceptance_criteria":  [
+                                "Validar preparação sanitizada de relatório, revisão independente e manifesto SHA-256.",
+                                "Permitir consulta do pacote por integração Git sem publicar conteúdo privado."
+                            ],
+    "execution_status":  "completed",
+    "tests":  {
+                  "passed":  [
+                                 "AB-01 executor com fixture dinâmica",
+                                 "AB-02 exportação e sanitização",
+                                 "AB-03 intervenção humana",
+                                 "AB-03-F2 validação do workflow",
+                                 "AB-04A transporte local e idempotência"
+                             ],
+                  "failed":  [
+
+                             ],
+                  "not_run":  [
+                                  "Execução funcional do FLCAD",
+                                  "Publicação via GitHub Actions",
+                                  "Criação de Issue ou notificação"
+                              ]
+              },
+    "duration_ms":  0,
+    "files_changed":  [
+
+                      ],
+    "limitations":  [
+                        "Pacote demonstrativo; duration_ms=0 não representa medição de execução funcional.",
+                        "Nenhuma STL, CAD, log bruto, credencial ou caminho local foi incluído.",
+                        "A publicação não dispara workflow nem aciona automaticamente uma conversa do ChatGPT."
+                    ],
+    "evidence":  [
+                     {
+                         "name":  "publish-report.ps1",
+                         "sha256":  "a184f14aa65730dd811dff3811b6f6ab218e8671cb780e3f82a8b175d1c857d7",
+                         "description":  "Implementação do transporte local revisada."
+                     },
+                     {
+                         "name":  "report-transport.schema.json",
+                         "sha256":  "e02dbb98c63d97926e63bc2e82ff27758cacc45d5c8a478ad2fdf2718d08e8b8",
+                         "description":  "Schema do resultado de transporte."
+                     }
+                 ],
+    "next_step":  "Revisão humana independente do relatório e, se aprovado, teste controlado de publicação posterior."
+}
