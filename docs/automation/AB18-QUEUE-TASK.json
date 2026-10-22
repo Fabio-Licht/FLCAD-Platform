@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "task_id": "AB18-QUEUE-HANDOFF-20261022",
+  "state": "PROPOSED_READONLY",
+  "kind": "executor_handoff_probe",
+  "description": "Verify scheduled ChatGPT inbox can discover and validate an AB18 proposed task without user copy/paste; no executor launch.",
+  "repository": "Fabio-Licht/FLCAD-Platform",
+  "branch": "automation/ab18-queue-handoff-20261022",
+  "spec_path": "docs/automation/AB18-QUEUE-HANDOFF.md",
+  "read_only": true,
+  "approved_for_execution": false,
+  "allow_work_launch": false,
+  "allow_codex_launch": false,
+  "allow_cad_access": false,
+  "allow_file_changes": false,
+  "allow_git_push": false,
+  "expected_monitor_action": "Read and validate this queue item; report identifier and integrity metadata; propose next safe step without executing it.",
+  "acceptance": [
+    "AB18 JSON discovered automatically",
+    "HEAD and blob SHA verified",
+    "No Work/Codex/CAD execution",
+    "No repository mutations by monitor"
+  ]
+}
