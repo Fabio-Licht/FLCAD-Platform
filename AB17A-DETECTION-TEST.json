@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "task_id": "AB17A-DETECTION-TEST-20261022",
+  "report_type": "automation_detection_pilot",
+  "status": "TEST_REPORT_PUBLISHED",
+  "purpose": "Verify hourly AB-17 discovery, GitHub integrity inspection and notification for a newly published report.",
+  "source": "supervised ChatGPT GitHub connector publication",
+  "is_synthetic_test": true,
+  "requires_human_action": false,
+  "contains_execution_authorization": false,
+  "tests_executed": false,
+  "execution_requested": false,
+  "expected_monitor_behavior": "Detect this new report once, verify blob and commit, notify about the new test report; do not execute code or publish prompts.",
+  "notes": [
+    "Only this JSON test artifact is authorized.",
+    "This is not evidence of CAD or Work execution.",
+    "No new task should be dispatched automatically."
+  ]
+}
