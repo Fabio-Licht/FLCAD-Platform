@@ -30,3 +30,12 @@ Validate an alternative to GitHub Pull Request webhook triggers: ChatGPT Work pe
 
 ## Next gate
 Request user approval before converting the existing AB-10 event monitor into a periodic monitor or installing a new scheduled task. Avoid consuming an additional automation slot without need.
+
+## AB-11-002 — Change-detection probe
+
+task_id: AB11-TEST-002
+status: PROPOSED — NOT APPROVED FOR EXECUTION
+kind: DOCUMENTATION_ONLY_MONITOR_TEST
+objective: Verify that the hourly GitHub Inbox monitor notices this new task entry and reports the change once, without executing anything.
+acceptance: Detect new task_id AB11-TEST-002; report current blob SHA and branch HEAD commit; do not report unchanged content repeatedly.
+restrictions: READ ONLY for monitor; no Codex, PowerShell, CAD, tests, merge, comments, or workflow dispatch. This entry is not execution authorization.
