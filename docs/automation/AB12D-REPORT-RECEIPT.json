@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "task_id": "AB12D-REPORT-RETURN-20261022",
+  "kind": "DOCUMENTATION_ONLY_RECEIPT",
+  "source_test": "AB-12C-R2",
+  "source_head": "c05bfe78d36bb4d8fde5a220c15874095b8a0c25",
+  "observations": [
+    {
+      "item": "AB-12C-R2 reported a disposable POSIX workspace at /tmp/flcad-ab12c-r2.3snYxt/repo, branch automation/flcad-bridge, expected HEAD c05bfe78d36bb4d8fde5a220c15874095b8a0c25, and clean Git status.",
+      "provenance": "prior_conversation_report",
+      "verification": "not_independently_reverified_during_AB-12D"
+    },
+    {
+      "item": "AB-12D instruction file was fetched through the GitHub connector from automation/ab12d-report-return-20261022; blob SHA 6837dacb40501244d524d6bb04c10a98580276c3.",
+      "provenance": "current_github_connector_read",
+      "verification": "verified"
+    },
+    {
+      "item": "A GitHub contents read for docs/automation/AB12D-REPORT-RECEIPT.json on the target branch returned 404 Not Found before creation.",
+      "provenance": "current_github_connector_read",
+      "verification": "verified"
+    }
+  ],
+  "reported_by": "ChatGPT Work; AB-12C-R2 execution details are preserved as prior conversation report, not fresh runner evidence",
+  "evidence_scope": "This receipt records the prior AB-12C-R2 report and current GitHub connector reads. The AB-12C-R2 clone and runner commands were not re-executed during AB-12D.",
+  "published_at": null
+}
