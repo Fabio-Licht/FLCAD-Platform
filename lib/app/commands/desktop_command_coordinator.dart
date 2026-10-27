@@ -17,7 +17,13 @@ class DesktopCommandCoordinator {
     required this.projects,
     ProjectRepository? repository,
   }) : repository = repository ?? ProjectRepository() {
-    manager = CommandManager(registry: registry);
+    manager = CommandManager(
+      registry: registry,
+      traceSink: (event) => cad.runtime.write('command.trace', event.toJson()),
+      operationGate: () async {
+        if (_initializationStarted) await _initialization;
+      },
+    );
     cad.runtime.attachCommands(manager);
     dispatcher = CommandDispatcher(
       manager: manager,
@@ -35,6 +41,8 @@ class DesktopCommandCoordinator {
   late final CommandDispatcher dispatcher;
   late final EngineeringCommandRouter router;
   Future<void> _saveTail = Future<void>.value();
+  Future<void>? _initialization;
+  bool _initializationStarted = false;
 
   /// Session owner of each operational command currently installed in
   /// [registry].
@@ -106,7 +114,8 @@ class DesktopCommandCoordinator {
 
   /// Canonical project save entry point. Menu, Ctrl+S and workspace callers
   /// share this tail so Sketch/document writes cannot interleave.
-  Future<void> saveProject({String? expectedProjectId}) {
+  Future<void> saveProject({String? expectedProjectId}) async {
+    if (_initializationStarted) await _initialization;
     final operation = _saveTail.then<void>(
       (_) => _performSave(expectedProjectId: expectedProjectId),
       onError: (_, _) => _performSave(expectedProjectId: expectedProjectId),
@@ -143,8 +152,18 @@ class DesktopCommandCoordinator {
     }
   }
 
-  Future<void> initialize() async {
+  Future<void> initialize() {
+    _initializationStarted = true;
+    return _initialization ??= _initialize();
+  }
+
+  Future<void> _initialize() async {
     await projects.initialize();
+    final project = projects.current;
+    if (project != null) {
+      final directory = await repository.directoryFor(project.id);
+      await manager.recoverJournals(directory);
+    }
     await refreshContext();
   }
 
@@ -169,6 +188,8 @@ class DesktopCommandCoordinator {
   }
 
   Future<void> openProject(Project project) async {
+    final directory = await repository.directoryFor(project.id);
+    await manager.recoverJournals(directory);
     await router.route('project.open', {'projectId': project.id});
     await refreshContext();
     await cad.restoreProjectGeometry(project.id);
@@ -181,19 +202,35 @@ class DesktopCommandCoordinator {
 
   Future<void> undo() async {
     try {
-      await cad.runtime.undoCommand();
+      if (_initializationStarted) await _initialization;
+      final operationId = 'shell-undo-${DateTime.now().microsecondsSinceEpoch}';
+      cad.runtime.write('command.operationId', operationId);
+      cad.runtime.write('command.callback.phase', 'enter');
+      await cad.runtime.undoCommand(operationId: operationId);
       await _afterHistory('history.afterUndo');
+      cad.runtime.write('command.callback.phase', 'complete');
     } catch (error) {
       cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
+      cad.runtime.write('command.callback.phase', 'failed');
+    } finally {
+      cad.runtime.write('command.callback.phase', 'exit');
     }
   }
 
   Future<void> redo() async {
     try {
-      await cad.runtime.redoCommand();
+      if (_initializationStarted) await _initialization;
+      final operationId = 'shell-redo-${DateTime.now().microsecondsSinceEpoch}';
+      cad.runtime.write('command.operationId', operationId);
+      cad.runtime.write('command.callback.phase', 'enter');
+      await cad.runtime.redoCommand(operationId: operationId);
       await _afterHistory('history.afterRedo');
+      cad.runtime.write('command.callback.phase', 'complete');
     } catch (error) {
       cad.setStatus(error.toString().replaceFirst('Bad state: ', ''));
+      cad.runtime.write('command.callback.phase', 'failed');
+    } finally {
+      cad.runtime.write('command.callback.phase', 'exit');
     }
   }
 
@@ -211,6 +248,7 @@ class DesktopCommandCoordinator {
       required CommandAction undo,
       CommandAction? redo,
       CommandValidator? validator,
+      bool undoable = true,
     }) => registry.register(
       RegisteredEngineeringCommand(
         id: id,
@@ -219,6 +257,7 @@ class DesktopCommandCoordinator {
         undo: undo,
         redo: redo ?? execute,
         validator: validator,
+        undoable: undoable,
       ),
     );
 
@@ -256,6 +295,7 @@ class DesktopCommandCoordinator {
       id: 'project.save',
       module: 'Project',
       validator: CommandValidation.projectRequired,
+      undoable: false,
       execute: (context, _) async {
         await saveProject(expectedProjectId: context.projectId);
         return 'Project saved';

@@ -74,7 +74,9 @@ extern "C" int32_t OCC_STREAM_CALL flcad_occ_mesh_stream_v1(
     stream_inject(1);
     BRepBuilderAPI_Copy copier(borrowed, true, false);
     auto shape = copier.Shape();
-    BRepMesh_IncrementalMesh mesher(shape, deflection, false, angle, false);
+    const auto precision = precision_for_stl(shape, deflection, angle);
+    BRepMesh_IncrementalMesh mesher(shape, precision.deflection, false,
+                                    precision.angle, false);
     if (!mesher.IsDone())
       return error(phase, "Tessellation did not complete");
     phase = OCC_STREAM_SERIALIZATION;

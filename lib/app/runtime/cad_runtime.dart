@@ -114,6 +114,23 @@ final class ManagedAlignmentPreview {
   final EntityPlacement placement;
 }
 
+/// In-memory documentary state captured before a command execute.
+final class CadRuntimeCommandCheckpoint {
+  const CadRuntimeCommandCheckpoint({
+    required this.document,
+    required this.runtimeRevision,
+    required this.undo,
+    required this.redo,
+    required this.recoveryRequired,
+  });
+
+  final CadDocument? document;
+  final int runtimeRevision;
+  final List<CadDocument> undo;
+  final List<CadDocument> redo;
+  final bool recoveryRequired;
+}
+
 class CadRuntime extends ChangeNotifier with NotificationGate {
   CadRuntime({
     required this.kernels,
@@ -181,6 +198,11 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   late final OperationalEntityResolver operationalResolver;
   late final OperationalSelectionManager operationalSelection;
   CadDocument? _document;
+
+  /// Document last written, or the opened document when the file already
+  /// matched. In-memory inserts that keep the revision list do not replace
+  /// it, so the next commit still detects an external file change.
+  CadDocument? _persistedDocumentBaseline;
   Directory? _projectDirectory;
   ImportedCadDocument? _activeImport;
   KernelMeshGeometry? _activeMeshGeometry;
@@ -191,6 +213,10 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   Object? recognitionSession, sketchSession, surfaceSession;
   final Map<String, Object?> _state = {};
   final Map<String, ManagedEntityGeometry> _managedGeometry = {};
+
+  /// Local display captured before rigid placement. Placement projects this
+  /// map and does not tessellate the native owner again.
+  final Map<String, Map<String, dynamic>> _managedLocalScene = {};
 
   // Native producers remain outside this documentary transaction protocol.
   final Object _runtimeIdentity = Object();
@@ -216,6 +242,35 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   CadManagedImportPublication? _managedImportPublication;
 
   CadDocument? get document => _document;
+
+  /// Snapshot used when a command mutates state and then throws.
+  /// Restoring it does not publish a new revision.
+  CadRuntimeCommandCheckpoint captureCommandCheckpoint() =>
+      CadRuntimeCommandCheckpoint(
+        document: _document?.detachedCheckpoint(),
+        runtimeRevision: _runtimeRevision,
+        undo: [for (final item in _undo) item.detachedCheckpoint()],
+        redo: [for (final item in _redo) item.detachedCheckpoint()],
+        recoveryRequired: _recoveryRequired,
+      );
+
+  void restoreCommandCheckpoint(CadRuntimeCommandCheckpoint checkpoint) {
+    _document = checkpoint.document;
+    _runtimeRevision = checkpoint.runtimeRevision;
+    _undo
+      ..clear()
+      ..addAll(checkpoint.undo);
+    _redo
+      ..clear()
+      ..addAll(checkpoint.redo);
+    _recoveryRequired = checkpoint.recoveryRequired;
+  }
+
+  @visibleForTesting
+  void debugInstallDocument(CadDocument document) {
+    _document = document;
+  }
+
   ImportedCadDocument? get activeImport => _activeImport;
   KernelMeshGeometry? get activeMeshGeometry => _activeMeshGeometry;
   KernelBounds? get workspaceBounds => _workspaceBounds;
@@ -1354,6 +1409,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
   Future<void> _removeManagedGeometry(String entityId) async {
     // Scene removal is performed by the caller before releasing native state.
     final value = _managedGeometry.remove(entityId);
+    _managedLocalScene.remove(entityId);
     if (value != null) await value.dispose();
   }
 
@@ -1365,10 +1421,11 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     _commands = value;
   }
 
-  Future<void> undoCommand() async {
+  Future<void> undoCommand({String? operationId}) async {
     final commands = _commands;
-    if (commands?.canUndo == true) {
-      await commands!.undo();
+    if (commands != null &&
+        (commands.canUndo || commands.hasPendingOperations)) {
+      await commands.undo(operationId);
     } else if (canUndo) {
       await undoDocument();
     } else {
@@ -1376,10 +1433,11 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     }
   }
 
-  Future<void> redoCommand() async {
+  Future<void> redoCommand({String? operationId}) async {
     final commands = _commands;
-    if (commands?.canRedo == true) {
-      await commands!.redo();
+    if (commands != null &&
+        (commands.canRedo || commands.hasPendingOperations)) {
+      await commands.redo(operationId);
     } else if (canRedo) {
       await redoDocument();
     } else {
@@ -1481,6 +1539,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
             boundary: true,
           );
           _managedGeometry.clear();
+          _managedLocalScene.clear();
         } catch (_) {
           _managedGeometry.addAll(managed);
           rethrow;
@@ -2328,6 +2387,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               displaySha256: displayAsset.metadata['sha256'] as String,
             );
             final identity = ManagedCadIdentity.stl();
+            final importedColor = _nextImportedMeshColor(current);
             final entity = CadDocumentEntity(
               id: entityId,
               kind: CadDocumentEntityKind.import,
@@ -2344,7 +2404,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
                 ...identity.toDocumentData(),
                 'collectionId': 'collection:original',
                 'sceneKind': CadSceneEntityKind.mesh.name,
-                'rootLinearRgb': _nextImportedMeshColor(current),
+                'rootLinearRgb': importedColor,
                 'managedStlAssets': assets.toJson(),
               },
             );
@@ -2362,7 +2422,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
               managedScene: CadSceneEntity(
                 id: entityId,
                 kind: CadSceneEntityKind.mesh,
-                geometry: sceneGeometry,
+                geometry: {...sceneGeometry, 'rootLinearRgb': importedColor},
               ),
               geometry: operationGeometry!,
               phasePrefix: 'managedStl',
@@ -2466,7 +2526,8 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     tx.validate();
     final before = _snapshots.document(_requireDocument());
     // Only known normalized snapshots can bypass normalization safely.
-    if (stateOverrides.isEmpty &&
+    if (!displayOnly &&
+        stateOverrides.isEmpty &&
         officialExport.action != OfficialExportAction.set &&
         _snapshots.isNormalized(before) &&
         !removed.any(before.entities.containsKey) &&
@@ -2521,7 +2582,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     );
     final candidateContent = candidate.toJson()..remove('revisions');
     final previousContent = before.toJson()..remove('revisions');
-    if (_sameJson(candidateContent, previousContent)) return;
+    if (!displayOnly && _sameJson(candidateContent, previousContent)) return;
     await _commitDocument(tx, candidate, [..._undo, before], const []);
   }
 
@@ -2704,77 +2765,78 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     );
   }
 
-  Future<void> setEntityVisibility(String id, bool visible) =>
-      _enqueue((tx) async {
-        final document = _requireDocument();
-        final entity =
-            document.entities[id] ??
-            (throw StateError('Unknown document entity: $id'));
-        if (entity.kind == CadDocumentEntityKind.collection) {
-          await _updateCollection(tx, id, visible: visible);
-          return;
+  Future<void> setEntityVisibility(String id, bool visible) => _enqueue((
+    tx,
+  ) async {
+    final document = _requireDocument();
+    final entity =
+        document.entities[id] ??
+        (throw StateError('Unknown document entity: $id'));
+    if (entity.kind == CadDocumentEntityKind.collection) {
+      await _updateCollection(tx, id, visible: visible);
+      return;
+    }
+    // A Sketch root owns its curves and sampled points. Hiding or showing
+    // the root must move the whole overlay, otherwise the green curves and
+    // endpoints stay painted above the native texture.
+    final children = document.entities.values
+        .where((child) => child.data['parentSketchId'] == id)
+        .toList(growable: false);
+    final alreadyVisible = (entity.data['sceneVisible'] ?? true) == visible;
+    final childrenMatch = children.every(
+      (child) => (child.data['sceneVisible'] ?? true) == visible,
+    );
+    if (alreadyVisible && childrenMatch) {
+      // A display-only synchronization can leave a stale scene entry even
+      // though the persisted root and child flags are already correct.
+      // Reconcile that presentation state instead of treating a Show as a
+      // second Hide on the next controller toggle.
+      final collection = document.entities[entity.data['collectionId']];
+      final effectiveVisible =
+          visible &&
+          collection?.data['visible'] != false &&
+          collection?.data['deleted'] != true;
+      var repaired = false;
+      void repair(String entityId) {
+        final sceneEntity = scene.find(entityId);
+        if (sceneEntity != null && sceneEntity.visible != effectiveVisible) {
+          scene.upsert(sceneEntity.copyWith(visible: effectiveVisible));
+          repaired = true;
         }
-        // A Sketch root owns its curves and sampled points. Hiding or showing
-        // the root must move the whole overlay, otherwise the green curves and
-        // endpoints stay painted above the native texture.
-        final children = document.entities.values
-            .where((child) => child.data['parentSketchId'] == id)
-            .toList(growable: false);
-        final alreadyVisible = (entity.data['sceneVisible'] ?? true) == visible;
-        final childrenMatch = children.every(
-          (child) => (child.data['sceneVisible'] ?? true) == visible,
-        );
-        if (alreadyVisible && childrenMatch) {
-          // A display-only synchronization can leave a stale scene entry even
-          // though the persisted root and child flags are already correct.
-          // Reconcile that presentation state instead of treating a Show as a
-          // second Hide on the next controller toggle.
-          final collection = document.entities[entity.data['collectionId']];
-          final effectiveVisible =
-              visible &&
-              collection?.data['visible'] != false &&
-              collection?.data['deleted'] != true;
-          var repaired = false;
-          void repair(String entityId) {
-            final sceneEntity = scene.find(entityId);
-            if (sceneEntity != null && sceneEntity.visible != effectiveVisible) {
-              scene.upsert(sceneEntity.copyWith(visible: effectiveVisible));
-              repaired = true;
-            }
-          }
+      }
 
-          repair(entity.id);
-          for (final child in children) {
-            repair(child.id);
-          }
-          if (repaired) notifyListeners();
-          return;
-        }
-        await _mutateDocument(
-          tx,
-          command: 'display.visibility',
-          displayOnly: true,
-          requested: [
-            CadDocumentEntity(
-              id: entity.id,
-              kind: entity.kind,
-              placement: entity.placement,
-              shape: entity.shape,
-              mesh: entity.mesh,
-              data: {...entity.data, 'sceneVisible': visible},
-            ),
-            for (final child in children)
-              CadDocumentEntity(
-                id: child.id,
-                kind: child.kind,
-                placement: child.placement,
-                shape: child.shape,
-                mesh: child.mesh,
-                data: {...child.data, 'sceneVisible': visible},
-              ),
-          ],
-        );
-      });
+      repair(entity.id);
+      for (final child in children) {
+        repair(child.id);
+      }
+      if (repaired) notifyListeners();
+      return;
+    }
+    await _mutateDocument(
+      tx,
+      command: 'display.visibility',
+      displayOnly: true,
+      requested: [
+        CadDocumentEntity(
+          id: entity.id,
+          kind: entity.kind,
+          placement: entity.placement,
+          shape: entity.shape,
+          mesh: entity.mesh,
+          data: {...entity.data, 'sceneVisible': visible},
+        ),
+        for (final child in children)
+          CadDocumentEntity(
+            id: child.id,
+            kind: child.kind,
+            placement: child.placement,
+            shape: child.shape,
+            mesh: child.mesh,
+            data: {...child.data, 'sceneVisible': visible},
+          ),
+      ],
+    );
+  });
 
   /// World-axis translation (mm), then X/Y/Z rotations (degrees) about the
   /// original local bounds center. One call is one transaction/history entry.
@@ -3567,10 +3629,33 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
     if (WorldCoordinateSystem.isProtected(target)) {
       throw StateError('World Coordinate System entities cannot be deleted.');
     }
+    final ownedSketchIds = <String>{};
+    final sketchRoot =
+        target.data['sketch'] is Map ||
+        target.kind == CadDocumentEntityKind.sketch;
+    if (sketchRoot) {
+      for (final entity in document.entities.values) {
+        if (entity.data['deleted'] == true) continue;
+        if (entity.data['parentSketchId'] == entityId) {
+          ownedSketchIds.add(entity.id);
+        }
+      }
+    }
+    final dependencySources = <String>{entityId, ...ownedSketchIds};
+    final dependentEntities = <CadDocumentEntity>{
+      for (final sourceId in dependencySources) ...dependencyImpact(sourceId),
+    };
     final entities = <CadDocumentEntity>[
       if (target.data['deleted'] != true) target,
+      for (final id in ownedSketchIds)
+        if (document.entities[id] case final CadDocumentEntity owned) owned,
       if (includeDependencies)
-        ...dependencyImpact(entityId).where((e) => e.data['deleted'] != true),
+        ...dependentEntities.where(
+          (entity) =>
+              entity.data['deleted'] != true &&
+              entity.id != entityId &&
+              !ownedSketchIds.contains(entity.id),
+        ),
     ];
     if (entities.any(WorldCoordinateSystem.isProtected)) {
       throw StateError('Protected entities cannot be recycled.');
@@ -3819,6 +3904,7 @@ class CadRuntime extends ChangeNotifier with NotificationGate {
           .then((_) async {
             final managed = _managedGeometry.values.toList();
             _managedGeometry.clear();
+            _managedLocalScene.clear();
             await Future.wait(managed.map((value) => value.dispose()));
             geometrySelection.removeListener(_forwardSelectionChange);
             _selectionForwardPending = false;

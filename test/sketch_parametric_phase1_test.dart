@@ -300,7 +300,7 @@ void main() {
   });
 
   test(
-    'explicit endpoint coincidence moves only the selected endpoint',
+    'explicit endpoint coincidence rigidly translates the selected line',
     () async {
       final anchor = sketch.builders.line.build(
         const SketchVector(0, 0),
@@ -319,7 +319,7 @@ void main() {
 
       expect(result.success, isTrue);
       expect(target.parameters['start'], [10.0, 0.0, 0.0]);
-      expect(target.parameters['end'], [40.0, 5.0, 0.0]);
+      expect(target.parameters['end'], [20.0, 0.0, 0.0]);
     },
   );
 

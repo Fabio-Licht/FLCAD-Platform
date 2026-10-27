@@ -204,10 +204,27 @@ abstract final class PanelViewModel {
     return PanelViewModelUpdate(merged, snapshot.changedKeys);
   }
 
-  static String _label(CadDocumentEntity entity) =>
-      entity.data['name'] as String? ??
-      entity.data['label'] as String? ??
-      entity.id;
+  static final RegExp _embeddedUuid = RegExp(
+    r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}',
+  );
+
+  static bool _isSketchPresentation(CadDocumentEntity entity) =>
+      entity.kind == CadDocumentEntityKind.sketch ||
+      entity.data['parentSketchId'] is String ||
+      entity.data['sketchEntity'] != null;
+
+  static String _label(CadDocumentEntity entity) {
+    final stored =
+        entity.data['name'] as String? ?? entity.data['label'] as String?;
+    final hasStored = stored != null && stored.isNotEmpty;
+    final sketchUuid =
+        hasStored &&
+        _isSketchPresentation(entity) &&
+        _embeddedUuid.hasMatch(stored);
+    if (hasStored && !sketchUuid) return stored;
+    if (_isSketchPresentation(entity)) return 'Geometria';
+    return entity.id;
+  }
 
   static String _group(CadDocumentEntity entity) {
     final workspaceGroup = entity.data['workspaceGroup'];

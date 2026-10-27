@@ -4,10 +4,13 @@ import '../analytics/constraint_analytics.dart';
 import '../graph/constraint_graph.dart';
 import '../history/constraint_history.dart';
 import '../models/constraint_models.dart';
+import '../../sketch_engine/persistence/sketch_persistence_transaction.dart';
 
 class ConstraintRepository {
   ConstraintRepository(this.projectDirectory);
   final Directory projectDirectory;
+  final Map<String, String> _lastConstraintJson = <String, String>{};
+  final Map<String, String> _lastDimensionJson = <String, String>{};
   static const paths = [
     'CAD/Constraints',
     'CAD/ConstraintGraph',
@@ -36,20 +39,28 @@ class ConstraintRepository {
     final constraintList = constraints.toList(growable: false);
     final dimensionList = dimensions.toList(growable: false);
     for (final c in constraintList) {
-      await _writeJsonAtomically(
-        File(
-          '${_dir(paths[0]).path}${Platform.pathSeparator}${_safe(c.id)}.json',
-        ),
-        c.toJson(),
+      final target = File(
+        '${_dir(paths[0]).path}${Platform.pathSeparator}${_safe(c.id)}.json',
       );
+      final encoded = jsonEncode(c.toJson());
+      if (_lastConstraintJson[c.id] == encoded) {
+        continue;
+      }
+      await _writeJsonAtomically(target, c.toJson());
+      _lastConstraintJson[c.id] = encoded;
     }
     for (final d in dimensionList) {
+      final encoded = jsonEncode(d.toJson());
+      if (_lastDimensionJson[d.id] == encoded) {
+        continue;
+      }
       await _writeJsonAtomically(
         File(
           '${_dir(paths[4]).path}${Platform.pathSeparator}${_safe(d.id)}.json',
         ),
         d.toJson(),
       );
+      _lastDimensionJson[d.id] = encoded;
     }
     await _writeJsonAtomically(
       File('${_dir(paths[1]).path}${Platform.pathSeparator}graph.json'),
@@ -76,37 +87,12 @@ class ConstraintRepository {
   }
 
   Future<void> _writeJsonAtomically(File target, Object value) async {
-    final suffix = DateTime.now().microsecondsSinceEpoch;
-    final temporary = File('${target.path}.tmp-$suffix');
-    final backup = File('${target.path}.bak-$suffix');
-    var installed = false;
-    try {
-      await temporary.writeAsString(jsonEncode(value), flush: true);
-      if (await target.exists()) await target.rename(backup.path);
-      await temporary.rename(target.path);
-      installed = true;
-      if (await backup.exists()) {
-        try {
-          await backup.delete();
-        } on Object {
-          // Best-effort cleanup only.
-        }
-      }
-    } catch (_) {
-      if (!installed && !await target.exists() && await backup.exists()) {
-        await backup.rename(target.path);
-      }
-      rethrow;
-    } finally {
-      if (await temporary.exists()) await temporary.delete();
-      if (installed && await backup.exists()) {
-        try {
-          await backup.delete();
-        } on Object {
-          // Best-effort cleanup only.
-        }
-      }
-    }
+    // SketchPersistenceTransaction snapshots all repository directories before
+    // entering this method. A synchronous replacement avoids a second
+    // exists/rename chain that can remain pending on Windows when the scanner
+    // briefly holds an existing JSON file. The outer snapshot is the recovery
+    // boundary for a partial write.
+    target.writeAsStringSync(jsonEncode(value));
   }
 
   Future<void> _removeStaleJson(
@@ -123,32 +109,38 @@ class ConstraintRepository {
   }
 
   Future<List<SketchConstraint>> loadConstraints() async {
+    await const SketchPersistenceTransaction().recoverIfNeeded(
+      projectDirectory,
+    );
     final d = _dir(paths[0]);
     if (!await d.exists()) return [];
     final result = <SketchConstraint>[];
     await for (final f in d.list()) {
       if (f is File && f.path.endsWith('.json')) {
-        result.add(
-          SketchConstraint.fromJson(
-            (jsonDecode(await f.readAsString()) as Map).cast<String, dynamic>(),
-          ),
+        final value = SketchConstraint.fromJson(
+          (jsonDecode(await f.readAsString()) as Map).cast<String, dynamic>(),
         );
+        result.add(value);
+        _lastConstraintJson[value.id] = jsonEncode(value.toJson());
       }
     }
     return result;
   }
 
   Future<List<SketchDimension>> loadDimensions() async {
+    await const SketchPersistenceTransaction().recoverIfNeeded(
+      projectDirectory,
+    );
     final d = _dir(paths[4]);
     if (!await d.exists()) return [];
     final result = <SketchDimension>[];
     await for (final f in d.list()) {
       if (f is File && f.path.endsWith('.json')) {
-        result.add(
-          SketchDimension.fromJson(
-            (jsonDecode(await f.readAsString()) as Map).cast<String, dynamic>(),
-          ),
+        final value = SketchDimension.fromJson(
+          (jsonDecode(await f.readAsString()) as Map).cast<String, dynamic>(),
         );
+        result.add(value);
+        _lastDimensionJson[value.id] = jsonEncode(value.toJson());
       }
     }
     return result;

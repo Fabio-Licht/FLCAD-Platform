@@ -2,6 +2,7 @@ import 'dart:math' as math;
 import '../../feature_lifecycle/feature_update_solver.dart';
 import '../../parametric_solver/parametric_solver.dart';
 import '../../sketch_constraints/api/constraint_api.dart';
+import '../../sketch_constraints/models/constraint_models.dart';
 import '../../sketch_engine/api/sketch_engine_api.dart';
 import '../../sketch_engine/entities/sketch_entities.dart';
 import '../../sketch_engine/history/sketch_history.dart';
@@ -19,6 +20,69 @@ import '../runtime/editor_runtime.dart';
 import '../selection/editor_selection.dart';
 import '../snapping/editor_snapping.dart';
 import '../toolbar/sketch_toolbar.dart';
+
+/// Chooses the fillet arc that faces the corner.
+///
+/// Raw atan2 endpoints can differ by the complementary 3pi/2 span. The
+/// viewport interpolates start to end linearly, so the stored sweep must be
+/// the signed turn whose midpoint points from the center toward the corner.
+({double startAngle, double endAngle}) filletArcAngles({
+  required SketchVector center,
+  required SketchVector corner,
+  required SketchVector firstTangent,
+  required SketchVector secondTangent,
+}) {
+  final start = math.atan2(
+    firstTangent.y - center.y,
+    firstTangent.x - center.x,
+  );
+  final rawEnd = math.atan2(
+    secondTangent.y - center.y,
+    secondTangent.x - center.x,
+  );
+  const twoPi = math.pi * 2;
+  var counterclockwise = (rawEnd - start) % twoPi;
+  if (counterclockwise <= 0) counterclockwise += twoPi;
+  final clockwise = counterclockwise - twoPi;
+  final towardCorner = math.atan2(corner.y - center.y, corner.x - center.x);
+
+  double angularDistance(double left, double right) {
+    var delta = (left - right) % twoPi;
+    if (delta < 0) delta += twoPi;
+    return math.min(delta, twoPi - delta);
+  }
+
+  final sweep =
+      angularDistance(start + counterclockwise / 2, towardCorner) <=
+          angularDistance(start + clockwise / 2, towardCorner)
+      ? counterclockwise
+      : clockwise;
+  return (startAngle: start, endAngle: start + sweep);
+}
+
+final class SketchEditorCheckpoint {
+  SketchEditorCheckpoint._({
+    required this.undoCounts,
+    required this.redoCounts,
+    required this.carriedOnUndo,
+    required this.carriedOnRedo,
+    required this.graph,
+    required this.historyLength,
+    required this.analytics,
+    required this.previews,
+    required this.activeTool,
+    required this.enabledTools,
+  });
+
+  final List<int> undoCounts, redoCounts;
+  final List<List<SketchConstraint>> carriedOnUndo, carriedOnRedo;
+  final Map<String, Set<String>> graph;
+  final int historyLength;
+  final List<int> analytics;
+  final Map<String, (EditorOperation, EditorOperationStatus)> previews;
+  final SketchToolType? activeTool;
+  final Set<SketchToolType> enabledTools;
+}
 
 class SketchEditorEngine {
   SketchEditorEngine({
@@ -47,7 +111,77 @@ class SketchEditorEngine {
   late final EditorSnappingEngine snapping;
   late final PreviewEngine preview;
   final _undoCounts = <int>[], _redoCounts = <int>[];
+  final _carriedOnUndo = <List<SketchConstraint>>[];
+  final _carriedOnRedo = <List<SketchConstraint>>[];
   final FeatureUpdateSolver featureUpdates = const FeatureUpdateSolver();
+
+  SketchEditorCheckpoint captureCheckpoint() => SketchEditorCheckpoint._(
+    undoCounts: List<int>.of(_undoCounts),
+    redoCounts: List<int>.of(_redoCounts),
+    carriedOnUndo: _carriedOnUndo.map(List<SketchConstraint>.of).toList(),
+    carriedOnRedo: _carriedOnRedo.map(List<SketchConstraint>.of).toList(),
+    graph: graph.capture(),
+    historyLength: history.entries.length,
+    analytics: [
+      analytics.editCount,
+      analytics.totalEditMicros,
+      analytics.entities,
+      analytics.selections,
+      analytics.undo,
+      analytics.redo,
+      analytics.movements,
+      analytics.conversions,
+      analytics.snapCount,
+      analytics.previewCount,
+      analytics.suggestionsAccepted,
+      analytics.suggestionsIgnored,
+      analytics.dofSamples,
+      analytics.totalDof,
+      analytics.sketchQuality,
+    ],
+    previews: preview.capture(),
+    activeTool: toolbar.activeTool,
+    enabledTools: Set<SketchToolType>.of(toolbar.enabled),
+  );
+
+  void restoreCheckpoint(SketchEditorCheckpoint checkpoint) {
+    _undoCounts
+      ..clear()
+      ..addAll(checkpoint.undoCounts);
+    _redoCounts
+      ..clear()
+      ..addAll(checkpoint.redoCounts);
+    _carriedOnUndo
+      ..clear()
+      ..addAll(checkpoint.carriedOnUndo.map(List<SketchConstraint>.of));
+    _carriedOnRedo
+      ..clear()
+      ..addAll(checkpoint.carriedOnRedo.map(List<SketchConstraint>.of));
+    graph.restore(checkpoint.graph);
+    history.truncate(checkpoint.historyLength);
+    final values = checkpoint.analytics;
+    analytics
+      ..editCount = values[0]
+      ..totalEditMicros = values[1]
+      ..entities = values[2]
+      ..selections = values[3]
+      ..undo = values[4]
+      ..redo = values[5]
+      ..movements = values[6]
+      ..conversions = values[7]
+      ..snapCount = values[8]
+      ..previewCount = values[9]
+      ..suggestionsAccepted = values[10]
+      ..suggestionsIgnored = values[11]
+      ..dofSamples = values[12]
+      ..totalDof = values[13]
+      ..sketchQuality = values[14];
+    preview.restore(checkpoint.previews);
+    toolbar.activeTool = checkpoint.activeTool;
+    toolbar.enabled
+      ..clear()
+      ..addAll(checkpoint.enabledTools);
+  }
 
   EditorOperation start(
     SketchToolType tool,
@@ -73,8 +207,7 @@ class SketchEditorEngine {
       // `_create` is wrapped by one SketchEngine transaction even when a tool
       // emits several entities (rectangle, polygon or slot). Undo/Redo must
       // therefore move one engine snapshot, not one snapshot per entity.
-      _undoCounts.add(1);
-      _redoCounts.clear();
+      _rememberUndo(1);
       history.record(EditorHistoryAction.commit, operation.id);
       analytics.editCount++;
       analytics.entities = sketch.engine.entities.length;
@@ -223,6 +356,21 @@ class SketchEditorEngine {
           }),
         )
         .toList();
+    final drivingDimensions = affectedConstraints.where(
+      (constraint) => constraint.enabled && constraint.driving,
+    );
+    if (drivingDimensions.isNotEmpty) {
+      final dimension = constraints.dimensions.firstWhere(
+        (item) => item.constraintId == drivingDimensions.first.id,
+        orElse: () => throw StateError(
+          'Driving dimension constraint ${drivingDimensions.first.id} has no dimension.',
+        ),
+      );
+      throw StateError(
+        'Sketch edit is incompatible with driving dimension ${dimension.id}. '
+        'Edit the dimension or convert it to Driven first.',
+      );
+    }
     if (affectedConstraints.isNotEmpty && !confirmConstrained) {
       throw StateError(
         'Editing affects ${affectedConstraints.length} constraint(s); confirmation is required.',
@@ -235,12 +383,18 @@ class SketchEditorEngine {
         return;
       }
       if (tool == SketchToolType.fillet || tool == SketchToolType.chamfer) {
+        final drivingBefore = tool == SketchToolType.fillet
+            ? _drivingMeasurements(targets)
+            : const <String, double>{};
         _corner(
           tool,
           targets,
           value,
           autoTrim: parameters['autoTrim'] as bool? ?? true,
         );
+        if (tool == SketchToolType.fillet) {
+          _rejectFilletDrivingConflict(targets, drivingBefore);
+        }
         return;
       }
       for (final id in targets) {
@@ -303,8 +457,7 @@ class SketchEditorEngine {
       }
     });
     graph.record(op.id, targets);
-    _undoCounts.add(sketch.engine.history.entries.length - historyBefore);
-    _redoCounts.clear();
+    _rememberUndo(sketch.engine.history.entries.length - historyBefore);
     history.record(EditorHistoryAction.edit, op.id);
     analytics.editCount++;
   }
@@ -312,11 +465,16 @@ class SketchEditorEngine {
   bool undo() {
     if (_undoCounts.isEmpty) return false;
     final count = _undoCounts.removeLast();
-    var changed = false;
+    final carried = _carriedOnUndo.removeLast();
+    for (final constraint in carried) {
+      constraints.engine.release(constraint.id);
+    }
+    var changed = carried.isNotEmpty;
     for (var i = 0; i < count; i++) {
       changed = sketch.engine.undo() || changed;
     }
     _redoCounts.add(count);
+    _carriedOnRedo.add(carried);
     analytics.undo++;
     history.record(EditorHistoryAction.undo, 'editor');
     return changed;
@@ -325,11 +483,17 @@ class SketchEditorEngine {
   bool redo() {
     if (_redoCounts.isEmpty) return false;
     final count = _redoCounts.removeLast();
+    final carried = _carriedOnRedo.removeLast();
     var changed = false;
     for (var i = 0; i < count; i++) {
       changed = sketch.engine.redo() || changed;
     }
+    for (final constraint in carried) {
+      constraints.engine.retain(constraint);
+      changed = true;
+    }
     _undoCounts.add(count);
+    _carriedOnUndo.add(carried);
     analytics.redo++;
     history.record(EditorHistoryAction.redo, 'editor');
     return changed;
@@ -376,8 +540,7 @@ class SketchEditorEngine {
         feature.metadata['featureValue'] = value;
       }),
     );
-    _undoCounts.add(sketch.engine.history.entries.length - historyBefore);
-    _redoCounts.clear();
+    _rememberUndo(sketch.engine.history.entries.length - historyBefore);
     history.record(EditorHistoryAction.edit, id);
   }
 
@@ -387,12 +550,21 @@ class SketchEditorEngine {
     String secondId,
     SketchVector secondKeepPoint,
   ) {
-    _ensureEditableWithoutConstraints([firstId, secondId]);
+    _rejectIncompatibleTrimConstraints([firstId, secondId]);
     final first = sketch.entity(firstId), second = sketch.entity(secondId);
     if (first is! SketchLine || second is! SketchLine) {
       throw StateError('Intersection Trim requires two lines.');
     }
     final intersection = _lineIntersectionParameters(first, second);
+    if (!_trimOnSegment(intersection.$2) || !_trimOnSegment(intersection.$3)) {
+      throw StateError('The selected lines do not meet on both segments.');
+    }
+    if (!_trimInterior(intersection.$2) && !_trimInterior(intersection.$3)) {
+      throw StateError(
+        'Endpoint-to-endpoint junctions have no portion to trim.',
+      );
+    }
+    final point = _trimMeetingPoint(first, second, intersection);
     final firstKeep = _projectOnLine(
       firstKeepPoint,
       SketchVector.fromJson(first.parameters['start']),
@@ -405,49 +577,128 @@ class SketchEditorEngine {
     ).$2;
     final historyBefore = sketch.engine.history.entries.length;
     sketch.engine.transaction('trim-intersection', () {
-      _keepLineSide(first, intersection.$1, firstKeep, intersection.$2);
-      _keepLineSide(second, intersection.$1, secondKeep, intersection.$3);
+      if (_trimInterior(intersection.$2)) {
+        _keepLineSide(first, point, firstKeep, intersection.$2);
+      }
+      if (_trimInterior(intersection.$3)) {
+        _keepLineSide(second, point, secondKeep, intersection.$3);
+      }
     });
     _recordExternalEdit('trim-intersection', historyBefore);
   }
 
+  /// True when another line's endpoint lies on this line's interior.
+  ///
+  /// That T junction is a cut boundary. A later Trim can remove one portion
+  /// of this line without shortening the line that already ends there.
+  bool hasEndpointBoundedTrimCut(String id) {
+    final line = sketch.entity(id);
+    if (line is! SketchLine) return false;
+    return _segmentCuts(line).any((cut) => _trimAtEndpoint(cut.otherParameter));
+  }
+
+  /// True when [clickedPoint] sits on a positive overhang beyond a real cut.
+  bool hasRemovableEndpointOverhang(String id, SketchVector clickedPoint) {
+    final line = sketch.entity(id);
+    if (line is! SketchLine) return false;
+    try {
+      return _nearestOverhangCut(line, clickedPoint) != null;
+    } on StateError {
+      return false;
+    }
+  }
+
+  /// Removes the clicked portion when a boundary endpoint lies on this line.
+  ///
+  /// Returns false when this line has no endpoint-bounded cut, so the caller
+  /// can keep the full-crossing gesture. Throws before any edit when the
+  /// portion cannot be removed cleanly.
+  bool trimEndpointBoundedPortion(String id, SketchVector clickedPoint) {
+    final line = sketch.entity(id);
+    if (line is! SketchLine) {
+      throw StateError('Portion Trim requires a line.');
+    }
+    final cuts = _segmentCuts(line);
+    if (!cuts.any((cut) => _trimAtEndpoint(cut.otherParameter))) return false;
+    _rejectIncompatibleTrimConstraints([id]);
+    _trimClickedSpan(line, clickedPoint, cuts);
+    return true;
+  }
+
   void trimEndpointToNearestIntersection(String id, SketchVector clickedPoint) {
-    _ensureEditableWithoutConstraints([id]);
+    _rejectIncompatibleTrimConstraints([id]);
     final line = sketch.entity(id);
     if (line is! SketchLine) {
       throw StateError('Endpoint Trim requires a line.');
     }
+    final cut = _nearestOverhangCut(line, clickedPoint);
+    if (cut == null) {
+      throw StateError('No valid intersection was found for this endpoint.');
+    }
     final start = SketchVector.fromJson(line.parameters['start']);
     final end = SketchVector.fromJson(line.parameters['end']);
     final clickedT = _projectOnLine(clickedPoint, start, end).$2;
-    final removeStart = clickedT <= .5;
-    (SketchVector, double)? best;
-    for (final other in sketch.engine.entities.values.whereType<SketchLine>()) {
-      if (other.id == id) continue;
-      try {
-        final candidate = _lineIntersectionParameters(line, other);
-        final t = candidate.$2, otherT = candidate.$3;
-        if (t <= 1e-8 || t >= 1 - 1e-8 || otherT < -1e-8 || otherT > 1 + 1e-8) {
-          continue;
-        }
-        final distance = removeStart ? t : 1 - t;
-        if (distance < 0 || (best != null && distance >= best.$2)) continue;
-        best = (candidate.$1, distance);
-      } catch (_) {
-        // Parallel lines are not valid cutting boundaries.
-      }
-    }
-    if (best == null) {
-      throw StateError('No valid intersection was found for this endpoint.');
-    }
+    final endpoint = clickedT <= .5 ? 'start' : 'end';
+    _rejectConstrainedEndpoint(id, endpoint);
     final historyBefore = sketch.engine.history.entries.length;
     sketch.engine.transaction('trim-endpoint', () {
-      sketch.engine.modify(id, SketchHistoryAction.modify, (entity) {
-        entity.parameters[removeStart ? 'start' : 'end'] = best!.$1.toJson();
-        entity.refreshDerivedParameters();
-      });
+      _replaceLineEndpoint(line, endpoint, cut.point);
     });
     _recordExternalEdit('trim-endpoint', historyBefore);
+  }
+
+  void _trimClickedSpan(
+    SketchLine line,
+    SketchVector clickedPoint,
+    List<_TrimCut> cuts,
+  ) {
+    final start = SketchVector.fromJson(line.parameters['start']);
+    final end = SketchVector.fromJson(line.parameters['end']);
+    final clickedT = _projectOnLine(clickedPoint, start, end).$2;
+    if (clickedT < -1e-8 || clickedT > 1 + 1e-8) {
+      throw StateError('Trim point must lie on the selected portion.');
+    }
+    final clamped = clickedT.clamp(0.0, 1.0);
+    final ordered = [...cuts]
+      ..sort((a, b) => a.parameter.compareTo(b.parameter));
+    final bounds = <_TrimCut>[];
+    for (final cut in ordered) {
+      if (bounds.isEmpty ||
+          (cut.parameter - bounds.last.parameter).abs() > 1e-8) {
+        bounds.add(cut);
+      }
+    }
+    var segment = bounds.length;
+    for (var index = 0; index < bounds.length; index++) {
+      if (clamped <= bounds[index].parameter + 1e-8) {
+        segment = index;
+        break;
+      }
+    }
+    final historyBefore = sketch.engine.history.entries.length;
+    final carried = <SketchConstraint>[];
+    if (segment == 0 || segment == bounds.length) {
+      final endpoint = segment == 0 ? 'start' : 'end';
+      final target = segment == 0 ? bounds.first.point : bounds.last.point;
+      _rejectConstrainedEndpoint(line.id, endpoint);
+      sketch.engine.transaction('trim-portion', () {
+        _replaceLineEndpoint(line, endpoint, target);
+      });
+    } else {
+      final left = bounds[segment - 1].point;
+      final right = bounds[segment].point;
+      if (_distance(right, end) <= 1e-8 || _distance(start, left) <= 1e-8) {
+        throw StateError('Trim would delete the whole line.');
+      }
+      _rejectConstrainedEndpoint(line.id, 'end');
+      late final SketchLine remainder;
+      sketch.engine.transaction('trim-portion', () {
+        _replaceLineEndpoint(line, 'end', left);
+        remainder = sketch.builders.line.build(right, end);
+      });
+      carried.addAll(_carryEntityConstraints(line.id, remainder.id));
+    }
+    _recordExternalEdit('trim-portion', historyBefore, carried: carried);
   }
 
   void _keepLineSide(
@@ -456,9 +707,100 @@ class SketchEditorEngine {
     double keepT,
     double intersectionT,
   ) {
+    final moveEnd = keepT < intersectionT;
+    if (moveEnd && intersectionT >= 1 - 1e-8) return;
+    if (!moveEnd && intersectionT <= 1e-8) return;
+    final endpoint = moveEnd ? 'end' : 'start';
+    _rejectConstrainedEndpoint(line.id, endpoint);
+    _replaceLineEndpoint(line, endpoint, intersection);
+  }
+
+  List<_TrimCut> _segmentCuts(SketchLine line) {
+    final cuts = <_TrimCut>[];
+    for (final other in sketch.engine.entities.values.whereType<SketchLine>()) {
+      if (other.id == line.id) continue;
+      try {
+        final hit = _lineIntersectionParameters(line, other);
+        if (!_trimInterior(hit.$2) || !_trimOnSegment(hit.$3)) continue;
+        cuts.add(
+          _TrimCut(
+            _snapToBoundaryEndpoint(other, hit.$3, hit.$1),
+            hit.$2,
+            hit.$3,
+          ),
+        );
+      } on StateError {
+        // Parallel lines are not cut boundaries.
+      }
+    }
+    return cuts;
+  }
+
+  _TrimCut? _nearestOverhangCut(SketchLine line, SketchVector clickedPoint) {
+    final start = SketchVector.fromJson(line.parameters['start']);
+    final end = SketchVector.fromJson(line.parameters['end']);
+    final clickedT = _projectOnLine(clickedPoint, start, end).$2;
+    final removeStart = clickedT <= .5;
+    _TrimCut? best;
+    var bestDistance = double.infinity;
+    for (final cut in _segmentCuts(line)) {
+      final distance = removeStart ? cut.parameter : 1 - cut.parameter;
+      if (distance <= 1e-8 || distance >= bestDistance) continue;
+      best = cut;
+      bestDistance = distance;
+    }
+    return best;
+  }
+
+  SketchVector _trimMeetingPoint(
+    SketchLine first,
+    SketchLine second,
+    (SketchVector, double, double) intersection,
+  ) {
+    if (_trimAtEndpoint(intersection.$3)) {
+      return _snapToBoundaryEndpoint(second, intersection.$3, intersection.$1);
+    }
+    if (_trimAtEndpoint(intersection.$2)) {
+      return _snapToBoundaryEndpoint(first, intersection.$2, intersection.$1);
+    }
+    return intersection.$1;
+  }
+
+  SketchVector _snapToBoundaryEndpoint(
+    SketchLine boundary,
+    double boundaryParameter,
+    SketchVector computed,
+  ) {
+    if (boundaryParameter <= 1e-8) {
+      return SketchVector.fromJson(boundary.parameters['start']);
+    }
+    if (boundaryParameter >= 1 - 1e-8) {
+      return SketchVector.fromJson(boundary.parameters['end']);
+    }
+    return computed;
+  }
+
+  bool _trimOnSegment(double parameter) =>
+      parameter >= -1e-8 && parameter <= 1 + 1e-8;
+
+  bool _trimInterior(double parameter) =>
+      parameter > 1e-8 && parameter < 1 - 1e-8;
+
+  bool _trimAtEndpoint(double parameter) =>
+      parameter <= 1e-8 || parameter >= 1 - 1e-8;
+
+  void _replaceLineEndpoint(
+    SketchLine line,
+    String endpoint,
+    SketchVector point,
+  ) {
+    final keptKey = endpoint == 'start' ? 'end' : 'start';
+    final kept = SketchVector.fromJson(line.parameters[keptKey]);
+    if (_distance(kept, point) <= 1e-8) {
+      throw StateError('Trim would delete the whole line.');
+    }
     sketch.engine.modify(line.id, SketchHistoryAction.modify, (entity) {
-      entity.parameters[keepT < intersectionT ? 'end' : 'start'] = intersection
-          .toJson();
+      entity.parameters[endpoint] = point.toJson();
       entity.refreshDerivedParameters();
     });
   }
@@ -483,15 +825,34 @@ class SketchEditorEngine {
     return (SketchVector(a.x + abx * t, a.y + aby * t), t, u);
   }
 
-  void _ensureEditableWithoutConstraints(Iterable<String> ids) {
+  void _rejectIncompatibleTrimConstraints(Iterable<String> ids) {
     final targets = ids.toSet();
-    final affected = constraints.constraints.where(
-      (constraint) => constraint.references.any(
+    for (final id in targets) {
+      if (sketch.entity(id)?.locked == true) {
+        throw StateError('Trim is blocked by locked entity ($id).');
+      }
+    }
+    const blocking = {
+      SketchConstraintType.fixed,
+      SketchConstraintType.lock,
+      SketchConstraintType.distance,
+      SketchConstraintType.angle,
+      SketchConstraintType.equal,
+      SketchConstraintType.drivingDimension,
+      SketchConstraintType.radius,
+      SketchConstraintType.diameter,
+      SketchConstraintType.symmetric,
+      SketchConstraintType.midpoint,
+      SketchConstraintType.offset,
+    };
+    final affected = constraints.constraints.where((constraint) {
+      if (!blocking.contains(constraint.type)) return false;
+      return constraint.references.any(
         (reference) => targets.contains(
-          reference.replaceFirst(RegExp(r':(start|end|point)$'), ''),
+          reference.replaceFirst(RegExp(r':(start|end|point|center)$'), ''),
         ),
-      ),
-    );
+      );
+    });
     if (affected.isNotEmpty) {
       throw StateError(
         'Trim is blocked by ${affected.first.type.name} '
@@ -500,11 +861,81 @@ class SketchEditorEngine {
     }
   }
 
-  void _recordExternalEdit(String id, int historyBefore) {
-    _undoCounts.add(sketch.engine.history.entries.length - historyBefore);
-    _redoCounts.clear();
+  void _rejectConstrainedEndpoint(String id, String endpoint) {
+    final marker = '$id:$endpoint';
+    const blocking = {
+      SketchConstraintType.coincident,
+      SketchConstraintType.pointOnLine,
+      SketchConstraintType.pointOnCurve,
+      SketchConstraintType.pointOnCircle,
+      SketchConstraintType.pointOnArc,
+      SketchConstraintType.midpoint,
+    };
+    for (final constraint in constraints.constraints) {
+      if (!blocking.contains(constraint.type)) continue;
+      final hits = constraint.references.any(
+        (reference) => reference == marker || reference == '$id:point',
+      );
+      if (!hits) continue;
+      throw StateError(
+        'Trim is blocked by ${constraint.type.name} '
+        '(${constraint.id}). Delete or suppress that constraint first.',
+      );
+    }
+  }
+
+  void _recordExternalEdit(
+    String id,
+    int historyBefore, {
+    List<SketchConstraint> carried = const [],
+  }) {
+    _rememberUndo(
+      sketch.engine.history.entries.length - historyBefore,
+      carried: carried,
+    );
     history.record(EditorHistoryAction.edit, id);
     analytics.editCount++;
+  }
+
+  void _rememberUndo(int count, {List<SketchConstraint> carried = const []}) {
+    _undoCounts.add(count);
+    _carriedOnUndo.add(List<SketchConstraint>.of(carried));
+    _redoCounts.clear();
+    _carriedOnRedo.clear();
+  }
+
+  /// Copies constraints that stay true for every colinear piece of [fromId].
+  ///
+  /// Horizontal, vertical, parallel, perpendicular and collinear describe the
+  /// whole line, so the retained remainder keeps them. Tangent is not copied:
+  /// the contact can sit on the portion that was removed.
+  List<SketchConstraint> _carryEntityConstraints(String fromId, String toId) {
+    const carried = {
+      SketchConstraintType.horizontal,
+      SketchConstraintType.vertical,
+      SketchConstraintType.parallel,
+      SketchConstraintType.perpendicular,
+      SketchConstraintType.collinear,
+    };
+    final copies = <SketchConstraint>[];
+    for (final constraint in constraints.constraints) {
+      if (!carried.contains(constraint.type)) continue;
+      if (!constraint.references.contains(fromId)) continue;
+      final copy = SketchConstraint(
+        type: constraint.type,
+        references: [
+          for (final reference in constraint.references)
+            reference == fromId ? toId : reference,
+        ],
+        value: constraint.value,
+        owner: constraint.owner,
+        priority: constraint.priority,
+        metadata: Map<String, dynamic>.of(constraint.metadata),
+      );
+      constraints.engine.retain(copy);
+      copies.add(copy);
+    }
+    return copies;
   }
 
   DegreesOfFreedom readDof() =>
@@ -790,6 +1221,68 @@ class SketchEditorEngine {
     sketch.deleteEntity(second.id);
   }
 
+  Map<String, double> _drivingMeasurements(List<String> ids) {
+    final measurements = <String, double>{};
+    for (final dimension in constraints.dimensions) {
+      final measured = _measuredDimension(dimension, ids);
+      if (measured != null) measurements[dimension.id] = measured;
+    }
+    return measurements;
+  }
+
+  void _rejectFilletDrivingConflict(
+    List<String> ids,
+    Map<String, double> before,
+  ) {
+    final tolerance = constraints.engine.solver.tolerance;
+    for (final dimension in constraints.dimensions) {
+      final previous = before[dimension.id];
+      final measured = _measuredDimension(dimension, ids);
+      if (previous == null || measured == null) continue;
+      final changed = (measured - previous).abs() > tolerance;
+      final offValue = (measured - dimension.value).abs() > tolerance;
+      if (changed && offValue) {
+        throw StateError(
+          'Fillet is incompatible with driving dimension ${dimension.id}. '
+          'The dimension value ${dimension.value} would no longer match '
+          'the trimmed geometry.',
+        );
+      }
+    }
+  }
+
+  double? _measuredDimension(SketchDimension dimension, List<String> ids) {
+    bool touches(String reference) {
+      final entityId = reference.replaceFirst(
+        RegExp(r':(start|end|point|center)$'),
+        '',
+      );
+      return ids.contains(entityId);
+    }
+
+    if (!dimension.references.any(touches)) return null;
+    if (dimension.references.length == 1) {
+      final entity = sketch.entity(
+        dimension.references.single.replaceFirst(
+          RegExp(r':(start|end|point|center)$'),
+          '',
+        ),
+      );
+      if (entity is! SketchLine) return null;
+      final start = SketchVector.fromJson(entity.parameters['start']);
+      final end = SketchVector.fromJson(entity.parameters['end']);
+      return switch (dimension.type) {
+        SketchDimensionType.linear => _distance(start, end),
+        SketchDimensionType.horizontal => (end.x - start.x).abs(),
+        SketchDimensionType.vertical => (end.y - start.y).abs(),
+        SketchDimensionType.angular =>
+          math.atan2(end.y - start.y, end.x - start.x) * 180 / math.pi,
+        _ => null,
+      };
+    }
+    return null;
+  }
+
   void _corner(
     SketchToolType tool,
     List<String> ids,
@@ -887,8 +1380,14 @@ class SketchEditorEngine {
         corner.x + bisectorX / bisectorLength * centerDistance,
         corner.y + bisectorY / bisectorLength * centerDistance,
       );
-      final startAngle = math.atan2(p1.y - center.y, p1.x - center.x);
-      final endAngle = math.atan2(p2.y - center.y, p2.x - center.x);
+      final angles = filletArcAngles(
+        center: center,
+        corner: corner,
+        firstTangent: p1,
+        secondTangent: p2,
+      );
+      final startAngle = angles.startAngle;
+      final endAngle = angles.endAngle;
       if (featureId == null) {
         sketch.builders.arc.build(center, value, startAngle, endAngle);
       } else {
@@ -961,4 +1460,11 @@ class SketchEditorEngine {
         ? angle > first && angle < last
         : angle > first || angle < last;
   }
+}
+
+class _TrimCut {
+  const _TrimCut(this.point, this.parameter, this.otherParameter);
+  final SketchVector point;
+  final double parameter;
+  final double otherParameter;
 }

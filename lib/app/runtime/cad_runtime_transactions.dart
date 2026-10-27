@@ -41,6 +41,17 @@ class CadRecoveryFailure implements Exception {
   String toString() => 'CAD recovery required: $original; recovery: $recovery';
 }
 
+class CadConcurrentWriteFailure implements Exception {
+  const CadConcurrentWriteFailure(this.projectId, this.expected, this.actual);
+  final String projectId;
+  final int expected, actual;
+
+  @override
+  String toString() =>
+      'CAD project changed concurrently: $projectId '
+      '(expected revision $expected, found $actual).';
+}
+
 final Object _transactionZone = Object();
 
 // A standalone identity has no back-reference to its runtime or document.
@@ -342,25 +353,59 @@ extension _CadTransactions on CadRuntime {
     List<CadDocument> undo,
     List<CadDocument> redo, {
     void Function()? publish,
+    CadDocument? concurrencyBaseline,
   }) async {
     tx.validate();
-    final backup = await _repository.captureFiles(directory);
-    tx.validate();
-    try {
-      await _repository.save(candidate, directory);
+    await _repository.withProjectLock(directory, () async {
       tx.validate();
-      await _repository.saveHistory(directory, undo: undo, redo: redo);
-      tx.validate();
-      publish?.call();
-    } catch (error, stack) {
-      try {
-        await _repository.restoreFiles(directory, backup);
-      } catch (recovery, recoveryStack) {
-        _recoveryRequired = true;
-        throw CadRecoveryFailure(error, recovery, stack, recoveryStack);
+      // A commit is based on the document last installed for this runtime.
+      // An open migration passes the file it just read. Either snapshot can
+      // repeat the live revision list and still differ in entities. Equal
+      // revision numbers never stand in for equal snapshots.
+      final expected =
+          concurrencyBaseline ?? _persistedDocumentBaseline ?? tx.document;
+      if (expected != null &&
+          expected.projectId == candidate.projectId &&
+          _repository.file(directory).existsSync()) {
+        // A file that does not parse is not a competing valid snapshot.
+        // Schema rejection stays on open. Save still restores the runtime's
+        // validated document over that unreadable payload.
+        CadDocument? onDisk;
+        try {
+          onDisk = await _repository.load(expected.projectId, directory);
+        } on FormatException {
+          onDisk = null;
+        }
+        if (onDisk != null && !_sameJson(onDisk.toJson(), expected.toJson())) {
+          throw CadConcurrentWriteFailure(
+            expected.projectId,
+            expected.revision,
+            onDisk.revision,
+          );
+        }
       }
-      Error.throwWithStackTrace(error, stack);
-    }
+      final backup = await _repository.captureFiles(directory);
+      tx.validate();
+      try {
+        await _repository.saveSnapshot(directory, () async {
+          await _repository.save(candidate, directory);
+          tx.validate();
+          await _repository.saveHistory(directory, undo: undo, redo: redo);
+        });
+        tx.validate();
+        publish?.call();
+        _persistedDocumentBaseline = candidate;
+      } catch (error, stack) {
+        try {
+          await _repository.restoreFiles(directory, backup);
+          await _repository.discardSnapshotTransaction(directory);
+        } catch (recovery, recoveryStack) {
+          _recoveryRequired = true;
+          throw CadRecoveryFailure(error, recovery, stack, recoveryStack);
+        }
+        Error.throwWithStackTrace(error, stack);
+      }
+    });
   }
 
   Future<void> _saveInTransaction(_CadTransaction tx) async {
@@ -525,6 +570,7 @@ extension _CadTransactions on CadRuntime {
     }
 
     _PreparedManagedOpen? prepared;
+    final localSceneBeforeCommit = _captureManagedLocalScene();
     try {
       prepared = restore.isEmpty
           ? _PreparedManagedOpen(geometry: {}, scene: {}, assets: [])
@@ -563,6 +609,38 @@ extension _CadTransactions on CadRuntime {
             );
             tx.validate();
             continue;
+          }
+          if (previousEntity != null &&
+              previousScene != null &&
+              _sameJson(
+                _renderDefinition(previousEntity),
+                _renderDefinition(entity),
+              )) {
+            final cached = _managedLocalScene[entry.key];
+            final local =
+                cached ??
+                (previousEntity.placement == null
+                    ? Map<String, dynamic>.from(previousScene.geometry)
+                    : null);
+            if (local != null) {
+              _managedLocalScene[entry.key] = local;
+              final collection =
+                  candidate.entities[entity.data['collectionId']];
+              prepared.scene[entry.key] = CadSceneEntity(
+                id: previousScene.id,
+                kind: previousScene.kind,
+                selected: previousScene.selected,
+                geometry: projectManagedPlacement(local, entity.placement),
+                visible:
+                    entity.data['deleted'] != true &&
+                    (entity.data['sceneVisible'] as bool? ?? true) &&
+                    collection?.data['visible'] != false &&
+                    collection?.data['deleted'] != true,
+                transparent: entity.data['sceneTransparent'] as bool? ?? false,
+              );
+              tx.validate();
+              continue;
+            }
           }
           prepared.scene[entry.key] = entity.data['managedStlAssets'] is Map
               ? await _prepareRetainedStlSceneEntity(
@@ -665,6 +743,7 @@ extension _CadTransactions on CadRuntime {
         );
       }
     } catch (error, stack) {
+      _restoreManagedLocalScene(localSceneBeforeCommit);
       final removed = prepared?.replaced?.values.toList() ?? const [];
       if (prepared != null) prepared.replaced = null;
       Object? cleanupFailure;
@@ -826,6 +905,7 @@ extension _CadTransactions on CadRuntime {
               runtimeGeometry,
             )) {
               _managedGeometry.remove(prepared.entityId);
+              _managedLocalScene.remove(prepared.entityId);
             }
             rethrow;
           }
@@ -902,7 +982,16 @@ extension _CadTransactions on CadRuntime {
     String projectId,
     Directory directory,
   ) async {
-    final loaded = await _repository.load(projectId, directory);
+    // Document and history are one recovery unit. Read both under the same
+    // project lock so another process cannot replace only one side between the
+    // two loads.
+    final (loaded, history) = await _repository.withProjectLock(
+      directory,
+      () async => (
+        await _repository.load(projectId, directory),
+        await _repository.loadHistory(directory),
+      ),
+    );
     tx.validate();
     final candidate = _snapshots.document(
       FeatureLifecycleProjector.normalize(
@@ -913,8 +1002,6 @@ extension _CadTransactions on CadRuntime {
       ),
       normalized: true,
     );
-    final history = await _repository.loadHistory(directory);
-    tx.validate();
     final undo = _snapshots.history(
       history.undo.where((d) => d.projectId == projectId),
     );
@@ -932,6 +1019,7 @@ extension _CadTransactions on CadRuntime {
         .toList(growable: false);
     _PreparedManagedOpen? managed;
     Map<String, ManagedEntityGeometry>? replacedByLegacyOpen;
+    final localSceneBeforeOpen = _captureManagedLocalScene();
     try {
       if (managedEntities.isNotEmpty) {
         managed = await _prepareManagedOpen(
@@ -994,6 +1082,7 @@ extension _CadTransactions on CadRuntime {
             _managedGeometry,
           );
           _managedGeometry.clear();
+          _managedLocalScene.clear();
           _install(
             tx,
             candidate,
@@ -1018,11 +1107,13 @@ extension _CadTransactions on CadRuntime {
           directory,
           undo,
           redo,
+          concurrencyBaseline: loaded,
           publish: publish,
         );
       } else {
         tx.validate();
         publish();
+        _persistedDocumentBaseline = candidate;
       }
       final replaced =
           managed?.replaced?.values.toList() ??
@@ -1053,6 +1144,7 @@ extension _CadTransactions on CadRuntime {
         );
       }
     } catch (error, stack) {
+      _restoreManagedLocalScene(localSceneBeforeOpen);
       final detachedOld = <ManagedEntityGeometry>[
         ...?managed?.replaced?.values,
         if (tx.committed) ...?replacedByLegacyOpen?.values,
@@ -1365,14 +1457,20 @@ extension _CadTransactions on CadRuntime {
     final sceneGeometry = await geometry.displayMesh.prepareSceneGeometry(
       kernel,
     );
+    _rememberManagedLocalScene(entity.id, {
+      ...sceneGeometry,
+      if (entity.data['rootLinearRgb'] is List)
+        'rootLinearRgb': entity.data['rootLinearRgb'],
+    });
     final collection = candidate.entities[entity.data['collectionId']];
     return CadSceneEntity(
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
       geometry: {
-        ...projectManagedPlacement(sceneGeometry, entity.placement),
-        if (entity.data['rootLinearRgb'] is List)
-          'rootLinearRgb': entity.data['rootLinearRgb'],
+        ...projectManagedPlacement(
+          _managedLocalScene[entity.id]!,
+          entity.placement,
+        ),
       },
       visible:
           entity.data['deleted'] != true &&
@@ -1412,18 +1510,22 @@ extension _CadTransactions on CadRuntime {
       throw const FormatException('Retained STEP appearance is incompatible');
     }
     final collection = candidate.entities[entity.data['collectionId']];
+    _rememberManagedLocalScene(entity.id, {
+      ...sceneGeometry,
+      if (rootLinearRgb != null)
+        'rootLinearRgb': (rootLinearRgb as List)
+            .map((v) => (v as num).toDouble())
+            .toList(),
+      if (previous.geometry['stepCompatibility'] == true)
+        'stepCompatibility': true,
+    });
     return CadSceneEntity(
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
-      geometry: {
-        ...projectManagedPlacement(sceneGeometry, entity.placement),
-        if (rootLinearRgb != null)
-          'rootLinearRgb': (rootLinearRgb as List)
-              .map((v) => (v as num).toDouble())
-              .toList(),
-        if (previous.geometry['stepCompatibility'] == true)
-          'stepCompatibility': true,
-      },
+      geometry: projectManagedPlacement(
+        _managedLocalScene[entity.id]!,
+        entity.placement,
+      ),
       visible:
           entity.data['deleted'] != true &&
           (entity.data['sceneVisible'] as bool? ?? true) &&
@@ -1476,16 +1578,19 @@ extension _CadTransactions on CadRuntime {
       presentationShape: geometry.shape,
     );
     final collection = candidate.entities[entity.data['collectionId']];
+    _rememberManagedLocalScene(entity.id, {
+      ...sceneGeometry,
+      if (stepAppearance?.hasColor == true)
+        'rootLinearRgb': stepAppearance!.linearRgb,
+      if (stepAppearance?.usedCompatibility == true) 'stepCompatibility': true,
+    });
     return CadSceneEntity(
       id: entity.id,
       kind: CadSceneEntityKind.mesh,
-      geometry: {
-        ...projectManagedPlacement(sceneGeometry, entity.placement),
-        if (stepAppearance?.hasColor == true)
-          'rootLinearRgb': stepAppearance!.linearRgb,
-        if (stepAppearance?.usedCompatibility == true)
-          'stepCompatibility': true,
-      },
+      geometry: projectManagedPlacement(
+        _managedLocalScene[entity.id]!,
+        entity.placement,
+      ),
       visible:
           entity.data['deleted'] != true &&
           (entity.data['sceneVisible'] as bool? ?? true) &&
@@ -1683,6 +1788,7 @@ extension _CadTransactions on CadRuntime {
       _managedGeometry
         ..clear()
         ..addAll(next);
+      _managedLocalScene.removeWhere((id, _) => !next.containsKey(id));
       prepared.installed = true;
       prepared.transferred.clear();
       prepared.previous = null;
@@ -1690,6 +1796,9 @@ extension _CadTransactions on CadRuntime {
       _managedGeometry
         ..clear()
         ..addAll(prepared.previous!);
+      _managedLocalScene.removeWhere(
+        (id, _) => !prepared.previous!.containsKey(id),
+      );
       prepared.previous = null;
       prepared.replaced = null;
       rethrow;
@@ -1780,6 +1889,20 @@ extension _CadTransactions on CadRuntime {
         ),
       ),
     );
+  }
+
+  void _rememberManagedLocalScene(String id, Map<String, dynamic> local) {
+    _managedLocalScene[id] = Map<String, dynamic>.from(local);
+  }
+
+  Map<String, Map<String, dynamic>> _captureManagedLocalScene() => {
+    for (final entry in _managedLocalScene.entries) entry.key: entry.value,
+  };
+
+  void _restoreManagedLocalScene(Map<String, Map<String, dynamic>> saved) {
+    _managedLocalScene
+      ..clear()
+      ..addAll(saved);
   }
 }
 

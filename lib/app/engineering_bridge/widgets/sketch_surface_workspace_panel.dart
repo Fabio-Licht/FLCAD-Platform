@@ -357,7 +357,7 @@ class _SketchSurfaceWorkspacePanelState
               _ConstraintGlyphSummary(controller: controller),
             const SizedBox(height: 8),
             OutlinedButton.icon(
-              onPressed: controller.sketchEntities.length < 4 || controller.busy
+              onPressed: !controller.canConstrainRectangle || controller.busy
                   ? null
                   : controller.constrainRectangle,
               icon: const Icon(Icons.square_foot),

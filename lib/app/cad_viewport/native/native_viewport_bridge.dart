@@ -223,6 +223,10 @@ class NativeViewportStats {
     this.meshDerivedDrawnSegments = 0,
     this.displayEdgesDrawnSegments = 0,
     this.presentationBuffer = 'none',
+    this.selectionOperationId,
+    this.selectionBufferBuildMs = 0,
+    this.selectionBufferTriangles = 0,
+    this.selectionFrameMark = 0,
   });
   final double fps, uploadMs, renderMs, pickingMs;
   final int drawCalls, triangles;
@@ -242,6 +246,9 @@ class NativeViewportStats {
       meshDerivedDrawnSegments,
       displayEdgesDrawnSegments;
   final String presentationBuffer;
+  final String? selectionOperationId;
+  final double selectionBufferBuildMs;
+  final int selectionBufferTriangles, selectionFrameMark;
   final bool textureRegistered;
   factory NativeViewportStats.fromMap(
     Map<Object?, Object?> value,
@@ -284,6 +291,12 @@ class NativeViewportStats {
     displayEdgesDrawnSegments:
         (value['displayEdgesDrawnSegments'] as num?)?.toInt() ?? 0,
     presentationBuffer: value['presentationBuffer'] as String? ?? 'none',
+    selectionOperationId: value['selectionOperationId'] as String?,
+    selectionBufferBuildMs:
+        (value['selectionBufferBuildMs'] as num?)?.toDouble() ?? 0,
+    selectionBufferTriangles:
+        (value['selectionBufferTriangles'] as num?)?.toInt() ?? 0,
+    selectionFrameMark: (value['selectionFrameMark'] as num?)?.toInt() ?? 0,
   );
 }
 
@@ -824,6 +837,19 @@ class NativeViewportBridge extends ChangeNotifier {
     'operationalEntityId': operationalEntityId,
     'entityId': entityId,
     'triangles': triangleIndices,
+  });
+  Future<void> setOperationalSelectionDiagnostic({
+    required String operationalEntityId,
+    required String entityId,
+    required List<int> triangleIndices,
+    String? selectionOperationId,
+  }) => _invoke('setOperationalSelection', {
+    'operationalEntityId': operationalEntityId,
+    'entityId': entityId,
+    'triangles': triangleIndices,
+    ...?(selectionOperationId == null
+        ? null
+        : <String, Object?>{'selectionOperationId': selectionOperationId}),
   });
   Future<void> clearOperationalSelection() =>
       _invoke('clearOperationalSelection');

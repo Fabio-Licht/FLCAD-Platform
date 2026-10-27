@@ -15,6 +15,7 @@ import '../../../core/geometric_kernel/geometry/vectors.dart';
 import '../../operational_entities/operational_entity.dart';
 import '../../operational_entities/operational_entity_resolver.dart';
 import 'native_viewport_bridge.dart';
+import '../selection_latency_diagnostics.dart';
 import 'viewport_render_diagnostics.dart';
 import '../rendering/shaded_debug_experiments.dart';
 import '../rendering/reference_visibility_mask.dart';
@@ -276,24 +277,55 @@ class _IntegratedCadViewportWidgetState
     final additive = HardwareKeyboard.instance.isShiftPressed;
     final toggle = HardwareKeyboard.instance.isControlPressed;
     if (!_canPublishTap(token, scene)) return;
+    final latency = SelectionLatencyDiagnostics.begin();
     if (widget.pickCaptureCandidateIds != null &&
         _pickReferenceOverlay(position, scene, additive, toggle)) {
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'reference_overlay_capture'},
+      );
       return;
     }
+    final pickingWatch = Stopwatch()..start();
     final result = await native.pick(position.dx, position.dy);
-    if (!_canPublishTap(token, scene)) return;
+    pickingWatch.stop();
+    latency?.mark(
+      'native_picking',
+      details: {'duration_ms': pickingWatch.elapsedMicroseconds / 1000},
+    );
+    if (!_canPublishTap(token, scene)) {
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'stale_pick'},
+      );
+      return;
+    }
     // Native D3D deliberately excludes UI/reference overlays and Sketch
     // profiles. Resolve those through the Flutter screen-space picker before
     // treating this as empty.
     if (result == null || result.kind == NativePickKind.none) {
       _selectManagedFace(null);
-      if (_pickReferenceOverlay(position, scene, additive, toggle)) return;
+      if (_pickReferenceOverlay(position, scene, additive, toggle)) {
+        SelectionLatencyDiagnostics.complete(
+          latency,
+          details: {'terminal_stage': 'reference_overlay_capture'},
+        );
+        return;
+      }
       widget.onViewportSelectionCleared?.call();
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'empty_pick'},
+      );
       return;
     }
     final source = scene.find(result.entityId);
     if (source == null || !source.visible) {
       _selectManagedFace(null);
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'invalid_source'},
+      );
       return;
     }
     final managedFace = result.kind == NativePickKind.face
@@ -306,7 +338,13 @@ class _IntegratedCadViewportWidgetState
               source.kind == CadSceneEntityKind.mesh
         ? _entityResolution(source)
         : await operationalResolver.resolve(result, scene);
-    if (!_canPublishTap(token, scene) || resolved == null) return;
+    if (!_canPublishTap(token, scene) || resolved == null) {
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'unresolved_pick'},
+      );
+      return;
+    }
     final point = result.point;
     final pointIsValid =
         point.length >= 3 && point.take(3).every((value) => value.isFinite);
@@ -339,14 +377,14 @@ class _IntegratedCadViewportWidgetState
           NativePickKind.none => null,
         },
         presentationSubId: managedFace?.presentationSubId ?? result.subId,
-        hit: MeshHit(
-          triangleIndex: -1,
-          point: transientPoint,
-          distance: 0,
-        ),
+        hit: MeshHit(triangleIndex: -1, point: transientPoint, distance: 0),
       );
       if (widget.onPickCapture?.call(pick) == true) {
         _selectManagedFace(null);
+        SelectionLatencyDiagnostics.complete(
+          latency,
+          details: {'terminal_stage': 'pick_capture'},
+        );
         return;
       }
     }
@@ -356,11 +394,18 @@ class _IntegratedCadViewportWidgetState
       toggle: toggle,
     );
     _selectManagedFace(managedFace);
+    latency?.mark('state_dispatch');
     if (pick != null) {
       if (pointIsValid) {
         widget.camera.focusOn(Vector3(point[0], point[1], point[2]));
       }
+      latency?.mark('recognition_dispatch');
       widget.onPick?.call(pick);
+    } else {
+      SelectionLatencyDiagnostics.complete(
+        latency,
+        details: {'terminal_stage': 'selection_dispatched'},
+      );
     }
   }
 
@@ -750,10 +795,11 @@ class _IntegratedCadViewportWidgetState
       native.clearOperationalSelection();
       return;
     }
-    native.setOperationalSelection(
+    native.setOperationalSelectionDiagnostic(
       operationalEntityId: presentation.entity.id,
       entityId: presentation.entity.ownerId,
       triangleIndices: presentation.triangleIndices,
+      selectionOperationId: SelectionLatencyDiagnostics.currentOperationId,
     );
   }
 

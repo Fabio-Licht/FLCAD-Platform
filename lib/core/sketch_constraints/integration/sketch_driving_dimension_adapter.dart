@@ -69,6 +69,7 @@ class SketchDrivingDimensionAdapter {
     double? orientationSign,
     bool allowAdjacentEndpointUpdates = false,
     ArcRadiusEditPlan? expectedRadiusPlan,
+    bool deferDirectionalConstraints = false,
   }) {
     lastArcRadiusEditPlan = null;
     if (!value.isFinite ||
@@ -401,7 +402,11 @@ class SketchDrivingDimensionAdapter {
         '${type.name} is incompatible with ${entity.type.name}.',
       );
     }
-    _validateGeometricConstraints(sketch, constraints);
+    _validateGeometricConstraints(
+      sketch,
+      constraints,
+      validateDirectional: !deferDirectionalConstraints,
+    );
     return SketchDrivingDimensionSolution(selectedAnchor, moved);
   }
 
@@ -510,10 +515,18 @@ class SketchDrivingDimensionAdapter {
 
   void _validateGeometricConstraints(
     SketchEngineApi sketch,
-    Iterable<SketchConstraint> constraints,
-  ) {
+    Iterable<SketchConstraint> constraints, {
+    bool validateDirectional = true,
+  }) {
     const epsilon = 1e-6;
     for (final c in constraints.where((c) => c.enabled && !c.suppressed)) {
+      if (!validateDirectional &&
+          (c.type == SketchConstraintType.horizontal ||
+              c.type == SketchConstraintType.vertical ||
+              c.type == SketchConstraintType.parallel ||
+              c.type == SketchConstraintType.perpendicular)) {
+        continue;
+      }
       final entities = c.references
           .map((r) => sketch.entity(_entityId(r)))
           .toList();

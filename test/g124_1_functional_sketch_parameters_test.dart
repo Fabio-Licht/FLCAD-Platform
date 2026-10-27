@@ -16,6 +16,8 @@ import 'package:flcad_mobile/core/cad_kernel/manager/kernel_manager.dart';
 import 'package:flcad_mobile/core/cad_kernel/api/geometry_kernel_api.dart';
 import 'package:flcad_mobile/core/cad_kernel/io/kernel_io_models.dart';
 import 'package:flcad_mobile/core/cad_kernel/models/kernel_models.dart';
+import 'package:flcad_mobile/core/sketch_constraints/api/constraint_api.dart';
+import 'package:flcad_mobile/core/sketch_constraints/diagnostics/constraint_diagnostics.dart';
 import 'package:flcad_mobile/core/sketch_constraints/models/constraint_models.dart';
 import 'package:flcad_mobile/core/sketch_constraints/integration/arc_radius_edit_planner.dart';
 import 'package:flcad_mobile/core/professional_recognition/api/professional_recognition_api.dart';
@@ -871,14 +873,10 @@ void main() {
       final constrainedLine = controller.sketchEntities
           .whereType<SketchLine>()
           .first;
-      controller.constraintApi!.builders.horizontal.build([constrainedLine.id]);
-      controller.constraintApi!.createDrivingDimension(
-        type: SketchDimensionType.linear,
-        references: [constrainedLine.id],
-        value: 2,
-      );
+      controller.selectSketchEntity(constrainedLine.id);
+      await controller.createDrivingDimension(SketchDimensionType.linear, 2);
       expect(controller.constraints, isNotEmpty);
-      expect(controller.dimensions, isNotEmpty);
+      expect(controller.dimensions, isNotEmpty, reason: controller.error);
       expect(controller.sketchReadyForSurface, isTrue);
       await controller.previewPlanarSurface();
       expect(controller.surfacePreviewActive, isTrue);
@@ -902,7 +900,11 @@ void main() {
       await reopened.updateSketchEntityParameters(line.id, {'length': 2.05});
       expect(reopened.surfacePreviewActive, isFalse);
       expect(reopenedCad.runtime.scene.find('surface-preview'), isNull);
-      expect(reopened.previewPlanarSurface, throwsStateError);
+      expect(reopened.sketchReadyForSurface, isTrue);
+      expect(
+        reopened.sketchApi!.entity(line.id)!.parameters['length'],
+        closeTo(2.05, 1e-6),
+      );
       await reopened.undo();
       expect(reopened.surfacePreviewActive, isTrue);
       expect(reopenedCad.runtime.scene.find('surface-preview'), isNotNull);
@@ -1469,7 +1471,7 @@ void main() {
     expect(controller.arcRadiusEditPreview, isNotNull);
     await controller.confirmArcRadiusEditPreview();
     expect(controller.arcRadiusEditPreview, isNull);
-    expect(controller.dimensions, hasLength(1));
+    expect(controller.dimensions, hasLength(1), reason: controller.error);
 
     // A geometry change between preview and Apply invalidates the token and
     // leaves the original arc untouched instead of silently replanning.
@@ -2393,7 +2395,17 @@ void main() {
       final promotedId = await controller.acceptSketchReconstructionSuggestion(
         firstSuggestion,
       );
-      expect(promotedId, isNotNull);
+      expect(
+        promotedId,
+        isNotNull,
+        reason:
+            'error=${controller.error}; message=${controller.sketchReconstructionMessage}; '
+            'suggestion=${firstSuggestion.kind.name}:${firstSuggestion.entityIds.length}:'
+            '${firstSuggestion.center}:${firstSuggestion.radius}:'
+            '${firstSuggestion.startAngle}:${firstSuggestion.endAngle}; '
+            'history=${controller.commands.manager.history.map((entry) => '${entry.commandId}:${entry.operation}').join(',')}; '
+            'trace=${controller.commands.manager.trace.join(' | ')}',
+      );
       expect(
         controller.commands.manager.history
             .where((record) => record.operation == 'execute')
@@ -4787,28 +4799,23 @@ void main() {
           harness.controller.commands.manager.history.length;
       harness.controller.selectSketchEntity(first.id);
       harness.controller.selectSketchEntity(second.id, additive: true);
-      expect(harness.controller.selectedSketchEntityIds, {
-        first.id,
-        second.id,
-      });
+      expect(harness.controller.selectedSketchEntityIds, {first.id, second.id});
       expect(
         harness.controller.commands.manager.history.length,
         historyBeforeSelect,
       );
 
       final beforeIds = harness.controller.activeSketch!.entityIds.toSet();
-      await harness.controller.commands.dispatch(
-        'reverse.sketch.draw',
-        {
-          'tool': 'line',
-          'points': [
-            const SketchVector(30, 0).toJson(),
-            const SketchVector(32, 2).toJson(),
-          ],
-        },
+      await harness.controller.commands.dispatch('reverse.sketch.draw', {
+        'tool': 'line',
+        'points': [
+          const SketchVector(30, 0).toJson(),
+          const SketchVector(32, 2).toJson(),
+        ],
+      });
+      final createdId = harness.controller.activeSketch!.entityIds.firstWhere(
+        (id) => !beforeIds.contains(id),
       );
-      final createdId = harness.controller.activeSketch!.entityIds
-          .firstWhere((id) => !beforeIds.contains(id));
       final historyAfterDraw =
           harness.controller.commands.manager.history.length;
       harness.controller.selectSketchEntity(createdId);
@@ -4843,10 +4850,7 @@ void main() {
       final historyAfterRedo =
           harness.controller.commands.manager.history.length;
       harness.controller.selectSketchEntity(createdId, additive: true);
-      expect(harness.controller.selectedSketchEntityIds, {
-        first.id,
-        createdId,
-      });
+      expect(harness.controller.selectedSketchEntityIds, {first.id, createdId});
       expect(
         harness.controller.commands.manager.history.length,
         historyAfterRedo,
@@ -4946,12 +4950,14 @@ void main() {
       // is the regression case for the old `sketches.last` restoration.
       controller.selectSketch(manual.id);
       await controller.persist();
-      final activeMetadata = jsonDecode(
-        await File(
-          '${harness.directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
-          'SketchHistory${Platform.pathSeparator}active-sketch.json',
-        ).readAsString(),
-      ) as Map<String, dynamic>;
+      final activeMetadata =
+          jsonDecode(
+                await File(
+                  '${harness.directory.path}${Platform.pathSeparator}CAD${Platform.pathSeparator}'
+                  'SketchHistory${Platform.pathSeparator}active-sketch.json',
+                ).readAsString(),
+              )
+              as Map<String, dynamic>;
       expect(activeMetadata['schema'], 'flcad.sketch-active');
       expect(activeMetadata['version'], 1);
       expect(activeMetadata['projectId'], 'g124-multiple-sketch-rehydration');
@@ -5673,10 +5679,13 @@ void main() {
       expect(harness.controller.selectedSketchG1RepairAlternative, isNotNull);
       if (viableAlternatives.length > 1) {
         final secondIndex = preview.alternatives.indexWhere(
-          (alternative) => alternative.isViable && alternative != firstAlternative,
+          (alternative) =>
+              alternative.isViable && alternative != firstAlternative,
         );
         expect(secondIndex, greaterThanOrEqualTo(0));
-        harness.controller.selectSketchG1ContinuityRepairAlternative(secondIndex);
+        harness.controller.selectSketchG1ContinuityRepairAlternative(
+          secondIndex,
+        );
         expect(
           harness.controller.selectedSketchG1RepairAlternative,
           isNot(same(firstAlternative)),
@@ -5749,8 +5758,9 @@ void main() {
         lineAlternativeIndex,
       );
       expect(
-        harness.controller.selectedSketchG1RepairAlternative!.updates
-            .any((update) => update.entityId == arc.id),
+        harness.controller.selectedSketchG1RepairAlternative!.updates.any(
+          (update) => update.entityId == arc.id,
+        ),
         isTrue,
       );
       final beforeLine = Map<String, dynamic>.from(line.parameters);
@@ -5761,10 +5771,12 @@ void main() {
       );
       expect(
         harness.controller.sketchContinuityAnalysis.joins.any(
-          (join) => {
-            join.first.entityId,
-            join.second.entityId,
-          }.containsAll({external.id, line.id}) && join.measuredC0,
+          (join) =>
+              {
+                join.first.entityId,
+                join.second.entityId,
+              }.containsAll({external.id, line.id}) &&
+              join.measuredC0,
         ),
         isTrue,
       );
@@ -5780,7 +5792,10 @@ void main() {
       expect(api.entity(arc.id)!.toJson()['parameters'], beforeArc);
       expect(api.entity(external.id), isNotNull);
       expect(api.engine.history.entries.length, historyBefore);
-      expect(harness.controller.commands.manager.history.length, commandHistory);
+      expect(
+        harness.controller.commands.manager.history.length,
+        commandHistory,
+      );
       expect(harness.controller.sketchG1ContinuityRepairPreview, isNull);
     },
   );
@@ -5824,7 +5839,7 @@ void main() {
       expect(api.entity(arc.id)!.toJson()['parameters'], beforeArc);
       expect(harness.controller.sketchG1ContinuityRepairPreview, isNotNull);
       final affected = await harness.controller
-        .confirmSketchG1ContinuityRepairPreview(token: token);
+          .confirmSketchG1ContinuityRepairPreview(token: token);
 
       expect(affected, isNotEmpty);
       expect(
@@ -6101,22 +6116,23 @@ void main() {
       final attention = harness.controller.sketchContinuityRepairAttentionJoins;
       expect(all, isNotEmpty);
       expect(attention, isNotEmpty);
+      expect(attention.every((join) => join.hasProblem), isTrue);
       expect(
-        attention.every((join) => join.hasProblem),
-        isTrue,
-      );
-      expect(
-        all.where((join) => {
-          join.first.entityId,
-          join.second.entityId,
-        }.containsAll({first.id, coincident.id})),
+        all.where(
+          (join) => {
+            join.first.entityId,
+            join.second.entityId,
+          }.containsAll({first.id, coincident.id}),
+        ),
         isNotEmpty,
       );
       expect(
-        attention.where((join) => {
-          join.first.entityId,
-          join.second.entityId,
-        }.containsAll({first.id, coincident.id})),
+        attention.where(
+          (join) => {
+            join.first.entityId,
+            join.second.entityId,
+          }.containsAll({first.id, coincident.id}),
+        ),
         isEmpty,
       );
       expect(
@@ -6486,6 +6502,347 @@ void main() {
     expect(reopenedCad.runtime.scene.find(first.id), isNotNull);
     expect(reopenedCad.runtime.scene.find(second.id), isNotNull);
   });
+
+  test(
+    'constrained Sketch drag is one global command and rejects fixed entities',
+    () async {
+      final harness = await _g124Harness('g124-drag-command');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final line = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      final fixed = controller.sketchApi!.builders.line.build(
+        const SketchVector(20, 0),
+        const SketchVector(30, 0),
+      );
+      controller.constraintApi!.builders.of(SketchConstraintType.fixed).build([
+        fixed.id,
+      ]);
+      final before = SketchVector.fromJson(line.parameters['start']);
+      final camera = CadCameraController()..resize(1000, 700);
+      final pick = CadViewportPick(
+        entityId: line.id,
+        hit: const MeshHit(
+          triangleIndex: 0,
+          point: Vector3(0, 0, 0),
+          distance: 0,
+        ),
+      );
+      final fixedPick = CadViewportPick(
+        entityId: fixed.id,
+        hit: const MeshHit(
+          triangleIndex: 0,
+          point: Vector3(20, 0, 0),
+          distance: 0,
+        ),
+      );
+      controller.beginSketchEntityDrag(
+        fixedPick,
+        const Offset(500, 350),
+        camera,
+      );
+      await expectLater(
+        controller.finishSketchEntityDrag(const Offset(560, 350), camera),
+        throwsStateError,
+      );
+      controller.beginSketchEntityDrag(pick, const Offset(500, 350), camera);
+      await controller.finishSketchEntityDrag(const Offset(560, 350), camera);
+      final moved = SketchVector.fromJson(
+        controller.sketchApi!.entity(line.id)!.parameters['start'],
+      );
+      expect(moved.x, isNot(closeTo(before.x, 1e-9)));
+      expect(controller.canonicalSketchAuthority?.isCanonical, isTrue);
+      final sketchTarget =
+          controller.sketchApi!.engine.history.entries.last.targetId;
+      final constraintTarget =
+          controller.constraintApi!.engine.history.entries.last.targetId;
+      expect(sketchTarget, startsWith('connected-sketch-drag:sketch-drag-'));
+      expect(constraintTarget, startsWith('solve:sketch-drag-'));
+      expect(
+        sketchTarget.substring('connected-sketch-drag:'.length),
+        constraintTarget.substring('solve:'.length),
+      );
+      await controller.undo();
+      expect(
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(line.id)!.parameters['start'],
+        ).x,
+        closeTo(before.x, 1e-9),
+      );
+      await controller.redo();
+      expect(
+        SketchVector.fromJson(
+          controller.sketchApi!.entity(line.id)!.parameters['start'],
+        ).x,
+        closeTo(moved.x, 1e-9),
+      );
+    },
+  );
+
+  test(
+    'parameter command normalizes angle and rejects unknown fields',
+    () async {
+      final harness = await _g124Harness('g124-parameter-contract');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final line = controller.sketchApi!.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+
+      await controller.updateSketchEntityParameters(line.id, {'angle': 45});
+      expect(
+        (controller.sketchApi!.entity(line.id)!.parameters['angleDegrees']
+                as num)
+            .toDouble(),
+        closeTo(45, 1e-6),
+      );
+      final before = controller.sketchApi!.entity(line.id)!.toJson().toString();
+      await expectLater(
+        controller.updateSketchEntityParameters(line.id, {'unknown': 1}),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('Unsupported Sketch parameter'),
+          ),
+        ),
+      );
+      expect(
+        controller.sketchApi!.entity(line.id)!.toJson().toString(),
+        before,
+      );
+    },
+  );
+
+  test('constrainRectangle rolls back an incompatible solver result', () async {
+    final harness = await _g124Harness('g124-rectangle-rollback');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final controller = harness.controller;
+    final api = controller.sketchApi!;
+    final lines = [
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      ),
+      api.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(10, 6),
+      ),
+      api.builders.line.build(
+        const SketchVector(10, 6),
+        const SketchVector(0, 6),
+      ),
+      api.builders.line.build(
+        const SketchVector(0, 6),
+        const SketchVector(0, 0),
+      ),
+    ];
+    controller.constraintApi!.builders.of(SketchConstraintType.vertical).build([
+      lines.first.id,
+    ]);
+    final geometryBefore = {for (final line in lines) line.id: line.toJson()};
+
+    await controller.constrainRectangle();
+
+    expect(controller.error, contains('could not be solved'));
+    expect(controller.constraints, hasLength(1));
+    expect(controller.constraints.single.type, SketchConstraintType.vertical);
+    for (final line in lines) {
+      final restored = api.entity(line.id)!;
+      final before = geometryBefore[line.id]!;
+      expect(restored.parameters, before['parameters']);
+      expect(restored.locked, before['locked']);
+      expect(restored.version, before['version']);
+    }
+  });
+
+  test(
+    'constrainRectangle orders a closed rectangle and undoes atomically',
+    () async {
+      final harness = await _g124Harness('g124-rectangle-ordered');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      api.builders.line.build(
+        const SketchVector(0, 6),
+        const SketchVector(10, 6),
+      );
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(10, 0),
+      );
+      api.builders.line.build(
+        const SketchVector(0, 6),
+        const SketchVector(0, 0),
+      );
+      api.builders.line.build(
+        const SketchVector(10, 0),
+        const SketchVector(10, 6),
+      );
+
+      expect(controller.canConstrainRectangle, isTrue);
+      await controller.constrainRectangle();
+
+      expect(controller.error, isNull);
+      expect(controller.constraints, hasLength(8));
+      expect(
+        controller.constraints
+            .where((item) => item.type == SketchConstraintType.horizontal)
+            .length,
+        2,
+      );
+      expect(
+        controller.constraints
+            .where((item) => item.type == SketchConstraintType.vertical)
+            .length,
+        2,
+      );
+      expect(
+        controller.constraints
+            .where((item) => item.type == SketchConstraintType.coincident)
+            .length,
+        4,
+      );
+
+      await controller.commands.manager.undo();
+      expect(controller.constraints, isEmpty);
+      await controller.commands.manager.redo();
+      expect(controller.constraints, hasLength(8));
+      expect(
+        controller.constraints.map((item) => item.signature).toSet(),
+        hasLength(8),
+      );
+    },
+  );
+
+  test('constrainRectangle rejects unrelated lines without mutation', () async {
+    final harness = await _g124Harness('g124-rectangle-topology');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final controller = harness.controller;
+    final api = controller.sketchApi!;
+    final lines = [
+      api.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, 0),
+      ),
+      api.builders.line.build(
+        const SketchVector(10, 10),
+        const SketchVector(15, 10),
+      ),
+      api.builders.line.build(
+        const SketchVector(20, 20),
+        const SketchVector(20, 25),
+      ),
+      api.builders.line.build(
+        const SketchVector(30, 30),
+        const SketchVector(30, 35),
+      ),
+    ];
+    final geometryBefore = {
+      for (final line in lines) line.id: line.toJson().toString(),
+    };
+    expect(controller.canConstrainRectangle, isFalse);
+
+    await controller.constrainRectangle();
+
+    expect(controller.error, contains('closed horizontal/vertical'));
+    expect(controller.constraints, isEmpty);
+    for (final line in lines) {
+      expect(api.entity(line.id)!.toJson().toString(), geometryBefore[line.id]);
+    }
+  });
+
+  test(
+    'idempotent constrainRectangle preserves a valid Redo command',
+    () async {
+      final harness = await _g124Harness('g124-rectangle-noop-redo');
+      addTearDown(() => harness.directory.delete(recursive: true));
+      addTearDown(harness.controller.dispose);
+      addTearDown(harness.cad.dispose);
+      final controller = harness.controller;
+      final api = controller.sketchApi!;
+      await controller.drawRectangle(
+        const SketchVector(0, 0),
+        const SketchVector(10, 6),
+      );
+      expect(controller.error, isNull);
+      final circle = api.builders.circle.build(const SketchVector(30, 30), 2);
+      await controller.updateSketchEntityParameters(circle.id, {'radius': 4});
+      await controller.commands.manager.undo();
+      expect(controller.commands.manager.redoDepth, 1);
+      final historyBefore = controller.commands.manager.history.length;
+
+      await controller.constrainRectangle();
+
+      expect(controller.error, isNull);
+      expect(controller.constraints, hasLength(8));
+      expect(controller.commands.manager.redoDepth, 1);
+      expect(controller.commands.manager.history, hasLength(historyBefore));
+      await controller.commands.manager.redo();
+      expect(
+        (api.entity(circle.id)!.parameters['radius'] as num).toDouble(),
+        closeTo(4, 1e-8),
+      );
+    },
+  );
+
+  test('rectangle creation rolls back lines if constraints fail', () async {
+    final harness = await _g124Harness('g124-rectangle-atomic-create');
+    addTearDown(() => harness.directory.delete(recursive: true));
+    addTearDown(harness.controller.dispose);
+    addTearDown(harness.cad.dispose);
+    final controller = harness.controller;
+    final api = controller.sketchApi!;
+    final circle = api.builders.circle.build(const SketchVector(20, 20), 2);
+    await controller.updateSketchEntityParameters(circle.id, {'radius': 3});
+    await controller.commands.manager.undo();
+    expect(controller.commands.manager.redoDepth, 1);
+    final historyBefore = controller.commands.manager.history.length;
+    controller.constraintApi = _ThrowingRectangleConstraintApi(
+      controller.constraintApi!.engine,
+    );
+
+    await controller.drawRectangle(
+      const SketchVector(0, 0),
+      const SketchVector(10, 6),
+    );
+
+    expect(controller.error, contains('injected rectangle failure'));
+    expect(controller.sketchEntities.whereType<SketchLine>(), isEmpty);
+    expect(controller.constraints, isEmpty);
+    expect(controller.commands.manager.redoDepth, 1);
+    expect(controller.commands.manager.history, hasLength(historyBefore));
+    final editor = controller.editorApi!.engine;
+    expect(editor.graph.operations, isEmpty);
+    expect(editor.history.entries, isEmpty);
+    expect(editor.undo(), isFalse);
+    expect(editor.redo(), isFalse);
+  });
+}
+
+class _ThrowingRectangleConstraintApi extends ConstraintApi {
+  _ThrowingRectangleConstraintApi(super.engine);
+
+  @override
+  Future<ConstraintSolveResult> solve({
+    Iterable<String>? only,
+    String? operationId,
+  }) async {
+    throw StateError('injected rectangle failure');
+  }
 }
 
 Future<

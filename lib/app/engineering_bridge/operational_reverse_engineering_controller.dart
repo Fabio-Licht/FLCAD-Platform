@@ -6,6 +6,7 @@ import 'dart:math' as math;
 import 'dart:ui' show Offset;
 
 import 'package:flutter/foundation.dart';
+import '../../core/sketch_engine/persistence/sketch_persistence_transaction.dart';
 
 import '../../core/cad_document/cad_document.dart';
 import '../../core/cad_document/alignment_coordinate_system.dart';
@@ -13,6 +14,7 @@ import '../../core/cad_document/managed_cad_reference.dart';
 import '../../core/feature_lifecycle/feature_lifecycle.dart';
 import '../cad_viewport/rendering/sketch_surface_preview_builder.dart';
 import '../cad_viewport/rendering/recognition_surface_preview_builder.dart';
+import '../cad_viewport/selection_latency_diagnostics.dart';
 import 'adapters/planar_surface_feature_adapter.dart';
 import 'adapters/professional_surface_operations_adapter.dart';
 import 'adapters/recognition_surface_assistant_adapter.dart';
@@ -55,6 +57,7 @@ import '../../core/sketch_constraints/integration/constraint_factory.dart';
 import '../../core/sketch_constraints/integration/arc_radius_edit_planner.dart';
 import '../../core/sketch_constraints/models/constraint_models.dart';
 import '../../core/sketch_editor/api/sketch_editor_api.dart';
+import '../../core/sketch_editor/engine/sketch_editor_engine.dart';
 import '../../core/sketch_editor/integration/editor_factory.dart';
 import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
@@ -70,6 +73,8 @@ import '../../core/sketch_engine/api/sketch_engine_api.dart';
 import '../../core/sketch_engine/entities/sketch_entities.dart'
     hide ReferenceGeometry;
 import '../../core/sketch_engine/history/sketch_history.dart';
+import '../../core/sketch_engine/integration/canonical_sketch_authority.dart';
+import 'sketch_lifecycle_diagnostics.dart';
 import '../../core/sketch_engine/integration/sketch_factory.dart';
 import '../../core/sketch_engine/models/sketch_models.dart';
 import '../../core/sketch_engine/geometry/sketch_spline_geometry.dart';
@@ -99,6 +104,7 @@ import '../cad_viewport/rendering/sketch_scene_adapter.dart';
 import '../cad_viewport/rendering/surface_scene_adapter.dart';
 import '../cad_viewport/scene/cad_scene_graph.dart';
 import '../commands/desktop_command_coordinator.dart';
+import '../commands/command_manager.dart';
 import '../commands/command_registry.dart';
 import 'adapters/mesh_region_smart_region_adapter.dart';
 import 'adapters/reference_bridge.dart';
@@ -599,6 +605,18 @@ class _RecognitionManualApproval {
 }
 
 class OperationalReverseEngineeringController extends ChangeNotifier {
+  /// Test-only fault boundary for the real Sketch -> dependent-feature flow.
+  /// It is null in production and has no effect unless a test explicitly
+  /// installs a scoped injector and clears it in tearDown.
+  @visibleForTesting
+  static Future<void> Function(String phase)? testFailureInjector;
+
+  static Future<void> _invokeTestFailure(String phase) async {
+    if (!kDebugMode) return;
+    final injector = testFailureInjector;
+    if (injector != null) await injector(phase);
+  }
+
   OperationalReverseEngineeringController({
     required ProfessionalRecognitionApi recognition,
     required this.commands,
@@ -636,6 +654,12 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     // operational command set once when the session starts, so reopening or
     // switching projects only reconfigures project data.
     _registerOperationalCommands();
+  }
+
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
   }
 
   @override
@@ -683,6 +707,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   final RecognitionBridge recognition;
   late final Future<void> Function() _beforeSaveCallback;
   late final Future<void> Function() _historyCleanupCallback;
+  Future<void> _sketchPersistenceTail = Future<void>.value();
 
   void _installBeforeSaveHook() {
     runtime.write<Future<void> Function()>(
@@ -822,6 +847,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void>? _configurationBootstrapInFlight;
   String? _configurationBootstrapProjectId;
   Future<void> _sketchEditTail = Future<void>.value();
+  Directory? _configuredProjectDirectory;
 
   /// Bumps on New/Edit/Exit so a late `_synchronizeSketchScene` from a
   /// previous session cannot revive tools, previews or selection.
@@ -969,6 +995,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   ConstraintApi? get constraintApi => runtime.read('sketch.constraintApi');
   set constraintApi(ConstraintApi? value) =>
       runtime.write('sketch.constraintApi', value);
+  CanonicalSketchAuthority? get canonicalSketchAuthority =>
+      runtime.read('sketch.canonicalAuthority');
+  set canonicalSketchAuthority(CanonicalSketchAuthority? value) =>
+      runtime.write('sketch.canonicalAuthority', value);
   SurfaceIntelligenceApi? get surfacePlanningApi =>
       runtime.read('surface.planningApi');
   set surfacePlanningApi(SurfaceIntelligenceApi? value) =>
@@ -1201,6 +1231,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   bool get circleCommandActive =>
       runtime.read<bool>('sketch.circle.active') ?? false;
   bool get arcCommandActive => runtime.read<bool>('sketch.arc.active') ?? false;
+  String sketchFunctionalPanel = 'sketch';
+
+  void showSketchFunctionalPanel(String panel) {
+    if (panel != 'sketch' && panel != 'constraints' && panel != 'dimensions') {
+      return;
+    }
+    if (sketchFunctionalPanel == panel) return;
+    sketchFunctionalPanel = panel;
+    notifyListeners();
+  }
+
   bool get rectangleCommandActive =>
       runtime.read<bool>('sketch.rectangle.active') ?? false;
   bool get splineCommandActive =>
@@ -2775,6 +2816,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     for (final id in hiddenIds) {
       if (runtime.document?.entities[id] == null) continue;
       await runtime.setEntityVisibility(id, !applied);
+      final sceneEntity = runtime.scene.find(id);
+      if (sceneEntity != null && sceneEntity.visible != !applied) {
+        runtime.scene.upsert(sceneEntity.copyWith(visible: !applied));
+      }
     }
     if (createdId != null) {
       selectedSketchEntityIds
@@ -3124,6 +3169,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     for (final id in sourceIds) {
       if (runtime.document?.entities[id] == null) continue;
       await runtime.setEntityVisibility(id, !applied);
+      final sceneEntity = runtime.scene.find(id);
+      if (sceneEntity != null && sceneEntity.visible != !applied) {
+        runtime.scene.upsert(sceneEntity.copyWith(visible: !applied));
+      }
     }
     selectedSketchEntityIds
       ..clear()
@@ -3154,6 +3203,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     for (final id in hiddenIds) {
       if (runtime.document?.entities[id] == null) continue;
       await runtime.setEntityVisibility(id, !applied);
+      final sceneEntity = runtime.scene.find(id);
+      if (sceneEntity != null && sceneEntity.visible != !applied) {
+        runtime.scene.upsert(sceneEntity.copyWith(visible: !applied));
+      }
     }
     selectedSketchEntityIds
       ..clear()
@@ -3226,7 +3279,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           angles.startDegrees > toleranceLimitDegrees ||
           angles.endDegrees > toleranceLimitDegrees) {
         api.engine.undo();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         selectedSketchEntityIds.clear();
         runtime.select(const <String>{});
         runtime.write('sketch.circularFit.confirmed', false);
@@ -4238,6 +4291,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     // previous selection that Ctrl-click could later treat as still valid.
     selectedSketchEntityIds.clear();
     runtime.select({id});
+    if (sketchEditSessionActive) {
+      _applySketchPresentationIsolation();
+    }
     notifyListeners();
   }
 
@@ -4305,6 +4361,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }();
     _sketchEditTail = operation.catchError((_) {});
     return operation;
+  }
+
+  /// Reasserts the edit-session presentation after a document lifecycle
+  /// transition republishes entities from their persisted sceneVisible flags.
+  /// The transition is allowed to update the document/history; it must not
+  /// undo the viewport isolation of the Sketch currently being edited.
+  void reapplySketchPresentationIsolation() {
+    if (!sketchEditSessionActive) return;
+    _applySketchPresentationIsolation();
+    notifyListeners();
   }
 
   Future<void> _reopenSketchForEditing(String id) async {
@@ -4641,7 +4707,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           () => true,
         );
         stage = SketchSurfaceStage.sketchActive;
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         await runtime.setEntityVisibility(section.id, false);
         _publishOriginalSectionReferenceOverlay();
         runtime.select({existing.id});
@@ -5538,16 +5604,50 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write<Set<String>>('delete.previewIds', null);
   }
 
+  /// Detaches the active Sketch before its document root is recycled.  The
+  /// document mutation is owned by CadRuntime, but the edit session, scene
+  /// selection and transient overlays are owned by this controller.  Leaving
+  /// those references live across a tree/project update can expose stale
+  /// dependents to the next frame or the next opened project.
+  void _deactivateRecycledSketch(String entityId) {
+    if (activeSketch?.id != entityId) return;
+    SketchLifecycleDiagnostics.record(
+      'deactivate-begin',
+      entityId: entityId,
+      stage: stage.name,
+    );
+    _clearSketchEditTransients(hideSurfacePreview: true);
+    clearSketchReconstructionSuggestions();
+    _restoreSketchPresentationVisibility();
+    final originalOverlay = runtime.read<String>(
+      'sketch.originalSectionReference.overlayId',
+    );
+    if (originalOverlay != null) runtime.hideTransient(originalOverlay);
+    runtime.write('sketch.originalSectionReference.overlayId', null);
+    sketchApi?.closeSketch();
+    activeSketch = null;
+    activeSelection = null;
+    selectedConstraintIds.clear();
+    selectedSketchEntityIds.clear();
+    runtime.select(const <String>{});
+    runtime.write('sketch.open.diagnostic', null);
+    stage = SketchSurfaceStage.idle;
+    SketchLifecycleDiagnostics.record(
+      'deactivate-complete',
+      entityId: entityId,
+      stage: stage.name,
+    );
+  }
+
   Future<void> deleteToRecycleBin(
     String entityId, {
     required bool includeDependencies,
   }) async {
     clearDeletionPreview();
-    await runtime.moveToRecycleBin(
-      entityId,
-      includeDependencies: includeDependencies,
-    );
-    notifyListeners();
+    await commands.dispatch('reverse.document.recycle', {
+      'id': entityId,
+      'includeDependencies': includeDependencies,
+    });
   }
 
   Future<void> restoreDeleted(String entityId) async {
@@ -5887,11 +5987,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final document = runtime.document;
     if (document == null) return;
     final roots = document.entities.values
-        .where(
-          (entity) =>
-              entity.data['authoringRoot'] == true &&
-              entity.data['authoringWorkspace'] == 'Sketch',
-        )
+        .where(_isSketchPresentationRoot)
         .map((entity) => entity.id)
         .toSet();
     for (final entity in document.entities.values) {
@@ -5907,18 +6003,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
+  /// Sketch presentation roots are Sketch documents. A Fillet or Chamfer is an
+  /// authoring feature inside that document; classifying the curve itself as a
+  /// root hides it for the whole Edit Sketch session after Confirm removes the
+  /// transient preview.
+  bool _isSketchPresentationRoot(CadDocumentEntity entity) =>
+      entity.data['authoringRoot'] == true &&
+      entity.data['authoringWorkspace'] == 'Sketch' &&
+      entity.data['sketch'] is Map;
+
   void _applySketchPresentationIsolation() {
     if (!sketchEditSessionActive) return;
     final activeId = activeSketch?.id;
     if (activeId == null) return;
     final document = runtime.document;
     if (document == null) return;
+    runtime.write('sketch.isolation.activeId', activeId);
+    var hiddenCount = 0;
     final roots = document.entities.values
-        .where(
-          (entity) =>
-              entity.data['authoringRoot'] == true &&
-              entity.data['authoringWorkspace'] == 'Sketch',
-        )
+        .where(_isSketchPresentationRoot)
         .map((entity) => entity.id)
         .toSet();
     for (final entity in document.entities.values) {
@@ -5931,11 +6034,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       if (rootId == null) continue;
       final scene = runtime.scene.find(entity.id);
       if (scene == null) continue;
-      final shouldShow = rootId == activeId;
+      final sketchEntity = sketchApi?.entity(entity.id);
+      final reconstructionHidden =
+          sketchEntity?.metadata['reconstructionHidden'] == true;
+      final persistedVisible = entity.data['sceneVisible'] as bool? ?? true;
+      final shouldShow =
+          rootId == activeId && persistedVisible && !reconstructionHidden;
       if (scene.visible != shouldShow) {
         runtime.scene.upsert(scene.copyWith(visible: shouldShow));
       }
+      if (!shouldShow) hiddenCount++;
     }
+    runtime.write('sketch.isolation.hiddenCount', hiddenCount);
   }
 
   void _restoreSketchPresentationVisibility() {
@@ -6440,6 +6550,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     selectedSketchEntityIds.clear();
     selectedConstraintIds.clear();
     configuredProjectId = projectId;
+    _configuredProjectDirectory = projectDirectory;
     _installBeforeSaveHook();
     final sketch = const SketchEngineFactory().create(projectDirectory);
     sketch.engine.projectId = projectId;
@@ -6449,6 +6560,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     sketchApi = sketch;
     constraintApi = constraints;
+    canonicalSketchAuthority = CanonicalSketchAuthority(
+      sketch: sketch,
+      constraints: constraints,
+    );
     editorApi = const SketchEditorFactory().create(
       projectDirectory: projectDirectory,
       sketch: sketch,
@@ -6591,6 +6706,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _sketchReconstructionSuggestionFingerprints = const {};
     cancelSketchPointReferenceCapture(notify: false);
     configuredProjectId = null;
+    _configuredProjectDirectory = null;
     activeReference = null;
     activeSketch = null;
     runtime.write('sketch.open.diagnostic', null);
@@ -6618,6 +6734,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     sketchApi = null;
     editorApi = null;
     constraintApi = null;
+    canonicalSketchAuthority = null;
     surfacePlanningApi = null;
     surfaceGenerationApi = null;
     professionalSurfaceApi = null;
@@ -6843,6 +6960,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     bool allowTechnicalStl = false,
     PrimitiveType? requestedType,
   }) async {
+    final selectionLatency = SelectionLatencyDiagnostics.claimLatestPending();
+    selectionLatency?.mark('recognize_pick_started');
     final pipelineWatch = Stopwatch()..start();
     var lastTraceStage = 'PICK_RECEIVED';
     final isManagedStl =
@@ -6895,6 +7014,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           worldRay: ray,
         );
         bvhWatch.stop();
+        selectionLatency?.mark(
+          'bvh_picking',
+          details: {'duration_ms': bvhWatch.elapsedMicroseconds / 1000},
+        );
         if (technicalHit == null) {
           runtime.write('recognition.diagnostic', {
             'stage': 'technicalStlPickResolver',
@@ -7099,6 +7222,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           rethrow;
         }
         cylinderSelectionWatch.stop();
+        selectionLatency?.mark(
+          'c2_region_selection',
+          details: {
+            'duration_ms': cylinderSelectionWatch.elapsedMicroseconds / 1000,
+            'selected_triangles': cylindrical.triangles.length,
+            'transition_triangles': cylindrical.transitionTriangles.length,
+          },
+        );
         _writeRecognitionTrace(
           'CYLINDER_REGION_RESULT',
           details: {
@@ -7144,6 +7275,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           selection: selection,
         );
         extractionWatch.stop();
+        selectionLatency?.mark(
+          'overlay_region_build',
+          details: {'duration_ms': extractionWatch.elapsedMicroseconds / 1000},
+        );
         _writeRecognitionTrace(
           'POINT_EXTRACTION',
           details: {
@@ -7199,6 +7334,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         allowedTypes: requestedType == null ? null : {requestedType},
       );
       fittingWatch.stop();
+      selectionLatency?.mark(
+        'c3_recognition',
+        details: {'duration_ms': fittingWatch.elapsedMicroseconds / 1000},
+      );
       _writeRecognitionTrace(
         'ROBUST_FIT_AND_METRICS',
         details: {
@@ -7354,6 +7493,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         details: {'after': lastTraceStage, 'message': error},
       );
     } finally {
+      SelectionLatencyDiagnostics.complete(
+        selectionLatency,
+        details: {'terminal_stage': lastTraceStage},
+      );
       if (requestGeneration == _recognitionRequestGeneration) {
         busy = false;
         notifyListeners();
@@ -9113,7 +9256,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> confirmSurfaceAssistantSuggestion() async {
     await _run('reverse.surface.assistant.confirm', <String, Object?>{});
-    if (error != null) throw StateError(error!);
+    if (error != null) {
+      runtime.write('sketch.edit.diagnostic', error);
+      notifyListeners();
+      throw StateError(error!);
+    }
   }
 
   Future<GeneratedSurface> _confirmSurfaceAssistantSuggestionValue() async {
@@ -9646,7 +9793,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     _sketchReconstructionSuggestionFingerprints = const {};
     _clearArcRadiusEditPreview();
     await _run('reverse.sketch.open', {'forceNew': forceNew});
-    if (error != null) throw StateError(error!);
+    if (error != null) {
+      runtime.write('sketch.edit.diagnostic', error);
+      notifyListeners();
+      throw StateError(error!);
+    }
   }
 
   Future<void> drawRectangle(SketchVector first, SketchVector second) => _run(
@@ -9752,16 +9903,46 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final t = length2 <= 1e-20
           ? .5
           : ((local.x - start.x) * dx + (local.y - start.y) * dy) / length2;
-      if (t <= .18 || t >= .82) {
+      if (editorApi!.hasEndpointBoundedTrimCut(entity.id)) {
         await _run('reverse.sketch.edit', {
           'tool': activeTool.name,
-          'trimMode': 'endpoint',
+          'trimMode': 'portion',
           'ids': [entity.id],
           'point': local.toJson(),
         });
         runtime.write('sketch.trim.firstId', null);
         runtime.write('sketch.trim.firstPoint', null);
         selectedSketchEntityIds.clear();
+      } else if (t <= .18 || t >= .82) {
+        final firstId = runtime.read<String>('sketch.trim.firstId');
+        final firstPoint = runtime.read<List<double>>('sketch.trim.firstPoint');
+        if (firstId != null && firstPoint != null && firstId != entity.id) {
+          await _run('reverse.sketch.edit', {
+            'tool': activeTool.name,
+            'trimMode': 'keepSides',
+            'ids': [firstId, entity.id],
+            'points': [firstPoint, local.toJson()],
+          });
+          runtime.write('sketch.trim.firstId', null);
+          runtime.write('sketch.trim.firstPoint', null);
+          selectedSketchEntityIds.clear();
+        } else if (editorApi!.hasRemovableEndpointOverhang(entity.id, local)) {
+          await _run('reverse.sketch.edit', {
+            'tool': activeTool.name,
+            'trimMode': 'endpoint',
+            'ids': [entity.id],
+            'point': local.toJson(),
+          });
+          runtime.write('sketch.trim.firstId', null);
+          runtime.write('sketch.trim.firstPoint', null);
+          selectedSketchEntityIds.clear();
+        } else {
+          runtime.write('sketch.trim.firstId', entity.id);
+          runtime.write('sketch.trim.firstPoint', local.toJson());
+          selectedSketchEntityIds
+            ..clear()
+            ..add(entity.id);
+        }
       } else {
         final firstId = runtime.read<String>('sketch.trim.firstId');
         final firstPoint = runtime.read<List<double>>('sketch.trim.firstPoint');
@@ -10048,11 +10229,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
                 corner.x + bx / bl * distance,
                 corner.y + by / bl * distance,
               );
+              final angles = filletArcAngles(
+                center: center,
+                corner: corner,
+                firstTangent: p1,
+                secondTangent: p2,
+              );
               return SketchArc(
                 center,
                 sketchEditingValue,
-                math.atan2(p1.y - center.y, p1.x - center.x),
-                math.atan2(p2.y - center.y, p2.x - center.x),
+                angles.startAngle,
+                angles.endAngle,
                 id: 'sketch-edit-preview-geometry',
               );
             }();
@@ -10088,32 +10275,49 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (ids.length != 2) {
       throw StateError('Select two lines: reference first, target second.');
     }
-    if (sketchTangentBlendActive) {
-      final controls = _selectedSketchBlendControls();
-      await _run('reverse.sketch.draw', {
-        'tool': SketchToolType.spline.name,
-        'points': [controls.first.toJson(), controls.last.toJson()],
-        'operationParameters': {
-          'bezierControls': controls.map((point) => point.toJson()).toList(),
-          'sourceEntityIds': ids,
-          'sourceEndpointReferences': [
-            sketchBlendFirstEndpoint,
-            sketchBlendSecondEndpoint,
-          ],
-          'tangentLength': sketchEditingValue,
-          'firstTangentLength': sketchBlendFirstTangentLength,
-          'secondTangentLength': sketchBlendSecondTangentLength,
-        },
-      });
-    } else {
-      await _run('reverse.sketch.edit', {
-        'tool': activeTool.name,
-        'ids': ids,
-        'value': sketchEditingValue,
-        'autoTrim': autoTrim ?? sketchFilletAutoTrim,
-      });
+    try {
+      if (sketchTangentBlendActive) {
+        final controls = _selectedSketchBlendControls();
+        await _run('reverse.sketch.draw', {
+          'tool': SketchToolType.spline.name,
+          'points': [controls.first.toJson(), controls.last.toJson()],
+          'operationParameters': {
+            'bezierControls': controls.map((point) => point.toJson()).toList(),
+            'sourceEntityIds': ids,
+            'sourceEndpointReferences': [
+              sketchBlendFirstEndpoint,
+              sketchBlendSecondEndpoint,
+            ],
+            'tangentLength': sketchEditingValue,
+            'firstTangentLength': sketchBlendFirstTangentLength,
+            'secondTangentLength': sketchBlendSecondTangentLength,
+          },
+        });
+      } else {
+        await _run('reverse.sketch.edit', {
+          'tool': activeTool.name,
+          'ids': ids,
+          'value': sketchEditingValue,
+          'autoTrim': autoTrim ?? sketchFilletAutoTrim,
+          // Confirm is the explicit operator approval required before a
+          // corner edit is allowed to touch constrained source lines.
+          'confirmConstrained': true,
+        });
+      }
+    } catch (value) {
+      final diagnostic = value.toString().replaceFirst('Bad state: ', '');
+      runtime.hideTransient('sketch-edit-preview');
+      runtime.write('sketch.edit.diagnostic', diagnostic);
+      notifyListeners();
+      rethrow;
     }
-    if (error != null) throw StateError(error!);
+    if (error != null) {
+      runtime.hideTransient('sketch-edit-preview');
+      runtime.write('sketch.edit.diagnostic', error);
+      notifyListeners();
+      throw StateError(error!);
+    }
+    runtime.write('sketch.edit.diagnostic', null);
     selectedSketchEntityIds.clear();
     runtime.hideTransient('sketch-edit-preview');
     _clearSketchBlendEndpoints();
@@ -11044,7 +11248,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'length': _sketchVectorLength(
           suggestion.points.last - suggestion.points.first,
         ),
-        'angle':
+        'angleDegrees':
             math.atan2(
               suggestion.points.last.y - suggestion.points.first.y,
               suggestion.points.last.x - suggestion.points.first.x,
@@ -11660,26 +11864,77 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         ? (startDistance <= endDistance ? 'start' : 'end')
         : null;
     final originals = <String, Map<String, SketchVector>>{};
-    bool samePoint(SketchVector a, SketchVector b) =>
-        squaredDistance(a, b) <= 1e-8;
-    for (final candidate in sketchEntities.whereType<SketchLine>()) {
-      final candidateStart = SketchVector.fromJson(
-        candidate.parameters['start'],
+    final closure = <String, Set<String>>{};
+    void include(String id, String endName) =>
+        closure.putIfAbsent(id, () => <String>{}).add(endName);
+    void remember(SketchLine candidate) {
+      originals.putIfAbsent(
+        candidate.id,
+        () => {
+          'start': SketchVector.fromJson(candidate.parameters['start']),
+          'end': SketchVector.fromJson(candidate.parameters['end']),
+        },
       );
-      final candidateEnd = SketchVector.fromJson(candidate.parameters['end']);
-      final touchesStart =
-          samePoint(candidateStart, start) || samePoint(candidateEnd, start);
-      final touchesEnd =
-          samePoint(candidateStart, end) || samePoint(candidateEnd, end);
-      if (candidate.id == entityId ||
-          (endpoint == 'start' && touchesStart) ||
-          (endpoint == 'end' && touchesEnd) ||
-          (endpoint == null && (touchesStart || touchesEnd))) {
-        originals[candidate.id] = {
-          'start': candidateStart,
-          'end': candidateEnd,
-        };
+    }
+
+    if (endpoint == null) {
+      // The pointer is on the edge body, not a vertex. Move that edge along
+      // its normal. Coincident partners of its two corners are collected
+      // below; the opposite edge is not in this closure.
+      remember(entity);
+      include(entityId, 'start');
+      include(entityId, 'end');
+    } else {
+      final anchorEnd = endpoint == 'start' ? start : end;
+      for (final candidate in sketchEntities.whereType<SketchLine>()) {
+        final candidateStart = SketchVector.fromJson(
+          candidate.parameters['start'],
+        );
+        final candidateEnd = SketchVector.fromJson(candidate.parameters['end']);
+        if (candidate.id != entityId &&
+            !_sameSketchPoint(candidateStart, anchorEnd) &&
+            !_sameSketchPoint(candidateEnd, anchorEnd)) {
+          continue;
+        }
+        remember(candidate);
+        if (_sameSketchPoint(candidateStart, anchorEnd)) {
+          include(candidate.id, 'start');
+        }
+        if (_sameSketchPoint(candidateEnd, anchorEnd)) {
+          include(candidate.id, 'end');
+        }
       }
+    }
+    final pending = <String>[
+      for (final entry in closure.entries)
+        for (final endName in entry.value) '${entry.key}:$endName',
+    ];
+    final seen = pending.toSet();
+    while (pending.isNotEmpty) {
+      final reference = pending.removeLast();
+      final separator = reference.lastIndexOf(':');
+      if (separator <= 0) continue;
+      include(
+        reference.substring(0, separator),
+        reference.substring(separator + 1),
+      );
+      for (final constraint in constraints) {
+        if (constraint.type != SketchConstraintType.coincident) continue;
+        if (!constraint.references.contains(reference)) continue;
+        for (final partner in constraint.references) {
+          if (seen.add(partner)) pending.add(partner);
+        }
+      }
+    }
+    for (final entry in closure.entries) {
+      final candidate = sketchApi?.entity(entry.key);
+      if (candidate is! SketchLine || originals.containsKey(candidate.id)) {
+        continue;
+      }
+      originals[candidate.id] = {
+        'start': SketchVector.fromJson(candidate.parameters['start']),
+        'end': SketchVector.fromJson(candidate.parameters['end']),
+      };
     }
     runtime.write('sketch.drag.active', true);
     runtime.write('sketch.drag.entityId', entityId);
@@ -11688,6 +11943,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.drag.end', end);
     runtime.write('sketch.drag.endpoint', endpoint);
     runtime.write('sketch.drag.originals', originals);
+    runtime.write('sketch.drag.closure', {
+      for (final entry in closure.entries) entry.key: entry.value.toList(),
+    });
     runtime.write(
       'sketch.drag.hud',
       SketchDragHud(anchor.x, anchor.y, lineSnapType?.name ?? 'Free'),
@@ -11722,24 +11980,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
     final start = runtime.read<SketchVector>('sketch.drag.start');
     final end = runtime.read<SketchVector>('sketch.drag.end');
-    final endpoint = runtime.read<String>('sketch.drag.endpoint');
     final originals = runtime.read<Map<String, Map<String, SketchVector>>>(
       'sketch.drag.originals',
     );
+    final closure = runtime.read<Map>('sketch.drag.closure');
     if (point == null || anchor == null || start == null || end == null) return;
-    final delta = point - anchor;
+    final delta = _sketchDragDelta(
+      point: point,
+      anchor: anchor,
+      start: start,
+      end: end,
+      endpoint: runtime.read<String>('sketch.drag.endpoint'),
+    );
     final coordinates = activeSketch!.coordinates;
     final segments = <List<List<double>>>[];
     for (final entry in (originals ?? const {}).entries) {
       var movedStart = entry.value['start']!;
       var movedEnd = entry.value['end']!;
-      final movesStart = endpoint == null
-          ? _sameSketchPoint(movedStart, start) ||
-                _sameSketchPoint(movedStart, end)
-          : _sameSketchPoint(movedStart, endpoint == 'start' ? start : end);
-      final movesEnd = endpoint == null
-          ? _sameSketchPoint(movedEnd, start) || _sameSketchPoint(movedEnd, end)
-          : _sameSketchPoint(movedEnd, endpoint == 'start' ? start : end);
+      final movesStart = _dragClosureMoves(closure, entry.key, 'start');
+      final movesEnd = _dragClosureMoves(closure, entry.key, 'end');
       if (movesStart) movedStart += delta;
       if (movesEnd) movedEnd += delta;
       segments.add([
@@ -11867,45 +12126,43 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     final anchor = runtime.read<SketchVector>('sketch.drag.anchor');
     final start = runtime.read<SketchVector>('sketch.drag.start');
     final end = runtime.read<SketchVector>('sketch.drag.end');
-    final endpoint = runtime.read<String>('sketch.drag.endpoint');
     final originals = runtime.read<Map<String, Map<String, SketchVector>>>(
       'sketch.drag.originals',
     );
+    final closure = runtime.read<Map>('sketch.drag.closure');
     try {
       if (entityId != null &&
           point != null &&
           anchor != null &&
           start != null &&
           end != null) {
-        final delta = point - anchor;
-        final api = sketchApi!;
-        api.engine.transaction('connected-sketch-drag', () {
-          for (final entry in (originals ?? const {}).entries) {
-            final originalStart = entry.value['start']!;
-            final originalEnd = entry.value['end']!;
-            final target = endpoint == 'start' ? start : end;
-            final movesStart = endpoint == null
-                ? _sameSketchPoint(originalStart, start) ||
-                      _sameSketchPoint(originalStart, end)
-                : _sameSketchPoint(originalStart, target);
-            final movesEnd = endpoint == null
-                ? _sameSketchPoint(originalEnd, start) ||
-                      _sameSketchPoint(originalEnd, end)
-                : _sameSketchPoint(originalEnd, target);
-            final movedStart = movesStart
-                ? originalStart + delta
-                : originalStart;
-            final movedEnd = movesEnd ? originalEnd + delta : originalEnd;
-            api.updateParameters(entry.key, {
-              'startX': movedStart.x,
-              'startY': movedStart.y,
-              'endX': movedEnd.x,
-              'endY': movedEnd.y,
-            });
-          }
+        final delta = _sketchDragDelta(
+          point: point,
+          anchor: anchor,
+          start: start,
+          end: end,
+          endpoint: runtime.read<String>('sketch.drag.endpoint'),
+        );
+        final values = <String, Object?>{};
+        for (final entry in (originals ?? const {}).entries) {
+          final originalStart = entry.value['start']!;
+          final originalEnd = entry.value['end']!;
+          final movesStart = _dragClosureMoves(closure, entry.key, 'start');
+          final movesEnd = _dragClosureMoves(closure, entry.key, 'end');
+          final movedStart = movesStart ? originalStart + delta : originalStart;
+          final movedEnd = movesEnd ? originalEnd + delta : originalEnd;
+          values[entry.key] = {
+            'startX': movedStart.x,
+            'startY': movedStart.y,
+            'endX': movedEnd.x,
+            'endY': movedEnd.y,
+          };
+        }
+        await commands.dispatch('reverse.sketch.drag', {
+          'entityId': entityId,
+          'values': values,
         });
-        await api.persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         runtime.select({entityId});
       }
     } finally {
@@ -11929,7 +12186,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           api.move(entityId, delta);
         });
         await api.persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         selectedSketchEntityIds
           ..clear()
           ..add(entityId);
@@ -11952,6 +12209,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.drag.end', null);
     runtime.write('sketch.drag.endpoint', null);
     runtime.write('sketch.drag.originals', null);
+    runtime.write('sketch.drag.closure', null);
     runtime.write('sketch.drag.hud', null);
     runtime.write('sketch.drag.regionFit', null);
     runtime.hideTransient('sketch-drag-preview');
@@ -11971,6 +12229,82 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   bool _sameSketchPoint(SketchVector first, SketchVector second) {
     final delta = first - second;
     return delta.dot(delta) <= _sketchPointTolerance * _sketchPointTolerance;
+  }
+
+  SketchVector _sketchDragDelta({
+    required SketchVector point,
+    required SketchVector anchor,
+    required SketchVector start,
+    required SketchVector end,
+    required String? endpoint,
+  }) {
+    final delta = point - anchor;
+    if (endpoint != null) return delta;
+    final direction = end - start;
+    final normal = SketchVector(-direction.y, direction.x);
+    final length2 = normal.dot(normal);
+    if (length2 <= 1e-12) return delta;
+    return normal.scale(delta.dot(normal) / length2);
+  }
+
+  bool _dragClosureMoves(Map? closure, String id, String endName) {
+    final ends = closure?[id];
+    return ends is List && ends.contains(endName);
+  }
+
+  SketchVector? _constraintReferencePoint(String reference) {
+    final separator = reference.lastIndexOf(':');
+    if (separator <= 0) return null;
+    final entity = sketchApi?.entity(reference.substring(0, separator));
+    final endName = reference.substring(separator + 1);
+    if (entity is SketchLine) {
+      final raw = switch (endName) {
+        'start' => entity.parameters['start'],
+        'end' => entity.parameters['end'],
+        _ => null,
+      };
+      return raw == null ? null : SketchVector.fromJson(raw);
+    }
+    if (entity is SketchArc && (endName == 'start' || endName == 'end')) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final angle =
+          (entity.parameters[endName == 'start' ? 'startAngle' : 'endAngle']
+                  as num)
+              .toDouble();
+      return SketchVector(
+        center.x + radius * math.cos(angle),
+        center.y + radius * math.sin(angle),
+        center.z,
+      );
+    }
+    return null;
+  }
+
+  bool _relatedCoincidentsHold(SketchConstraint created) {
+    final touched = created.references
+        .map(
+          (reference) =>
+              reference.replaceFirst(RegExp(r':(start|end|point|center)$'), ''),
+        )
+        .toSet();
+    for (final constraint in constraints) {
+      if (constraint.type != SketchConstraintType.coincident) continue;
+      final shares = constraint.references.any(
+        (reference) => touched.contains(
+          reference.replaceFirst(RegExp(r':(start|end|point|center)$'), ''),
+        ),
+      );
+      if (!shares) continue;
+      if (constraint.references.length < 2) return false;
+      final first = _constraintReferencePoint(constraint.references[0]);
+      final second = _constraintReferencePoint(constraint.references[1]);
+      if (first == null || second == null) return false;
+      final delta = first - second;
+      // Solver tolerance is a distance of 1e-8. A larger opening is unsolved.
+      if (delta.dot(delta) > 1e-16) return false;
+    }
+    return true;
   }
 
   Future<void> setSketchEntityVisibility(String id, bool visible) async {
@@ -14354,6 +14688,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Whether the active Sketch contains one closed, axis-aligned rectangle.
+  bool get canConstrainRectangle =>
+      _orderedRectangleEdges(sketchEntities.whereType<SketchLine>()) != null;
+
   Future<void> constrainRectangle() =>
       _run('reverse.sketch.constrainRectangle');
   Future<void> createDrivingDimension(
@@ -14390,6 +14728,75 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     });
   }
 
+  Future<void> createDrivenDimension(SketchDimensionType type) async {
+    if (selectedSketchEntityIds.length != 1) {
+      throw StateError(
+        'Select exactly one Sketch entity for this measurement.',
+      );
+    }
+    final entity = sketchApi?.entity(selectedSketchEntityIds.single);
+    if (entity == null) {
+      throw StateError('Selected Sketch entity is unavailable.');
+    }
+    final value = switch (entity) {
+      SketchLine() => switch (type) {
+        SketchDimensionType.linear => _lineLength(entity),
+        SketchDimensionType.horizontal =>
+          (_lineEnd(entity).x - _lineStart(entity).x).abs(),
+        SketchDimensionType.vertical =>
+          (_lineEnd(entity).y - _lineStart(entity).y).abs(),
+        SketchDimensionType.angular =>
+          math.atan2(
+                _lineEnd(entity).y - _lineStart(entity).y,
+                _lineEnd(entity).x - _lineStart(entity).x,
+              ) *
+              180 /
+              math.pi,
+        _ => throw StateError('${type.name} is not a line measurement.'),
+      },
+      SketchCircle() || SketchArc() => switch (type) {
+        SketchDimensionType.radius =>
+          (entity.parameters['radius'] as num).toDouble(),
+        SketchDimensionType.diameter =>
+          (entity.parameters['radius'] as num).toDouble() * 2,
+        _ => throw StateError('${type.name} is not a curve measurement.'),
+      },
+      _ => throw StateError('Select a line, circle, or arc to measure.'),
+    };
+    final label = switch (entity) {
+      SketchLine() => () {
+        final a = _lineStart(entity);
+        final b = _lineEnd(entity);
+        return SketchVector(
+          (a.x + b.x) / 2 - (b.y - a.y) * .15,
+          (a.y + b.y) / 2 + (b.x - a.x) * .15,
+        );
+      }(),
+      SketchCircle() || SketchArc() => () {
+        final center = SketchVector.fromJson(entity.parameters['center']);
+        final radius = (entity.parameters['radius'] as num).toDouble();
+        return SketchVector(center.x + radius * .8, center.y + radius * .8);
+      }(),
+      _ => const SketchVector(0, 0),
+    };
+    await _run('reverse.sketch.dimension.createDriven', {
+      'type': type.name,
+      'value': value,
+      'references': [selectedSketchEntityIds.single],
+      'labelX': label.x,
+      'labelY': label.y,
+    });
+  }
+
+  SketchVector _lineStart(SketchLine line) =>
+      SketchVector.fromJson(line.parameters['start']);
+  SketchVector _lineEnd(SketchLine line) =>
+      SketchVector.fromJson(line.parameters['end']);
+  double _lineLength(SketchLine line) {
+    final delta = _lineEnd(line) - _lineStart(line);
+    return math.sqrt(delta.dot(delta));
+  }
+
   Future<void> editDrivingDimension(
     String id,
     double value, {
@@ -14399,6 +14806,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     'value': value,
     'confirmAdjacent': confirmAdjacent,
   });
+
+  Future<void> convertDimensionMode(String id, {required bool driven}) => _run(
+    'reverse.sketch.dimension.convertMode',
+    {'id': id, 'driven': driven},
+  );
 
   Future<void> deleteDrivingDimension(String id) =>
       _run('reverse.sketch.dimension.delete', {'id': id});
@@ -14966,6 +15378,22 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     SketchEntity entity,
     Map<String, double> values,
   ) {
+    final fixed = constraints.where(
+      (item) =>
+          item.enabled &&
+          !item.suppressed &&
+          (item.type == SketchConstraintType.fixed ||
+              item.type == SketchConstraintType.lock) &&
+          item.references.any(
+            (reference) => _sketchEntityIdFromReference(reference) == entity.id,
+          ),
+    );
+    if (fixed.isNotEmpty) {
+      throw StateError(
+        '${_constraintLabel(fixed.first.type)} (${fixed.first.id}) prevents '
+        'editing entity ${entity.id}.',
+      );
+    }
     final requestedAngle = values['angleDegrees'];
     if (requestedAngle == null || entity is! SketchLine) return;
     double normalized(double value) {
@@ -15015,6 +15443,243 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           'Delete or suppress that constraint before changing this angle.',
         );
       }
+    }
+  }
+
+  void _assertRequestedParametersApplied(
+    SketchEntity entity,
+    Map<String, double> values,
+  ) {
+    const tolerance = 1e-6;
+    bool same(double expected, double actual) =>
+        (expected - actual).abs() <= tolerance;
+    void expectNear(String name, double expected, double actual) {
+      if (!same(expected, actual)) {
+        throw StateError(
+          'The requested $name $expected is incompatible with the active '
+          'constraints (actual $actual).',
+        );
+      }
+    }
+
+    if (entity is SketchLine) {
+      final start = SketchVector.fromJson(entity.parameters['start']);
+      final end = SketchVector.fromJson(entity.parameters['end']);
+      final delta = end - start;
+      if (values['length'] case final expected?) {
+        final actual = math.sqrt(delta.x * delta.x + delta.y * delta.y);
+        expectNear('line length', expected, actual);
+      }
+      if (values['angleDegrees'] case final expected?) {
+        final actual = math.atan2(delta.y, delta.x) * 180 / math.pi;
+        double normalized(double value) => (value % 180 + 180) % 180;
+        expectNear('line angle', normalized(expected), normalized(actual));
+      }
+      if (values['startX'] case final expected?) {
+        expectNear('start X', expected, start.x);
+      }
+      if (values['startY'] case final expected?) {
+        expectNear('start Y', expected, start.y);
+      }
+      if (values['endX'] case final expected?) {
+        expectNear('end X', expected, end.x);
+      }
+      if (values['endY'] case final expected?) {
+        expectNear('end Y', expected, end.y);
+      }
+    } else if (entity is SketchCircle) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      if (values['centerX'] case final expected?) {
+        expectNear('center X', expected, center.x);
+      }
+      if (values['centerY'] case final expected?) {
+        expectNear('center Y', expected, center.y);
+      }
+      if (values['radius'] case final expected?) {
+        expectNear('radius', expected, radius);
+      }
+      if (values['diameter'] case final expected?) {
+        expectNear('diameter', expected, radius * 2);
+      }
+    } else if (entity is SketchArc) {
+      final center = SketchVector.fromJson(entity.parameters['center']);
+      final radius = (entity.parameters['radius'] as num).toDouble();
+      final startAngle =
+          (entity.parameters['startAngle'] as num).toDouble() * 180 / math.pi;
+      final endAngle =
+          (entity.parameters['endAngle'] as num).toDouble() * 180 / math.pi;
+      if (values['centerX'] case final expected?) {
+        expectNear('center X', expected, center.x);
+      }
+      if (values['centerY'] case final expected?) {
+        expectNear('center Y', expected, center.y);
+      }
+      if (values['radius'] case final expected?) {
+        expectNear('radius', expected, radius);
+      }
+      if (values['startAngleDegrees'] case final expected?) {
+        expectNear('start angle', expected, startAngle);
+      }
+      if (values['endAngleDegrees'] case final expected?) {
+        expectNear('end angle', expected, endAngle);
+      }
+    }
+  }
+
+  void _assertDrivingDimensionApplied(SketchDimension dimension) {
+    final api = sketchApi;
+    if (api == null || dimension.references.isEmpty) {
+      throw StateError('Driving dimension has no Sketch reference.');
+    }
+    String entityId(String reference) {
+      final marker = reference.lastIndexOf(':');
+      if (marker <= 0) return reference;
+      return const {
+            'start',
+            'end',
+            'point',
+            'center',
+          }.contains(reference.substring(marker + 1))
+          ? reference.substring(0, marker)
+          : reference;
+    }
+
+    final firstId = entityId(dimension.references.first);
+    final first = api.entity(firstId);
+    SketchVector? point(String reference) {
+      final explicit = _sketchEndpoint(reference);
+      if (explicit != null) return explicit;
+      final entity = api.entity(entityId(reference));
+      return entity is SketchPoint
+          ? SketchVector.fromJson(entity.parameters['point'])
+          : null;
+    }
+
+    double? actual;
+    switch (dimension.type) {
+      case SketchDimensionType.linear:
+        if (dimension.references.length == 1 && first is SketchLine) {
+          final start = SketchVector.fromJson(first.parameters['start']);
+          final end = SketchVector.fromJson(first.parameters['end']);
+          final delta = end - start;
+          actual = math.sqrt(delta.x * delta.x + delta.y * delta.y);
+        } else if (dimension.references.length >= 2) {
+          final a = point(dimension.references[0]);
+          final b = point(dimension.references[1]);
+          if (a != null && b != null) {
+            final delta = b - a;
+            actual = math.sqrt(delta.dot(delta));
+          }
+        }
+        break;
+      case SketchDimensionType.horizontal:
+        if (dimension.references.length == 1 && first is SketchLine) {
+          final start = SketchVector.fromJson(first.parameters['start']);
+          final end = SketchVector.fromJson(first.parameters['end']);
+          actual = (end.x - start.x).abs();
+        } else if (dimension.references.length >= 2) {
+          final a = point(dimension.references[0]);
+          final b = point(dimension.references[1]);
+          if (a != null && b != null) actual = (b.x - a.x).abs();
+        }
+        break;
+      case SketchDimensionType.vertical:
+        if (dimension.references.length == 1 && first is SketchLine) {
+          final start = SketchVector.fromJson(first.parameters['start']);
+          final end = SketchVector.fromJson(first.parameters['end']);
+          actual = (end.y - start.y).abs();
+        } else if (dimension.references.length >= 2) {
+          final a = point(dimension.references[0]);
+          final b = point(dimension.references[1]);
+          if (a != null && b != null) actual = (b.y - a.y).abs();
+        }
+        break;
+      case SketchDimensionType.parallelDistance:
+        if (dimension.references.length >= 2) {
+          final a = api.entity(entityId(dimension.references[0]));
+          final b = api.entity(entityId(dimension.references[1]));
+          if (a is SketchLine && b is SketchLine) {
+            final aStart = SketchVector.fromJson(a.parameters['start']);
+            final aEnd = SketchVector.fromJson(a.parameters['end']);
+            final bStart = SketchVector.fromJson(b.parameters['start']);
+            final direction = aEnd - aStart;
+            final length = math.sqrt(
+              direction.x * direction.x + direction.y * direction.y,
+            );
+            if (length > 1e-12) {
+              final normal = SketchVector(
+                -direction.y / length,
+                direction.x / length,
+              );
+              final delta = bStart - aStart;
+              actual = (delta.x * normal.x + delta.y * normal.y).abs();
+            }
+          }
+        }
+        break;
+      case SketchDimensionType.ordinateX:
+      case SketchDimensionType.ordinateY:
+        final p = point(dimension.references.first);
+        if (p != null) {
+          actual = dimension.type == SketchDimensionType.ordinateX ? p.x : p.y;
+        }
+        break;
+      case SketchDimensionType.angular:
+        if (dimension.references.length == 1 && first is SketchLine) {
+          final start = SketchVector.fromJson(first.parameters['start']);
+          final end = SketchVector.fromJson(first.parameters['end']);
+          actual = math.atan2(end.y - start.y, end.x - start.x) * 180 / math.pi;
+        } else if (dimension.references.length >= 2) {
+          final a = api.entity(entityId(dimension.references[0]));
+          final b = api.entity(entityId(dimension.references[1]));
+          if (a is SketchLine && b is SketchLine) {
+            final aStart = SketchVector.fromJson(a.parameters['start']);
+            final aEnd = SketchVector.fromJson(a.parameters['end']);
+            final bStart = SketchVector.fromJson(b.parameters['start']);
+            final bEnd = SketchVector.fromJson(b.parameters['end']);
+            final aAngle = math.atan2(aEnd.y - aStart.y, aEnd.x - aStart.x);
+            final bAngle = math.atan2(bEnd.y - bStart.y, bEnd.x - bStart.x);
+            actual = (bAngle - aAngle) * 180 / math.pi;
+          }
+        }
+        break;
+      case SketchDimensionType.radius:
+      case SketchDimensionType.diameter:
+        if (first != null && (first is SketchCircle || first is SketchArc)) {
+          final radius = (first.parameters['radius'] as num).toDouble();
+          actual = dimension.type == SketchDimensionType.radius
+              ? radius
+              : radius * 2;
+        }
+        break;
+      default:
+        break;
+    }
+    if (actual == null) {
+      throw StateError(
+        'Driving dimension ${dimension.id} cannot be measured after solve.',
+      );
+    }
+    var expected = dimension.value;
+    var measured = actual;
+    if (dimension.type == SketchDimensionType.angular) {
+      expected = (expected % 180 + 180) % 180;
+      measured = (measured % 180 + 180) % 180;
+      final delta = (expected - measured).abs();
+      if (math.min(delta, 180 - delta) > 1e-6) {
+        throw StateError(
+          'Driving dimension ${dimension.id} was not applied: '
+          'expected $expected, actual $measured.',
+        );
+      }
+      return;
+    }
+    if ((expected - measured).abs() > 1e-6) {
+      throw StateError(
+        'Driving dimension ${dimension.id} was not applied: '
+        'expected $expected, actual $measured.',
+      );
     }
   }
 
@@ -19899,6 +20564,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   Future<void> undo() async {
+    final operationId =
+        'controller-undo-${DateTime.now().microsecondsSinceEpoch}';
+    runtime.write('command.operationId', operationId);
+    runtime.write('command.callback.phase', 'enter');
     await commands.undo();
     if (hasRecognitionSelection) {
       clearRecognitionSelection(notify: false);
@@ -19927,9 +20596,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.hideTransient('sketch-line-preview');
     }
     notifyListeners();
+    runtime.write('command.callback.phase', 'complete');
+    runtime.write('command.callback.phase', 'exit');
   }
 
   Future<void> redo() async {
+    final operationId =
+        'controller-redo-${DateTime.now().microsecondsSinceEpoch}';
+    runtime.write('command.operationId', operationId);
+    runtime.write('command.callback.phase', 'enter');
     await commands.redo();
     if (hasRecognitionSelection) {
       clearRecognitionSelection(notify: false);
@@ -19937,6 +20612,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await _synchronizeSketchScene();
     _reconcileSketchEntitySelection();
     notifyListeners();
+    runtime.write('command.callback.phase', 'complete');
+    runtime.write('command.callback.phase', 'exit');
   }
 
   /// Undo/Redo restores the Sketch engine independently of the transient CAD
@@ -19965,26 +20642,336 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Future<void> persist() async {
     await _awaitProjectConfiguration();
-    await sketchApi?.persist();
-    await editorApi?.persist();
-    await constraintApi?.persist();
+    await _persistConfiguredSketchState();
+  }
+
+  Future<void> _persistConfiguredSketchState() {
+    final directory = _configuredProjectDirectory;
+    if (directory == null) {
+      // Reference and recognition commands synchronize the scene before a
+      // Sketch project exists. There is no engine to write until configure.
+      if (sketchApi == null) return Future<void>.value();
+      throw StateError('Sketch project directory is not configured.');
+    }
+    final completion = Completer<void>();
+    final clock = Stopwatch()..start();
+    runtime.write('sketch.persistence.phase', 'queued');
+    _sketchPersistenceTail = _sketchPersistenceTail
+        .catchError((Object _) {})
+        .then((_) async {
+          try {
+            runtime.write('sketch.persistence.phase', 'transaction');
+            await const SketchPersistenceTransaction().run(
+              directory,
+              () async {
+                runtime.write('sketch.persistence.phase', 'sketch');
+                await sketchApi?.persist();
+                runtime.write(
+                  'sketch.persistence.timing.sketchMs',
+                  clock.elapsedMilliseconds,
+                );
+                runtime.write('sketch.persistence.phase', 'sketch.complete');
+                runtime.write('sketch.persistence.phase', 'editor');
+                await editorApi?.persist();
+                runtime.write(
+                  'sketch.persistence.timing.editorMs',
+                  clock.elapsedMilliseconds,
+                );
+                runtime.write('sketch.persistence.phase', 'editor.complete');
+                runtime.write('sketch.persistence.phase', 'constraint');
+                await constraintApi?.persist();
+                runtime.write(
+                  'sketch.persistence.timing.constraintMs',
+                  clock.elapsedMilliseconds,
+                );
+                runtime.write(
+                  'sketch.persistence.phase',
+                  'constraint.complete',
+                );
+              },
+              reportTiming: (phase, elapsedMicros) {
+                runtime.write(
+                  'sketch.persistence.timing.transaction.$phase',
+                  elapsedMicros,
+                );
+              },
+            );
+            runtime.write(
+              'sketch.persistence.timing.transactionMs',
+              clock.elapsedMilliseconds,
+            );
+            runtime.write('sketch.persistence.phase', 'transaction.complete');
+            runtime.write('sketch.persistence.phase', 'complete');
+            runtime.write(
+              'sketch.persistence.timing.totalMs',
+              clock.elapsedMilliseconds,
+            );
+            completion.complete();
+          } catch (error, stackTrace) {
+            runtime.write('sketch.persistence.phase', 'failed');
+            completion.completeError(error, stackTrace);
+          }
+        });
+    return completion.future;
   }
 
   Future<void> saveProject() async {
     await commands.dispatch('project.save');
   }
 
+  Map<String, Map<String, double>> _decodeSketchDragValues(
+    Map<String, Object?> parameters,
+  ) {
+    final raw = parameters['values'];
+    if (raw is! Map) throw StateError('Sketch drag values are missing.');
+    return raw.map((key, value) {
+      if (key is! String || value is! Map) {
+        throw StateError('Sketch drag values are malformed.');
+      }
+      final decoded = <String, double>{};
+      for (final entry in value.entries) {
+        if (entry.key is! String || entry.value is! num) {
+          throw StateError('Sketch drag parameter is malformed.');
+        }
+        final number = (entry.value as num).toDouble();
+        if (!number.isFinite) {
+          throw StateError('Sketch drag parameter must be finite.');
+        }
+        decoded[entry.key as String] = number;
+      }
+      return MapEntry(key, decoded);
+    });
+  }
+
+  void _rejectFixedSketchDrag(Iterable<String> entityIds) {
+    final ids = entityIds.toSet();
+    final blocked = constraintApi?.constraints.where(
+      (constraint) =>
+          constraint.enabled &&
+          (constraint.type == SketchConstraintType.fixed ||
+              constraint.type == SketchConstraintType.lock) &&
+          constraint.references.any((reference) {
+            final id = reference.replaceFirst(
+              RegExp(r':(start|end|point)$'),
+              '',
+            );
+            return ids.contains(id);
+          }),
+    );
+    if (blocked != null && blocked.isNotEmpty) {
+      throw StateError(
+        'The dragged Sketch entity is fully constrained and cannot move.',
+      );
+    }
+  }
+
+  void _rejectDrivingDimensionEdit(Iterable<String> entityIds) {
+    final ids = entityIds.toSet();
+    final blocked = constraintApi?.constraints.where(
+      (constraint) =>
+          constraint.enabled &&
+          constraint.driving &&
+          constraint.references.any((reference) {
+            final id = reference.replaceFirst(
+              RegExp(r':(start|end|point|center)$'),
+              '',
+            );
+            return ids.contains(id);
+          }),
+    );
+    if (blocked != null && blocked.isNotEmpty) {
+      editorApi?.engine.preview.clear();
+      runtime.hideTransient('sketch-edit-preview');
+      final first = blocked.first;
+      final dimension = constraintApi!.dimensions.firstWhere(
+        (item) => item.constraintId == first.id,
+        orElse: () => throw StateError(
+          'Driving dimension constraint ${first.id} has no dimension.',
+        ),
+      );
+      throw StateError(
+        'Sketch edit is incompatible with driving dimension '
+        '${dimension.id}. '
+        'Edit the dimension or convert it to Driven first.',
+      );
+    }
+  }
+
+  Future<Object?> _executeSketchDragCommand(
+    Map<String, Object?> parameters,
+  ) async {
+    final api = sketchApi;
+    final authority = canonicalSketchAuthority;
+    if (api == null || authority == null || !authority.isCanonical) {
+      throw StateError('Canonical Sketch authority is not available.');
+    }
+    final values = _decodeSketchDragValues(parameters);
+    if (values.isEmpty) throw StateError('Sketch drag has no affected entity.');
+    _rejectFixedSketchDrag(values.keys);
+    final operationId =
+        parameters['operationId'] as String? ??
+        'sketch-drag-${DateTime.now().microsecondsSinceEpoch}';
+    parameters['operationId'] = operationId;
+    runtime.write('sketch.drag.lastOperationId', operationId);
+    var solveStarted = false;
+    var solveSucceeded = false;
+    final sketchBeforeDrag = api.engine.captureCheckpoint();
+    try {
+      api.engine.transaction('connected-sketch-drag:$operationId', () {
+        for (final entry in values.entries) {
+          api.updateParameters(entry.key, entry.value);
+        }
+        // The drag is a candidate. Re-project active Driving dimensions in
+        // the same Sketch transaction before the canonical solver validates
+        // the complete relation graph. Driven dimensions remain measurements.
+        constraintApi?.enforceDrivingDimensions();
+      });
+      solveStarted = true;
+      final result = await authority.solve(operationId: operationId);
+      if (!result.success) {
+        throw StateError(
+          result.diagnostics.map((diagnostic) => diagnostic.message).join('; '),
+        );
+      }
+      solveSucceeded = true;
+      // The Sketch is a candidate until every dependent feature has rebuilt.
+      // Synchronization still publishes the candidate document projection in
+      // memory, but its durable Sketch repositories are committed only after
+      // Extrude/Revolve (and the other dependents) have succeeded.
+      runtime.write('sketch.transaction.phase', 'candidate');
+      await _synchronizeSketchScene(persistSketch: false);
+      runtime.write('sketch.transaction.phase', 'validated');
+      await _invokeTestFailure('beforeSketchPersistence');
+      await _persistConfiguredSketchState();
+      await _invokeTestFailure('afterSketchPersistence');
+      runtime.write('sketch.transaction.phase', 'committed');
+      return parameters['entityId'] ?? values.keys.first;
+    } catch (error) {
+      if (!solveStarted) {
+        rethrow;
+      }
+      if (!solveSucceeded) {
+        // ConstraintEngine intentionally restores its own stacks when a
+        // projection is rejected. The Sketch transaction is a separate
+        // engine, so restore that candidate explicitly instead of looking for
+        // a solve undo entry that the rejected solve deliberately removed.
+        api.engine.restoreCheckpoint(sketchBeforeDrag);
+        try {
+          runtime.write('sketch.transaction.phase', 'rollingBack');
+          await _synchronizeSketchScene(persistSketch: false);
+          await _persistConfiguredSketchState();
+          runtime.write('sketch.transaction.phase', 'rolledBack');
+        } catch (recoveryError) {
+          runtime.write('sketch.transaction.phase', 'recoveryRequired');
+          throw StateError(
+            'Sketch drag recovery failed after ${error.runtimeType}: '
+            '$recoveryError',
+          );
+        }
+        rethrow;
+      }
+      if (!authority.undoSketchEdit(
+        expectedSketchTarget: 'connected-sketch-drag:$operationId',
+        expectedConstraintTarget: 'solve:$operationId',
+      )) {
+        throw StateError(
+          'Sketch drag rollback rejected an incompatible history.',
+        );
+      }
+      // The first synchronization may already have committed a document
+      // projection before a later dependent feature failed. Rebuild the
+      // restored candidate before exposing the failure, so memory and the
+      // durable Sketch repositories return to the same pre-drag revision.
+      try {
+        runtime.write('sketch.transaction.phase', 'rollingBack');
+        await _synchronizeSketchScene(persistSketch: false);
+        await _persistConfiguredSketchState();
+        runtime.write('sketch.transaction.phase', 'rolledBack');
+      } catch (recoveryError) {
+        runtime.write('sketch.transaction.phase', 'recoveryRequired');
+        throw StateError(
+          'Sketch drag recovery failed after ${error.runtimeType}: '
+          '$recoveryError',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  Future<Object?> _undoSketchDragCommand(
+    Map<String, Object?> parameters,
+  ) async {
+    final authority = canonicalSketchAuthority;
+    if (authority == null || !authority.isCanonical) {
+      throw StateError('Canonical Sketch authority is not available.');
+    }
+    final operationId =
+        parameters['operationId'] as String? ??
+        runtime.read<String>('sketch.drag.lastOperationId');
+    final sketchTarget = authority.sketch.engine.undoTarget;
+    final constraintTarget = authority.constraints.engine.undoTarget;
+    final targetsMatch =
+        operationId != null &&
+        sketchTarget == 'connected-sketch-drag:$operationId' &&
+        constraintTarget == 'solve:$operationId';
+    if (!authority.undoSketchEdit(
+      expectedSketchTarget: targetsMatch ? sketchTarget : '__mismatch__',
+      expectedConstraintTarget: targetsMatch
+          ? constraintTarget
+          : '__mismatch__',
+    )) {
+      throw StateError('No Sketch drag is available to undo.');
+    }
+    try {
+      runtime.write('sketch.transaction.phase', 'candidate');
+      await _synchronizeSketchScene(persistSketch: false);
+      runtime.write('sketch.transaction.phase', 'validated');
+      await _invokeTestFailure('beforeUndoSketchPersistence');
+      await _persistConfiguredSketchState();
+      await _invokeTestFailure('afterUndoSketchPersistence');
+      runtime.write('sketch.transaction.phase', 'committed');
+      return 'sketch drag undone';
+    } catch (error) {
+      authority.redoSketchEdit();
+      try {
+        runtime.write('sketch.transaction.phase', 'rollingBack');
+        await _synchronizeSketchScene(persistSketch: false);
+        await _persistConfiguredSketchState();
+        runtime.write('sketch.transaction.phase', 'rolledBack');
+      } catch (recoveryError) {
+        runtime.write('sketch.transaction.phase', 'recoveryRequired');
+        throw StateError(
+          'Sketch undo recovery failed after ${error.runtimeType}: '
+          '$recoveryError',
+        );
+      }
+      rethrow;
+    }
+  }
+
   Future<void> _run(
     String id, [
     Map<String, Object?> parameters = const {},
   ]) async {
+    if (_disposed) return;
+    final operationId =
+        'controller-${DateTime.now().microsecondsSinceEpoch}-$id';
+    var tracedParameters = parameters;
+    try {
+      parameters[CommandManager.traceOperationIdKey] = operationId;
+    } on UnsupportedError {
+      tracedParameters = Map<String, Object?>.from(parameters)
+        ..[CommandManager.traceOperationIdKey] = operationId;
+    }
+    runtime.write('command.operationId', operationId);
+    runtime.write('command.callback.phase', 'enter');
     busy = true;
     error = null;
     notifyListeners();
     _operationalCommandDepth++;
     try {
       await _awaitProjectConfiguration();
-      await commands.dispatch(id, parameters);
+      await commands.dispatch(id, tracedParameters);
     } catch (value) {
       if (value case ArcRadiusEditConfirmationRequired failure) {
         _beginArcRadiusEditPreview(failure.plan, id, parameters);
@@ -19993,7 +20980,9 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     } finally {
       _operationalCommandDepth--;
       busy = false;
-      notifyListeners();
+      if (!_disposed) notifyListeners();
+      runtime.write('command.callback.phase', 'complete');
+      runtime.write('command.callback.phase', 'exit');
     }
   }
 
@@ -20005,6 +20994,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       required Future<Object?> Function(Map<String, Object?>) execute,
       required Future<Object?> Function(Map<String, Object?>) undo,
       Future<Object?> Function(Map<String, Object?>)? redo,
+      CommandEffect? hasEffect,
     }) => pending.add(
       RegisteredEngineeringCommand(
         id: id,
@@ -20012,7 +21002,33 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         execute: (_, parameters) => execute(parameters),
         undo: (_, parameters) => undo(parameters),
         redo: (_, parameters) => (redo ?? execute)(parameters),
+        hasEffect: hasEffect,
+        checkpoint: (_, _) async {
+          final sketch = sketchApi?.engine.captureCheckpoint();
+          final constraints = constraintApi?.engine.captureCheckpoint();
+          final editor = editorApi?.engine.captureCheckpoint();
+          final documentary = runtime.captureCommandCheckpoint();
+          return () async {
+            runtime.restoreCommandCheckpoint(documentary);
+            if (constraints != null) {
+              constraintApi?.engine.restoreCheckpoint(constraints);
+            }
+            if (sketch != null) {
+              sketchApi?.engine.restoreCheckpoint(sketch);
+            }
+            if (editor != null) {
+              editorApi?.engine.restoreCheckpoint(editor);
+            }
+          };
+        },
       ),
+    );
+
+    register(
+      id: 'reverse.sketch.drag',
+      execute: _executeSketchDragCommand,
+      undo: _undoSketchDragCommand,
+      redo: _executeSketchDragCommand,
     );
 
     register(
@@ -20115,14 +21131,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         if (sketchApi?.engine.undo() != true) {
           throw StateError('No gap repair is available to undo.');
         }
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'gap restored';
       },
       redo: (_) async {
         if (sketchApi?.engine.redo() != true) {
           throw StateError('No gap repair is available to redo.');
         }
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'gap closed';
       },
     );
@@ -20785,7 +21801,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         });
         activeSketch = sketch;
         stage = SketchSurfaceStage.sketchActive;
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         // The support remains visibly active for the entire Sketch session.
         runtime.select({planeId, sketch.id});
         return sketch.id;
@@ -20804,29 +21820,273 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
 
     register(
+      id: 'reverse.document.recycle',
+      execute: (parameters) async {
+        runtime.write('document.recycle.phase', 'collect-owned');
+        final id = parameters['id']! as String;
+        final includeDependencies = parameters['includeDependencies'] == true;
+        final document = runtime.document;
+        final owned =
+            document?.entities.values
+                .where(
+                  (entity) =>
+                      entity.data['deleted'] != true &&
+                      entity.data['parentSketchId'] == id,
+                )
+                .map((entity) => entity.id)
+                .toList(growable: false) ??
+            const <String>[];
+        parameters['ownedIds'] = owned;
+        if (includeDependencies) {
+          final sources = <String>{id, ...owned};
+          parameters['dependentIds'] =
+              {
+                    for (final sourceId in sources)
+                      ...runtime.dependencyImpact(sourceId),
+                  }
+                  .where(
+                    (entity) => entity.id != id && !owned.contains(entity.id),
+                  )
+                  .map((entity) => entity.id)
+                  .toList(growable: false);
+        } else {
+          parameters['dependentIds'] = const <String>[];
+        }
+        runtime.write('document.recycle.phase', 'mutate-document');
+        await runtime.moveToRecycleBin(
+          id,
+          includeDependencies: includeDependencies,
+        );
+        runtime.write('document.recycle.phase', 'deactivate-sketch');
+        _deactivateRecycledSketch(id);
+        runtime.select(runtime.selection.difference({id, ...owned}));
+        runtime.write('document.recycle.phase', 'synchronize-scene');
+        // CadRuntime has already committed the root and every owned child.
+        // Persisting the now-closed editor again here can queue behind that
+        // mutation and strand the UI command before history publication.
+        await _synchronizeSketchScene(persistSketch: false);
+        runtime.write('document.recycle.phase', 'complete');
+        return 'moved to recycle bin';
+      },
+      undo: (parameters) async {
+        final id = parameters['id']! as String;
+        final owned = (parameters['ownedIds'] as List?)?.whereType<String>();
+        final dependent = (parameters['dependentIds'] as List?)
+            ?.whereType<String>();
+        final additional = <String>{...?owned, ...?dependent};
+        await runtime.restoreFromRecycleBin(id, additionalIds: additional);
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'restored from recycle bin';
+      },
+      redo: (parameters) async {
+        final id = parameters['id']! as String;
+        final includeDependencies = parameters['includeDependencies'] == true;
+        await runtime.moveToRecycleBin(
+          id,
+          includeDependencies: includeDependencies,
+        );
+        _deactivateRecycledSketch(id);
+        final owned = (parameters['ownedIds'] as List?)?.whereType<String>();
+        final dependent = (parameters['dependentIds'] as List?)
+            ?.whereType<String>();
+        runtime.select(
+          runtime.selection.difference({id, ...?owned, ...?dependent}),
+        );
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'moved to recycle bin again';
+      },
+    );
+
+    register(
       id: 'reverse.sketch.rectangle',
       execute: (parameters) async {
         if (activeSketch == null) throw StateError('Open Sketch first.');
+        final constraints =
+            constraintApi ??
+            (throw StateError(
+              'Rectangle constraints require the constraint engine.',
+            ));
+        final sketchUndoBefore = sketchApi!.engine.undoDepth;
+        final constraintUndoBefore = constraints.engine.undoDepth;
         final first = SketchVector.fromJson(parameters['first']);
         final second = SketchVector.fromJson(parameters['second']);
-        final operation = editorApi!.preview(SketchToolType.rectangle, [
-          first,
-          second,
-        ]);
-        final created = editorApi!.confirm(operation.id);
-        previewPoints = const [];
-        await _synchronizeSketchScene();
-        return created.map((item) => item.id).join(',');
+        final editorCheckpoint = editorApi!.engine.captureCheckpoint();
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraints.engine.captureCheckpoint();
+        String? previewId;
+        var confirmed = false;
+        try {
+          final operation = editorApi!.preview(SketchToolType.rectangle, [
+            first,
+            second,
+          ]);
+          previewId = operation.id;
+          final created = editorApi!.confirm(operation.id);
+          confirmed = true;
+          final cycle = _orderedRectangleEdges(created.whereType<SketchLine>());
+          if (cycle == null) {
+            throw StateError(
+              'Rectangle preview did not produce one closed H/V rectangle.',
+            );
+          }
+          final sketchUndoAfterEditor = sketchApi!.engine.undoDepth;
+          // Shared coordinates are not constraints. Commit the complete
+          // rectangle contract in one transaction so Undo removes all eight
+          // relations together.
+          constraints.engine.transaction('rectangle constraints', () {
+            for (final edge in cycle) {
+              constraints.engine.add(
+                SketchConstraint(
+                  type: edge.direction,
+                  references: [edge.line.id],
+                ),
+              );
+            }
+            for (var index = 0; index < cycle.length; index++) {
+              final current = cycle[index];
+              final next = cycle[(index + 1) % cycle.length];
+              constraints.engine.add(
+                SketchConstraint(
+                  type: SketchConstraintType.coincident,
+                  references: [current.endReference, next.startReference],
+                ),
+              );
+            }
+          });
+          final solve = await constraints.solve();
+          if (!solve.success) {
+            throw StateError(
+              'Rectangle constraints could not be solved: '
+              '${solve.statistics.failureReason ?? 'unknown conflict'}.',
+            );
+          }
+          final invalid = _rectangleConstraintProblem(cycle, constraints);
+          if (invalid != null) {
+            throw StateError('Rectangle constraints are incomplete: $invalid.');
+          }
+          parameters['cornerConstraints'] = true;
+          parameters['createdIds'] = created
+              .map((entity) => entity.id)
+              .toList(growable: false);
+          parameters['editorSketchUndoCount'] =
+              sketchUndoAfterEditor - sketchUndoBefore;
+          parameters['solverSketchUndoCount'] =
+              sketchApi!.engine.undoDepth - sketchUndoAfterEditor;
+          parameters['constraintUndoCount'] =
+              constraints.engine.undoDepth - constraintUndoBefore;
+          previewPoints = const [];
+          await _synchronizeSketchScene();
+          return created.map((item) => item.id).join(',');
+        } catch (error, stack) {
+          if (!confirmed && previewId != null) {
+            try {
+              editorApi!.cancel(previewId);
+            } catch (_) {
+              // The engine checkpoint below is authoritative for rollback.
+            }
+          }
+          try {
+            constraints.engine.restoreCheckpoint(constraintCheckpoint);
+            sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+            editorApi!.engine.restoreCheckpoint(editorCheckpoint);
+            previewPoints = const [];
+            await _synchronizeSketchScene();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Rectangle creation failed and rollback failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
       },
-      undo: (_) async {
-        editorApi!.undo();
-        await _synchronizeSketchScene();
-        return 'rectangle undone';
+      undo: (parameters) async {
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi!.engine.captureCheckpoint();
+        try {
+          runtime.write('sketch.rectangle.history.phase', 'undo.constraints');
+          final constraintUndoCount =
+              parameters['constraintUndoCount'] as int? ?? 0;
+          for (var index = 0; index < constraintUndoCount; index++) {
+            if (constraintApi?.engine.undoConstraintsOnly() != true) {
+              throw StateError('Rectangle constraints cannot be undone.');
+            }
+          }
+          final solverSketchUndoCount =
+              parameters['solverSketchUndoCount'] as int? ?? 0;
+          runtime.write('sketch.rectangle.history.phase', 'undo.solver');
+          for (var index = 0; index < solverSketchUndoCount; index++) {
+            if (!sketchApi!.engine.undo()) {
+              throw StateError('Rectangle solve cannot be undone.');
+            }
+          }
+          final editorSketchUndoCount =
+              parameters['editorSketchUndoCount'] as int? ?? 1;
+          runtime.write('sketch.rectangle.history.phase', 'undo.editor');
+          if (editorSketchUndoCount != 1 || editorApi!.undo() != true) {
+            throw StateError('Rectangle creation cannot be undone.');
+          }
+          runtime.write('sketch.rectangle.history.phase', 'undo.viewport');
+          await _synchronizeSketchScene();
+          runtime.write('sketch.rectangle.history.phase', 'undo.complete');
+          return 'rectangle undone';
+        } catch (error, stack) {
+          try {
+            constraintApi!.engine.restoreCheckpoint(constraintCheckpoint);
+            sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+            await _synchronizeSketchScene();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Rectangle undo failed and rollback failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
       },
-      redo: (_) async {
-        editorApi!.redo();
-        await _synchronizeSketchScene();
-        return 'rectangle restored';
+      redo: (parameters) async {
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi!.engine.captureCheckpoint();
+        try {
+          runtime.write('sketch.rectangle.history.phase', 'redo.editor');
+          final editorSketchUndoCount =
+              parameters['editorSketchUndoCount'] as int? ?? 1;
+          if (editorSketchUndoCount != 1 || editorApi!.redo() != true) {
+            throw StateError('Rectangle creation cannot be redone.');
+          }
+          final solverSketchUndoCount =
+              parameters['solverSketchUndoCount'] as int? ?? 0;
+          runtime.write('sketch.rectangle.history.phase', 'redo.solver');
+          for (var index = 0; index < solverSketchUndoCount; index++) {
+            if (!sketchApi!.engine.redo()) {
+              throw StateError('Rectangle solve cannot be redone.');
+            }
+          }
+          final constraintUndoCount =
+              parameters['constraintUndoCount'] as int? ?? 0;
+          runtime.write('sketch.rectangle.history.phase', 'redo.constraints');
+          for (var index = 0; index < constraintUndoCount; index++) {
+            if (constraintApi?.engine.redoConstraintsOnly() != true) {
+              throw StateError('Rectangle constraints cannot be redone.');
+            }
+          }
+          runtime.write('sketch.rectangle.history.phase', 'redo.viewport');
+          await _synchronizeSketchScene();
+          runtime.write('sketch.rectangle.history.phase', 'redo.complete');
+          return 'rectangle restored';
+        } catch (error, stack) {
+          try {
+            constraintApi!.engine.restoreCheckpoint(constraintCheckpoint);
+            sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+            await _synchronizeSketchScene();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Rectangle redo failed and rollback failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
       },
     );
 
@@ -20894,6 +22154,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           parameters['tool']! as String,
         );
         final ids = (parameters['ids']! as List).cast<String>();
+        _rejectDrivingDimensionEdit(ids);
         final trimMode = parameters['trimMode'] as String?;
         if (tool == SketchToolType.trim && trimMode == 'endpoint') {
           editorApi!.trimEndpointToNearestIntersection(
@@ -20902,6 +22163,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           );
           await _synchronizeSketchScene();
           return 'trim endpoint completed';
+        }
+        if (tool == SketchToolType.trim && trimMode == 'portion') {
+          final applied = editorApi!.trimEndpointBoundedPortion(
+            ids.single,
+            SketchVector.fromJson(parameters['point']),
+          );
+          if (!applied) {
+            throw StateError(
+              'No endpoint boundary was found for this portion.',
+            );
+          }
+          await _synchronizeSketchScene();
+          return 'portion trim completed';
         }
         if (tool == SketchToolType.trim && trimMode == 'keepSides') {
           final points = (parameters['points']! as List)
@@ -20921,6 +22195,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             if (parameters['point'] != null) 'point': parameters['point'],
             'autoTrim': parameters['autoTrim'] as bool? ?? true,
           },
+          confirmConstrained: parameters['confirmConstrained'] == true,
         );
         final created = sketchApi!.engine.entities.keys
             .where((id) => !before.contains(id))
@@ -20966,6 +22241,45 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         );
         final entity = sketchApi?.entity(id);
         if (entity == null) throw StateError('Unknown Sketch entity: $id');
+        if (values.containsKey('angle')) {
+          final angle = values.remove('angle')!;
+          if (values['angleDegrees'] case final explicit?) {
+            if ((explicit - angle).abs() > 1e-6) {
+              throw StateError(
+                'Conflicting angle and angleDegrees values were supplied.',
+              );
+            }
+          } else {
+            values['angleDegrees'] = angle;
+          }
+        }
+        final supportedKeys = switch (entity) {
+          SketchLine() => const {
+            'startX',
+            'startY',
+            'endX',
+            'endY',
+            'length',
+            'angleDegrees',
+          },
+          SketchCircle() => const {'centerX', 'centerY', 'radius', 'diameter'},
+          SketchArc() => const {
+            'centerX',
+            'centerY',
+            'radius',
+            'startAngleDegrees',
+            'endAngleDegrees',
+          },
+          _ => const <String>{},
+        };
+        final unsupported = values.keys
+            .where((key) => !supportedKeys.contains(key))
+            .toList(growable: false);
+        if (unsupported.isNotEmpty) {
+          throw StateError(
+            'Unsupported Sketch parameter(s): ${unsupported.join(', ')}.',
+          );
+        }
         final radiusOnly =
             entity is SketchArc &&
             values.length == 1 &&
@@ -20995,22 +22309,74 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         _validateConstrainedParameterEdit(entity, resolvedValues);
         parameters['entityVersionBefore'] = entity.version;
         final connections = _currentSketchConnections(robustEntityIds: false);
-        sketchApi!.engine.transaction('safe-parametric-edit', () {
-          sketchApi!.updateParameters(id, resolvedValues);
-          for (final entry
-              in radiusPlan?.endpointUpdates.entries ??
-                  <MapEntry<String, Map<String, double>>>[]) {
-            sketchApi!.updateParameters(entry.key, entry.value);
+        final sketchUndoBefore = sketchApi!.engine.undoDepth;
+        final constraintUndoBefore = constraintApi?.engine.undoDepth ?? 0;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi?.engine.captureCheckpoint();
+        void restoreCheckpoint() {
+          constraintApi?.engine.restoreCheckpoint(constraintCheckpoint!);
+          sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+        }
+
+        try {
+          sketchApi!.engine.transaction('safe-parametric-edit', () {
+            sketchApi!.updateParameters(id, resolvedValues);
+            for (final entry
+                in radiusPlan?.endpointUpdates.entries ??
+                    <MapEntry<String, Map<String, double>>>[]) {
+              sketchApi!.updateParameters(entry.key, entry.value);
+            }
+          });
+          if (constraintApi != null && constraintApi!.constraints.isNotEmpty) {
+            final solve = await constraintApi!.solve(
+              operationId:
+                  'parameter-${entity.version}-${DateTime.now().microsecondsSinceEpoch}',
+            );
+            if (!solve.success) {
+              throw StateError(
+                'Parametric edit could not be solved: '
+                '${solve.statistics.failureReason ?? 'unknown conflict'}.',
+              );
+            }
           }
+          _assertRequestedParametersApplied(entity, resolvedValues);
           _assertSketchConnectionsPreserved(connections);
-        });
-        await _synchronizeSketchScene();
+          parameters['sketchUndoCount'] =
+              sketchApi!.engine.undoDepth - sketchUndoBefore;
+          parameters['constraintSolveUndoCount'] =
+              (constraintApi?.engine.undoDepth ?? constraintUndoBefore) -
+              constraintUndoBefore;
+          await _synchronizeSketchScene();
+        } catch (error, stack) {
+          try {
+            restoreCheckpoint();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Parametric edit failed and recovery failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
+        }
         runtime.select({id});
         return id;
       },
       undo: (parameters) async {
         final id = parameters['id']! as String;
-        if (sketchApi?.engine.undo() != true) {
+        final constraintUndoCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintUndoCount; index++) {
+          if (constraintApi?.engine.undoConstraintsOnly() != true) {
+            throw StateError('No constraint solve is available to undo.');
+          }
+        }
+        final sketchUndoCount = parameters['sketchUndoCount'] as int? ?? 1;
+        for (var index = 0; index < sketchUndoCount; index++) {
+          if (sketchApi?.engine.undo() != true) {
+            throw StateError('No parametric edit is available to undo.');
+          }
+        }
+        if (sketchUndoCount == 0) {
           throw StateError('No parametric edit is available to undo.');
         }
         await _synchronizeSketchScene();
@@ -21019,8 +22385,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       },
       redo: (parameters) async {
         final id = parameters['id']! as String;
-        if (sketchApi?.engine.redo() != true) {
+        final sketchUndoCount = parameters['sketchUndoCount'] as int? ?? 1;
+        for (var index = 0; index < sketchUndoCount; index++) {
+          if (sketchApi?.engine.redo() != true) {
+            throw StateError('No parametric edit is available to redo.');
+          }
+        }
+        if (sketchUndoCount == 0) {
           throw StateError('No parametric edit is available to redo.');
+        }
+        final constraintUndoCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintUndoCount; index++) {
+          if (constraintApi?.engine.redoConstraintsOnly() != true) {
+            throw StateError('No constraint solve is available to redo.');
+          }
         }
         await _synchronizeSketchScene();
         runtime.select({id});
@@ -21123,10 +22502,71 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
 
     register(
+      id: 'reverse.sketch.dimension.createDriven',
+      execute: (parameters) async {
+        final before = constraintApi!.engine.undoDepth;
+        final checkpoint = constraintApi!.engine.captureCheckpoint();
+        try {
+          final dimension = constraintApi!.createDrivenDimension(
+            type: SketchDimensionType.values.byName(
+              parameters['type']! as String,
+            ),
+            references: (parameters['references']! as List).cast<String>(),
+            value: (parameters['value']! as num).toDouble(),
+            labelX: (parameters['labelX'] as num?)?.toDouble() ?? 0,
+            labelY: (parameters['labelY'] as num?)?.toDouble() ?? 0,
+          );
+          parameters['id'] = dimension.id;
+          parameters['constraintUndoCount'] =
+              constraintApi!.engine.undoDepth - before;
+          await _synchronizeSketchScene(persistSketch: false);
+          return dimension.id;
+        } catch (error, stack) {
+          constraintApi!.engine.restoreCheckpoint(checkpoint);
+          await _synchronizeSketchScene(persistSketch: false);
+          Error.throwWithStackTrace(error, stack);
+        }
+      },
+      undo: (parameters) async {
+        final count = parameters['constraintUndoCount'] as int? ?? 0;
+        for (var index = 0; index < count; index++) {
+          if (constraintApi?.engine.undoConstraintsOnly() != true) {
+            throw StateError(
+              'No driven dimension creation is available to undo.',
+            );
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'driven dimension removed';
+      },
+      redo: (parameters) async {
+        final count = parameters['constraintUndoCount'] as int? ?? 0;
+        for (var index = 0; index < count; index++) {
+          if (constraintApi?.engine.redoConstraintsOnly() != true) {
+            throw StateError(
+              'No driven dimension creation is available to redo.',
+            );
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'driven dimension restored';
+      },
+    );
+    register(
       id: 'reverse.sketch.dimension.create',
       execute: (parameters) async {
+        runtime.write('sketch.dimension.command.phase', 'create.solve');
         late final SketchDimension dimension;
         final expectedPreview = _previewFromParameters(parameters);
+        final sketchUndoBefore = sketchApi!.engine.undoDepth;
+        final constraintUndoBefore = constraintApi!.engine.undoDepth;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi!.engine.captureCheckpoint();
+        void restoreCheckpoint() {
+          constraintApi!.engine.restoreCheckpoint(constraintCheckpoint);
+          sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+        }
+
         try {
           dimension = constraintApi!.createDrivingDimension(
             type: SketchDimensionType.values.byName(
@@ -21139,71 +22579,234 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             labelY: (parameters['labelY'] as num?)?.toDouble() ?? 0,
             confirmAdjacent: parameters['confirmAdjacent'] == true,
             expectedRadiusPlan: expectedPreview?.plan,
+            deferDirectionalConstraints: true,
           );
+          final solve = await constraintApi!.solve(
+            operationId:
+                'dimension-create-${DateTime.now().microsecondsSinceEpoch}',
+          );
+          if (!solve.success) {
+            throw StateError(
+              'Driving dimension could not be solved: '
+              '${solve.statistics.failureReason ?? 'unknown conflict'}.',
+            );
+          }
+          _assertDrivingDimensionApplied(dimension);
         } on ArcRadiusEditConfirmationRequired catch (failure) {
+          restoreCheckpoint();
           parameters['radiusEditMetrics'] = failure.details;
           rethrow;
+        } catch (error, stack) {
+          try {
+            restoreCheckpoint();
+            await _synchronizeSketchScene(persistSketch: false);
+          } on Object catch (recovery) {
+            throw StateError(
+              'Driving dimension failed and recovery failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
         }
         parameters['id'] = dimension.id;
-        await persist();
-        await _synchronizeSketchScene();
+        parameters['sketchUndoCount'] =
+            sketchApi!.engine.undoDepth - sketchUndoBefore;
+        parameters['constraintSolveUndoCount'] =
+            constraintApi!.engine.undoDepth - constraintUndoBefore;
+        runtime.write('sketch.dimension.command.phase', 'create.viewport');
+        await _synchronizeSketchScene(persistSketch: false);
+        runtime.write('sketch.dimension.command.phase', 'create.complete');
         return dimension.id;
       },
-      undo: (_) async {
-        if (constraintApi?.undoDimensionEdit() != true) {
-          throw StateError('No dimension creation is available to undo.');
+      undo: (parameters) async {
+        final constraintCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.undoConstraintsOnly() != true) {
+            throw StateError('No dimension creation is available to undo.');
+          }
         }
-        await persist();
-        await _synchronizeSketchScene();
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.undo() != true) {
+            throw StateError('No dimension geometry is available to undo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension removed';
       },
-      redo: (_) async {
-        if (constraintApi?.redoDimensionEdit() != true) {
-          throw StateError('No dimension creation is available to redo.');
+      redo: (parameters) async {
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.redo() != true) {
+            throw StateError('No dimension geometry is available to redo.');
+          }
         }
-        await persist();
-        await _synchronizeSketchScene();
+        final constraintCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.redoConstraintsOnly() != true) {
+            throw StateError('No dimension creation is available to redo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension restored';
+      },
+    );
+    register(
+      id: 'reverse.sketch.dimension.convertMode',
+      execute: (parameters) async {
+        final beforeSketch = sketchApi!.engine.undoDepth;
+        final beforeConstraint = constraintApi!.engine.undoDepth;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi!.engine.captureCheckpoint();
+        try {
+          constraintApi!.convertDimensionMode(
+            parameters['id']! as String,
+            driven: parameters['driven'] == true,
+          );
+          parameters['sketchUndoCount'] =
+              sketchApi!.engine.undoDepth - beforeSketch;
+          parameters['constraintUndoCount'] =
+              constraintApi!.engine.undoDepth - beforeConstraint;
+          await _synchronizeSketchScene(persistSketch: false);
+          return parameters['id']!;
+        } catch (error, stack) {
+          constraintApi!.engine.restoreCheckpoint(constraintCheckpoint);
+          sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+          await _synchronizeSketchScene(persistSketch: false);
+          Error.throwWithStackTrace(error, stack);
+        }
+      },
+      undo: (parameters) async {
+        final constraintCount = parameters['constraintUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.undoConstraintsOnly() != true) {
+            throw StateError('No dimension conversion is available to undo.');
+          }
+        }
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.undo() != true) {
+            throw StateError('No dimension geometry is available to undo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'dimension mode restored';
+      },
+      redo: (parameters) async {
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.redo() != true) {
+            throw StateError('No dimension geometry is available to redo.');
+          }
+        }
+        final constraintCount = parameters['constraintUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.redoConstraintsOnly() != true) {
+            throw StateError('No dimension conversion is available to redo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
+        return 'dimension mode reapplied';
       },
     );
     register(
       id: 'reverse.sketch.dimension.edit',
       execute: (parameters) async {
         final expectedPreview = _previewFromParameters(parameters);
+        final sketchUndoBefore = sketchApi!.engine.undoDepth;
+        final constraintUndoBefore = constraintApi!.engine.undoDepth;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraintApi!.engine.captureCheckpoint();
+        void restoreCheckpoint() {
+          constraintApi!.engine.restoreCheckpoint(constraintCheckpoint);
+          sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+        }
+
         try {
           constraintApi!.driveDimension(
             parameters['id']! as String,
             (parameters['value']! as num).toDouble(),
             confirmAdjacent: parameters['confirmAdjacent'] == true,
             expectedRadiusPlan: expectedPreview?.plan,
+            deferDirectionalConstraints: true,
+          );
+          final solve = await constraintApi!.solve(
+            operationId:
+                'dimension-edit-${DateTime.now().microsecondsSinceEpoch}',
+          );
+          if (!solve.success) {
+            throw StateError(
+              'Driving dimension edit could not be solved: '
+              '${solve.statistics.failureReason ?? 'unknown conflict'}.',
+            );
+          }
+          _assertDrivingDimensionApplied(
+            constraintApi!.dimensions.firstWhere(
+              (item) => item.id == parameters['id'],
+            ),
           );
         } on ArcRadiusEditConfirmationRequired catch (failure) {
+          restoreCheckpoint();
           parameters['radiusEditMetrics'] = failure.details;
           rethrow;
+        } catch (error, stack) {
+          try {
+            restoreCheckpoint();
+            await _synchronizeSketchScene(persistSketch: false);
+          } on Object catch (recovery) {
+            throw StateError(
+              'Driving dimension edit failed and recovery failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
         }
         final radiusPlan =
             constraintApi!.engine.dimensionAdapter.lastArcRadiusEditPlan;
         if (radiusPlan != null) {
           parameters['radiusEditMetrics'] = radiusPlan.diagnosticDetails;
         }
-        await persist();
-        await _synchronizeSketchScene();
+        parameters['sketchUndoCount'] =
+            sketchApi!.engine.undoDepth - sketchUndoBefore;
+        parameters['constraintSolveUndoCount'] =
+            constraintApi!.engine.undoDepth - constraintUndoBefore;
+        await _synchronizeSketchScene(persistSketch: false);
         return parameters['id']!;
       },
-      undo: (_) async {
-        if (constraintApi?.undoDimensionEdit() != true) {
-          throw StateError('No dimension edit is available to undo.');
+      undo: (parameters) async {
+        final constraintCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.undoConstraintsOnly() != true) {
+            throw StateError('No dimension edit is available to undo.');
+          }
         }
-        await persist();
-        await _synchronizeSketchScene();
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.undo() != true) {
+            throw StateError('No dimension geometry is available to undo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension value restored';
       },
-      redo: (_) async {
-        if (constraintApi?.redoDimensionEdit() != true) {
-          throw StateError('No dimension edit is available to redo.');
+      redo: (parameters) async {
+        final sketchCount = parameters['sketchUndoCount'] as int? ?? 0;
+        for (var index = 0; index < sketchCount; index++) {
+          if (sketchApi?.engine.redo() != true) {
+            throw StateError('No dimension geometry is available to redo.');
+          }
         }
-        await persist();
-        await _synchronizeSketchScene();
+        final constraintCount =
+            parameters['constraintSolveUndoCount'] as int? ?? 0;
+        for (var index = 0; index < constraintCount; index++) {
+          if (constraintApi?.engine.redoConstraintsOnly() != true) {
+            throw StateError('No dimension edit is available to redo.');
+          }
+        }
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension value reapplied';
       },
     );
@@ -21212,7 +22815,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       execute: (parameters) async {
         constraintApi!.deleteDimension(parameters['id']! as String);
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return parameters['id']!;
       },
       undo: (_) async {
@@ -21220,7 +22823,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           throw StateError('No dimension deletion is available to undo.');
         }
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension restored';
       },
       redo: (_) async {
@@ -21228,7 +22831,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           throw StateError('No dimension deletion is available to redo.');
         }
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension deleted';
       },
     );
@@ -21241,7 +22844,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           labelY: (parameters['y']! as num).toDouble(),
         );
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return parameters['id']!;
       },
       undo: (_) async {
@@ -21249,7 +22852,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           throw StateError('No dimension move is available to undo.');
         }
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension label restored';
       },
       redo: (_) async {
@@ -21257,54 +22860,184 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           throw StateError('No dimension move is available to redo.');
         }
         await persist();
-        await _synchronizeSketchScene();
+        await _synchronizeSketchScene(persistSketch: false);
         return 'dimension label moved';
       },
     );
 
-    final rectangleConstraints = <SketchConstraint>[];
     register(
       id: 'reverse.sketch.constrainRectangle',
-      execute: (_) async {
-        final lines = sketchEntities.whereType<SketchLine>().toList();
-        if (lines.length < 4) {
-          throw StateError('A four-line rectangle is required.');
-        }
-        rectangleConstraints.clear();
-        for (var index = 0; index < 4; index++) {
-          rectangleConstraints.add(
-            (index.isEven
-                    ? constraintApi!.builders.horizontal
-                    : constraintApi!.builders.vertical)
-                .build([lines[index].id]),
+      execute: (parameters) async {
+        final cycle = _orderedRectangleEdges(
+          sketchEntities.whereType<SketchLine>(),
+        );
+        if (cycle == null) {
+          throw StateError(
+            'Exactly one closed horizontal/vertical rectangle is required.',
           );
         }
-        for (var index = 0; index < 4; index++) {
-          final current = lines[index];
-          final next = lines[(index + 1) % 4];
-          rectangleConstraints.add(
-            constraintApi!.builders.coincident.build([
-              '${current.id}:end',
-              '${next.id}:start',
-            ]),
-          );
+        final constraints =
+            constraintApi ??
+            (throw StateError(
+              'Rectangle constraints require the constraint engine.',
+            ));
+        final rectangleConstraints = <SketchConstraint>[];
+        final constraintsToEnable = <SketchConstraint>[];
+        final requiredDirections = [
+          for (final edge in cycle)
+            (type: edge.direction, entityId: edge.line.id),
+        ];
+        final requiredCoincidences = [
+          for (var index = 0; index < cycle.length; index++)
+            (
+              first: cycle[index].endReference,
+              second: cycle[(index + 1) % cycle.length].startReference,
+            ),
+        ];
+        final beforeConstraintMutation = constraints.engine.undoDepth;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraints.engine.captureCheckpoint();
+        try {
+          for (final required in requiredDirections) {
+            final matches = constraints.constraints
+                .where(
+                  (item) =>
+                      item.type == required.type &&
+                      item.references.length == 1 &&
+                      item.references.single == required.entityId,
+                )
+                .toList(growable: false);
+            if (matches.any(_constraintIsActive)) {
+              continue;
+            }
+            if (matches.isNotEmpty) {
+              constraintsToEnable.add(matches.first);
+            } else {
+              rectangleConstraints.add(
+                constraints.builders.of(required.type).build([
+                  required.entityId,
+                ]),
+              );
+            }
+          }
+          for (final required in requiredCoincidences) {
+            final matches = constraints.constraints
+                .where(
+                  (item) =>
+                      item.type == SketchConstraintType.coincident &&
+                      ((item.references.length == 2 &&
+                              item.references[0] == required.first &&
+                              item.references[1] == required.second) ||
+                          (item.references.length == 2 &&
+                              item.references[0] == required.second &&
+                              item.references[1] == required.first)),
+                )
+                .toList(growable: false);
+            if (matches.any(_constraintIsActive)) {
+              continue;
+            }
+            if (matches.isNotEmpty) {
+              constraintsToEnable.add(matches.first);
+            } else {
+              rectangleConstraints.add(
+                constraints.builders.coincident.build([
+                  required.first,
+                  required.second,
+                ]),
+              );
+            }
+          }
+          if (rectangleConstraints.isEmpty && constraintsToEnable.isEmpty) {
+            parameters['constraintUndoCount'] = 0;
+            parameters['constraintIds'] = const <String>[];
+            return '0 constraints';
+          }
+          constraints.engine.transaction('rectangle constraints', () {
+            for (final constraint in constraintsToEnable) {
+              if (!constraints.engine.constraints.containsKey(constraint.id)) {
+                throw StateError(
+                  'Rectangle constraint ${constraint.id} disappeared.',
+                );
+              }
+              constraints.engine.enable(constraint.id);
+            }
+            for (final constraint in rectangleConstraints) {
+              if (constraints.engine.constraints.containsKey(constraint.id)) {
+                continue;
+              }
+              constraints.engine.add(constraint);
+            }
+          });
+          final solve = await constraints.solve();
+          if (!solve.success) {
+            throw StateError(
+              'Rectangle constraints could not be solved: '
+              '${solve.statistics.failureReason ?? 'unknown conflict'}.',
+            );
+          }
+          final invalid = _rectangleConstraintProblem(cycle, constraints);
+          if (invalid != null) {
+            throw StateError('Rectangle constraints are incomplete: $invalid.');
+          }
+          await _synchronizeSketchScene();
+        } catch (error, stack) {
+          try {
+            constraints.engine.restoreCheckpoint(constraintCheckpoint);
+            sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+            await _synchronizeSketchScene();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Rectangle constraint rollback failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
         }
-        await constraintApi!.solve();
-        await _synchronizeSketchScene();
-        return '${rectangleConstraints.length} constraints';
+        final constraintUndoCount =
+            constraints.engine.undoDepth - beforeConstraintMutation;
+        parameters['constraintUndoCount'] = constraintUndoCount;
+        parameters['constraintIds'] = [
+          ...constraintsToEnable.map((constraint) => constraint.id),
+          ...rectangleConstraints.map((constraint) => constraint.id),
+        ];
+        return '${rectangleConstraints.length + constraintsToEnable.length} '
+            'constraints';
       },
-      undo: (_) async {
-        for (final constraint in rectangleConstraints.toList().reversed) {
-          constraintApi!.delete(constraint.id);
+      hasEffect: (_, parameters) =>
+          (parameters['constraintUndoCount'] as int? ?? 0) > 0,
+      undo: (parameters) async {
+        final constraints = constraintApi!;
+        final sketchCheckpoint = sketchApi!.engine.captureCheckpoint();
+        final constraintCheckpoint = constraints.engine.captureCheckpoint();
+        try {
+          final count = parameters['constraintUndoCount'] as int? ?? 0;
+          for (var index = 0; index < count; index++) {
+            if (!constraints.engine.undo()) {
+              throw StateError('Rectangle constraint history is incomplete.');
+            }
+          }
+          await _synchronizeSketchScene();
+          return 'constraints removed';
+        } catch (error, stack) {
+          try {
+            constraints.engine.restoreCheckpoint(constraintCheckpoint);
+            sketchApi!.engine.restoreCheckpoint(sketchCheckpoint);
+            await _synchronizeSketchScene();
+          } on Object catch (recovery) {
+            throw StateError(
+              'Rectangle constraint undo failed and rollback failed: $error; '
+              'recovery: $recovery',
+            );
+          }
+          Error.throwWithStackTrace(error, stack);
         }
-        await _synchronizeSketchScene();
-        return 'constraints removed';
       },
     );
 
     register(
       id: 'reverse.sketch.constraint',
       execute: (parameters) async {
+        runtime.write('sketch.constraint.phase', 'build');
         final type = SketchConstraintType.values.byName(
           parameters['type']! as String,
         );
@@ -21321,11 +23054,16 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               value: (parameters['value'] as num?)?.toDouble(),
             );
         parameters['createdId'] = explicitConstraint.id;
+        runtime.write('sketch.constraint.phase', 'solve');
         final solution = await constraintApi!.solve(
           only: [explicitConstraint.id],
         );
-        if (!solution.solvedIds.contains(explicitConstraint.id)) {
-          constraintApi!.engine.undo();
+        if (!solution.success ||
+            !solution.solvedIds.contains(explicitConstraint.id) ||
+            !_relatedCoincidentsHold(explicitConstraint)) {
+          // ConstraintEngine.solve() rolls back a rejected projection while
+          // preserving the pre-existing Undo/Redo stacks. Remove only the
+          // constraint created by this command.
           constraintApi!.engine.undo();
           final diagnostic = solution.diagnostics
               .where(
@@ -21335,21 +23073,31 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               )
               .firstOrNull;
           throw StateError(
-            diagnostic?.message ?? 'The Sketch constraint could not be solved.',
+            diagnostic?.message ??
+                'The Sketch constraint could not be solved without opening a corner.',
           );
         }
+        runtime.write('sketch.constraint.phase', 'persist');
         await persist();
-        await _synchronizeSketchScene();
+        runtime.write('sketch.constraint.phase', 'synchronize');
+        await _synchronizeSketchScene(persistSketch: false);
+        runtime.write('sketch.constraint.phase', 'complete');
         return explicitConstraint.id;
       },
       undo: (parameters) async {
+        runtime.write('sketch.constraint.phase', 'undo.engine');
         final geometryUndone = constraintApi!.engine.undo();
         final constraintUndone = constraintApi!.engine.undo();
         if (!geometryUndone || !constraintUndone) {
           throw StateError('Constraint undo history is incomplete.');
         }
+        runtime.write('sketch.constraint.phase', 'undo.engine.complete');
+        runtime.write('sketch.constraint.phase', 'undo.persist');
         await persist();
-        await _synchronizeSketchScene();
+        runtime.write('sketch.constraint.phase', 'undo.persist.complete');
+        runtime.write('sketch.constraint.phase', 'undo.synchronize');
+        await _synchronizeSketchScene(persistSketch: false);
+        runtime.write('sketch.constraint.phase', 'undo.complete');
         return '${parameters['createdId']} removed and geometry restored';
       },
     );
@@ -22166,7 +23914,156 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
   }
 
-  Future<void> _synchronizeSketchScene() async {
+  static bool _constraintIsActive(SketchConstraint constraint) =>
+      constraint.enabled && !constraint.suppressed;
+
+  /// Returns edges in cycle order and with each edge oriented from the
+  /// previous corner to the next one. A list of four unrelated lines is not a
+  /// rectangle and must be rejected before any constraint is added.
+  List<_RectangleEdge>? _orderedRectangleEdges(Iterable<SketchLine> source) {
+    final lines = source.toList(growable: false);
+    if (lines.length != 4) return null;
+    const tolerance = 1e-8;
+    bool near(SketchVector a, SketchVector b) =>
+        (a.x - b.x).abs() <= tolerance && (a.y - b.y).abs() <= tolerance;
+
+    final starts = [
+      for (final line in lines) SketchVector.fromJson(line.parameters['start']),
+    ];
+    final ends = [
+      for (final line in lines) SketchVector.fromJson(line.parameters['end']),
+    ];
+    final startConnections = List<int>.filled(4, 0);
+    final endConnections = List<int>.filled(4, 0);
+    for (var first = 0; first < 4; first++) {
+      for (var second = first + 1; second < 4; second++) {
+        final connections = <(int, int)>[
+          if (near(starts[first], starts[second])) (0, 0),
+          if (near(starts[first], ends[second])) (0, 1),
+          if (near(ends[first], starts[second])) (1, 0),
+          if (near(ends[first], ends[second])) (1, 1),
+        ];
+        if (connections.length > 1) return null;
+        for (final connection in connections) {
+          if (connection.$1 == 0) {
+            startConnections[first]++;
+          } else {
+            endConnections[first]++;
+          }
+          if (connection.$2 == 0) {
+            startConnections[second]++;
+          } else {
+            endConnections[second]++;
+          }
+        }
+      }
+    }
+    if (startConnections.any((count) => count != 1) ||
+        endConnections.any((count) => count != 1)) {
+      return null;
+    }
+
+    _RectangleEdge oriented(int index, {required bool fromStart}) {
+      final start = fromStart ? starts[index] : ends[index];
+      final end = fromStart ? ends[index] : starts[index];
+      final deltaX = end.x - start.x, deltaY = end.y - start.y;
+      final length = math.sqrt(deltaX * deltaX + deltaY * deltaY);
+      if (length <= tolerance) {
+        throw const FormatException('Rectangle edge has zero length.');
+      }
+      final horizontal = deltaY.abs() <= tolerance;
+      final vertical = deltaX.abs() <= tolerance;
+      if (horizontal == vertical) {
+        throw const FormatException(
+          'Rectangle edge is neither horizontal nor vertical.',
+        );
+      }
+      return _RectangleEdge(
+        line: lines[index],
+        start: start,
+        end: end,
+        startReference: '${lines[index].id}:${fromStart ? 'start' : 'end'}',
+        endReference: '${lines[index].id}:${fromStart ? 'end' : 'start'}',
+        direction: horizontal
+            ? SketchConstraintType.horizontal
+            : SketchConstraintType.vertical,
+      );
+    }
+
+    try {
+      final ordered = <_RectangleEdge>[oriented(0, fromStart: true)];
+      final used = <int>{0};
+      while (ordered.length < 4) {
+        final currentEnd = ordered.last.end;
+        final candidates = <(int, bool)>[
+          for (var index = 0; index < 4; index++)
+            if (!used.contains(index)) ...[
+              if (near(currentEnd, starts[index])) (index, true),
+              if (near(currentEnd, ends[index])) (index, false),
+            ],
+        ];
+        if (candidates.length != 1) return null;
+        final candidate = candidates.single;
+        ordered.add(oriented(candidate.$1, fromStart: candidate.$2));
+        used.add(candidate.$1);
+      }
+      if (!near(ordered.last.end, ordered.first.start)) return null;
+      for (var index = 0; index < 4; index++) {
+        if (ordered[index].direction == ordered[(index + 1) % 4].direction) {
+          return null;
+        }
+      }
+      if (ordered
+                  .where(
+                    (edge) => edge.direction == SketchConstraintType.horizontal,
+                  )
+                  .length !=
+              2 ||
+          ordered
+                  .where(
+                    (edge) => edge.direction == SketchConstraintType.vertical,
+                  )
+                  .length !=
+              2) {
+        return null;
+      }
+      return ordered;
+    } on FormatException {
+      return null;
+    }
+  }
+
+  String? _rectangleConstraintProblem(
+    List<_RectangleEdge> cycle,
+    ConstraintApi constraints,
+  ) {
+    for (final edge in cycle) {
+      final active = constraints.constraints.any(
+        (item) =>
+            _constraintIsActive(item) &&
+            item.type == edge.direction &&
+            item.references.length == 1 &&
+            item.references.single == edge.line.id,
+      );
+      if (!active) return 'missing ${edge.direction.name} for ${edge.line.id}';
+    }
+    for (var index = 0; index < cycle.length; index++) {
+      final first = cycle[index].endReference;
+      final second = cycle[(index + 1) % cycle.length].startReference;
+      final active = constraints.constraints.any(
+        (item) =>
+            _constraintIsActive(item) &&
+            item.type == SketchConstraintType.coincident &&
+            item.references.length == 2 &&
+            ((item.references[0] == first && item.references[1] == second) ||
+                (item.references[0] == second && item.references[1] == first)),
+      );
+      if (!active) return 'missing coincidence $first/$second';
+    }
+    return null;
+  }
+
+  Future<void> _synchronizeSketchScene({bool persistSketch = true}) async {
     final document = runtime.document;
     if (document == null) return;
     final session = _sketchSessionEpoch;
@@ -22181,10 +24078,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           .firstOrNull;
       if (canonicalActive != null) activeSketch = canonicalActive;
     }
-    final allSketches = sketchApi?.sketches ?? const <Sketch>[];
+    // The Sketch engine retains roots for Undo/Redo and for an eventual
+    // recycle-bin restore.  A deleted document root is not a live viewport
+    // source, however.  Publishing it here would resurrect its curves on the
+    // next unrelated synchronization (the classic "deleted geometry remains
+    // visible" failure).  Document deletion is authoritative until restore.
+    final allSketches = (sketchApi?.sketches ?? const <Sketch>[])
+        .where(
+          (sketch) => document.entities[sketch.id]?.data['deleted'] != true,
+        )
+        .toList(growable: false);
     final allSketchEntities = <SketchEntity>[];
     final sketchByEntityId = <String, Sketch>{};
     final sketchEntityNames = <String, String>{};
+    final constraintsBySketch = <String, List<SketchConstraint>>{};
+    final dimensionsBySketch = <String, List<SketchDimension>>{};
     for (final sketch in allSketches) {
       _reconcileSketchEntityMembership(sketch);
       final rootVisible =
@@ -22194,6 +24102,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       final counts = <SketchEntityType, int>{};
       for (final id in sketch.entityIds) {
         final entity = sketchApi?.entity(id);
+        if (document.entities[id]?.data['deleted'] == true) continue;
         if (entity != null) {
           // Explorer visibility is persisted by CadRuntime without rebuilding
           // Sketch geometry. Preserve that localized display state whenever a
@@ -22224,7 +24133,25 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           sketchEntityNames[id] = '$prefix${number.toString().padLeft(3, '0')}';
         }
       }
+      final entityIds = sketch.entityIds.toSet();
+      bool belongsToSketch(Iterable<String> references) => references.any(
+        (reference) => entityIds.contains(
+          reference.replaceFirst(RegExp(r':(start|end|point|center)$'), ''),
+        ),
+      );
+      constraintsBySketch[sketch.id] = constraints
+          .where((value) => belongsToSketch(value.references))
+          .toList(growable: false);
+      dimensionsBySketch[sketch.id] = dimensions
+          .where((value) => belongsToSketch(value.references))
+          .toList(growable: false);
     }
+    final liveConstraints = constraintsBySketch.values
+        .expand((items) => items)
+        .toList(growable: false);
+    final liveDimensions = dimensionsBySketch.values
+        .expand((items) => items)
+        .toList(growable: false);
     final currentIds = {
       ...allSketchEntities.map((item) => item.id),
       ...allSketches.map((item) => item.id),
@@ -22285,11 +24212,15 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       }
     }
     final constraintIds = {
-      ...constraints.map((item) => item.id),
-      ...dimensions.map((item) => item.id),
+      ...liveConstraints.map((item) => item.id),
+      ...liveDimensions.map((item) => item.id),
     };
     final stale = document.entities.values
-        .where((item) => item.kind == CadDocumentEntityKind.sketch)
+        .where(
+          (item) =>
+              item.kind == CadDocumentEntityKind.sketch &&
+              item.data['deleted'] != true,
+        )
         .map((item) => item.id)
         .where(
           (id) =>
@@ -22297,13 +24228,19 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               !persistedSketchMemberIds.contains(id),
         );
     final staleConstraints = document.entities.values
-        .where((item) => item.kind == CadDocumentEntityKind.constraint)
+        .where(
+          (item) =>
+              item.kind == CadDocumentEntityKind.constraint &&
+              item.data['deleted'] != true,
+        )
         .map((item) => item.id)
         .where(
           (id) =>
               !constraintIds.contains(id) &&
               !persistedSketchMemberIds.contains(id),
         );
+    final clock = Stopwatch()..start();
+    runtime.write('sketch.synchronize.phase', 'document');
     await runtime.mutate(
       command: 'sketch.synchronize',
       remove: [...stale, ...staleConstraints],
@@ -22331,7 +24268,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'associationState':
                   sketch.metadata['associationState'] ?? 'detached',
               'entityCount': sketch.entityIds.length,
-              'constraintCount': constraints.length,
+              'constraintCount': constraintsBySketch[sketch.id]?.length ?? 0,
               'pointCount': sketch.metadata['pointCount'] ?? 0,
               'segmentCount': sketch.metadata['segmentCount'] ?? 0,
               'maximumError': sketch.metadata['maximumError'] ?? 0.0,
@@ -22340,8 +24277,14 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
               'lastUpdatedAt': sketch.metadata['lastUpdatedAt'],
               'localCoordinateSystem': sketch.coordinates.toJson(),
               'geometricEntities': sketch.entityIds,
-              'constraints': constraints.map((item) => item.id).toList(),
-              'dimensions': dimensions.map((item) => item.id).toList(),
+              'constraints':
+                  (constraintsBySketch[sketch.id] ?? const <SketchConstraint>[])
+                      .map((item) => item.id)
+                      .toList(),
+              'dimensions':
+                  (dimensionsBySketch[sketch.id] ?? const <SketchDimension>[])
+                      .map((item) => item.id)
+                      .toList(),
               'sketch': sketch.toJson(),
             },
           ),
@@ -22369,7 +24312,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             },
           );
         }),
-        ...constraints.map((value) {
+        ...liveConstraints.map((value) {
           final referenceId = value.references.firstOrNull?.replaceFirst(
             RegExp(r':(start|end|point)$'),
             '',
@@ -22398,7 +24341,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             },
           );
         }),
-        ...dimensions.map((value) {
+        ...liveDimensions.map((value) {
           final referenceId = value.references.firstOrNull?.replaceFirst(
             RegExp(r':(start|end|center)$'),
             '',
@@ -22430,9 +24373,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         }),
       ],
     );
-    await sketchApi?.persist();
-    await editorApi?.persist();
-    await constraintApi?.persist();
+    runtime.write(
+      'sketch.synchronize.timing.documentMs',
+      clock.elapsedMilliseconds,
+    );
+    runtime.write('sketch.synchronize.phase', 'persistence');
+    if (persistSketch) await _persistConfiguredSketchState();
+    runtime.write(
+      'sketch.synchronize.timing.persistenceMs',
+      clock.elapsedMilliseconds,
+    );
+    runtime.write('sketch.synchronize.phase', 'dependencies');
     await _updateDependentPlanarSurfaces();
     await refreshDependentProfessionalLofts();
     await refreshDependentProfessionalSweeps();
@@ -22442,8 +24393,17 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     await refreshDependentProfessionalSewBodies();
     await refreshDependentProfessionalExtrudes();
     await refreshDependentProfessionalRevolves();
+    runtime.write(
+      'sketch.synchronize.timing.dependenciesMs',
+      clock.elapsedMilliseconds,
+    );
     if (session != _sketchSessionEpoch) return;
+    runtime.write('sketch.synchronize.phase', 'preview');
     await _refreshSketchSurfacePreview();
+    runtime.write(
+      'sketch.synchronize.timing.previewMs',
+      clock.elapsedMilliseconds,
+    );
     if (session != _sketchSessionEpoch) return;
     if (sketchEditSessionActive) {
       _applySketchPresentationIsolation();
@@ -22456,6 +24416,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       selectedConstraintIds.isNotEmpty
           ? selectedConstraintIds
           : _selectionWithDimensions(),
+    );
+    runtime.write('sketch.synchronize.phase', 'complete');
+    runtime.write(
+      'sketch.synchronize.timing.totalMs',
+      clock.elapsedMilliseconds,
     );
   }
 
@@ -23079,6 +25044,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           extent: contract.extent,
         );
         await confirmProfessionalExtrude();
+        await _invokeTestFailure('afterExtrudeRefresh');
       }
     } finally {
       runtime.select(previousSelection);
@@ -23119,6 +25085,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           direction: contract.direction,
         );
         await confirmProfessionalRevolve();
+        await _invokeTestFailure('afterRevolveRefresh');
       }
     } finally {
       runtime.select(previousSelection);
@@ -23133,7 +25100,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     if (generation == null || sketchEngine == null) return;
     runtime.write('surface.solverUpdate.active', true);
     try {
-      for (final current in generation.engine.registry.surfaces.toList()) {
+      final surfaces = generation.engine.registry.surfaces.toList();
+      for (final current in surfaces) {
         if (current.kind != SurfaceKind.plane) continue;
         if (current.parameters['operation'] == 'offset') continue;
         final sketchId = current.parameters['sourceSketchId'] as String?;
@@ -23496,4 +25464,22 @@ class _SectionSplineFit {
   final List<SketchVector> sampledPoints;
   final double maximumError;
   final double meanError;
+}
+
+class _RectangleEdge {
+  const _RectangleEdge({
+    required this.line,
+    required this.start,
+    required this.end,
+    required this.startReference,
+    required this.endReference,
+    required this.direction,
+  });
+
+  final SketchLine line;
+  final SketchVector start;
+  final SketchVector end;
+  final String startReference;
+  final String endReference;
+  final SketchConstraintType direction;
 }

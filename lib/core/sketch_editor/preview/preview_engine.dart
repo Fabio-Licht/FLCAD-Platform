@@ -6,6 +6,21 @@ class PreviewEngine {
   final EditorAnalytics analytics;
   final Map<String, EditorOperation> _previews = {};
   List<EditorOperation> get active => List.unmodifiable(_previews.values);
+  Map<String, (EditorOperation, EditorOperationStatus)> capture() => {
+    for (final entry in _previews.entries)
+      entry.key: (entry.value, entry.value.status),
+  };
+  void restore(Map<String, (EditorOperation, EditorOperationStatus)> snapshot) {
+    _previews
+      ..clear()
+      ..addAll({
+        for (final entry in snapshot.entries) entry.key: entry.value.$1,
+      });
+    for (final entry in snapshot.values) {
+      entry.$1.status = entry.$2;
+    }
+  }
+
   EditorOperation begin(EditorOperation operation) {
     operation.status = EditorOperationStatus.preview;
     _previews[operation.id] = operation;

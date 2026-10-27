@@ -203,6 +203,28 @@ std::string fingerprint(const TopoDS_Shape &shape) {
 #endif
   return result;
 }
+struct MeshPrecision {
+  double deflection;
+  double angle;
+};
+// OCCT meshes a TopoDS_Shape as one job, so a stricter request required by a
+// spherical or toroidal face applies to that complete job. Keep this policy
+// shared by the legacy and streaming STL APIs: callers receive equivalent
+// output for the same shape/request, including compounds.
+MeshPrecision precision_for_stl(const TopoDS_Shape &shape, double deflection,
+                                double angle) {
+  MeshPrecision result{deflection, angle};
+  for (TopExp_Explorer ex(shape, TopAbs_FACE); ex.More(); ex.Next()) {
+    const auto type =
+        BRepAdaptor_Surface(TopoDS::Face(ex.Current()), Standard_False)
+            .GetType();
+    if (type == GeomAbs_Sphere)
+      result.deflection = std::min(result.deflection, 0.004);
+    else if (type == GeomAbs_Torus)
+      result.angle = std::min(result.angle, 0.10);
+  }
+  return result;
+}
 // All allocating preparation/preflight belongs to the caller. Keep the registry
 // locked through publication/compensation, so no observer sees a partial batch.
 // reserve prevents rehash: saved iterators identify only this batch's entries.
@@ -2202,7 +2224,12 @@ int flcad_occ_mesh(const char *id, const char *p, double deflection, int *v,
                    int *t, char *e, size_t es) {
   try {
     auto s = get(id);
-    BRepMesh_IncrementalMesh mesh(s, deflection, false, 0.5, true);
+    // The legacy API fixes its public angular request at 0.5 rad. The shared
+    // STL policy tightens only where the Precision Oracle demonstrates that
+    // this is insufficient, and the stream API applies the identical policy.
+    const auto precision = precision_for_stl(s, deflection, 0.5);
+    BRepMesh_IncrementalMesh mesh(s, precision.deflection, false,
+                                  precision.angle, true);
     int vertices = 0, triangles = 0;
     for (TopExp_Explorer ex(s, TopAbs_FACE); ex.More(); ex.Next()) {
       TopLoc_Location loc;

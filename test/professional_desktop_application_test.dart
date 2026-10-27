@@ -4,6 +4,7 @@ import 'package:flcad_mobile/app/desktop/desktop_application.dart';
 import 'package:flcad_mobile/app/desktop/desktop_asset_manager.dart';
 import 'package:flcad_mobile/app/desktop/desktop_cad_controller.dart';
 import 'package:flcad_mobile/app/desktop/desktop_settings.dart';
+import 'package:flcad_mobile/app/desktop/shell_presentation.dart';
 import 'package:flcad_mobile/app/commands/desktop_command_coordinator.dart';
 import 'package:flcad_mobile/app/cad_viewport/native/integrated_native_viewport_widget.dart';
 import 'package:flcad_mobile/app/bootstrap/engineering_bootstrap.dart';
@@ -32,41 +33,39 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('Professional Desktop Application', () {
-    testWidgets('workspace keeps the viewport bounded when suggestion hover is idle', (
-      tester,
-    ) async {
-      EngineeringBootstrap.instance.initialize();
-      final cad = DesktopCadController(
-        kernels: KernelManager(),
-        projects: ProjectManager.instance,
-      );
-      final commands = DesktopCommandCoordinator(
-        cad: cad,
-        projects: ProjectManager.instance,
-      );
-      addTearDown(cad.dispose);
-      await tester.binding.setSurfaceSize(const Size(1400, 900));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+    testWidgets(
+      'workspace keeps the viewport bounded when suggestion hover is idle',
+      (tester) async {
+        EngineeringBootstrap.instance.initialize();
+        final cad = DesktopCadController(
+          kernels: KernelManager(),
+          projects: ProjectManager.instance,
+        );
+        final commands = DesktopCommandCoordinator(
+          cad: cad,
+          projects: ProjectManager.instance,
+        );
+        addTearDown(cad.dispose);
+        await tester.binding.setSurfaceSize(const Size(1400, 900));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
 
-      await tester.pumpWidget(
-        MaterialApp(
-          home: Scaffold(
-            body: OfficialEngineeringWorkspace(
-              cad: cad,
-              commands: commands,
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: OfficialEngineeringWorkspace(cad: cad, commands: commands),
             ),
           ),
-        ),
-      );
-      await tester.pump();
+        );
+        await tester.pump();
 
-      final viewport = tester.renderObject<RenderBox>(
-        find.byType(IntegratedCadViewportWidget),
-      );
-      expect(viewport.hasSize, isTrue);
-      expect(viewport.size.width, greaterThan(0));
-      expect(viewport.size.height, greaterThan(0));
-    });
+        final viewport = tester.renderObject<RenderBox>(
+          find.byType(IntegratedCadViewportWidget),
+        );
+        expect(viewport.hasSize, isTrue);
+        expect(viewport.size.width, greaterThan(0));
+        expect(viewport.size.height, greaterThan(0));
+      },
+    );
 
     testWidgets('shell and Settings remain available while lab initializes', (
       tester,
@@ -127,7 +126,7 @@ void main() {
         tester.widget<NavigationRail>(find.byType(NavigationRail)).destinations,
         hasLength(3),
       );
-      await tester.tap(find.text('Settings'));
+      await tester.tap(find.byIcon(Icons.settings_outlined));
       await tester.pump();
       expect(find.byKey(const Key('colmap-lab-initializing')), findsOneWidget);
       expect(find.byKey(const Key('open-colmap-lab')), findsOneWidget);
@@ -179,7 +178,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Settings'));
+      await tester.tap(find.byIcon(Icons.settings_outlined));
       await tester.pump();
 
       gate.completeError(StateError('private startup detail'));
@@ -188,6 +187,33 @@ void main() {
       expect(find.byKey(const Key('colmap-lab-unavailable')), findsOneWidget);
       expect(find.textContaining('private startup detail'), findsNothing);
       expect(find.text('Engineering tips'), findsOneWidget);
+    });
+
+    testWidgets('command recovery failure is visible on the shell root', (
+      tester,
+    ) async {
+      EngineeringBootstrap.instance.initialize();
+      final value = controller();
+      addTearDown(value.dispose);
+      await tester.binding.setSurfaceSize(const Size(1400, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: DesktopThemeManager.dark(),
+          home: DesktopShell(
+            controller: value,
+            commandCoordinatorFactory: (cad, projects) =>
+                _FailingStartupCommandCoordinator(cad: cad, projects: projects),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('Falha na recuperação de comandos'),
+        findsOneWidget,
+      );
     });
 
     test('official asset manager validates every managed asset', () async {
@@ -240,7 +266,7 @@ void main() {
       expect(find.text('FLCAD Reverse AI'), findsOneWidget);
       expect(find.byKey(const Key('splash-status')), findsOneWidget);
       await tester.pumpAndSettle();
-      expect(find.text('Home Dashboard'), findsOneWidget);
+      expect(find.text(ShellPresentation.dashboard), findsOneWidget);
     });
 
     testWidgets('first run wizard persists completion once', (tester) async {
@@ -254,7 +280,7 @@ void main() {
           home: FirstRunWizard(controller: value),
         ),
       );
-      expect(find.text('Language'), findsOneWidget);
+      expect(find.text(ShellPresentation.language), findsOneWidget);
       await tester.tap(find.byKey(const Key('wizard-continue-0')));
       await tester.pumpAndSettle();
       await tester.ensureVisible(find.byKey(const Key('wizard-continue-1')));
@@ -279,9 +305,9 @@ void main() {
           home: DesktopShell(controller: value),
         ),
       );
-      expect(find.text('Novo Projeto'), findsOneWidget);
+      expect(find.text(ShellPresentation.newProject), findsOneWidget);
       expect(find.text('Importar STL'), findsOneWidget);
-      await tester.tap(find.text('Workspace').last);
+      await tester.tap(find.byIcon(Icons.view_quilt_outlined));
       await tester.pumpAndSettle();
       expect(find.text('Explorer'), findsOneWidget);
       expect(find.text('Shaded'), findsOneWidget);
@@ -289,18 +315,12 @@ void main() {
       expect(find.text('Engineering Assistant'), findsOneWidget);
       expect(find.text('Engineering Intelligence'), findsNothing);
       expect(find.text('New Sketch'), findsNothing);
-      await tester.tap(find.text('AI Engineering'));
+      await tester.tap(find.byTooltip('Atividades'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Engenharia com IA').last);
       await tester.pumpAndSettle();
       expect(find.text('Engineering Intelligence'), findsOneWidget);
-      await tester.tap(find.widgetWithText(ChoiceChip, 'Sketch'));
-      await tester.pumpAndSettle();
-      expect(
-        tester
-            .widget<ChoiceChip>(find.widgetWithText(ChoiceChip, 'Sketch'))
-            .selected,
-        isTrue,
-      );
-      await tester.tap(find.byTooltip('About'));
+      await tester.tap(find.byTooltip('Sobre'));
       await tester.pumpAndSettle();
       expect(find.text('0.9.1 Alpha'), findsOneWidget);
       expect(find.text('FLCAD MODEL'), findsOneWidget);
@@ -462,4 +482,15 @@ void main() {
       );
     });
   });
+}
+
+class _FailingStartupCommandCoordinator extends DesktopCommandCoordinator {
+  _FailingStartupCommandCoordinator({
+    required super.cad,
+    required super.projects,
+  });
+
+  @override
+  Future<void> initialize() =>
+      Future<void>.error(StateError('injected command recovery failure'));
 }

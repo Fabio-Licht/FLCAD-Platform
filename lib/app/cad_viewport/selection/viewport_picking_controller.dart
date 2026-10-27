@@ -405,8 +405,26 @@ class ViewportPickingController {
       Vector3 worldPoint,
     ) {
       if (screenDistance > 9) return;
-      if (priority > bestPriority ||
-          (priority == bestPriority && screenDistance >= bestDistance)) {
+      // An endpoint dot must not hide the other line at a T junction, including
+      // an exact tie. The through-line stays pickable no matter which entity
+      // is visited first. A foreign endpoint still wins when the click is
+      // more than 0.75 px closer to that dot than to the other line.
+      final foreignEndpoint =
+          priority < 0 &&
+          best != null &&
+          best!.entityId != entity.id &&
+          bestPriority == 0 &&
+          screenDistance + .75 >= bestDistance;
+      if (foreignEndpoint) return;
+      final nearerBody =
+          priority == 0 &&
+          bestPriority < 0 &&
+          best != null &&
+          best!.entityId != entity.id &&
+          screenDistance <= bestDistance + .75;
+      if (!nearerBody &&
+          (priority > bestPriority ||
+              (priority == bestPriority && screenDistance >= bestDistance))) {
         return;
       }
       bestPriority = priority;

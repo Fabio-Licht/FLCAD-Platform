@@ -175,6 +175,10 @@ private:
   bool shaded_lighting_experiment_ = false;
   flcad::render::CadCameraSystem camera_;
   double fps_ = 0, upload_ms_ = 0, render_ms_ = 0, picking_ms_ = 0;
+  double selection_buffer_build_ms_ = 0;
+  uint64_t selection_buffer_triangles_ = 0;
+  uint64_t selection_frame_mark_ = 0;
+  std::string selection_operation_id_;
   uint64_t frames_ = 0, triangles_ = 0;
   uint64_t set_camera_calls_ = 0;
   uint64_t render_calls_ = 0;

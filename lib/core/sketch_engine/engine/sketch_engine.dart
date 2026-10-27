@@ -9,6 +9,21 @@ import '../repository/sketch_repository.dart';
 import '../runtime/sketch_runtime.dart';
 import '../selection/sketch_selection_engine.dart';
 
+/// Opaque command-level checkpoint for compensating multi-engine failures.
+final class SketchEngineCheckpoint {
+  SketchEngineCheckpoint._(
+    this._current,
+    this._undo,
+    this._redo,
+    this._history,
+  );
+
+  final _Snapshot _current;
+  final List<_Snapshot> _undo;
+  final List<_Snapshot> _redo;
+  final List<SketchHistoryEntry> _history;
+}
+
 class SketchEngine {
   SketchEngine({
     required this.repository,
@@ -28,6 +43,7 @@ class SketchEngine {
   late final SketchSelectionEngine selection;
   final Map<String, Sketch> sketches = {};
   final Map<String, SketchEntity> entities = {};
+  final Map<String, Set<String>> _loadedEntityOwnership = {};
   final List<_Snapshot> _undo = [];
   final List<_Snapshot> _redo = [];
   int _transactionDepth = 0;
@@ -104,6 +120,10 @@ class SketchEngine {
       if (entity.reference) graphs.references.addNode(entity.id);
       if (entity.construction) graphs.construction.addNode(entity.id);
     }
+    _loadedEntityOwnership[sketch.id] = {
+      ...sketch.entityIds,
+      ...restoredEntities.map((entity) => entity.id),
+    };
     analytics.sketches = sketches.length;
     analytics.entities = this.entities.length;
     analytics.referenceEntities = this.entities.values
@@ -138,6 +158,7 @@ class SketchEngine {
           analytics.constructionEntities++;
         }
         analytics.entities++;
+        sketch.version++;
         return entity;
       });
   void deleteEntity(String id) =>
@@ -146,7 +167,7 @@ class SketchEngine {
     final entity =
         entities.remove(id) ?? (throw StateError('Unknown entity: $id'));
     for (final s in sketches.values) {
-      s.entityIds.remove(id);
+      if (s.entityIds.remove(id)) s.version++;
     }
     graphs.entities.removeNode(id);
     graphs.dependencies.removeNode(id);
@@ -167,6 +188,12 @@ class SketchEngine {
     update(entity);
     entity.refreshDerivedParameters();
     entity.version++;
+    // Dependent CAD features key their source contract to the owning Sketch
+    // revision.  A dimensional solve mutates the entity through this same
+    // canonical path, so the root revision must advance with the geometry.
+    for (final sketch in sketches.values) {
+      if (sketch.entityIds.contains(id)) sketch.version++;
+    }
     entity.history.add(action.name);
     analytics.edits++;
   });
@@ -177,7 +204,7 @@ class SketchEngine {
     // single undo/redo boundary and still restores atomically on failure.
     if (_transactionDepth > 0) return operation();
     _transactionDepth++;
-    final before = _capture();
+    final before = _capture(label);
     final historyLength = history.entries.length;
     final redoLength = _redo.length;
     try {
@@ -197,9 +224,34 @@ class SketchEngine {
     }
   }
 
+  SketchEngineCheckpoint captureCheckpoint() => SketchEngineCheckpoint._(
+    _capture('checkpoint'),
+    List<_Snapshot>.of(_undo),
+    List<_Snapshot>.of(_redo),
+    List<SketchHistoryEntry>.of(history.entries),
+  );
+
+  /// Restores geometry, active Sketch, undo/redo snapshots and audit entries
+  /// to the exact state captured by [captureCheckpoint].
+  void restoreCheckpoint(SketchEngineCheckpoint checkpoint) {
+    if (_transactionDepth != 0) {
+      throw StateError(
+        'Cannot restore a Sketch checkpoint during a transaction.',
+      );
+    }
+    _restore(checkpoint._current);
+    _undo
+      ..clear()
+      ..addAll(checkpoint._undo);
+    _redo
+      ..clear()
+      ..addAll(checkpoint._redo);
+    history.restore(checkpoint._history);
+  }
+
   bool undo() {
     if (_undo.isEmpty) return false;
-    final current = _capture();
+    final current = _capture('redo');
     final previous = _undo.removeLast();
     _redo.add(current);
     _restore(previous);
@@ -208,9 +260,25 @@ class SketchEngine {
     return true;
   }
 
+  bool get canUndo => _undo.isNotEmpty;
+
+  /// Number of canonical geometry snapshots currently available to Undo.
+  ///
+  /// Composite UI commands use the delta across their execution to keep one
+  /// global command aligned with every solver mutation it produced.
+  int get undoDepth => _undo.length;
+
+  bool get canRedo => _redo.isNotEmpty;
+
+  int get redoDepth => _redo.length;
+
+  String? get undoTarget => _undo.isEmpty ? null : _undo.last.target;
+
+  String? get redoTarget => _redo.isEmpty ? null : _redo.last.target;
+
   bool redo() {
     if (_redo.isEmpty) return false;
-    final current = _capture();
+    final current = _capture('undo');
     final next = _redo.removeLast();
     _undo.add(current);
     _restore(next);
@@ -239,6 +307,7 @@ class SketchEngine {
   }
 
   Future<void> persist() async {
+    persistencePhase = 'validate';
     // Validate the complete in-memory graph before writing any file.  This
     // prevents a partially rehydrated Engine from persisting earlier Sketches
     // and then failing when it reaches an unloaded child entity.
@@ -255,18 +324,36 @@ class SketchEngine {
         'Cannot persist Sketch entities that are not loaded: ${missing.join(', ')}',
       );
     }
-    for (final sketch in sketches.values) {
+    // Persistence crosses multiple awaits. Snapshot both collection levels so
+    // creating/reopening a second Sketch cannot mutate the iteration while
+    // the first Sketch is being written.
+    final sketchList = sketches.values.toList(growable: false);
+    final entityIdsBySketch = <String, List<String>>{
+      for (final sketch in sketchList)
+        sketch.id: List<String>.from(sketch.entityIds, growable: false),
+    };
+    for (final sketch in sketchList) {
+      persistencePhase = 'sketch:${sketch.id}';
       await repository.saveSketch(sketch);
-      for (final id in sketch.entityIds) {
+      final ids = entityIdsBySketch[sketch.id] ?? const <String>[];
+      final batch = <SketchEntity>[];
+      for (final id in ids) {
         final entity = entities[id];
         if (entity == null) {
           throw StateError(
             'Cannot persist Sketch ${sketch.id}: entity $id is listed but not loaded.',
           );
         }
-        await repository.saveEntity(sketch.id, entity);
+        batch.add(entity);
       }
+      persistencePhase = 'entities:${sketch.id}:${batch.length}';
+      await repository.saveEntities(
+        sketch.id,
+        batch,
+        previousEntityIds: _loadedEntityOwnership[sketch.id],
+      );
     }
+    persistencePhase = 'support';
     await repository.saveSupport(
       graphs: graphs,
       history: history,
@@ -274,7 +361,10 @@ class SketchEngine {
       activeSketchId: activeSketchId,
       projectId: projectId,
     );
+    persistencePhase = 'complete';
   }
+
+  String? persistencePhase;
 
   Future<void> load() async {
     for (final sketch in await repository.loadSketches()) {
@@ -284,7 +374,14 @@ class SketchEngine {
       // sketch root's entityIds list was updated.  Load the files as the
       // source of truth and repair the root membership in memory so the
       // editor, health checks and Explorer all see the same geometry.
-      final loadedEntities = await repository.loadEntities(sketch.id);
+      final loadedEntities = await repository.loadEntities(
+        sketch.id,
+        expectedEntityIds: sketch.entityIds,
+      );
+      _loadedEntityOwnership[sketch.id] = {
+        ...sketch.entityIds,
+        ...loadedEntities.map((entity) => entity.id),
+      };
       for (final entity in loadedEntities) {
         entities[entity.id] = entity;
         if (!sketch.entityIds.contains(entity.id)) {
@@ -322,7 +419,9 @@ class SketchEngine {
           'Projeto com identidade persistida sem Sketch ativo.';
       return;
     }
-    if (metadata.valid && persisted != null && sketches.containsKey(persisted)) {
+    if (metadata.valid &&
+        persisted != null &&
+        sketches.containsKey(persisted)) {
       activeSketchId = persisted;
       activeSketchRestoreDiagnostic =
           'Sketch ativo restaurado pela identidade persistida: $persisted.';

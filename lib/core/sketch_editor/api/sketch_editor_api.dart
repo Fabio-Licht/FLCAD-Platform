@@ -46,6 +46,12 @@ class SketchEditorApi {
   );
   void trimEndpointToNearestIntersection(String id, SketchVector point) =>
       engine.trimEndpointToNearestIntersection(id, point);
+  bool hasEndpointBoundedTrimCut(String id) =>
+      engine.hasEndpointBoundedTrimCut(id);
+  bool hasRemovableEndpointOverhang(String id, SketchVector point) =>
+      engine.hasRemovableEndpointOverhang(id, point);
+  bool trimEndpointBoundedPortion(String id, SketchVector point) =>
+      engine.trimEndpointBoundedPortion(id, point);
   DegreesOfFreedom get dof => engine.readDof();
   SketchQuality get quality => engine.quality();
   List<SketchRecommendation> get recommendations => engine.recommendations();

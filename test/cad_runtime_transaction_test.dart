@@ -720,7 +720,7 @@ void main() {
   );
 
   test(
-    'two runtimes own distinct live temporaries and both saves succeed',
+    'two runtimes serialize project writes and both saves succeed',
     () async {
       final second = CadRuntime(
         kernels: KernelManager(),
@@ -739,15 +739,17 @@ void main() {
         final firstSave = runtime.save();
         await gates[0].entered.future;
         final secondSave = second.save();
-        await gates[1].entered.future;
-        expect(temporaryPaths.toSet(), hasLength(2));
-        for (final temporary in temporaryPaths) {
-          expect(await Directory(temporary).exists(), isTrue);
-          expect(Directory(temporary).parent.absolute.path, a.absolute.path);
-        }
-        // Final-file multi-writer arbitration is explicitly outside this phase.
+        await Future<void>.delayed(Duration.zero);
+        expect(gates[1].entered.isCompleted, isFalse);
+        expect(temporaryPaths, hasLength(1));
         gates[0].release.complete();
         await firstSave;
+        await gates[1].entered.future;
+        expect(temporaryPaths.toSet(), hasLength(2));
+        expect(
+          Directory(temporaryPaths.last).parent.absolute.path,
+          a.absolute.path,
+        );
         gates[1].release.complete();
         await secondSave;
         for (final temporary in temporaryPaths) {

@@ -34,5 +34,11 @@ class ConstraintHistory {
   List<ConstraintHistoryEntry> get entries => List.unmodifiable(_entries);
   void record(ConstraintHistoryAction action, String target) =>
       _entries.add(ConstraintHistoryEntry(action, target));
+  void restore(Iterable<ConstraintHistoryEntry> entries) {
+    _entries
+      ..clear()
+      ..addAll(entries);
+  }
+
   void truncate(int length) => _entries.removeRange(length, _entries.length);
 }

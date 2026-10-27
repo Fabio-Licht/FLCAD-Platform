@@ -489,4 +489,40 @@ class CadDocument {
       officialExportShapeId: json['officialExportShapeId'] as String?,
     );
   }
+
+  /// Copy used when a command mutates the live document and then throws.
+  /// Nested maps and lists are copied. Shape and mesh handles stay shared
+  /// because their native kernel objects are not owned by this snapshot.
+  /// [ShapeHandle.metadata] is unmodifiable, so an in-place metadata write is
+  /// rejected by the handle itself. This copy does not restore native geometry.
+  CadDocument detachedCheckpoint() => CadDocument(
+    projectId: projectId,
+    entities: Map.unmodifiable({
+      for (final entity in entities.values)
+        entity.id: CadDocumentEntity(
+          id: entity.id,
+          kind: entity.kind,
+          data: _detachSnapshotValue(entity.data)! as Map<String, dynamic>,
+          shape: entity.shape,
+          mesh: entity.mesh,
+          placement: entity.placement,
+        ),
+    }),
+    revisions: List<CadDocumentRevision>.unmodifiable(revisions),
+    parameters: _detachSnapshotValue(parameters)! as Map<String, dynamic>,
+    officialExportShapeId: officialExportShapeId,
+  );
+}
+
+Object? _detachSnapshotValue(Object? value) {
+  if (value is Map) {
+    return <String, dynamic>{
+      for (final entry in value.entries)
+        '${entry.key}': _detachSnapshotValue(entry.value),
+    };
+  }
+  if (value is List) {
+    return <Object?>[for (final item in value) _detachSnapshotValue(item)];
+  }
+  return value;
 }

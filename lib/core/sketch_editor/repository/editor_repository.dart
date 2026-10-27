@@ -7,6 +7,9 @@ import '../history/editor_history.dart';
 class EditorRepository {
   EditorRepository(this.projectDirectory);
   final Directory projectDirectory;
+  String? _lastHistoryJson;
+  String? _lastGraphJson;
+  String? _lastAnalyticsJson;
   static const paths = [
     'CAD/SketchEditor',
     'CAD/SketchEditorHistory',
@@ -24,17 +27,29 @@ class EditorRepository {
     for (final p in paths) {
       await _dir(p).create(recursive: true);
     }
-    await File(
-      '${_dir(paths[1]).path}${Platform.pathSeparator}history.json',
-    ).writeAsString(
-      jsonEncode(history.entries.map((e) => e.toJson()).toList()),
+    final historyJson = jsonEncode(
+      history.entries.map((e) => e.toJson()).toList(),
     );
-    await File(
-      '${_dir(paths[2]).path}${Platform.pathSeparator}graph.json',
-    ).writeAsString(jsonEncode(graph.toJson()));
-    await File(
-      '${_dir(paths[3]).path}${Platform.pathSeparator}analytics.json',
-    ).writeAsString(jsonEncode(analytics.toJson()));
+    if (_lastHistoryJson != historyJson) {
+      await File(
+        '${_dir(paths[1]).path}${Platform.pathSeparator}history.json',
+      ).writeAsString(historyJson);
+      _lastHistoryJson = historyJson;
+    }
+    final graphJson = jsonEncode(graph.toJson());
+    if (_lastGraphJson != graphJson) {
+      await File(
+        '${_dir(paths[2]).path}${Platform.pathSeparator}graph.json',
+      ).writeAsString(graphJson);
+      _lastGraphJson = graphJson;
+    }
+    final analyticsJson = jsonEncode(analytics.toJson());
+    if (_lastAnalyticsJson != analyticsJson) {
+      await File(
+        '${_dir(paths[3]).path}${Platform.pathSeparator}analytics.json',
+      ).writeAsString(analyticsJson);
+      _lastAnalyticsJson = analyticsJson;
+    }
   }
 }
 

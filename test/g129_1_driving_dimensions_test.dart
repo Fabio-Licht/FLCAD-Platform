@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -47,6 +48,124 @@ void main() {
     expect(second.parameters['start'], [4.0, 0.0, 0.0]);
     expect(dimension.anchorReference, '${first.id}:end');
   });
+
+  test(
+    'canonical solve reapplies a driving dimension after interactive geometry update',
+    () async {
+      final line = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(50, 0),
+      );
+      final dimension = dimensions.createDrivingDimension(
+        type: SketchDimensionType.linear,
+        references: [line.id],
+        value: 50,
+        anchorReference: '${line.id}:start',
+      );
+
+      sketch.engine.transaction('interactive-drag', () {
+        sketch.updateParameters(line.id, {
+          'startX': 0.0,
+          'startY': 0.0,
+          'endX': 70.0,
+          'endY': 0.0,
+        });
+        dimensions.enforceDrivingDimensions();
+      });
+      final result = await dimensions.engine.solve(
+        operationId: 'interactive-drag',
+      );
+
+      expect(result.success, isTrue);
+      expect(dimension.value, 50);
+      final end = SketchVector.fromJson(line.parameters['end']);
+      expect(
+        end.x - SketchVector.fromJson(line.parameters['start']).x,
+        closeTo(50, 1e-9),
+      );
+    },
+  );
+
+  test(
+    'driven dimension follows geometry without restricting an interactive update',
+    () async {
+      final line = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(4, 0),
+      );
+      final dimension = dimensions.createDrivenDimension(
+        type: SketchDimensionType.linear,
+        references: [line.id],
+        value: 4,
+      );
+
+      sketch.engine.transaction('interactive-drag', () {
+        sketch.updateParameters(line.id, {
+          'startX': 0.0,
+          'startY': 0.0,
+          'endX': 7.0,
+          'endY': 0.0,
+        });
+      });
+      final result = await dimensions.engine.solve(operationId: 'driven-drag');
+
+      expect(result.success, isTrue);
+      expect(
+        dimensions.engine.constraints[dimension.constraintId]!.driven,
+        isTrue,
+      );
+      expect(dimension.value, closeTo(7, 1e-9));
+      expect(SketchVector.fromJson(line.parameters['end']).x, 7);
+    },
+  );
+
+  test(
+    'dimension mode conversion preserves the persistent dimension identity',
+    () {
+      final line = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, 0),
+      );
+      final dimension = dimensions.createDrivingDimension(
+        type: SketchDimensionType.linear,
+        references: [line.id],
+        value: 5,
+      );
+      dimensions.convertDimensionMode(dimension.id, driven: true);
+      expect(
+        dimensions.engine.constraints[dimension.constraintId]!.driven,
+        isTrue,
+      );
+      expect(dimension.value, closeTo(5, 1e-9));
+      dimensions.convertDimensionMode(dimension.id, driven: false);
+      expect(
+        dimensions.engine.constraints[dimension.constraintId]!.driving,
+        isTrue,
+      );
+      expect(dimension.value, closeTo(5, 1e-9));
+      expect(dimensions.dimensions.single.id, dimension.id);
+    },
+  );
+
+  test(
+    'driven dimension creation is constraint-only and undoable atomically',
+    () {
+      final line = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(5, 0),
+      );
+      final sketchUndoBefore = sketch.engine.undoDepth;
+      dimensions.createDrivenDimension(
+        type: SketchDimensionType.linear,
+        references: [line.id],
+        value: 5,
+      );
+      expect(sketch.engine.undoDepth, sketchUndoBefore);
+      expect(dimensions.engine.undoConstraintsOnly(), isTrue);
+      expect(dimensions.dimensions, isEmpty);
+      expect(sketch.entity(line.id), isNotNull);
+    },
+  );
 
   test('explicit line anchor is preserved and creation undo is atomic', () {
     final line = sketch.builders.line.build(
@@ -485,6 +604,83 @@ void main() {
     expect(reopened.dimensions.single.value, 3.0);
   });
 
+  test(
+    'Driving and Driven conversion survives geometry update and Save/Open',
+    () async {
+      final line = sketch.builders.line.build(
+        const SketchVector(0, 0),
+        const SketchVector(50, 0),
+      );
+      final dimension = dimensions.createDrivingDimension(
+        type: SketchDimensionType.linear,
+        references: [line.id],
+        value: 50,
+      );
+      dimensions.convertDimensionMode(dimension.id, driven: true);
+      sketch.engine.transaction('driven-interactive-drag', () {
+        sketch.updateParameters(line.id, {
+          'startX': 0.0,
+          'startY': 0.0,
+          'endX': 60.0,
+          'endY': 0.0,
+        });
+      });
+      await dimensions.solve(operationId: 'driven-save-open');
+      expect(dimension.value, closeTo(60, 1e-9));
+      await sketch.persist();
+      await dimensions.persist();
+
+      final reopenedSketch = const SketchEngineFactory().create(project);
+      await reopenedSketch.load();
+      final reopened = const ConstraintFactory().create(
+        projectDirectory: project,
+        sketch: reopenedSketch,
+      );
+      await reopened.load();
+      final reopenedDimension = reopened.dimensions.single;
+      expect(reopenedDimension.id, dimension.id);
+      expect(
+        reopened.engine.constraints[reopenedDimension.constraintId]!.driven,
+        isTrue,
+      );
+      expect(reopenedDimension.value, closeTo(60, 1e-9));
+
+      reopened.convertDimensionMode(reopenedDimension.id, driven: false);
+      expect(
+        reopened.engine.constraints[reopenedDimension.constraintId]!.driving,
+        isTrue,
+      );
+      expect(reopened.engine.undo(), isTrue);
+      expect(
+        reopened.engine.constraints[reopenedDimension.constraintId]!.driven,
+        isTrue,
+      );
+      expect(reopened.engine.redo(), isTrue);
+      expect(
+        reopened.engine.constraints[reopenedDimension.constraintId]!.driving,
+        isTrue,
+      );
+      await reopened.persist();
+      await reopenedSketch.persist();
+
+      final reopenedAgainSketch = const SketchEngineFactory().create(project);
+      await reopenedAgainSketch.load();
+      final reopenedAgain = const ConstraintFactory().create(
+        projectDirectory: project,
+        sketch: reopenedAgainSketch,
+      );
+      await reopenedAgain.load();
+      expect(
+        reopenedAgain
+            .engine
+            .constraints[reopenedAgain.dimensions.single.constraintId]!
+            .driving,
+        isTrue,
+      );
+      expect(reopenedAgain.dimensions.single.value, closeTo(60, 1e-9));
+    },
+  );
+
   test('isolated radius edit accepts 7.216 to 7.500 mm', () {
     final arc = sketch.builders.arc.build(
       const SketchVector(-12, 4),
@@ -523,6 +719,49 @@ void main() {
     expect(sketch.entity(line.id)!.toJson().toString(), geometry);
   });
 
+  test('failed constraint transaction preserves a preexisting redo', () {
+    final line = sketch.builders.line.build(
+      const SketchVector(0, 0),
+      const SketchVector(10, 0),
+    );
+    dimensions.builders.of(SketchConstraintType.horizontal).build([line.id]);
+    expect(dimensions.engine.undo(), isTrue);
+    expect(dimensions.engine.redoDepth, 1);
+
+    expect(
+      () => dimensions.engine.transaction('injected failure', () {
+        dimensions.engine.add(
+          SketchConstraint(
+            type: SketchConstraintType.vertical,
+            references: [line.id],
+          ),
+        );
+        throw StateError('original failure');
+      }),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          'original failure',
+        ),
+      ),
+    );
+    expect(dimensions.engine.redoDepth, 1);
+    expect(dimensions.engine.redo(), isTrue);
+    expect(
+      dimensions.constraints.where(
+        (item) => item.type == SketchConstraintType.horizontal,
+      ),
+      hasLength(1),
+    );
+    expect(
+      dimensions.constraints.where(
+        (item) => item.type == SketchConstraintType.vertical,
+      ),
+      isEmpty,
+    );
+  });
+
   test('load repairs sketch membership when the root list is stale', () async {
     final line = sketch.builders.line.build(
       const SketchVector(0, 0),
@@ -532,8 +771,16 @@ void main() {
 
     // Reproduce projects written by the older non-atomic section conversion:
     // the child entity exists on disk but the root list was saved empty.
-    sketch.sketches.single.entityIds.clear();
-    await sketch.persist();
+    final sketchId = sketch.sketches.single.id;
+    final safeId = sketchId.replaceAll(':', '_');
+    final rootFile = File('${project.path}/CAD/Sketch/$safeId.json');
+    final root = jsonDecode(await rootFile.readAsString()) as Map;
+    root['entityIds'] = <String>[];
+    await rootFile.writeAsString(jsonEncode(root), flush: true);
+    final ownership = File(
+      '${project.path}/CAD/SketchEntities/$safeId/entities.owner.json',
+    );
+    if (await ownership.exists()) await ownership.delete();
 
     final reopened = const SketchEngineFactory().create(project);
     await reopened.load();

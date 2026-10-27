@@ -6,6 +6,18 @@ typedef CommandAction =
       CommandContext context,
       Map<String, Object?> parameters,
     );
+typedef CommandEffect =
+    bool Function(Object? result, Map<String, Object?> parameters);
+
+/// Captures a domain snapshot before execute, undo, or redo.
+/// The returned function restores that snapshot. CommandManager calls it when
+/// that operation throws before it is considered applied, so a mutation that
+/// escapes as an exception does not remain committed.
+typedef CommandCheckpoint =
+    Future<Future<void> Function()> Function(
+      CommandContext context,
+      Map<String, Object?> parameters,
+    );
 
 class RegisteredEngineeringCommand {
   const RegisteredEngineeringCommand({
@@ -15,6 +27,9 @@ class RegisteredEngineeringCommand {
     required this.undo,
     required this.redo,
     this.validator,
+    this.undoable = true,
+    this.hasEffect,
+    this.checkpoint,
   });
   final String id;
   final String module;
@@ -22,6 +37,17 @@ class RegisteredEngineeringCommand {
   final CommandAction undo;
   final CommandAction redo;
   final CommandValidator? validator;
+  final bool undoable;
+
+  /// Lets a command execute and validate without changing history when the
+  /// requested operation is already satisfied. Commands that omit this stay
+  /// fully backward compatible and always record their execution.
+  final CommandEffect? hasEffect;
+
+  /// When set, a failure before the operation is applied restores this
+  /// snapshot. The same closure covers execute, undo, and redo. Commands that
+  /// omit it do not get a domain rollback; the original error still propagates.
+  final CommandCheckpoint? checkpoint;
 }
 
 class CommandRegistry {

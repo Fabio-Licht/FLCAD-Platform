@@ -89,26 +89,37 @@ abstract class SketchEntity {
   static SketchEntity fromJson(Map<String, dynamic> json) {
     final type = SketchEntityType.values.byName(json['type'] as String);
     final p = (json['parameters'] as Map).cast<String, dynamic>();
+    final id = json['id'] as String;
+    final owner = json['owner'] as String? ?? 'local';
+    final timestamp = json['timestamp'] == null
+        ? null
+        : DateTime.parse(json['timestamp'] as String);
     SketchEntity entity;
     switch (type) {
       case SketchEntityType.point:
         entity = SketchPoint(
           SketchVector.fromJson(p['point']),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         break;
       case SketchEntityType.line:
         entity = SketchLine(
           SketchVector.fromJson(p['start']),
           SketchVector.fromJson(p['end']),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         break;
       case SketchEntityType.circle:
         entity = SketchCircle(
           SketchVector.fromJson(p['center']),
           (p['radius'] as num).toDouble(),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         break;
       case SketchEntityType.arc:
@@ -117,13 +128,17 @@ abstract class SketchEntity {
           (p['radius'] as num).toDouble(),
           (p['startAngle'] as num).toDouble(),
           (p['endAngle'] as num).toDouble(),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         break;
       case SketchEntityType.spline:
         entity = SketchSpline(
           (p['points'] as List).map(SketchVector.fromJson).toList(),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         entity.parameters.addAll(p);
         break;
@@ -132,14 +147,26 @@ abstract class SketchEntity {
           SketchVector.fromJson(p['center']),
           (p['radiusX'] as num).toDouble(),
           (p['radiusY'] as num).toDouble(),
-          id: json['id'] as String,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
         );
         break;
       case SketchEntityType.construction:
-        entity = ConstructionGeometry(p, id: json['id'] as String);
+        entity = ConstructionGeometry(
+          p,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
+        );
         break;
       case SketchEntityType.reference:
-        entity = ReferenceGeometry(p, id: json['id'] as String);
+        entity = ReferenceGeometry(
+          p,
+          id: id,
+          owner: owner,
+          timestamp: timestamp,
+        );
         break;
     }
     entity.version = json['version'] as int;
@@ -159,7 +186,12 @@ abstract class SketchEntity {
 }
 
 class SketchPoint extends SketchEntity {
-  SketchPoint(SketchVector point, {super.id})
+  SketchPoint(
+    SketchVector point, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(
         type: SketchEntityType.point,
         parameters: {'point': point.toJson()},
@@ -167,7 +199,13 @@ class SketchPoint extends SketchEntity {
 }
 
 class SketchLine extends SketchEntity {
-  SketchLine(SketchVector start, SketchVector end, {super.id})
+  SketchLine(
+    SketchVector start,
+    SketchVector end, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(type: SketchEntityType.line, parameters: parametersFor(start, end));
 
   static Map<String, dynamic> parametersFor(
@@ -191,7 +229,13 @@ class SketchLine extends SketchEntity {
 }
 
 class SketchCircle extends SketchEntity {
-  SketchCircle(SketchVector center, double radius, {super.id})
+  SketchCircle(
+    SketchVector center,
+    double radius, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(
         type: SketchEntityType.circle,
         parameters: {'center': center.toJson(), 'radius': radius},
@@ -205,6 +249,8 @@ class SketchArc extends SketchEntity {
     double startAngle,
     double endAngle, {
     super.id,
+    super.owner,
+    super.timestamp,
   }) : super(
          type: SketchEntityType.arc,
          parameters: {
@@ -220,6 +266,8 @@ class SketchSpline extends SketchEntity {
   SketchSpline(
     List<SketchVector> points, {
     super.id,
+    super.owner,
+    super.timestamp,
     List<SketchVector>? bezierControls,
   }) : super(
          type: SketchEntityType.spline,
@@ -241,7 +289,14 @@ class SketchSpline extends SketchEntity {
 }
 
 class SketchEllipse extends SketchEntity {
-  SketchEllipse(SketchVector center, double radiusX, double radiusY, {super.id})
+  SketchEllipse(
+    SketchVector center,
+    double radiusX,
+    double radiusY, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(
         type: SketchEntityType.ellipse,
         parameters: {
@@ -253,7 +308,12 @@ class SketchEllipse extends SketchEntity {
 }
 
 class ConstructionGeometry extends SketchEntity {
-  ConstructionGeometry(Map<String, dynamic> parameters, {super.id})
+  ConstructionGeometry(
+    Map<String, dynamic> parameters, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(
         type: SketchEntityType.construction,
         parameters: parameters,
@@ -262,7 +322,12 @@ class ConstructionGeometry extends SketchEntity {
 }
 
 class ReferenceGeometry extends SketchEntity {
-  ReferenceGeometry(Map<String, dynamic> parameters, {super.id})
+  ReferenceGeometry(
+    Map<String, dynamic> parameters, {
+    super.id,
+    super.owner,
+    super.timestamp,
+  })
     : super(
         type: SketchEntityType.reference,
         parameters: parameters,

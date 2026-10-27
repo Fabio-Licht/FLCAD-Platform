@@ -936,7 +936,7 @@ void main() {
       const axisId = '$projectId:world:x-axis';
 
       controller.selectSketchSupport(planeId);
-      await controller.openSketch();
+      await controller.openSketch(forceNew: true);
       await controller.drawRectangle(
         const SketchVector(-2, 2),
         const SketchVector(2, 5),
@@ -1030,13 +1030,14 @@ void main() {
       controller.cancelProfessionalRevolve();
 
       controller.selectSketchSupport(planeId);
-      await controller.openSketch();
+      await controller.openSketch(forceNew: true);
       controller.sketchApi!.builders.line.build(
         const SketchVector(-3, 7),
         const SketchVector(3, 7),
       );
       final openSketch = controller.activeSketch!;
       await controller.finishSketch();
+      expect(controller.healthForSketch(openSketch.id).closedProfile, isFalse);
       controller.selectRevolveProfile(openSketch.id);
       controller.selectRevolveAxis(axisId);
       await controller.previewProfessionalRevolve(
@@ -1126,6 +1127,210 @@ void main() {
         [0.0, 5.0, 0.0],
         [8.0, 5.0, 0.0],
       ]);
+    },
+  );
+
+  test(
+    'controller dimension edit rebuilds dependent Revolve and survives undo redo save open',
+    () async {
+      const projectId = 'managed-reference-sketch';
+      const planeId = '$projectId:world:xy-plane';
+      const axisId = '$projectId:world:x-axis';
+      controller.selectSketchSupport(planeId);
+      await controller.openSketch();
+      await controller.drawRectangle(
+        const SketchVector(-2, 2),
+        const SketchVector(2, 5),
+      );
+      final circle = controller.activeSketch!.entityIds
+          .map(controller.sketchApi!.entity)
+          .whereType<SketchLine>()
+          .first;
+      controller.selectedSketchEntityIds
+        ..clear()
+        ..add(circle.id);
+      await controller.createDrivingDimension(SketchDimensionType.linear, 4);
+      final dimension = controller.dimensions.single;
+      await controller.finishSketch();
+      controller.selectRevolveProfile(controller.activeSketch!.id);
+      controller.selectRevolveAxis(axisId);
+      await controller.previewProfessionalRevolve(
+        angleDegrees: 360,
+        output: RevolveOutput.solid,
+      );
+      final featureId = controller.professionalRevolvePreview!['id'] as String;
+      await controller.confirmProfessionalRevolve();
+      final before = cad.runtime.document!.entities[featureId]!;
+      final beforeRevision = before.data['revision'];
+      final beforeShape = before.shape;
+      final beforeSketchVersion = controller.activeSketch!.version;
+      expect(before.kind, CadDocumentEntityKind.solid);
+      expect(beforeShape, isNotNull);
+
+      await controller.editDrivingDimension(dimension.id, 3);
+      final after = cad.runtime.document!.entities[featureId]!;
+      expect(after.kind, CadDocumentEntityKind.solid);
+      expect(after.data['revision'], isNot(beforeRevision));
+      expect(
+        controller.activeSketch!.version,
+        greaterThan(beforeSketchVersion),
+      );
+      expect(after.shape?.persistentId, beforeShape!.persistentId);
+      final beforeContract = Map<String, dynamic>.from(
+        (before.data['revolveFeature'] as Map)['contract'] as Map,
+      );
+      final afterContract = Map<String, dynamic>.from(
+        (after.data['revolveFeature'] as Map)['contract'] as Map,
+      );
+      expect(
+        afterContract['profileRevision'],
+        greaterThan(beforeContract['profileRevision']),
+      );
+      expect(controller.dimensions.single.value, closeTo(3, 1e-9));
+
+      await controller.undo();
+      expect(controller.dimensions.single.value, closeTo(4, 1e-9));
+      expect(
+        cad.runtime.document!.entities[featureId]?.kind,
+        CadDocumentEntityKind.solid,
+      );
+      final undoContract = Map<String, dynamic>.from(
+        (cad.runtime.document!.entities[featureId]!.data['revolveFeature']
+                as Map)['contract']
+            as Map,
+      );
+      expect(
+        undoContract['profileRevision'],
+        lessThan(afterContract['profileRevision']),
+      );
+      await controller.redo();
+      expect(controller.dimensions.single.value, closeTo(3, 1e-9));
+      final redoContract = Map<String, dynamic>.from(
+        (cad.runtime.document!.entities[featureId]!.data['revolveFeature']
+                as Map)['contract']
+            as Map,
+      );
+      expect(redoContract['profileRevision'], afterContract['profileRevision']);
+
+      final beforeSave = cad.runtime.read<Future<void> Function()>(
+        'project.beforeSave',
+      );
+      expect(beforeSave, isNotNull);
+      await beforeSave!();
+      await cad.runtime.save();
+      final scratch = await Directory(
+        p.join(root.path, 'dimension-scratch'),
+      ).create();
+      controller.detachProject();
+      await cad.runtime.open('dimension-scratch', scratch);
+      await cad.runtime.open(projectId, project);
+      await controller.configureProject(
+        projectId: projectId,
+        projectDirectory: project,
+      );
+      expect(controller.dimensions.single.value, closeTo(3, 1e-9));
+      expect(
+        cad.runtime.document!.entities[featureId]?.kind,
+        CadDocumentEntityKind.solid,
+      );
+      final reopenedContract = Map<String, dynamic>.from(
+        (cad.runtime.document!.entities[featureId]!.data['revolveFeature']
+                as Map)['contract']
+            as Map,
+      );
+      final reopenedProfileId = reopenedContract['profileEntityId'] as String;
+      final reopenedSketch = controller.sketchApi!.sketches.firstWhere(
+        (item) => item.id == reopenedProfileId,
+      );
+      expect(reopenedContract['profileRevision'], reopenedSketch.version);
+    },
+  );
+
+  test(
+    'deleting a Sketch with a dependent Revolve preserves links across undo redo',
+    () async {
+      const planeId = 'managed-reference-sketch:world:xy-plane';
+      const axisId = 'managed-reference-sketch:world:x-axis';
+      controller.selectSketchSupport(planeId);
+      await controller.openSketch();
+      await controller.drawRectangle(
+        const SketchVector(-2, 2),
+        const SketchVector(2, 5),
+      );
+      final sketchId = controller.activeSketch!.id;
+      await controller.finishSketch();
+      controller.selectExtrudeSource(sketchId);
+      await controller.previewProfessionalExtrude(distance: 6);
+      final extrudeId = controller.professionalExtrudePreview!['id'] as String;
+      await controller.confirmProfessionalExtrude();
+      controller.selectRevolveProfile(sketchId);
+      controller.selectRevolveAxis(axisId);
+      await controller.previewProfessionalRevolve(
+        angleDegrees: 180,
+        output: RevolveOutput.solid,
+      );
+      final featureId = controller.professionalRevolvePreview!['id'] as String;
+      await controller.confirmProfessionalRevolve();
+      final featureBefore = cad.runtime.document!.entities[featureId]!;
+      final contract = Map<String, dynamic>.from(
+        (featureBefore.data['revolveFeature'] as Map)['contract'] as Map,
+      );
+      expect(contract['profileEntityId'], isNotNull);
+      expect(
+        (featureBefore.data['dependencies'] as List).cast<String>(),
+        contains(contract['profileEntityId']),
+      );
+      expect(cad.runtime.scene.find(featureId), isNotNull);
+      expect(cad.runtime.scene.find(extrudeId), isNotNull);
+
+      await controller.deleteToRecycleBin(sketchId, includeDependencies: true);
+      expect(cad.runtime.document!.entities[sketchId]!.data['deleted'], isTrue);
+      expect(
+        cad.runtime.document!.entities[featureId]!.data['deleted'],
+        isTrue,
+      );
+      expect(
+        cad.runtime.document!.entities[extrudeId]!.data['deleted'],
+        isTrue,
+      );
+      expect(cad.runtime.scene.find(sketchId), isNull);
+      expect(cad.runtime.scene.find(featureId), isNull);
+      expect(cad.runtime.scene.find(extrudeId), isNull);
+
+      await controller.undo();
+      expect(
+        cad.runtime.document!.entities[sketchId]!.data['deleted'],
+        isNot(true),
+      );
+      expect(
+        cad.runtime.document!.entities[featureId]!.data['deleted'],
+        isNot(true),
+      );
+      expect(
+        cad.runtime.document!.entities[extrudeId]!.data['deleted'],
+        isNot(true),
+      );
+      expect(cad.runtime.scene.find(featureId), isNotNull);
+      expect(cad.runtime.scene.find(extrudeId), isNotNull);
+      await controller.reenterProfessionalRevolve(featureId);
+      expect(controller.professionalRevolvePreview, isNotNull);
+      controller.cancelProfessionalRevolve();
+      await controller.reenterProfessionalExtrude(extrudeId);
+      expect(controller.professionalExtrudePreview, isNotNull);
+      controller.cancelProfessionalExtrude();
+
+      await controller.redo();
+      expect(cad.runtime.document!.entities[sketchId]!.data['deleted'], isTrue);
+      expect(
+        cad.runtime.document!.entities[featureId]!.data['deleted'],
+        isTrue,
+      );
+      expect(
+        cad.runtime.document!.entities[extrudeId]!.data['deleted'],
+        isTrue,
+      );
+      expect(cad.runtime.scene.find(featureId), isNull);
+      expect(cad.runtime.scene.find(extrudeId), isNull);
     },
   );
 
@@ -1374,7 +1579,11 @@ void main() {
       ]);
       expect(cad.runtime.selection, selectionBefore);
       await controller.confirmSketchPointReferenceCapture();
+      expect(anchor.parameters['start'], [0.0, 0.0, 0.0]);
+      expect(anchor.parameters['end'], [10.0, 0.0, 0.0]);
       expect(target.parameters['start'], [10.0, 0.0, 0.0]);
+      expect(target.parameters['end'], [20.0, 0.0, 0.0]);
+      expect(target.parameters['length'], 10.0);
       expect(controller.sketchPointReferenceCaptureActive, isFalse);
 
       controller.beginSketchPointReferenceCapture('distance');
@@ -1393,7 +1602,7 @@ void main() {
           entityId: target.id,
           hit: const MeshHit(
             triangleIndex: -1,
-            point: Vector3(30, 5, 0),
+            point: Vector3(20, 0, 0),
             distance: 0,
           ),
         ),

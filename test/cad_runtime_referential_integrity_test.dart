@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flcad_mobile/app/runtime/cad_runtime.dart';
@@ -1016,6 +1017,124 @@ void main() {
       consistentDependencies(['A'], explicit: false);
       await runtime.redoDocument();
       consistentDependencies([], explicit: true);
+    },
+  );
+
+  test(
+    'open reloads an external entity set that keeps the same revision list',
+    () async {
+      final before = runtime.document!;
+      final revision = before.revision;
+      final revisionJson = before.revisions
+          .map((item) => item.toJson())
+          .toList();
+      expect(before.entities.containsKey('external'), isFalse);
+      await legacy([
+        recycled(feature('external', dependencies: ['missing'])),
+      ]);
+      expect(runtime.document!.projectId, 'A');
+      expect(runtime.document!.revision, revision);
+      expect(runtime.document!.entities['external']!.data['deleted'], isTrue);
+      expect(
+        runtime.document!.revisions.map((item) => item.toJson()).toList(),
+        revisionJson,
+      );
+      expect(runtime.document!.entities.containsKey('external'), isTrue);
+      expect(
+        runtime.document!.entities['external']!.data['featureLifecycle'],
+        isA<Map>(),
+      );
+      final disk = await repository.load('A', directory);
+      expect(disk.revision, revision);
+      expect(
+        disk.revisions.map((item) => item.toJson()).toList(),
+        revisionJson,
+      );
+      expect(disk.entities.containsKey('external'), isTrue);
+      expect(disk.entities['external']!.data['featureLifecycle'], isA<Map>());
+      expect(runtime.recoveryRequired, isFalse);
+    },
+  );
+
+  test('in-memory insert with the same revision list still commits', () async {
+    final revision = runtime.document!.revision;
+    runtime.debugPutEntity(feature('inserted'));
+    expect(runtime.document!.revision, revision);
+    expect(runtime.document!.entities.containsKey('inserted'), isTrue);
+    await add('after');
+    expect(runtime.document!.entities.containsKey('inserted'), isTrue);
+    expect(runtime.document!.entities.containsKey('after'), isTrue);
+    expect(runtime.document!.revision, revision + 1);
+    final disk = await repository.load('A', directory);
+    expect(disk.entities.containsKey('inserted'), isTrue);
+    expect(disk.entities.containsKey('after'), isTrue);
+    expect(disk.revision, revision + 1);
+    expect(runtime.recoveryRequired, isFalse);
+  });
+
+  test('commit still rejects a same-revision external entity change', () async {
+    await add('kept');
+    final current = runtime.document!;
+    final revision = current.revision;
+    await repository.save(
+      CadDocument(
+        projectId: current.projectId,
+        entities: {...current.entities, 'intruder': feature('intruder')},
+        revisions: current.revisions,
+        parameters: current.parameters,
+        officialExportShapeId: current.officialExportShapeId,
+      ),
+      directory,
+    );
+    final disk = await repository.load('A', directory);
+    expect(disk.revision, revision);
+    expect(disk.entities.containsKey('intruder'), isTrue);
+    expect(current.entities.containsKey('intruder'), isFalse);
+    await expectLater(add('after'), throwsA(isA<CadConcurrentWriteFailure>()));
+    expect(identical(runtime.document, current), isTrue);
+    expect(runtime.document!.entities.containsKey('after'), isFalse);
+    expect(runtime.document!.entities.containsKey('intruder'), isFalse);
+    expect(runtime.recoveryRequired, isFalse);
+  });
+
+  test(
+    'open rejects a same-revision file replaced after the migration was read',
+    () async {
+      var reads = 0;
+      repository.onLoad = (_) async {
+        reads++;
+        if (reads != 2) return;
+        final file = repository.file(directory);
+        final json =
+            jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+        final entities = (json['entities'] as List).toList();
+        entities.add({
+          'id': 'racer',
+          'kind': 'vertex',
+          'data': {
+            'sceneKind': 'point',
+            'sceneGeometry': {
+              'position': [0, 0, 0],
+            },
+          },
+          'shape': null,
+          'mesh': null,
+        });
+        json['entities'] = entities;
+        await file.writeAsString(jsonEncode(json), flush: true);
+      };
+      try {
+        await expectLater(
+          legacy([feature('external')]),
+          throwsA(isA<CadConcurrentWriteFailure>()),
+        );
+      } finally {
+        repository.onLoad = null;
+      }
+      expect(reads, 2);
+      expect(runtime.document!.entities.containsKey('external'), isFalse);
+      expect(runtime.document!.entities.containsKey('racer'), isFalse);
+      expect(runtime.recoveryRequired, isFalse);
     },
   );
 }

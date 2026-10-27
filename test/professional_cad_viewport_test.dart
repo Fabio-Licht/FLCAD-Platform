@@ -28,6 +28,7 @@ import 'package:flcad_mobile/core/reference_engine/api/reference_api.dart';
 import 'package:flcad_mobile/core/reference_engine/engine/reference_engine.dart';
 import 'package:flcad_mobile/core/reference_engine/repository/reference_repository.dart';
 import 'package:flcad_mobile/core/smart_regions/models/geometry.dart';
+import 'package:flcad_mobile/core/sketch_engine/entities/sketch_entities.dart';
 import 'package:flcad_mobile/core/sketch_engine/models/sketch_models.dart';
 import 'package:flcad_mobile/core/storage/local_storage_service.dart';
 import 'package:flcad_mobile/features/projects/data/project_repository.dart';
@@ -1430,6 +1431,7 @@ void main() {
       const SketchVector(2, 1),
     );
     await controller.constrainRectangle();
+    expect(controller.constraints, hasLength(8));
     await controller.finishSketch();
     await controller.previewPlanarSurface();
     expect(scene.find('surface-preview'), isNotNull);
@@ -1456,7 +1458,14 @@ void main() {
       projectId: 'project',
       projectDirectory: projectDirectory,
     );
-    expect(reopened.sketchEntities, hasLength(4));
+    expect(
+      reopened.sketchApi!.engine.entities.values.whereType<SketchLine>(),
+      hasLength(4),
+      reason:
+          'controllerError=${reopened.error}; '
+          'engineSketches=${reopened.sketchApi?.sketches.map((item) => '${item.id}:${item.entityIds.length}').toList()}; '
+          'documentSketchRoots=${cad.runtime.document?.entities.values.where((item) => item.kind == CadDocumentEntityKind.sketch && item.data['sketch'] is Map).map((item) => '${item.id}:${(item.data['sketch'] as Map)['entityIds']}').toList()}',
+    );
     expect(reopened.activeSurface?.handle, controller.activeSurface?.handle);
     expect(reopened.activeReference?.id, _planeReference.id);
     expect(reopenedScene.find(_planeReference.id), isNotNull);

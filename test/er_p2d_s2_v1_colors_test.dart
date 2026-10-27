@@ -16,6 +16,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/test_output_path.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -258,9 +259,9 @@ void main() {
       final image = await boundary.toImage();
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
       image.dispose();
-      final file = File(
+      final file = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S2-V1\brush_cursor_selection_DIAGNOSTIC.png',
-      );
+      ));
       file.parent.createSync(recursive: true);
       await file.writeAsBytes(data!.buffer.asUint8List());
     });

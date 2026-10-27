@@ -42,5 +42,11 @@ class SketchHistory {
     Map<String, dynamic> details = const {},
   }) => _entries.add(SketchHistoryEntry(action, targetId, details: details));
   void clear() => _entries.clear();
+  void restore(Iterable<SketchHistoryEntry> entries) {
+    _entries
+      ..clear()
+      ..addAll(entries);
+  }
+
   void truncate(int length) => _entries.removeRange(length, _entries.length);
 }

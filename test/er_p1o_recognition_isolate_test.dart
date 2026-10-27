@@ -37,6 +37,7 @@ import 'package:flcad_mobile/core/surface_recognition/segmentation/region_growin
 import 'package:flcad_mobile/app/engineering_bridge/selection/cylindrical_region_selector.dart';
 import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/test_output_path.dart';
 
 void main() {
   test('capturing mesh wrappers in Isolate.run is unsendable', () async {
@@ -167,9 +168,9 @@ void main() {
         ..writeln('managed_stl_preserved_after_clear=true')
         ..writeln('processing_ms=${stopwatch.elapsedMilliseconds}')
         ..writeln('gui_capture=not performed');
-      final out = File(
+      final out = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P1O\er_p1o_report.txt',
-      );
+      ));
       out.parent.createSync(recursive: true);
       out.writeAsStringSync(report.toString());
     },
@@ -323,12 +324,12 @@ void main() {
         allowTechnicalStl: false,
       );
       final newSelectionCount = session.controller.selectionTriangleCount;
-      final beforeSvg = File(
+      final beforeSvg = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S1\calota_selection_before.svg',
-      );
-      final afterSvg = File(
+      ));
+      final afterSvg = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S1\calota_selection_after.svg',
-      );
+      ));
       _writeSelectionSvg(
         geometry,
         initialSelectionTriangles,
@@ -415,7 +416,7 @@ void main() {
         r'C:\flcad_mobile\test_assets\screenshots\ER-P1Q\er_p1q_real_mode_report.txt',
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S1\er_p2d_s1_report.txt',
       ]) {
-        final out = File(path);
+        final out = File(testOutputPath(path));
         out.parent.createSync(recursive: true);
         out.writeAsStringSync(report.toString());
       }
@@ -798,12 +799,12 @@ void main() {
       );
       final newSelectionCount = session.controller.selectionTriangleCount;
 
-      final beforeSvg = File(
+      final beforeSvg = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S2\calota_brush_before.svg',
-      );
-      final afterSvg = File(
+      ));
+      final afterSvg = File(testOutputPath(
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S2\calota_brush_after.svg',
-      );
+      ));
       _writeSelectionSvg(
         geometry,
         initialTriangles,
@@ -936,7 +937,7 @@ void main() {
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S2\er_p2d_s2_report.txt',
         r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-S3\er_p2d_s3_calota_report.txt',
       ]) {
-        final out = File(path);
+        final out = File(testOutputPath(path));
         out.parent.createSync(recursive: true);
         out.writeAsStringSync(report.toString());
       }
@@ -1434,13 +1435,13 @@ void main() {
         pcaFit,
         normalFit,
         jointFit,
-        File(
+        File(testOutputPath(
           r'C:\flcad_mobile\artifacts\ER-P2C-C1-windows-debug\inner-wall-diagnostic.svg',
-        ),
+        )),
       );
-      final report = File(
+      final report = File(testOutputPath(
         r'C:\flcad_mobile\artifacts\ER-P2C-C1-windows-debug\ER-P2C-C1-report.txt',
-      )..parent.createSync(recursive: true);
+      ))..parent.createSync(recursive: true);
       report.writeAsStringSync(
         _cylinderAuditReport(
           geometry: geometry,
@@ -1577,9 +1578,9 @@ void main() {
               ),
             ),
           );
-    final report = File(
+    final report = File(testOutputPath(
       r'C:\flcad_mobile\artifacts\ER-P2C-C1-windows-debug\ER-P2C-C2-selection-report.txt',
-    )..parent.createSync(recursive: true);
+    ))..parent.createSync(recursive: true);
     report.writeAsStringSync(
       'ER-P2C-C2 cylindrical continuity selection\n'
       'selected_triangles=${result.triangles.length}\n'
@@ -1599,9 +1600,9 @@ void main() {
       geometry,
       result.triangles,
       result.transitionTriangles,
-      File(
+      File(testOutputPath(
         r'C:\flcad_mobile\artifacts\ER-P2C-B-F1-windows-debug\c2-selection-diagnostic.svg',
-      ),
+      )),
     );
     print(
       'ER-P2C-C2 fitter selected radius=${selectedCandidate.parameters['radius']} '
@@ -1679,9 +1680,9 @@ void main() {
       final fitMs = fitWatch.elapsedMicroseconds / 1000;
       total.stop();
       final parameters = candidate.parameters;
-      final report = File(
+      final report = File(testOutputPath(
         r'C:\flcad_mobile\artifacts\ER-P2C-C3-F1-windows-debug\ER-P2C-C3-F1-performance-report.txt',
-      )..parent.createSync(recursive: true);
+      ))..parent.createSync(recursive: true);
       report.writeAsStringSync(
         'ER-P2C-C3-F1 staged real cylinder performance audit\n'
         'fixture=${file.path}\n'

@@ -40,6 +40,7 @@ import 'package:flcad_mobile/features/projects/domain/project_manager.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'support/test_output_path.dart';
 
 // ER-P2D-C3-F2: after "Criar superfície" on a managed STL the viewport fell
 // back to Flutter Canvas ("Payload Native GPU inválido para curva CAD") and
@@ -52,7 +53,9 @@ import 'package:flutter_test/flutter_test.dart';
 const _channel = MethodChannel('flcad/native_viewport');
 const _debugDir = r'C:\flcad_mobile\build\windows\x64\runner\Debug';
 const _calota = r'C:\flcad_mobile\test_assets\real_meshes\CALOTA_INOXX.stl';
-const _reportDir = r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-C3-F2';
+final _reportDir = testOutputPath(
+  r'C:\flcad_mobile\test_assets\screenshots\ER-P2D-C3-F2',
+);
 
 CadSceneEntity _calotaEntity() => const CadSceneEntity(
   id: 'calota',

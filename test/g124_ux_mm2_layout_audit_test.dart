@@ -157,7 +157,7 @@ void main() {
       final panel = entry.toAdaptivePanel(monitorIndex: 2);
 
       expect(panel.id, 'inspector');
-      expect(panel.title, 'Property Inspector');
+      expect(panel.title, 'Inspector');
       expect(panel.dockState, DockState.docked);
       expect(panel.visible, isTrue);
       expect(panel.monitor, 2);

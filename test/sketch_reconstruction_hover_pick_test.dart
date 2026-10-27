@@ -109,7 +109,8 @@ void main() {
         expect(
           hit?.entityId,
           id,
-          reason: 'Visible $id must remain hoverable under the pick-only overlay',
+          reason:
+              'Visible $id must remain hoverable under the pick-only overlay',
         );
       }
       final interior = picking.pick(
@@ -158,7 +159,8 @@ void main() {
             )
             ?.entityId,
         'xy-plane',
-        reason: 'Suggestion hover excludes pick-only and can still hit the plane',
+        reason:
+            'Suggestion hover excludes pick-only and can still hit the plane',
       );
     },
   );
@@ -505,7 +507,8 @@ void main() {
       expect(
         controller.hoverSketchReconstructionSuggestionForEntity(covered.id),
         isTrue,
-        reason: 'A visible covered fragment of an active suggestion is hoverable',
+        reason:
+            'A visible covered fragment of an active suggestion is hoverable',
       );
 
       expect(
@@ -635,7 +638,8 @@ void main() {
             )
             ?.entityId,
         isNot(anyOf('imported-mesh', isNull)),
-        reason: 'Null filter keeps unrestricted overlay pick of painted geometry',
+        reason:
+            'Null filter keeps unrestricted overlay pick of painted geometry',
       );
     },
   );
@@ -645,7 +649,8 @@ void main() {
     () async {
       final directory = await Directory.systemTemp.createTemp('hover-hidden_');
       addTearDown(() => directory.delete(recursive: true));
-      final kernels = KernelManager()..register(_HoverKernel(), makeDefault: true);
+      final kernels = KernelManager()
+        ..register(_HoverKernel(), makeDefault: true);
       final cad = DesktopCadController(
         kernels: kernels,
         projects: ProjectManager.instance,
@@ -706,7 +711,10 @@ void main() {
       expect(overlay, isNotNull);
       expect(overlay!.geometry['reconstructionHighlight'], 'hover');
       expect(overlay.geometry['segments'], isNotEmpty);
-      expect(controller.isSketchReconstructionSuggestionHovered(suggestion), isTrue);
+      expect(
+        controller.isSketchReconstructionSuggestionHovered(suggestion),
+        isTrue,
+      );
     },
   );
 
@@ -717,7 +725,8 @@ void main() {
       final secondDir = await Directory.systemTemp.createTemp('hover-proj-b_');
       addTearDown(() => firstDir.delete(recursive: true));
       addTearDown(() => secondDir.delete(recursive: true));
-      final kernels = KernelManager()..register(_HoverKernel(), makeDefault: true);
+      final kernels = KernelManager()
+        ..register(_HoverKernel(), makeDefault: true);
       final cad = DesktopCadController(
         kernels: kernels,
         projects: ProjectManager.instance,
@@ -764,7 +773,10 @@ void main() {
         final adapter = const SketchSceneAdapter();
         for (final entity in [line, arc, spline]) {
           cad.runtime.scene.upsert(
-            adapter.adapt(entity, coordinates: controller.activeSketch!.coordinates),
+            adapter.adapt(
+              entity,
+              coordinates: controller.activeSketch!.coordinates,
+            ),
           );
         }
         final suggestions = [
@@ -873,6 +885,115 @@ void main() {
       }
     },
   );
+
+  test('a T-junction endpoint does not hide the line it lies on', () {
+    final camera = CadCameraController(
+      eye: const Vector3(0, 0, 20),
+      target: Vector3.zero,
+      up: const Vector3(0, 1, 0),
+    )..resize(800, 600);
+    final scene = CadSceneGraph()
+      ..upsert(
+        const CadSceneEntity(
+          id: 'horizontal',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'points': [
+              [-6.0, 0.0, 0.0],
+              [6.0, 0.0, 0.0],
+            ],
+            'showEndpoints': true,
+          },
+        ),
+      )
+      ..upsert(
+        const CadSceneEntity(
+          id: 'vertical',
+          kind: CadSceneEntityKind.sketch,
+          geometry: {
+            'points': [
+              [0.0, 0.0, 0.0],
+              [0.0, 6.0, 0.0],
+            ],
+            'showEndpoints': true,
+          },
+        ),
+      );
+    final picking = ViewportPickingController();
+    final origin = _project(camera, const [0, 0, 0]);
+    final along = _project(camera, const [1, 0, 0]);
+    final delta = along - origin;
+    final hit = picking.pick(
+      position: origin + delta / delta.distance * 4,
+      camera: camera,
+      scene: scene,
+    );
+    expect(hit?.entityId, 'horizontal');
+
+    final left = _project(camera, const [-6, 0, 0]);
+    final inward = origin - left;
+    final ownEnd = picking.pick(
+      position: left + inward / inward.distance * 4,
+      camera: camera,
+      scene: scene,
+    );
+    expect(ownEnd?.entityId, 'horizontal');
+    expect(ownEnd?.hit.point.x, closeTo(-6, 1e-6));
+    expect(ownEnd?.hit.point.y, closeTo(0, 1e-6));
+  });
+
+  test('an exact T junction picks the through-line in either entity order', () {
+    CadSceneEntity horizontal() => const CadSceneEntity(
+      id: 'horizontal',
+      kind: CadSceneEntityKind.sketch,
+      geometry: {
+        'points': [
+          [-6.0, 0.0, 0.0],
+          [6.0, 0.0, 0.0],
+        ],
+        'showEndpoints': true,
+      },
+    );
+    CadSceneEntity vertical() => const CadSceneEntity(
+      id: 'vertical',
+      kind: CadSceneEntityKind.sketch,
+      geometry: {
+        'points': [
+          [0.0, 0.0, 0.0],
+          [0.0, 6.0, 0.0],
+        ],
+        'showEndpoints': true,
+      },
+    );
+    final camera = CadCameraController(
+      eye: const Vector3(0, 0, 20),
+      target: Vector3.zero,
+      up: const Vector3(0, 1, 0),
+    )..resize(800, 600);
+    final origin = _project(camera, const [0, 0, 0]);
+    for (final verticalFirst in [false, true]) {
+      final scene = CadSceneGraph();
+      if (verticalFirst) {
+        scene
+          ..upsert(vertical())
+          ..upsert(horizontal());
+      } else {
+        scene
+          ..upsert(horizontal())
+          ..upsert(vertical());
+      }
+      final hit = ViewportPickingController().pick(
+        position: origin,
+        camera: camera,
+        scene: scene,
+      );
+      expect(
+        hit?.entityId,
+        'horizontal',
+        reason: 'verticalFirst=$verticalFirst',
+      );
+    }
+  });
 }
 
 class _HoverKernel implements GeometryKernelAPI, SurfaceOperationKernelAPI {
