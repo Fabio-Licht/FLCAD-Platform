@@ -77,6 +77,121 @@ void main() {
     }
   });
 
+  testWidgets('Sketch selection panel fits an 800×600 viewport', (
+    tester,
+  ) async {
+    await _openSketch(tester, cad, commands, surfaceSize: const Size(800, 600));
+    final viewport = find.byType(IntegratedCadViewportWidget);
+    expect(viewport, findsOneWidget);
+    final viewportRect = tester.getRect(viewport);
+    expect(viewportRect.width, greaterThanOrEqualTo(200));
+    expect(viewportRect.height, greaterThan(0));
+    expect(viewportRect.left, greaterThanOrEqualTo(0));
+    expect(viewportRect.top, greaterThanOrEqualTo(0));
+    expect(viewportRect.right, lessThanOrEqualTo(800));
+    expect(viewportRect.bottom, lessThanOrEqualTo(600));
+
+    await _beginOffsetFromPanel(tester, _sketchController(tester));
+    expect(
+      find.byKey(const ValueKey('sketch-command-selection-panel')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+    final resizedViewport = tester.getRect(viewport);
+    expect(resizedViewport.width, greaterThanOrEqualTo(200));
+    expect(resizedViewport.height, greaterThan(0));
+    expect(resizedViewport.right, lessThanOrEqualTo(800));
+    expect(resizedViewport.bottom, lessThanOrEqualTo(600));
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'Offset Enter applies, then Save/Open preserves the created geometry',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.22, .50),
+        end: const Offset(.78, .50),
+      );
+      final source = _liveLines(cad).single;
+      final controller = _sketchController(tester);
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(.75);
+      await _tapLine(tester, source);
+      expect(controller.sketchOffsetPreviewValid, isTrue);
+
+      final input = find.byKey(const ValueKey('sketch-edit-offset-0.75'));
+      expect(input, findsOneWidget);
+      await tester.ensureVisible(input);
+      await tester.tap(input);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'execute');
+
+      final generated = _liveLines(
+        cad,
+      ).singleWhere((line) => line.id != source.id);
+      final generatedId = generated.id;
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.entity(generatedId),
+        isNotNull,
+      );
+
+      await _finishSketchFromWidget(tester, commands);
+      await _awaitFuture(tester, commands.saveProject(), 'offset project save');
+      final project = commands.projects.current!;
+      await _awaitFuture(
+        tester,
+        commands.openProject(project),
+        'offset project reopen',
+      );
+      final reopened = cad.runtime.document!.entities[generatedId];
+      expect(reopened, isNotNull);
+      expect(reopened!.data['deleted'], isNot(true));
+      final sketchEntity = Map<String, dynamic>.from(
+        reopened.data['sketchEntity'] as Map,
+      );
+      expect(sketchEntity['type'], SketchEntityType.line.name);
+    },
+  );
+
+  testWidgets(
+    'Offset selection reports rejected disconnected geometry accurately',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.20, .32),
+        end: const Offset(.42, .32),
+      );
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.58, .66),
+        end: const Offset(.80, .66),
+      );
+      final lines = _liveLines(cad);
+      expect(lines, hasLength(2));
+      final controller = _sketchController(tester);
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(.75);
+      await _tapLine(tester, lines.first);
+      await _tapLine(tester, lines.last);
+
+      expect(controller.sketchOffsetPreviewValid, isFalse);
+      expect(controller.sketchEditingDiagnostic, isNotNull);
+      expect(
+        controller.sketchEditingSelectionValidation,
+        controller.sketchEditingDiagnostic,
+      );
+      expect(
+        controller.sketchEditingSelectionValidation,
+        isNot('Entrada válida para Offset.'),
+      );
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+    },
+  );
+
   testWidgets(
     'rectangle button creates four lines with four coincident and four directional constraints',
     (tester) async {
@@ -947,7 +1062,12 @@ void main() {
         expect(cad.runtime.scene.find(id)?.visible, isTrue, reason: id);
       }
 
-      await _reopenSketchFromTree(tester, name: first.data['name'] as String);
+      await _reopenSketchFromTree(
+        tester,
+        cad: cad,
+        id: first.id,
+        name: first.data['name'] as String,
+      );
       expect(
         cad.runtime.selection,
         contains(first.id),
@@ -966,7 +1086,12 @@ void main() {
         );
       }
 
-      await _reopenSketchFromTree(tester, name: second.data['name'] as String);
+      await _reopenSketchFromTree(
+        tester,
+        cad: cad,
+        id: second.id,
+        name: second.data['name'] as String,
+      );
       expect(cad.runtime.selection, contains(second.id));
       for (final id in secondLineIds) {
         expect(cad.runtime.scene.find(id)?.visible, isTrue, reason: id);
@@ -1280,6 +1405,519 @@ void main() {
   });
 
   testWidgets(
+    'Offset Cancel button removes Preview without mutating geometry or history',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.28, .56),
+        end: const Offset(.54, .56),
+      );
+      final controller = _sketchController(tester);
+      final source = _engineLines(cad).single;
+      final sourceSnapshot = _parameterSnapshot(source);
+      final undoDepth = cad.runtime
+          .read<SketchEngineApi>('sketch.api')!
+          .engine
+          .undoDepth;
+      controller.beginSketchEditingTool(SketchToolType.offset);
+      await _openPanel(tester, 'sketch-panel-tab-sketch');
+      await _tapLine(tester, _liveLines(cad).single);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+
+      final cancel = find.widgetWithText(TextButton, 'Cancel');
+      await tester.ensureVisible(cancel);
+      await _settle(tester);
+      await tester.tap(cancel);
+      await _settle(tester);
+
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(controller.sketchEditingCommandActive, isFalse);
+      expect(_engineLines(cad), hasLength(1));
+      expect(_parameterSnapshot(_engineLine(cad, source.id)), sourceSnapshot);
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepth,
+      );
+    },
+  );
+
+  testWidgets(
+    'Offset Escape cancels transient preview without changing Sketch',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.30, .52),
+        end: const Offset(.55, .52),
+      );
+      final controller = _sketchController(tester);
+      final source = _engineLines(cad).single;
+      final sourceSnapshot = _parameterSnapshot(source);
+      final undoDepth = cad.runtime
+          .read<SketchEngineApi>('sketch.api')!
+          .engine
+          .undoDepth;
+      controller.beginSketchEditingTool(SketchToolType.offset);
+      await _openPanel(tester, 'sketch-panel-tab-sketch');
+      await _tapLine(tester, _liveLines(cad).single);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(controller.sketchEditingCommandActive, isFalse);
+      expect(_engineLines(cad), hasLength(1));
+      expect(_parameterSnapshot(_engineLine(cad, source.id)), sourceSnapshot);
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepth,
+      );
+    },
+  );
+
+  testWidgets(
+    'Offset preview Apply creates independent geometry through the real panel callback',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.30, .48),
+        end: const Offset(.55, .48),
+      );
+      final controller = _sketchController(tester);
+      final sourceBefore = _engineLines(cad).single;
+      final sourceSnapshot = _parameterSnapshot(sourceBefore);
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(5.0);
+      await _tapLine(tester, _liveLines(cad).single);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+      expect(
+        _parameterSnapshot(_engineLine(cad, sourceBefore.id)),
+        sourceSnapshot,
+      );
+      expect(_engineLines(cad), hasLength(1));
+
+      final apply = find.widgetWithText(FilledButton, 'Apply Offset');
+      expect(apply, findsOneWidget);
+      final button = tester.widget<FilledButton>(apply);
+      expect(button.onPressed, isNotNull);
+      await tester.ensureVisible(apply);
+      await _settle(tester);
+      await tester.tap(apply);
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'execute');
+      await _settle(tester);
+
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      final lines = _engineLines(cad);
+      expect(lines, hasLength(2));
+      final generated = lines.singleWhere((line) => line.id != sourceBefore.id);
+      expect(generated.metadata['featureType'], 'geometricOffset');
+      expect(generated.metadata['sourceEntityIds'], [sourceBefore.id]);
+      expect(generated.metadata['associative'], isFalse);
+      expect(
+        _parameterSnapshot(_engineLine(cad, sourceBefore.id)),
+        sourceSnapshot,
+      );
+
+      await tester.tap(find.byTooltip('Desfazer'));
+      await _awaitShellAction(tester, cad, commands, 'undo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'undo');
+      expect(_engineLines(cad), hasLength(1));
+      await tester.tap(find.byTooltip('Refazer'));
+      await _awaitShellAction(tester, cad, commands, 'redo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'redo');
+      expect(_engineLines(cad), hasLength(2));
+    },
+  );
+
+  testWidgets(
+    'Offset selects an Arc in the viewport and previews/applies both radius directions',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawCenterArc(
+        tester,
+        const Offset(.5, .5),
+        const Offset(.7, .5),
+        const Offset(.5, .3),
+      );
+      final drawingArc = find.text('Drawing Arc');
+      if (drawingArc.evaluate().isNotEmpty) {
+        final confirmArc = find.ancestor(
+          of: drawingArc,
+          matching: find.byType(FilledButton),
+        );
+        expect(confirmArc, findsOneWidget);
+        await tester.ensureVisible(confirmArc);
+        await tester.tap(confirmArc);
+        await _settle(tester);
+      }
+      final controller = _sketchController(tester);
+      final source = _engineArc(cad);
+      final sourceSnapshot = _parameterSnapshot(source);
+      final radius = (source.parameters['radius'] as num).toDouble();
+      final start = source.parameters['startAngle'] as double;
+      final end = source.parameters['endAngle'] as double;
+      expect(radius, greaterThan(5));
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(5.0);
+      await _tapArc(tester, _liveArc(cad, source.id));
+
+      expect(controller.selectedSketchEntityIds, contains(source.id));
+      final preview = cad.runtime.scene.find('sketch-edit-preview');
+      expect(preview, isNotNull);
+      expect(preview!.geometry['segments'], isNotEmpty);
+      expect(controller.sketchOffsetPreviewValid, isTrue);
+      expect(_parameterSnapshot(_engineArc(cad)), sourceSnapshot);
+
+      Future<void> apply() async {
+        final button = find.widgetWithText(FilledButton, 'Apply Offset');
+        expect(
+          button,
+          findsOneWidget,
+          reason:
+              'panel=${controller.sketchFunctionalPanel}; '
+              'active=${controller.sketchEditingCommandActive}; '
+              'tool=${controller.activeTool}; '
+              'valid=${controller.sketchOffsetPreviewValid}; '
+              'diagnostic=${controller.sketchEditingDiagnostic}',
+        );
+        await tester.ensureVisible(button);
+        await _settle(tester);
+        await tester.tap(button);
+        await _waitForHistory(
+          tester,
+          commands,
+          'reverse.sketch.edit',
+          'execute',
+        );
+        await _settle(tester);
+      }
+
+      await apply();
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      var arcs = _engineArcs(cad);
+      expect(arcs, hasLength(2));
+      var generated = arcs.singleWhere((arc) => arc.id != source.id);
+      expect(generated.parameters['radius'], closeTo(radius - 5, 1e-8));
+      expect(generated.parameters['startAngle'], start);
+      expect(generated.parameters['endAngle'], end);
+      final persistedSceneArc = cad.runtime.scene.find(generated.id);
+      expect(persistedSceneArc, isNotNull);
+      expect(persistedSceneArc!.geometry['points'], isA<List>());
+      expect((persistedSceneArc.geometry['points'] as List).length, 65);
+      expect(
+        _parameterSnapshot(_engineArcById(cad, source.id)),
+        sourceSnapshot,
+      );
+
+      await tester.tap(find.byTooltip('Desfazer'));
+      await _awaitShellAction(tester, cad, commands, 'undo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'undo');
+      expect(_engineArcs(cad), hasLength(1));
+      await tester.tap(find.byTooltip('Refazer'));
+      await _awaitShellAction(tester, cad, commands, 'redo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'redo');
+      expect(_engineArcs(cad), hasLength(2));
+    },
+  );
+
+  testWidgets(
+    'Offset interpolated spline uses the real tool, viewport pick, preview, cancel and Apply callbacks',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _openPanel(tester, 'sketch-panel-tab-sketch');
+      final splineButton = find.widgetWithText(
+        FilledButton,
+        'Spline interpolada',
+      );
+      expect(splineButton, findsOneWidget);
+      await tester.ensureVisible(splineButton);
+      await _settle(tester);
+      await tester.tap(splineButton);
+      await _settle(tester);
+
+      final viewport = find.byType(IntegratedCadViewportWidget);
+      final view = tester.widget<IntegratedCadViewportWidget>(viewport);
+      expect(view.onSketchTap, isNotNull);
+      final coordinates = [
+        const Offset(.25, .62),
+        const Offset(.40, .42),
+        const Offset(.60, .40),
+        const Offset(.76, .60),
+      ];
+      await tester.runAsync(() async {
+        for (final point in coordinates) {
+          view.onSketchTap!(
+            Offset(
+              view.camera.viewportWidth * point.dx,
+              view.camera.viewportHeight * point.dy,
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 90));
+        }
+      });
+      await _settle(tester);
+      final finish = find.widgetWithText(FilledButton, 'Concluir spline');
+      expect(finish, findsOneWidget);
+      await tester.ensureVisible(finish);
+      await _settle(tester);
+      await tester.tap(finish);
+      await _waitForHistory(tester, commands, 'reverse.sketch.draw', 'execute');
+
+      final source = _liveSplines(cad).single;
+      final sourceEntity =
+          cad.runtime.read<SketchEngineApi>('sketch.api')!.entity(source.id)
+              as SketchSpline;
+      final sourceSnapshot = _parameterSnapshot(sourceEntity);
+      final sourceCount = _liveSplines(cad).length;
+      final undoDepth = cad.runtime
+          .read<SketchEngineApi>('sketch.api')!
+          .engine
+          .undoDepth;
+      final controller = _sketchController(tester);
+
+      // Invalid input must reach visible UI feedback and never enable Apply.
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(100000.0);
+      await _tapSpline(tester, source);
+      expect(controller.sketchOffsetPreviewValid, isFalse);
+      expect(controller.sketchEditingDiagnostic, contains('curvature'));
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(const ValueKey('sketch-command-selection-validation')),
+            )
+            .data,
+        controller.sketchEditingDiagnostic,
+      );
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      final disabledApply = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, 'Apply Offset'),
+      );
+      expect(disabledApply.onPressed, isNull);
+      final invalidCancel = find.widgetWithText(TextButton, 'Cancel');
+      await tester.ensureVisible(invalidCancel);
+      await _settle(tester);
+      await tester.tap(invalidCancel);
+      await _settle(tester);
+      expect(_liveSplines(cad), hasLength(sourceCount));
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepth,
+      );
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(.75);
+      await _tapSpline(tester, source);
+      expect(controller.selectedSketchEntityIds, contains(source.id));
+      expect(
+        find.textContaining('Geometria · spline · ${source.id}'),
+        findsOneWidget,
+      );
+      expect(
+        controller.sketchOffsetPreviewValid,
+        isTrue,
+        reason: controller.sketchEditingDiagnostic,
+      );
+      final preview = cad.runtime.scene.find('sketch-edit-preview');
+      expect(preview, isNotNull);
+      expect(preview!.geometry['segments'], isNotEmpty);
+      expect(controller.sketchOffsetSummary, contains('Interpolated spline'));
+      expect(controller.sketchOffsetSummary, contains('sampled max error'));
+      expect(_liveSplines(cad), hasLength(sourceCount));
+      expect(_parameterSnapshot(sourceEntity), sourceSnapshot);
+
+      // Cancel through the actual panel callback; it must clear only the
+      // transient projection and leave geometry/history untouched.
+      final cancel = find.widgetWithText(TextButton, 'Cancel');
+      await tester.ensureVisible(cancel);
+      await _settle(tester);
+      await tester.tap(cancel);
+      await _settle(tester);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(_liveSplines(cad), hasLength(sourceCount));
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepth,
+      );
+      expect(_parameterSnapshot(sourceEntity), sourceSnapshot);
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(.75);
+      await _tapSpline(tester, _liveSpline(cad, source.id));
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(_liveSplines(cad), hasLength(sourceCount));
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepth,
+      );
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(.75);
+      await _tapSpline(tester, _liveSpline(cad, source.id));
+      expect(
+        controller.sketchOffsetPreviewValid,
+        isTrue,
+        reason: controller.sketchEditingDiagnostic,
+      );
+      final apply = find.widgetWithText(FilledButton, 'Apply Offset');
+      await tester.ensureVisible(apply);
+      await _settle(tester);
+      await tester.tap(apply);
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'execute');
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+
+      final splines = _liveSplines(cad);
+      expect(splines, hasLength(sourceCount + 1));
+      final generated = splines.singleWhere((entity) => entity.id != source.id);
+      final generatedSpline =
+          cad.runtime.read<SketchEngineApi>('sketch.api')!.entity(generated.id)
+              as SketchSpline;
+      expect(
+        generatedSpline.parameters['interpolation'],
+        'centripetalCatmullRom',
+      );
+      expect(generatedSpline.metadata['featureType'], 'geometricOffset');
+      expect(generatedSpline.metadata['sourceEntityIds'], [source.id]);
+      expect(generatedSpline.metadata['associative'], isFalse);
+      expect(
+        generatedSpline.metadata['offsetEstimatedMaxErrorMm'],
+        lessThanOrEqualTo(.05),
+      );
+      expect(_parameterSnapshot(sourceEntity), sourceSnapshot);
+      await tester.tap(find.byTooltip('Desfazer'));
+      await _awaitShellAction(tester, cad, commands, 'undo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'undo');
+      expect(_liveSplines(cad), hasLength(sourceCount));
+      await tester.tap(find.byTooltip('Refazer'));
+      await _awaitShellAction(tester, cad, commands, 'redo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'redo');
+      expect(_liveSplines(cad), hasLength(sourceCount + 1));
+    },
+  );
+
+  testWidgets(
+    'Offset Arc direction switch previews and applies the opposite radius',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawCenterArc(
+        tester,
+        const Offset(.5, .5),
+        const Offset(.7, .5),
+        const Offset(.5, .3),
+      );
+      final drawingArc = find.text('Drawing Arc');
+      if (drawingArc.evaluate().isNotEmpty) {
+        final confirmArc = find.ancestor(
+          of: drawingArc,
+          matching: find.byType(FilledButton),
+        );
+        await tester.ensureVisible(confirmArc);
+        await tester.tap(confirmArc);
+        await _settle(tester);
+      }
+      final controller = _sketchController(tester);
+      final source = _engineArc(cad);
+      final sourceSnapshot = _parameterSnapshot(source);
+      final radius = (source.parameters['radius'] as num).toDouble();
+      final start = source.parameters['startAngle'] as double;
+      final end = source.parameters['endAngle'] as double;
+      expect(radius, greaterThan(5));
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(5.0);
+      final invert = find.widgetWithText(
+        SwitchListTile,
+        'Invert offset direction',
+      );
+      await tester.ensureVisible(invert);
+      await _settle(tester);
+      await tester.tap(invert);
+      await _settle(tester);
+      await _tapArc(tester, _liveArc(cad, source.id));
+      expect(controller.selectedSketchEntityIds, contains(source.id));
+      expect(
+        find.textContaining('Geometria · arc · ${source.id}'),
+        findsOneWidget,
+      );
+      expect(controller.sketchOffsetPreviewValid, isTrue);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+      expect(_parameterSnapshot(_engineArc(cad)), sourceSnapshot);
+
+      final arcCountBeforeCancel = _engineArcs(cad).length;
+      final undoDepthBeforeCancel = cad.runtime
+          .read<SketchEngineApi>('sketch.api')!
+          .engine
+          .undoDepth;
+      final cancel = find.widgetWithText(TextButton, 'Cancel');
+      await tester.ensureVisible(cancel);
+      await _settle(tester);
+      await tester.tap(cancel);
+      await _settle(tester);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(_engineArcs(cad), hasLength(arcCountBeforeCancel));
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepthBeforeCancel,
+      );
+      expect(_parameterSnapshot(_engineArc(cad)), sourceSnapshot);
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(5.0);
+      await _tapArc(tester, _liveArc(cad, source.id));
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      expect(_engineArcs(cad), hasLength(arcCountBeforeCancel));
+      expect(
+        cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.undoDepth,
+        undoDepthBeforeCancel,
+      );
+
+      await _beginOffsetFromPanel(tester, controller);
+      controller.setSketchEditingValue(5.0);
+      final secondInvert = find.widgetWithText(
+        SwitchListTile,
+        'Invert offset direction',
+      );
+      await tester.ensureVisible(secondInvert);
+      await _settle(tester);
+      await tester.tap(secondInvert);
+      await _settle(tester);
+      await _tapArc(tester, _liveArc(cad, source.id));
+      expect(controller.sketchOffsetPreviewValid, isTrue);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNotNull);
+
+      final button = find.widgetWithText(FilledButton, 'Apply Offset');
+      expect(button, findsOneWidget);
+      await tester.ensureVisible(button);
+      await _settle(tester);
+      await tester.tap(button);
+      await _waitForHistory(tester, commands, 'reverse.sketch.edit', 'execute');
+      await _settle(tester);
+
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+      final arcs = _engineArcs(cad);
+      expect(arcs, hasLength(2));
+      final generated = arcs.singleWhere((arc) => arc.id != source.id);
+      expect(generated.parameters['radius'], closeTo(radius + 5, 1e-8));
+      expect(generated.parameters['startAngle'], start);
+      expect(generated.parameters['endAngle'], end);
+      expect(
+        _parameterSnapshot(_engineArcById(cad, source.id)),
+        sourceSnapshot,
+      );
+    },
+  );
+
+  testWidgets(
     'Fillet preview Confirm persists an arc through the real button callback',
     (tester) async {
       await _openSketch(tester, cad, commands);
@@ -1440,6 +2078,255 @@ void main() {
               .abs();
       expect(reopenedSweep, closeTo(math.pi / 2, 1e-8));
       expect(cad.runtime.scene.find(reopened.id)?.visible, isNot(false));
+    },
+  );
+
+  testWidgets(
+    'command selection panel mirrors ordered viewport picks and removal callbacks',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.30, .46),
+        end: const Offset(.52, .46),
+      );
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.52, .46),
+        end: const Offset(.52, .68),
+      );
+      final controller = _sketchController(tester);
+      await _beginEditingTool(tester, 'Fillet');
+      controller.setSketchEditingValue(5.0);
+      await _settle(tester);
+
+      final lines = _liveLines(cad);
+      await _tapLine(tester, lines[0]);
+      await _tapLine(tester, lines[1]);
+
+      final ids = controller.sketchEditingSelectionOrder;
+      expect(ids, [lines[0].id, lines[1].id]);
+      expect(cad.runtime.selection, ids.toSet());
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Referência e alvo prontos.',
+      );
+      expect(
+        find.byKey(const ValueKey('sketch-command-selection-panel')),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Referência · line · ${lines[0].id}'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Alvo · line · ${lines[1].id}'),
+        findsOneWidget,
+      );
+
+      await _tapLine(tester, lines[0]);
+      expect(
+        controller.sketchEditingDiagnostic,
+        'A entidade ${lines[0].id} já está selecionada para este comando.',
+      );
+      expect(controller.sketchEditingSelectionOrder, ids);
+      expect(cad.runtime.selection.toList(), ids);
+
+      final firstSelectionLabel = find.byKey(
+        ValueKey('sketch-command-selection-label-${lines[0].id}'),
+      );
+      await tester.ensureVisible(firstSelectionLabel);
+      await tester.tap(firstSelectionLabel);
+      await _settle(tester);
+      expect(controller.sketchEditingSelectionOrder, ids);
+      expect(cad.runtime.selection, ids.toSet());
+
+      final removeSecond = find.byKey(
+        ValueKey('sketch-command-selection-remove-${lines[1].id}'),
+      );
+      await tester.ensureVisible(removeSecond);
+      await tester.tap(removeSecond);
+      await _settle(tester);
+      expect(controller.sketchEditingSelectionOrder, [lines[0].id]);
+      expect(cad.runtime.selection, {lines[0].id});
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Selecione duas linhas; referência primeiro.',
+      );
+
+      final clearSelection = find.byKey(
+        const ValueKey('sketch-command-selection-clear'),
+      );
+      await tester.ensureVisible(clearSelection);
+      await tester.tap(clearSelection);
+      await _settle(tester);
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      expect(cad.runtime.selection, isEmpty);
+      expect(cad.runtime.scene.find('sketch-edit-preview'), isNull);
+    },
+  );
+
+  testWidgets(
+    'Chamfer selection panel preserves reference and target viewport order',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.30, .46),
+        end: const Offset(.52, .46),
+      );
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.52, .46),
+        end: const Offset(.52, .68),
+      );
+      final controller = _sketchController(tester);
+      await _beginEditingTool(tester, 'Chamfer');
+      controller.setSketchEditingValue(5.0);
+
+      final lines = _liveLines(cad);
+      await _tapLine(tester, lines[0]);
+      await _tapLine(tester, lines[1]);
+
+      expect(controller.activeTool, SketchToolType.chamfer);
+      expect(controller.sketchEditingSelectionOrder, [
+        lines[0].id,
+        lines[1].id,
+      ]);
+      expect(cad.runtime.selection, {lines[0].id, lines[1].id});
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Referência e alvo prontos.',
+      );
+      expect(
+        find.textContaining('Referência · line · ${lines[0].id}'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Alvo · line · ${lines[1].id}'),
+        findsOneWidget,
+      );
+
+      final removeReference = find.byKey(
+        ValueKey('sketch-command-selection-remove-${lines[0].id}'),
+      );
+      await tester.ensureVisible(removeReference);
+      await tester.tap(removeReference);
+      await _settle(tester);
+      expect(controller.sketchEditingSelectionOrder, [lines[1].id]);
+      expect(cad.runtime.selection, {lines[1].id});
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Selecione duas linhas; referência primeiro.',
+      );
+    },
+  );
+
+  testWidgets(
+    'Trim and Extend panel follow actual viewport picks and tool changes',
+    (tester) async {
+      await _openSketch(tester, cad, commands);
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.22, .50),
+        end: const Offset(.78, .50),
+      );
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.50, .28),
+        end: const Offset(.50, .74),
+      );
+      final lines = _liveLines(cad);
+      final vertical = lines.singleWhere((line) => !_isHorizontal(line));
+      final before = _sceneEnds(vertical);
+      final controller = _sketchController(tester);
+
+      await _beginEditingTool(tester, 'Trim');
+      await _tapWorldPoint(tester, _mix(before[0], before[1], .30));
+      expect(controller.sketchEditingSelectionOrder, [vertical.id]);
+      expect(cad.runtime.selection, {vertical.id});
+      expect(
+        find.textContaining('Primeiro trecho · line · ${vertical.id}'),
+        findsOneWidget,
+      );
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Primeiro trecho selecionado; selecione o segundo lado.',
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('sketch-command-selection-clear')),
+      );
+      await _settle(tester);
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      expect(cad.runtime.selection, isEmpty);
+
+      await _beginEditingTool(tester, 'Extend');
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      final extendIds = _liveLines(cad).map((line) => line.id).toSet();
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.18, .30),
+        end: const Offset(.32, .30),
+      );
+      await _drawOpenLine(
+        tester,
+        start: const Offset(.62, .20),
+        end: const Offset(.62, .42),
+      );
+      final extendLines = _liveLines(
+        cad,
+      ).where((line) => !extendIds.contains(line.id)).toList(growable: false);
+      final target = extendLines.singleWhere(_isHorizontal);
+      final boundary = extendLines.singleWhere((line) => !_isHorizontal(line));
+      final targetLength = _lineLength(target);
+      final editsBeforeExtend = _historyCount(commands, 'reverse.sketch.edit');
+      // Drawing the fixture exits Extend; re-enter so the real edit command
+      // receives both picks in target/reference order.
+      await _beginEditingTool(tester, 'Extend');
+      await _tapLine(tester, target);
+      expect(controller.sketchEditingSelectionOrder, [target.id]);
+      expect(cad.runtime.selection, {target.id});
+      expect(
+        find.textContaining('Linha alvo · line · ${target.id}'),
+        findsOneWidget,
+      );
+      expect(
+        controller.sketchEditingSelectionValidation,
+        'Selecione a linha alvo e depois a referência de limite.',
+      );
+
+      await _tapLine(tester, boundary);
+      await _waitForTrim(tester, commands, editsBeforeExtend + 1);
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      expect(cad.runtime.selection, isEmpty);
+      expect(_lineLength(_liveLine(cad, target.id)), greaterThan(targetLength));
+      expect(_sceneEnds(_liveLine(cad, boundary.id)), isNotEmpty);
+      expect(
+        _samePointSet(_sceneEnds(_liveLine(cad, vertical.id)), before),
+        isTrue,
+      );
+
+      await _tapLine(tester, boundary);
+      expect(controller.sketchEditingSelectionOrder, [boundary.id]);
+      expect(cad.runtime.selection, {boundary.id});
+      await tester.sendKeyEvent(LogicalKeyboardKey.delete);
+      await _waitForHistory(
+        tester,
+        commands,
+        'reverse.sketch.delete',
+        'execute',
+      );
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      expect(cad.runtime.selection, isEmpty);
+      expect(_liveLines(cad).any((line) => line.id == boundary.id), isFalse);
+
+      await tester.tap(find.byTooltip('Desfazer'));
+      await _awaitShellAction(tester, cad, commands, 'undo');
+      await _waitForHistory(tester, commands, 'reverse.sketch.delete', 'undo');
+      expect(_liveLines(cad).any((line) => line.id == boundary.id), isTrue);
+      expect(controller.sketchEditingSelectionOrder, isEmpty);
+      expect(cad.runtime.selection, isEmpty);
     },
   );
 
@@ -2778,9 +3665,10 @@ void main() {
 Future<void> _openSketch(
   WidgetTester tester,
   DesktopCadController cad,
-  DesktopCommandCoordinator commands,
-) async {
-  await tester.binding.setSurfaceSize(const Size(1440, 900));
+  DesktopCommandCoordinator commands, {
+  Size surfaceSize = const Size(1440, 900),
+}) async {
+  await tester.binding.setSurfaceSize(surfaceSize);
   addTearDown(() => tester.binding.setSurfaceSize(null));
   await tester.pumpWidget(
     MaterialApp(
@@ -3259,6 +4147,30 @@ Future<void> _openPanel(WidgetTester tester, String key) async {
   await _settle(tester);
 }
 
+Future<void> _beginOffsetFromPanel(
+  WidgetTester tester,
+  dynamic controller,
+) async {
+  await _openPanel(tester, 'sketch-panel-tab-sketch');
+  var offsetTool = find.byTooltip('Offset');
+  if (offsetTool.evaluate().isEmpty) {
+    final modify = find.text('Modify');
+    expect(modify, findsOneWidget);
+    await tester.ensureVisible(modify);
+    await _settle(tester);
+    await tester.tap(modify);
+    await _settle(tester);
+    offsetTool = find.byTooltip('Offset');
+  }
+  expect(offsetTool, findsOneWidget);
+  await tester.ensureVisible(offsetTool);
+  await _settle(tester);
+  await tester.tap(offsetTool);
+  await _settle(tester);
+  expect(controller.sketchEditingCommandActive, isTrue);
+  expect(controller.activeTool, SketchToolType.offset);
+}
+
 Future<void> _finishSketchFromWidget(
   WidgetTester tester,
   DesktopCommandCoordinator commands,
@@ -3305,6 +4217,8 @@ Future<void> _openNewSketchFromWidget(
 
 Future<void> _reopenSketchFromTree(
   WidgetTester tester, {
+  required DesktopCadController cad,
+  required String id,
   required String name,
 }) async {
   final project = find.byKey(const ValueKey('workspace-project-root'));
@@ -3329,10 +4243,18 @@ Future<void> _reopenSketchFromTree(
   );
   expect(target, findsWidgets);
   await tester.runAsync(() async {
-    tester.widget<GestureDetector>(target.first).onDoubleTap!();
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    final callback = tester.widget<GestureDetector>(target.first).onDoubleTap!;
+    final pending = Function.apply(callback, const []);
+    if (pending is Future<void>) await pending;
   });
   await _settle(tester);
+  expect(cad.runtime.read<Sketch>('sketch.active')?.id, id);
+  expect(
+    cad.runtime.selection,
+    contains(id),
+    reason:
+        'Sketch reopen must complete before assertions; status=${cad.message}',
+  );
 }
 
 Future<void> _tapConstraint(WidgetTester tester, String label) async {
@@ -3509,6 +4431,38 @@ Future<void> _tapLine(WidgetTester tester, CadDocumentEntity line) async {
   final end = _vector(points.last);
   final mid = (start + end) * .5;
   final projected = widget.camera.viewProjectionMatrix.transformPoint(mid);
+  final local = Offset(
+    (projected.x + 1) * box.width / 2,
+    (1 - projected.y) * box.height / 2,
+  );
+  await tester.tapAt(box.topLeft + local);
+  await _settle(tester);
+}
+
+Future<void> _tapArc(WidgetTester tester, CadDocumentEntity arc) async {
+  final viewport = find.byType(IntegratedCadViewportWidget);
+  final widget = tester.widget<IntegratedCadViewportWidget>(viewport);
+  final box = tester.getRect(viewport);
+  final points = (arc.data['sceneGeometry'] as Map)['points'] as List;
+  expect(points.length, greaterThan(3));
+  final point = _vector(points[points.length ~/ 2]);
+  final projected = widget.camera.viewProjectionMatrix.transformPoint(point);
+  final local = Offset(
+    (projected.x + 1) * box.width / 2,
+    (1 - projected.y) * box.height / 2,
+  );
+  await tester.tapAt(box.topLeft + local);
+  await _settle(tester);
+}
+
+Future<void> _tapSpline(WidgetTester tester, CadDocumentEntity spline) async {
+  final viewport = find.byType(IntegratedCadViewportWidget);
+  final widget = tester.widget<IntegratedCadViewportWidget>(viewport);
+  final box = tester.getRect(viewport);
+  final points = (spline.data['sceneGeometry'] as Map)['points'] as List;
+  expect(points.length, greaterThan(4));
+  final point = _vector(points[points.length ~/ 2]);
+  final projected = widget.camera.viewProjectionMatrix.transformPoint(point);
   final local = Offset(
     (projected.x + 1) * box.width / 2,
     (1 - projected.y) * box.height / 2,
@@ -3757,6 +4711,29 @@ List<CadDocumentEntity> _liveLines(DesktopCadController cad) =>
         .toList(growable: false) ??
     const [];
 
+List<CadDocumentEntity> _liveSplines(DesktopCadController cad) =>
+    cad.runtime.document?.entities.values
+        .where(
+          (entity) =>
+              entity.data['deleted'] != true &&
+              entity.data['sketchEntity'] is Map &&
+              (entity.data['sketchEntity'] as Map)['type'] == 'spline',
+        )
+        .toList(growable: false) ??
+    const [];
+
+CadDocumentEntity _liveSpline(DesktopCadController cad, String id) =>
+    _liveSplines(cad).singleWhere((spline) => spline.id == id);
+
+CadDocumentEntity _liveArc(DesktopCadController cad, String id) =>
+    cad.runtime.document!.entities.values.singleWhere(
+      (entity) =>
+          entity.id == id &&
+          entity.data['deleted'] != true &&
+          entity.data['sketchEntity'] is Map &&
+          (entity.data['sketchEntity'] as Map)['type'] == 'arc',
+    );
+
 List<CadDocumentEntity> _liveCoincidents(DesktopCadController cad) =>
     cad.runtime.document?.entities.values
         .where(
@@ -3894,6 +4871,18 @@ SketchArc _engineArc(DesktopCadController cad) => cad.runtime
     .values
     .whereType<SketchArc>()
     .single;
+
+SketchArc _engineArcById(DesktopCadController cad, String id) =>
+    cad.runtime.read<SketchEngineApi>('sketch.api')!.engine.entities[id]!
+        as SketchArc;
+
+List<SketchArc> _engineArcs(DesktopCadController cad) => cad.runtime
+    .read<SketchEngineApi>('sketch.api')!
+    .engine
+    .entities
+    .values
+    .whereType<SketchArc>()
+    .toList(growable: false);
 
 List<SketchLine> _engineLines(DesktopCadController cad) => cad.runtime
     .read<SketchEngineApi>('sketch.api')!

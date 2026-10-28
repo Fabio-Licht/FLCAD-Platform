@@ -5,6 +5,7 @@ import '../../sketch_constraints/api/constraint_api.dart';
 import '../../sketch_constraints/models/constraint_models.dart';
 import '../../sketch_engine/api/sketch_engine_api.dart';
 import '../../sketch_engine/entities/sketch_entities.dart';
+import '../../sketch_engine/geometry/sketch_spline_geometry.dart';
 import '../../sketch_engine/history/sketch_history.dart';
 import '../../sketch_engine/models/sketch_models.dart';
 import '../analytics/editor_analytics.dart';
@@ -13,6 +14,7 @@ import '../editing/degrees_of_freedom.dart';
 import '../graph/editor_graph.dart';
 import '../history/editor_history.dart';
 import '../integration/sketch_advisor.dart';
+import '../geometry/sketch_offset_geometry.dart';
 import '../models/editor_models.dart';
 import '../preview/preview_engine.dart';
 import '../repository/editor_repository.dart';
@@ -345,6 +347,10 @@ class SketchEditorEngine {
       throw StateError('Editing requires preview before confirmation');
     }
     final op = preview.confirm(preview.active.last.id), targets = ids.toList();
+    if (tool == SketchToolType.offset) {
+      _commitOffset(op, targets, value, parameters: parameters);
+      return;
+    }
     final affectedConstraints = constraints.constraints
         .where(
           (constraint) => constraint.references.any((reference) {
@@ -423,7 +429,7 @@ class SketchEditorEngine {
               ),
             );
           case SketchToolType.offset:
-            _offset(id, value);
+            throw StateError('Offset must be committed as a geometry result.');
           case SketchToolType.trim:
             _trimOrExtend(id, _vector(parameters['point']), trim: true);
           case SketchToolType.extend:
@@ -460,6 +466,83 @@ class SketchEditorEngine {
     _rememberUndo(sketch.engine.history.entries.length - historyBefore);
     history.record(EditorHistoryAction.edit, op.id);
     analytics.editCount++;
+  }
+
+  void _commitOffset(
+    EditorOperation operation,
+    List<String> sourceIds,
+    double distance, {
+    required Map<String, dynamic> parameters,
+  }) {
+    final sources = sourceIds
+        .map(
+          (id) =>
+              sketch.entity(id) ?? (throw StateError('Unknown entity: $id')),
+        )
+        .toList(growable: false);
+    final historyBefore = sketch.engine.history.entries.length;
+    final created = <SketchEntity>[];
+    try {
+      sketch.engine.transaction('editor-offset:${operation.id}', () {
+        final curves = SketchOffsetGeometry.calculate(
+          sources,
+          distance: distance,
+          outward: parameters['outward'] as bool? ?? true,
+        );
+        for (final curve in curves) {
+          final entity = switch (curve) {
+            SketchOffsetLine(:final start, :final end) =>
+              sketch.builders.line.build(start, end),
+            SketchOffsetArc(
+              :final center,
+              :final radius,
+              :final startAngle,
+              :final endAngle,
+            ) =>
+              sketch.builders.arc.build(center, radius, startAngle, endAngle),
+            SketchOffsetCircle(:final center, :final radius) =>
+              sketch.builders.circle.build(center, radius),
+            SketchOffsetEllipse(
+              :final center,
+              :final radiusX,
+              :final radiusY,
+            ) =>
+              sketch.builders.ellipse.build(center, radiusX, radiusY),
+            SketchOffsetSpline(:final points, :final estimatedMaxErrorMm) =>
+              sketch.builders.spline.build(points)
+                ..parameters['sampledPoints'] =
+                    SketchSplineGeometry.interpolate(
+                      points,
+                      samplesPerSpan: 64,
+                    ).map((point) => point.toJson()).toList(growable: false)
+                ..metadata['offsetEstimatedMaxErrorMm'] = estimatedMaxErrorMm,
+          };
+          entity.metadata.addAll({
+            'featureType': 'geometricOffset',
+            'offsetDistance': distance.abs(),
+            'offsetOutward': parameters['outward'] as bool? ?? true,
+            if (curve case SketchOffsetSpline(:final signedDistanceMm))
+              'offsetSignedDistanceMm': signedDistanceMm,
+            'sourceEntityIds': sourceIds,
+            'associative': false,
+            'authoringWorkspace': 'Sketch',
+          });
+          created.add(entity);
+        }
+      });
+      final createdIds = created
+          .map((entity) => entity.id)
+          .toList(growable: false);
+      graph.record(operation.id, createdIds);
+      _rememberUndo(sketch.engine.history.entries.length - historyBefore);
+      history.record(EditorHistoryAction.edit, operation.id);
+      analytics.editCount++;
+      analytics.entities = sketch.engine.entities.length;
+    } catch (_) {
+      operation.status = EditorOperationStatus.failed;
+      history.record(EditorHistoryAction.rollback, operation.id);
+      rethrow;
+    }
   }
 
   bool undo() {
@@ -970,66 +1053,6 @@ class SketchEditorEngine {
     sketch.engine.modify(id, SketchHistoryAction.modify, (value) {
       final point = SketchVector.fromJson(value.parameters[endpoint]);
       value.parameters[endpoint] = (point + delta).toJson();
-    });
-  }
-
-  void _offset(String id, double distance) {
-    sketch.engine.modify(id, SketchHistoryAction.modify, (entity) {
-      if (entity is SketchLine) {
-        final start = SketchVector.fromJson(entity.parameters['start']);
-        final end = SketchVector.fromJson(entity.parameters['end']);
-        final dx = end.x - start.x, dy = end.y - start.y;
-        final length = math.sqrt(dx * dx + dy * dy);
-        if (length <= 1e-12) {
-          throw StateError('Cannot offset a degenerate line.');
-        }
-        final shift = SketchVector(
-          -dy / length * distance,
-          dx / length * distance,
-        );
-        entity.parameters['start'] = (start + shift).toJson();
-        entity.parameters['end'] = (end + shift).toJson();
-      } else if (entity is SketchCircle || entity is SketchArc) {
-        final radius =
-            (entity.parameters['radius'] as num).toDouble() + distance;
-        if (radius <= 0) throw StateError('Offset collapses the radius.');
-        entity.parameters['radius'] = radius;
-      } else if (entity is SketchEllipse) {
-        final rx = (entity.parameters['radiusX'] as num).toDouble() + distance;
-        final ry = (entity.parameters['radiusY'] as num).toDouble() + distance;
-        if (rx <= 0 || ry <= 0) {
-          throw StateError('Offset collapses the ellipse.');
-        }
-        entity.parameters['radiusX'] = rx;
-        entity.parameters['radiusY'] = ry;
-      } else if (entity is SketchSpline) {
-        final points = (entity.parameters['points'] as List)
-            .map(SketchVector.fromJson)
-            .toList();
-        if (points.length < 2) throw StateError('Spline has too few points.');
-        final shifted = <SketchVector>[];
-        for (var i = 0; i < points.length; i++) {
-          final before = points[i == 0 ? i : i - 1];
-          final after = points[i == points.length - 1 ? i : i + 1];
-          final dx = after.x - before.x, dy = after.y - before.y;
-          final length = math.sqrt(dx * dx + dy * dy);
-          shifted.add(
-            length <= 1e-12
-                ? points[i]
-                : points[i] +
-                      SketchVector(
-                        -dy / length * distance,
-                        dx / length * distance,
-                      ),
-          );
-        }
-        entity.parameters['points'] = shifted
-            .map((point) => point.toJson())
-            .toList();
-        entity.parameters.remove('sampledPoints');
-      } else {
-        throw StateError('Offset is unavailable for ${entity.type.name}.');
-      }
     });
   }
 

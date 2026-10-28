@@ -7,6 +7,71 @@ import '../models/sketch_models.dart';
 class SketchSplineGeometry {
   const SketchSplineGeometry._();
 
+  /// Evaluates the canonical centripetal Catmull–Rom interpolation on one
+  /// span. [u] is clamped to the span's [0, 1] domain.
+  static SketchVector evaluateSpan(
+    List<SketchVector> knots,
+    int span,
+    double u,
+  ) {
+    if (knots.length < 2 || span < 0 || span >= knots.length - 1) {
+      throw ArgumentError('Spline span is outside the curve domain.');
+    }
+    if (!u.isFinite) throw ArgumentError('Spline parameter must be finite.');
+    final value = u.clamp(0.0, 1.0);
+    if (knots.length == 2) {
+      return knots[span] + (knots[span + 1] - knots[span]).scale(value);
+    }
+    final p1 = knots[span], p2 = knots[span + 1];
+    final p0 = span == 0 ? p1 + (p1 - p2) : knots[span - 1];
+    final p3 = span + 2 == knots.length ? p2 + (p2 - p1) : knots[span + 2];
+    final t0 = 0.0;
+    final t1 = t0 + math.sqrt(_distance(p0, p1));
+    final t2 = t1 + math.sqrt(_distance(p1, p2));
+    final t3 = t2 + math.sqrt(_distance(p2, p3));
+    final t = t1 + (t2 - t1) * value;
+    final a1 = _blend(p0, p1, t0, t1, t);
+    final a2 = _blend(p1, p2, t1, t2, t);
+    final a3 = _blend(p2, p3, t2, t3, t);
+    final b1 = _blend(a1, a2, t0, t2, t);
+    final b2 = _blend(a2, a3, t1, t3, t);
+    return _blend(b1, b2, t1, t2, t);
+  }
+
+  /// Numerically estimates the first and second derivatives within a span.
+  /// These are local-parameter derivatives; curvature computed from them is
+  /// invariant to the span's linear parameter scale.
+  static ({SketchVector first, SketchVector second}) derivativesAtSpan(
+    List<SketchVector> knots,
+    int span,
+    double u,
+  ) {
+    const h = 1e-4;
+    final t = u.clamp(0.0, 1.0);
+    if (t < h) {
+      final p0 = evaluateSpan(knots, span, t);
+      final p1 = evaluateSpan(knots, span, math.min(1, t + h));
+      final p2 = evaluateSpan(knots, span, math.min(1, t + 2 * h));
+      final first = (p0.scale(-3) + p1.scale(4) - p2).scale(1 / (2 * h));
+      final second = (p0 - p1.scale(2) + p2).scale(1 / (h * h));
+      return (first: first, second: second);
+    }
+    if (t > 1 - h) {
+      final p0 = evaluateSpan(knots, span, t);
+      final p1 = evaluateSpan(knots, span, math.max(0, t - h));
+      final p2 = evaluateSpan(knots, span, math.max(0, t - 2 * h));
+      final first = (p0.scale(3) - p1.scale(4) + p2).scale(1 / (2 * h));
+      final second = (p0 - p1.scale(2) + p2).scale(1 / (h * h));
+      return (first: first, second: second);
+    }
+    final p = evaluateSpan(knots, span, t);
+    final before = evaluateSpan(knots, span, t - h);
+    final after = evaluateSpan(knots, span, t + h);
+    final first = (after - before).scale(1 / (2 * h));
+    final second = (after - p.scale(2) + before).scale(1 / (h * h));
+    return (first: first, second: second);
+  }
+
   static List<SketchVector> interpolate(
     List<SketchVector> knots, {
     int samplesPerSpan = 24,

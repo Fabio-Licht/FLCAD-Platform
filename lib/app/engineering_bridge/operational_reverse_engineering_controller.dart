@@ -63,6 +63,7 @@ import '../../core/sketch_editor/inferencing/sketch_inference_engine.dart';
 import '../../core/sketch_editor/health/sketch_health_analyzer.dart';
 import '../../core/sketch_editor/regions/sketch_region_classifier.dart';
 import '../../core/sketch_editor/models/editor_models.dart';
+import '../../core/sketch_editor/geometry/sketch_offset_geometry.dart';
 import '../../core/sketch_editor/snapping/editor_snapping.dart';
 import '../../core/sketch_editor/snapping/sketch_coordinate_magnet.dart';
 import '../../core/sketch_assistant/sketch_assistant.dart';
@@ -641,6 +642,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     );
     _historyCleanupCallback = () async {
       if (hasRecognitionSelection) clearRecognitionSelection();
+      _reconcileSketchEditingSelectionAfterHistory();
     };
     runtime.write<Future<void> Function()>(
       'history.afterUndo',
@@ -4024,6 +4026,160 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
 
   Set<String> get selectedSketchEntityIds =>
       runtime.readOrCreate('sketch.selectedIds', () => <String>{});
+
+  /// The command consumes the same insertion-ordered Set used by viewport
+  /// picks. This view is for presentation only; it is not another selection
+  /// store and preserves reference/target order for Fillet, Chamfer and Extend.
+  List<String> get sketchEditingSelectionOrder =>
+      List<String>.unmodifiable(selectedSketchEntityIds);
+
+  SketchEntity? sketchEditingSelectionEntity(String id) =>
+      selectedSketchEntityIds.contains(id) ? sketchApi?.entity(id) : null;
+
+  String get sketchEditingSelectionValidation {
+    if (!sketchEditingCommandActive) return '';
+    final ids = sketchEditingSelectionOrder;
+    if (ids.any((id) => sketchApi?.entity(id) == null)) {
+      return 'A seleção contém uma entidade que não existe mais no Sketch.';
+    }
+    final entities = ids
+        .map((id) => sketchApi?.entity(id))
+        .whereType<SketchEntity>()
+        .toList(growable: false);
+    switch (activeTool) {
+      case SketchToolType.offset:
+        if (entities.any(
+          (entity) => !const {
+            SketchEntityType.line,
+            SketchEntityType.arc,
+            SketchEntityType.circle,
+            SketchEntityType.ellipse,
+            SketchEntityType.spline,
+          }.contains(entity.type),
+        )) {
+          return 'Offset não aceita um dos tipos selecionados.';
+        }
+        return entities.isEmpty
+            ? 'Selecione uma geometria ou uma cadeia de linhas.'
+            : sketchOffsetPreviewValid
+            ? 'Entrada válida para Offset.'
+            : sketchEditingDiagnostic ?? 'Preview de Offset inválido.';
+      case SketchToolType.fillet:
+      case SketchToolType.chamfer:
+        if (entities.any((entity) => entity is! SketchLine)) {
+          return '${activeTool.name} exige linhas; remova a entidade incompatível.';
+        }
+        if (entities.length < 2) {
+          return 'Selecione duas linhas; referência primeiro.';
+        }
+        if (entities.length > 2) {
+          return 'Remova linhas extras; o comando aceita duas.';
+        }
+        return 'Referência e alvo prontos.';
+      case SketchToolType.trim:
+        if (entities.any((entity) => entity is! SketchLine)) {
+          return 'Trim atualmente exige uma linha.';
+        }
+        final firstId = runtime.read<String>('sketch.trim.firstId');
+        return firstId == null
+            ? 'Selecione um trecho; para manter lados, selecione dois.'
+            : 'Primeiro trecho selecionado; selecione o segundo lado.';
+      case SketchToolType.extend:
+        if (entities.any((entity) => entity is! SketchLine)) {
+          return 'Extend exige a linha alvo e uma linha de limite.';
+        }
+        if (entities.length > 2) {
+          return 'Remova entidades extras; Extend aceita duas linhas.';
+        }
+        return entities.length < 2
+            ? 'Selecione a linha alvo e depois a referência de limite.'
+            : 'Alvo e referência prontos.';
+      default:
+        return 'Seleção não suportada por este comando.';
+    }
+  }
+
+  String sketchEditingSelectionRole(int index) => switch (activeTool) {
+    SketchToolType.fillet ||
+    SketchToolType.chamfer => index == 0 ? 'Referência' : 'Alvo',
+    SketchToolType.extend => index == 0 ? 'Linha alvo' : 'Limite',
+    SketchToolType.trim =>
+      index < sketchEditingSelectionOrder.length &&
+              runtime.read<String>('sketch.trim.firstId') ==
+                  sketchEditingSelectionOrder[index]
+          ? 'Primeiro trecho'
+          : 'Trecho',
+    SketchToolType.offset when sketchEditingSelectionOrder.length > 1 =>
+      'Cadeia ${index + 1}',
+    SketchToolType.offset => 'Geometria',
+    _ => 'Entrada ${index + 1}',
+  };
+
+  /// Reassert the command's canonical selection as viewport highlight only.
+  void focusSketchEditingSelection(String id) {
+    if (!sketchEditingCommandActive ||
+        !selectedSketchEntityIds.contains(id) ||
+        sketchApi?.entity(id) == null) {
+      return;
+    }
+    runtime.select(selectedSketchEntityIds);
+    notifyListeners();
+  }
+
+  void removeSketchEditingSelection(String id) {
+    if (!sketchEditingCommandActive || !selectedSketchEntityIds.remove(id)) {
+      return;
+    }
+    if (runtime.read<String>('sketch.trim.firstId') == id) {
+      runtime.write('sketch.trim.firstId', null);
+      runtime.write('sketch.trim.firstPoint', null);
+    }
+    _refreshSketchEditingSelection();
+  }
+
+  void clearSketchEditingSelection() {
+    if (!sketchEditingCommandActive) return;
+    selectedSketchEntityIds.clear();
+    runtime.write('sketch.trim.firstId', null);
+    runtime.write('sketch.trim.firstPoint', null);
+    runtime.write('sketch.edit.diagnostic', null);
+    runtime.hideTransient('sketch-edit-preview');
+    runtime.write('sketch.offset.previewValid', false);
+    runtime.write('sketch.offset.summary', null);
+    runtime.select(const <String>{});
+    notifyListeners();
+  }
+
+  void _refreshSketchEditingSelection() {
+    runtime.write('sketch.edit.diagnostic', null);
+    runtime.select(selectedSketchEntityIds);
+    if (activeTool == SketchToolType.offset) {
+      _updateSketchOffsetPreview();
+    } else if (activeTool == SketchToolType.fillet ||
+        activeTool == SketchToolType.chamfer) {
+      if (selectedSketchEntityIds.length == 2) {
+        _updateSketchCornerPreview();
+      } else {
+        runtime.hideTransient('sketch-edit-preview');
+      }
+    }
+    notifyListeners();
+  }
+
+  void _reconcileSketchEditingSelectionAfterHistory() {
+    if (!sketchEditingCommandActive) return;
+    final before = selectedSketchEntityIds.length;
+    selectedSketchEntityIds.removeWhere((id) => sketchApi?.entity(id) == null);
+    final firstTrimId = runtime.read<String>('sketch.trim.firstId');
+    if (firstTrimId != null && !selectedSketchEntityIds.contains(firstTrimId)) {
+      runtime.write('sketch.trim.firstId', null);
+      runtime.write('sketch.trim.firstPoint', null);
+    }
+    if (selectedSketchEntityIds.length != before) {
+      _refreshSketchEditingSelection();
+    }
+  }
+
   bool get sketchCircularSelectionMode =>
       runtime.read<bool>('sketch.circularSelectionMode') ?? false;
 
@@ -4259,6 +4415,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   }
 
   void selectSketch(String id) {
+    if (activeSketch?.id != id && sketchEditingCommandActive) {
+      finishSketchEditingTool();
+      activeTool = SketchToolType.point;
+    }
     clearSketchReconstructionSelection(notify: false);
     _sketchReconstructionSuggestions = const [];
     _sketchReconstructionSuggestionFingerprints = const {};
@@ -9828,6 +9988,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           SketchToolType.extend,
           SketchToolType.fillet,
           SketchToolType.chamfer,
+          SketchToolType.offset,
         }.contains(tool)) {
       return;
     }
@@ -9838,6 +9999,10 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.edit.active', true);
     runtime.write('sketch.edit.tangentBlend', false);
     runtime.write('sketch.edit.diagnostic', null);
+    if (tool == SketchToolType.offset) {
+      runtime.write('sketch.offset.outward', true);
+      runtime.write('sketch.offset.previewValid', false);
+    }
     _clearSketchBlendEndpoints();
     runtime.write('sketch.trim.firstId', null);
     runtime.write('sketch.trim.firstPoint', null);
@@ -9853,6 +10018,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       runtime.write('sketch.blend.secondTangentLength', value);
     }
     _updateSketchCornerPreview();
+    if (activeTool == SketchToolType.offset) _updateSketchOffsetPreview();
     notifyListeners();
   }
 
@@ -9888,7 +10054,11 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
   Future<void> captureSketchEditingPick(CadViewportPick pick) async {
     if (!sketchEditingCommandActive) return;
     final entity = sketchApi?.entity(pick.entityId);
-    if (entity == null) return;
+    if (entity == null) {
+      throw StateError(
+        'A entidade ${pick.entityId} não pertence mais ao Sketch ativo.',
+      );
+    }
     final local = activeSketch!.coordinates.globalToLocal(
       SketchVector(pick.hit.point.x, pick.hit.point.y, pick.hit.point.z),
     );
@@ -9972,11 +10142,21 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       _captureSketchBlendEndpoint(entity, local);
       return;
     }
-    if (!selectedSketchEntityIds.contains(entity.id)) {
-      selectedSketchEntityIds.add(entity.id);
+    if (!selectedSketchEntityIds.add(entity.id)) {
+      runtime.write(
+        'sketch.edit.diagnostic',
+        'A entidade ${entity.id} já está selecionada para este comando.',
+      );
+      notifyListeners();
+      return;
     }
     runtime.write('sketch.edit.diagnostic', null);
     runtime.select(selectedSketchEntityIds);
+    if (activeTool == SketchToolType.offset) {
+      _updateSketchOffsetPreview();
+      notifyListeners();
+      return;
+    }
     if (activeTool == SketchToolType.extend &&
         selectedSketchEntityIds.length == 2) {
       final ids = selectedSketchEntityIds.toList(growable: false);
@@ -9987,6 +10167,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
         'point': intersection.toJson(),
       });
       selectedSketchEntityIds.clear();
+      runtime.select(const <String>{});
     } else if (selectedSketchEntityIds.length == 2) {
       _updateSketchCornerPreview();
     }
@@ -10263,6 +10444,155 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     }
   }
 
+  bool get sketchOffsetOutward =>
+      runtime.read<bool>('sketch.offset.outward') ?? true;
+  bool get sketchOffsetPreviewValid =>
+      runtime.read<bool>('sketch.offset.previewValid') ?? false;
+  String? get sketchOffsetSummary =>
+      runtime.read<String>('sketch.offset.summary');
+
+  void setSketchOffsetOutward(bool value) {
+    runtime.write('sketch.offset.outward', value);
+    _updateSketchOffsetPreview();
+    notifyListeners();
+  }
+
+  void _updateSketchOffsetPreview() {
+    final sketch = activeSketch;
+    if (activeTool != SketchToolType.offset ||
+        sketch == null ||
+        selectedSketchEntityIds.isEmpty) {
+      runtime.hideTransient('sketch-edit-preview');
+      runtime.write('sketch.offset.previewValid', false);
+      runtime.write('sketch.offset.summary', null);
+      return;
+    }
+    try {
+      final sources = selectedSketchEntityIds
+          .map((id) => sketchApi?.entity(id))
+          .whereType<SketchEntity>()
+          .toList(growable: false);
+      final curves = SketchOffsetGeometry.calculate(
+        sources,
+        distance: sketchEditingValue,
+        outward: sketchOffsetOutward,
+      );
+      final segments = <List<List<double>>>[];
+      double? estimatedError;
+      for (final curve in curves) {
+        if (curve case SketchOffsetSpline(:final estimatedMaxErrorMm)) {
+          estimatedError = estimatedMaxErrorMm;
+        }
+        final entity = switch (curve) {
+          SketchOffsetLine(:final start, :final end) => SketchLine(start, end),
+          SketchOffsetArc(
+            :final center,
+            :final radius,
+            :final startAngle,
+            :final endAngle,
+          ) =>
+            SketchArc(center, radius, startAngle, endAngle),
+          SketchOffsetCircle(:final center, :final radius) => SketchCircle(
+            center,
+            radius,
+          ),
+          SketchOffsetEllipse(:final center, :final radiusX, :final radiusY) =>
+            SketchEllipse(center, radiusX, radiusY),
+          SketchOffsetSpline(:final points) =>
+            SketchSpline(points)
+              ..parameters['sampledPoints'] = SketchSplineGeometry.interpolate(
+                points,
+                samplesPerSpan: 64,
+              ).map((point) => point.toJson()).toList(growable: false),
+        };
+        final points = (_sketchScene.adapt(entity).geometry['points'] as List)
+            .map(
+              (point) => sketch.coordinates
+                  .localToGlobal(SketchVector.fromJson(point))
+                  .toJson(),
+            )
+            .toList(growable: false);
+        for (var index = 1; index < points.length; index++) {
+          segments.add([
+            points[index - 1].cast<double>(),
+            points[index].cast<double>(),
+          ]);
+        }
+      }
+      runtime.showTransient(
+        CadSceneEntity(
+          id: 'sketch-edit-preview',
+          kind: CadSceneEntityKind.preview,
+          geometry: {
+            'segments': segments,
+            'displayColor': 'previewOrange',
+            'strokeWidth': SketchSceneAdapter.technicalStrokeWidth,
+          },
+          transparent: true,
+        ),
+      );
+      runtime.write('sketch.offset.previewValid', true);
+      final selectedType = sources.length == 1
+          ? (sources.single is SketchSpline
+                ? 'Interpolated spline'
+                : sources.single.runtimeType.toString())
+          : 'Connected line profile';
+      final directionLabel =
+          (sources.length == 1 && sources.single is SketchSpline) ||
+              sources.every((entity) => entity is SketchLine)
+          ? ((sketchOffsetOutward ? sketchEditingValue : -sketchEditingValue) >=
+                    0
+                ? 'left'
+                : 'right')
+          : (sketchOffsetOutward ? 'outside' : 'inside');
+      runtime.write(
+        'sketch.offset.summary',
+        '$selectedType · ${sketchEditingValue.toStringAsFixed(3)} mm · '
+            '$directionLabel · '
+            'Preview ready${estimatedError == null ? '' : ' · sampled max error ${estimatedError.toStringAsFixed(5)} mm'}',
+      );
+      runtime.write('sketch.edit.diagnostic', null);
+    } catch (failure) {
+      runtime.hideTransient('sketch-edit-preview');
+      runtime.write('sketch.offset.previewValid', false);
+      runtime.write('sketch.offset.summary', null);
+      runtime.write(
+        'sketch.edit.diagnostic',
+        failure.toString().replaceFirst('Bad state: ', ''),
+      );
+    }
+  }
+
+  Future<void> commitSketchOffset() async {
+    if (!sketchEditingCommandActive || activeTool != SketchToolType.offset) {
+      return;
+    }
+    if (!sketchOffsetPreviewValid || selectedSketchEntityIds.isEmpty) {
+      throw StateError(
+        sketchEditingDiagnostic ?? 'Offset preview is not valid.',
+      );
+    }
+    final ids = selectedSketchEntityIds.toList(growable: false);
+    try {
+      await _run('reverse.sketch.edit', {
+        'tool': SketchToolType.offset.name,
+        'ids': ids,
+        'value': sketchEditingValue,
+        'outward': sketchOffsetOutward,
+      });
+      runtime.write('sketch.edit.diagnostic', null);
+      selectedSketchEntityIds.clear();
+      runtime.select(const <String>{});
+      finishSketchEditingTool();
+    } catch (error) {
+      final diagnostic = error.toString().replaceFirst('Bad state: ', '');
+      runtime.write('sketch.edit.diagnostic', diagnostic);
+      _updateSketchOffsetPreview();
+      notifyListeners();
+      rethrow;
+    }
+  }
+
   Future<void> commitSketchCorner({bool? autoTrim}) async {
     if (!sketchEditingCommandActive ||
         !const {
@@ -10331,6 +10661,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
     runtime.write('sketch.edit.active', false);
     runtime.write('sketch.edit.tangentBlend', false);
     runtime.hideTransient('sketch-edit-preview');
+    runtime.write('sketch.offset.previewValid', false);
     _clearSketchBlendEndpoints();
     selectedSketchEntityIds.clear();
     runtime.select(const <String>{});
@@ -11794,6 +12125,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
       await runtime.setEntityVisibility(sourceId, false);
     }
     selectedSketchEntityIds.clear();
+    runtime.select(const <String>{});
     notifyListeners();
   }
 
@@ -22154,7 +22486,7 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           parameters['tool']! as String,
         );
         final ids = (parameters['ids']! as List).cast<String>();
-        _rejectDrivingDimensionEdit(ids);
+        if (tool != SketchToolType.offset) _rejectDrivingDimensionEdit(ids);
         final trimMode = parameters['trimMode'] as String?;
         if (tool == SketchToolType.trim && trimMode == 'endpoint') {
           editorApi!.trimEndpointToNearestIntersection(
@@ -22193,6 +22525,8 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
           value: (parameters['value'] as num?)?.toDouble() ?? 1,
           parameters: {
             if (parameters['point'] != null) 'point': parameters['point'],
+            if (tool == SketchToolType.offset)
+              'outward': parameters['outward'] as bool? ?? true,
             'autoTrim': parameters['autoTrim'] as bool? ?? true,
           },
           confirmConstrained: parameters['confirmConstrained'] == true,
@@ -22202,15 +22536,18 @@ class OperationalReverseEngineeringController extends ChangeNotifier {
             .toList(growable: false);
         for (final id in created) {
           final entity = sketchApi!.entity(id)!;
-          entity.metadata.addAll({
-            'featureType': tool.name,
-            'featureValue': (parameters['value'] as num?)?.toDouble() ?? 1,
-            'sourceEntityIds': ids,
-            'autoTrim': parameters['autoTrim'] as bool? ?? true,
-            'authoringRoot':
-                tool == SketchToolType.fillet || tool == SketchToolType.chamfer,
-            'authoringWorkspace': 'Sketch',
-          });
+          if (tool != SketchToolType.offset) {
+            entity.metadata.addAll({
+              'featureType': tool.name,
+              'featureValue': (parameters['value'] as num?)?.toDouble() ?? 1,
+              'sourceEntityIds': ids,
+              'autoTrim': parameters['autoTrim'] as bool? ?? true,
+              'authoringRoot':
+                  tool == SketchToolType.fillet ||
+                  tool == SketchToolType.chamfer,
+              'authoringWorkspace': 'Sketch',
+            });
+          }
         }
         parameters['createdIds'] = created;
         await _synchronizeSketchScene();

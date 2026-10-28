@@ -223,12 +223,23 @@ void main() {
     );
     expect((transformed.parameters['end'] as List)[1], closeTo(-6, 1e-9));
 
-    final offset = sketch.builders.line.build(
+    final offsetSource = sketch.builders.line.build(
       const SketchVector(0, 0),
       const SketchVector(10, 0),
     );
-    edit(SketchToolType.offset, [offset.id], value: 2);
+    final countBeforeOffset = sketch.engine.entities.length;
+    edit(SketchToolType.offset, [offsetSource.id], value: 2);
+    expect(offsetSource.parameters['start'], [0.0, 0.0, 0.0]);
+    expect(sketch.engine.entities.length, countBeforeOffset + 1);
+    var offset = sketch.engine.entities.values.whereType<SketchLine>().last;
     expect(offset.parameters['start'], [0.0, 2.0, 0.0]);
+    expect(offset.parameters['end'], [10.0, 2.0, 0.0]);
+    expect(offset.metadata['featureType'], 'geometricOffset');
+    expect(offset.metadata['associative'], isFalse);
+    expect(editor.undo(), isTrue);
+    expect(sketch.engine.entities.containsKey(offset.id), isFalse);
+    expect(editor.redo(), isTrue);
+    offset = sketch.engine.entities[offset.id]! as SketchLine;
     edit(
       SketchToolType.trim,
       [offset.id],

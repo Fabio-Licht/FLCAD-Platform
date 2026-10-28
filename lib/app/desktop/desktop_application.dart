@@ -6584,7 +6584,9 @@ class _OfficialEngineeringWorkspaceState
                                             );
                                           }
                                           if (!operational
-                                              .sketchPointReferenceCaptureActive) {
+                                                  .sketchPointReferenceCaptureActive &&
+                                              !operational
+                                                  .sketchEditingCommandActive) {
                                             geometrySelection.select(
                                               pick.entityId,
                                               toggle: false,
@@ -7756,7 +7758,14 @@ class _OfficialEngineeringWorkspaceState
                   SizedBox(width: 6),
                   Text(ShellPresentation.ready),
                   Spacer(),
-                  Text(ShellPresentation.footer),
+                  Flexible(
+                    child: Text(
+                      ShellPresentation.footer,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -10653,6 +10662,147 @@ String _operatorGeometryLabel(CadDocument? document, String reference) {
   return end.isEmpty ? name : '$name · $end';
 }
 
+class _SketchCommandSelectionPanel extends StatelessWidget {
+  const _SketchCommandSelectionPanel({required this.controller});
+
+  final OperationalReverseEngineeringController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final ids = controller.sketchEditingSelectionOrder;
+    final validation = controller.sketchEditingSelectionValidation;
+    final invalid =
+        validation.contains('não aceita') ||
+        validation.contains('exige') ||
+        validation.contains('não existe') ||
+        validation.contains('Remova');
+    final colors = Theme.of(context).colorScheme;
+    return Container(
+      key: const ValueKey('sketch-command-selection-panel'),
+      margin: const EdgeInsets.only(top: 7),
+      padding: const EdgeInsets.fromLTRB(8, 6, 5, 5),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: .42),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: colors.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Seleção · ${controller.activeTool.name.toUpperCase()}',
+                  style: const TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              TextButton(
+                key: const ValueKey('sketch-command-selection-clear'),
+                onPressed: ids.isEmpty
+                    ? null
+                    : controller.clearSketchEditingSelection,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 5),
+                  minimumSize: const Size(0, 27),
+                ),
+                child: const Text('Limpar', style: TextStyle(fontSize: 10)),
+              ),
+            ],
+          ),
+          if (ids.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 4),
+              child: Text(
+                'Nenhuma entidade selecionada.',
+                style: TextStyle(fontSize: 10),
+              ),
+            )
+          else
+            for (var index = 0; index < ids.length; index++)
+              Builder(
+                key: ValueKey('sketch-command-selection-row-${ids[index]}'),
+                builder: (context) {
+                  final id = ids[index];
+                  final entity = controller.sketchEditingSelectionEntity(id);
+                  final type = entity?.type.name ?? 'ID inválido';
+                  return InkWell(
+                    onTap: entity == null
+                        ? null
+                        : () => controller.focusSketchEditingSelection(id),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 15,
+                            child: Text(
+                              '${index + 1}.',
+                              style: const TextStyle(fontSize: 9),
+                            ),
+                          ),
+                          Expanded(
+                            child: Tooltip(
+                              message: id,
+                              child: Text(
+                                '${controller.sketchEditingSelectionRole(index)} · $type · $id',
+                                key: ValueKey(
+                                  'sketch-command-selection-label-$id',
+                                ),
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  color: entity == null
+                                      ? colors.error
+                                      : colors.onSurface,
+                                ),
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            key: ValueKey(
+                              'sketch-command-selection-remove-$id',
+                            ),
+                            tooltip: 'Remover $id da seleção do comando',
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 28,
+                              height: 28,
+                            ),
+                            padding: EdgeInsets.zero,
+                            onPressed: () =>
+                                controller.removeSketchEditingSelection(id),
+                            icon: const Icon(Icons.close, size: 14),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text(
+              validation,
+              key: const ValueKey('sketch-command-selection-validation'),
+              style: TextStyle(
+                fontSize: 9,
+                color: invalid ? colors.error : colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SketchWorkspaceFoundation extends StatelessWidget {
   const _SketchWorkspaceFoundation({
     required this.controller,
@@ -11699,6 +11849,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     ('Extend', Icons.trending_flat, SketchToolType.extend),
                     ('Fillet', Icons.rounded_corner, SketchToolType.fillet),
                     ('Chamfer', Icons.change_history, SketchToolType.chamfer),
+                    ('Offset', Icons.content_copy, SketchToolType.offset),
                   ])
                     Tooltip(
                       message: item.$1,
@@ -11719,6 +11870,7 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   const {
                     SketchToolType.fillet,
                     SketchToolType.chamfer,
+                    SketchToolType.offset,
                   }.contains(controller.activeTool)) ...[
                 const SizedBox(height: 7),
                 TextFormField(
@@ -11742,7 +11894,11 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                   },
                   onFieldSubmitted: (_) async {
                     try {
-                      await controller.commitSketchCorner();
+                      if (controller.activeTool == SketchToolType.offset) {
+                        await controller.commitSketchOffset();
+                      } else {
+                        await controller.commitSketchCorner();
+                      }
                     } catch (_) {}
                   },
                 ),
@@ -11754,6 +11910,27 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     value: controller.sketchFilletAutoTrim,
                     onChanged: controller.setSketchFilletAutoTrim,
                   ),
+                if (controller.activeTool == SketchToolType.offset)
+                  SwitchListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Invert offset direction'),
+                    subtitle: const Text(
+                      'Open: left/right · Closed: outside/inside',
+                    ),
+                    value: !controller.sketchOffsetOutward,
+                    onChanged: (inverted) =>
+                        controller.setSketchOffsetOutward(!inverted),
+                  ),
+                if (controller.activeTool == SketchToolType.offset &&
+                    controller.sketchOffsetSummary != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      controller.sketchOffsetSummary!,
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                  ),
                 if (controller.sketchEditingDiagnostic case final diagnostic?)
                   Text(
                     diagnostic,
@@ -11763,18 +11940,38 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                     ),
                   ),
                 const SizedBox(height: 6),
-                FilledButton.icon(
-                  onPressed: controller.selectedSketchEntityIds.length == 2
-                      ? () async {
-                          try {
-                            await controller.commitSketchCorner();
-                          } catch (_) {}
-                        }
-                      : null,
-                  icon: const Icon(Icons.check, size: 16),
-                  label: const Text('Confirm'),
-                ),
+                if (controller.activeTool == SketchToolType.offset) ...[
+                  FilledButton.icon(
+                    onPressed: controller.sketchOffsetPreviewValid
+                        ? () async {
+                            try {
+                              await controller.commitSketchOffset();
+                            } catch (_) {}
+                          }
+                        : null,
+                    icon: const Icon(Icons.check, size: 16),
+                    label: const Text('Apply Offset'),
+                  ),
+                  TextButton(
+                    onPressed: controller.finishSketchEditingTool,
+                    child: const Text('Cancel'),
+                  ),
+                ] else
+                  FilledButton.icon(
+                    onPressed: controller.selectedSketchEntityIds.length == 2
+                        ? () async {
+                            try {
+                              await controller.commitSketchCorner();
+                            } catch (_) {}
+                          }
+                        : null,
+                    icon: const Icon(Icons.check, size: 16),
+                    label: const Text('Confirm'),
+                  ),
               ],
+              if (controller.sketchEditingCommandActive &&
+                  !controller.sketchTangentBlendActive)
+                _SketchCommandSelectionPanel(controller: controller),
               if (controller.sketchEditingCommandActive &&
                   !controller.sketchTangentBlendActive)
                 Padding(
@@ -11784,6 +11981,8 @@ class _SketchWorkspaceFoundation extends StatelessWidget {
                         ? 'Click an end to remove its overhang, or click the two sides that must remain. Click a portion that stops on another line to remove that portion.'
                         : controller.activeTool == SketchToolType.extend
                         ? 'Click the line, then its boundary reference.'
+                        : controller.activeTool == SketchToolType.offset
+                        ? 'Select a line, arc, ellipse, interpolated spline, or connected line chain. Preview is transient; Apply creates independent geometry.'
                         : 'Select two lines, enter the value, then confirm.',
                     style: const TextStyle(fontSize: 9.5),
                   ),
